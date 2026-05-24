@@ -69,3 +69,17 @@ func TestDispatchList(t *testing.T) {
 		t.Fatalf("items = %d, want 1", len(items))
 	}
 }
+
+func TestResolveRemotePathConfinesToRootCWD(t *testing.T) {
+	previous := rootCWD
+	root := t.TempDir()
+	rootCWD = root
+	defer func() { rootCWD = previous }()
+
+	if _, err := resolveRemotePath(filepath.Join(root, "ok.txt")); err != nil {
+		t.Fatalf("path inside root was rejected: %v", err)
+	}
+	if _, err := resolveRemotePath(filepath.Join(root, "..", "outside.txt")); err == nil {
+		t.Fatal("path outside root was allowed")
+	}
+}

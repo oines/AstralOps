@@ -5,6 +5,7 @@ import type {
   HealthResponse,
   Session,
   WorkspaceCommandResponse,
+  WorkspaceConnection,
   Workspace,
 } from "@astralops/protocol";
 import type { DaemonInfo } from "./types";
@@ -30,8 +31,16 @@ export class AstralApi {
     return this.post("/v1/workspaces", input);
   }
 
-  async connectWorkspace(id: string): Promise<{ ok: boolean }> {
+  async workspaceConnection(id: string): Promise<WorkspaceConnection> {
+    return this.get(`/v1/workspaces/${id}/connection`);
+  }
+
+  async connectWorkspace(id: string): Promise<WorkspaceConnection> {
     return this.post(`/v1/workspaces/${id}/connect`, {});
+  }
+
+  async disconnectWorkspace(id: string): Promise<WorkspaceConnection> {
+    return this.post(`/v1/workspaces/${id}/disconnect`, {});
   }
 
   async listWorkspaceFiles(id: string, path = ""): Promise<FileListResponse> {

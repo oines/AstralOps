@@ -19,6 +19,23 @@ export type Workspace = {
   updated_at?: string;
 };
 
+export type WorkspaceConnection = {
+  workspace_id: string;
+  target: WorkspaceTarget;
+  status: "disconnected" | "connecting" | "connected" | "degraded" | "failed" | string;
+  endpoint?: string;
+  port?: number;
+  remote_cwd?: string;
+  remote_os?: string;
+  remote_arch?: string;
+  remote_shell?: string;
+  helper_path?: string;
+  helper_status?: string;
+  message?: string;
+  updated_at: string;
+  raw?: Record<string, unknown>;
+};
+
 export type AstralEvent = {
   seq: number;
   ts: string;

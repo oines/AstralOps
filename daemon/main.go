@@ -24,10 +24,12 @@ const version = "0.1.0"
 type app struct {
 	store    *store
 	token    string
+	addr     string
 	hub      *eventHub
 	upgrader websocket.Upgrader
 	agents   map[AgentKind]agentInfo
 	runtimes map[AgentKind]AgentRuntime
+	ssh      *sshManager
 	queueMu  sync.Mutex
 	queues   map[string][]queuedTurn
 }
@@ -56,6 +58,7 @@ func main() {
 	a := &app{
 		store:  st,
 		token:  token,
+		addr:   localTCPHostPort(ln.Addr().String()),
 		hub:    newEventHub(),
 		agents: discoverAgents(),
 		queues: map[string][]queuedTurn{},
@@ -63,6 +66,7 @@ func main() {
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
+	a.ssh = newSSHManager(a)
 	a.runtimes = newRuntimeRegistry(a)
 
 	if err := writeRuntime(dataDir, port, token); err != nil {
@@ -73,6 +77,7 @@ func main() {
 	mux.HandleFunc("/v1/health", a.handleHealth)
 	mux.HandleFunc("/v1/workspaces", a.auth(a.handleWorkspaces))
 	mux.HandleFunc("/v1/workspaces/", a.auth(a.handleWorkspaceAction))
+	mux.HandleFunc("/v1/codex-exec/", a.auth(a.handleCodexExecServerWS))
 	mux.HandleFunc("/v1/sessions", a.auth(a.handleSessions))
 	mux.HandleFunc("/v1/sessions/", a.auth(a.handleSessionAction))
 	mux.HandleFunc("/v1/approvals/", a.auth(a.handleApprovalAction))
@@ -124,6 +129,10 @@ func writeRuntime(dataDir string, port int, token string) error {
 		"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
 	}, "", "  ")
 	return os.WriteFile(path, body, 0o600)
+}
+
+func (a *app) codexExecServerURL(workspaceID string) string {
+	return fmt.Sprintf("ws://%s/v1/codex-exec/%s?token=%s", a.addr, workspaceID, a.token)
 }
 
 func randomID(n int) string {

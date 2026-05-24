@@ -49,6 +49,47 @@ func TestStoreWorkspacePersistence(t *testing.T) {
 	}
 }
 
+func TestStoreSSHWorkspaceRequiresAbsoluteRemoteCWD(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentCodex,
+		SSH: &SSHConfig{
+			Endpoint:  "root@example.com",
+			Port:      0,
+			RemoteCWD: "relative",
+		},
+	})
+	if err == nil {
+		t.Fatal("relative remote cwd was accepted")
+	}
+
+	ws, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentCodex,
+		SSH: &SSHConfig{
+			Endpoint:  "root@example.com",
+			RemoteCWD: "/root/project",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ws.SSH.Port != 22 {
+		t.Fatalf("port = %d, want 22", ws.SSH.Port)
+	}
+	if ws.LocalCWD != "" {
+		t.Fatalf("ssh workspace local cwd = %q, want empty", ws.LocalCWD)
+	}
+}
+
+
 func TestStoreEventAppendAndQuery(t *testing.T) {
 	dir := t.TempDir()
 	st, err := loadStore(dir)

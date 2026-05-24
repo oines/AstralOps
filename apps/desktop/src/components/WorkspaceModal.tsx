@@ -19,7 +19,7 @@ const initialDraft: WorkspaceDraft = {
   local_cwd: "",
   ssh_endpoint: "",
   ssh_port: 22,
-  ssh_remote_cwd: "~",
+  ssh_remote_cwd: "/root",
 };
 
 export function WorkspaceModal({
@@ -48,7 +48,11 @@ export function WorkspaceModal({
   const claudeAvailable = Boolean(agents?.claude.available);
   const codexAvailable = Boolean(agents?.codex.available);
   const selectedAvailable = draft.agent === "claude" ? claudeAvailable : codexAvailable;
-  const canCreate = draft.target === "local" && selectedAvailable && draft.local_cwd.trim() !== "";
+  const canCreate =
+    selectedAvailable &&
+    (draft.target === "local"
+      ? draft.local_cwd.trim() !== ""
+      : draft.ssh_endpoint.trim() !== "" && draft.ssh_remote_cwd.trim().startsWith("/"));
 
   async function chooseFolder(): Promise<void> {
     const folder = await onChooseDirectory();
@@ -62,18 +66,36 @@ export function WorkspaceModal({
 
   async function submit(): Promise<void> {
     if (!canCreate) {
-      setError(draft.local_cwd.trim() === "" ? "先选择本机文件夹" : "当前 agent 不可用");
+      if (!selectedAvailable) {
+        setError("当前 agent 不可用");
+      } else if (draft.target === "local") {
+        setError("先选择本机文件夹");
+      } else {
+        setError("填写 SSH endpoint，并使用绝对远端路径");
+      }
       return;
     }
     setBusy(true);
     setError("");
     try {
-      const request: CreateWorkspaceRequest = {
-        name: draft.name || draft.local_cwd.split("/").at(-1) || "Local",
-        target: "local",
-        agent: draft.agent,
-        local_cwd: draft.local_cwd,
-      };
+      const request: CreateWorkspaceRequest =
+        draft.target === "ssh"
+          ? {
+              name: draft.name || draft.ssh_endpoint || "SSH",
+              target: "ssh",
+              agent: draft.agent,
+              ssh: {
+                endpoint: draft.ssh_endpoint.trim(),
+                port: draft.ssh_port || 22,
+                remote_cwd: draft.ssh_remote_cwd.trim(),
+              },
+            }
+          : {
+              name: draft.name || draft.local_cwd.split("/").at(-1) || "Local",
+              target: "local",
+              agent: draft.agent,
+              local_cwd: draft.local_cwd,
+            };
       await onCreate(request);
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : String(createError));
@@ -89,7 +111,7 @@ export function WorkspaceModal({
           <div>
             <h2 className="m-0 text-[18px] font-bold text-[#1d1d1f]">创建工作区</h2>
             <p className="m-0 mt-1.5 max-w-[430px] text-[13px] leading-5 text-[#6b6b70]">
-              选择本机目录后进入会话。SSH 远程路径保留到下一阶段。
+              选择本机目录，或连接 SSH 远程 cwd。远程目录按需读取，不做全量同步。
             </p>
           </div>
           <button className="grid size-8 place-items-center rounded-[10px] text-[#98979c] hover:bg-black/[0.035]" type="button" title="Close" onClick={onClose}>
@@ -108,28 +130,59 @@ export function WorkspaceModal({
                 onClick={() => setDraft((current) => ({ ...current, target: "local" }))}
               />
               <TargetChoice
-                active={false}
-                description="即将支持"
-                disabled
+                active={draft.target === "ssh"}
+                description="远端透明执行"
                 icon={<Server size={17} strokeWidth={1.8} />}
                 label="SSH 远程"
-                onClick={() => undefined}
+                onClick={() => setDraft((current) => ({ ...current, target: "ssh" }))}
               />
             </div>
           </Field>
 
-          <Field label="本机文件夹">
-            <button
-              className="flex h-11 w-full items-center gap-2 rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 text-left text-[14px] font-semibold text-[#343438] hover:bg-[#f1f0ec]"
-              type="button"
-              onClick={() => void chooseFolder()}
-            >
-              <FolderGit2 size={17} strokeWidth={1.8} />
-              <span className={draft.local_cwd ? "min-w-0 flex-1 truncate font-mono text-[13px]" : "min-w-0 flex-1 truncate text-[#96949a]"}>
-                {draft.local_cwd || "选择文件夹..."}
-              </span>
-            </button>
-          </Field>
+          {draft.target === "local" ? (
+            <Field label="本机文件夹">
+              <button
+                className="flex h-11 w-full items-center gap-2 rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 text-left text-[14px] font-semibold text-[#343438] hover:bg-[#f1f0ec]"
+                type="button"
+                onClick={() => void chooseFolder()}
+              >
+                <FolderGit2 size={17} strokeWidth={1.8} />
+                <span className={draft.local_cwd ? "min-w-0 flex-1 truncate font-mono text-[13px]" : "min-w-0 flex-1 truncate text-[#96949a]"}>
+                  {draft.local_cwd || "选择文件夹..."}
+                </span>
+              </button>
+            </Field>
+          ) : (
+            <div className="grid gap-3">
+              <Field label="SSH endpoint">
+                <input
+                  className="h-10 w-full rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
+                  placeholder="root@example.com"
+                  value={draft.ssh_endpoint}
+                  onChange={(event) => setDraft((current) => ({ ...current, ssh_endpoint: event.target.value }))}
+                />
+              </Field>
+              <div className="grid grid-cols-[110px_1fr] gap-3">
+                <Field label="端口">
+                  <input
+                    className="h-10 w-full rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
+                    min={1}
+                    type="number"
+                    value={draft.ssh_port}
+                    onChange={(event) => setDraft((current) => ({ ...current, ssh_port: Number(event.target.value) || 22 }))}
+                  />
+                </Field>
+                <Field label="远端 cwd">
+                  <input
+                    className="h-10 w-full rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
+                    placeholder="/root/project"
+                    value={draft.ssh_remote_cwd}
+                    onChange={(event) => setDraft((current) => ({ ...current, ssh_remote_cwd: event.target.value }))}
+                  />
+                </Field>
+              </div>
+            </div>
+          )}
 
           <Field label="Agent">
             <div className="grid grid-cols-2 gap-2">

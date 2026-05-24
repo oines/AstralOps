@@ -2,11 +2,14 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,10 +25,12 @@ type codexLocalRuntime struct {
 }
 
 type codexClient struct {
-	runtime *codexLocalRuntime
-	session Session
-	cwd     string
-	path    string
+	runtime       *codexLocalRuntime
+	session       Session
+	cwd           string
+	processCWD    string
+	execServerURL string
+	path          string
 
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -66,25 +71,39 @@ func newCodexLocalRuntime(a *app) *codexLocalRuntime {
 }
 
 func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, input string, options TurnOptions) error {
-	if workspace.Target != "local" {
-		return fmt.Errorf("codex runtime only supports local workspaces in this milestone")
-	}
 	info := r.app.agents[AgentCodex]
 	if !info.Available || info.Path == "" {
 		return fmt.Errorf("codex executable was not found on PATH")
 	}
 	cwd := strings.TrimSpace(workspace.LocalCWD)
+	processCWD := cwd
+	execServerURL := ""
+	if workspace.Target == "ssh" {
+		if workspace.SSH == nil || strings.TrimSpace(workspace.SSH.RemoteCWD) == "" {
+			return fmt.Errorf("ssh workspace remote cwd is empty")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		_, _, err := r.app.ssh.proxyFor(ctx, workspace)
+		cancel()
+		if err != nil {
+			return err
+		}
+		cwd = filepath.Clean(workspace.SSH.RemoteCWD)
+		processCWD = workspace.LocalProjectionRoot
+		execServerURL = r.app.codexExecServerURL(workspace.ID)
+	}
 	if cwd == "" {
-		return fmt.Errorf("local workspace cwd is empty")
+		return fmt.Errorf("workspace cwd is empty")
 	}
 
 	r.mu.Lock()
 	client := r.clients[session.ID]
 	if client == nil {
-		client = newCodexClient(r, session, cwd, info.Path)
+		client = newCodexClient(r, session, cwd, processCWD, execServerURL, info.Path)
 		r.clients[session.ID] = client
 	} else {
 		client.updateSession(session)
+		client.updateWorkspace(cwd, processCWD, execServerURL)
 	}
 	if client.isRunning() {
 		r.mu.Unlock()
@@ -135,16 +154,21 @@ func (r *codexLocalRuntime) RespondApproval(approvalID string, response map[stri
 	return fmt.Errorf("approval %s is not pending in codex runtime", approvalID)
 }
 
-func newCodexClient(runtime *codexLocalRuntime, session Session, cwd, path string) *codexClient {
+func newCodexClient(runtime *codexLocalRuntime, session Session, cwd, processCWD, execServerURL, path string) *codexClient {
+	if processCWD == "" {
+		processCWD = cwd
+	}
 	return &codexClient{
-		runtime:   runtime,
-		session:   session,
-		cwd:       cwd,
-		path:      path,
-		closed:    make(chan struct{}),
-		pending:   map[int64]chan codexRPCResponse{},
-		approvals: map[string]codexPendingApproval{},
-		items:     map[string]map[string]any{},
+		runtime:       runtime,
+		session:       session,
+		cwd:           cwd,
+		processCWD:    processCWD,
+		execServerURL: execServerURL,
+		path:          path,
+		closed:        make(chan struct{}),
+		pending:       map[int64]chan codexRPCResponse{},
+		approvals:     map[string]codexPendingApproval{},
+		items:         map[string]map[string]any{},
 	}
 }
 
@@ -190,7 +214,10 @@ func (c *codexClient) ensureStarted() error {
 	c.mu.Unlock()
 
 	cmd := exec.Command(c.path, "app-server", "--listen", "stdio://")
-	cmd.Dir = c.cwd
+	cmd.Dir = c.processCWD
+	if c.execServerURL != "" {
+		cmd.Env = append(os.Environ(), "CODEX_EXEC_SERVER_URL="+c.execServerURL)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -478,6 +505,17 @@ func (c *codexClient) updateSession(session Session) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.session = session
+}
+
+func (c *codexClient) updateWorkspace(cwd, processCWD, execServerURL string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cwd = cwd
+	if processCWD == "" {
+		processCWD = cwd
+	}
+	c.processCWD = processCWD
+	c.execServerURL = execServerURL
 }
 
 func (c *codexClient) persistedThreadID() string {

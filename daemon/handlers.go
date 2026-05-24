@@ -119,25 +119,59 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 		a.handleWorkspacePTY(w, r, ws)
 		return
 	}
-	if len(parts) != 2 || parts[1] != "connect" || r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusNotFound)
+	if len(parts) == 2 && parts[1] == "connection" && r.Method == http.MethodGet {
+		ws, ok := a.store.getWorkspace(parts[0])
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, a.ssh.getConnection(ws))
 		return
 	}
-	ws, ok := a.store.getWorkspace(parts[0])
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+	if len(parts) == 2 && parts[1] == "connect" && r.Method == http.MethodPost {
+		ws, ok := a.store.getWorkspace(parts[0])
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+		defer cancel()
+		state, err := a.ssh.connect(ctx, ws)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "connection": state})
+			return
+		}
+		writeJSON(w, http.StatusOK, state)
 		return
 	}
-	a.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.connected", Normalized: map[string]any{
-		"target": ws.Target,
-		"status": "connected",
-	}})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if len(parts) == 2 && parts[1] == "disconnect" && r.Method == http.MethodPost {
+		ws, ok := a.store.getWorkspace(parts[0])
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, a.ssh.disconnect(ws))
+		return
+	}
+	if len(parts) == 2 && parts[1] == "claude-hook" && r.Method == http.MethodPost {
+		ws, ok := a.store.getWorkspace(parts[0])
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+			return
+		}
+		a.handleClaudeRemoteHook(w, r, ws)
+		return
+	}
+	if len(parts) >= 2 && parts[1] == "projection" {
+		a.handleProjectionAction(w, r, parts)
+		return
+	}
+	w.WriteHeader(http.StatusNotFound)
 }
 
 func (a *app) handleWorkspaceFiles(w http.ResponseWriter, ws Workspace, queryPath string) {
-	if ws.Target != "local" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file browsing is only available for local workspaces"})
+	if ws.Target == "ssh" {
+		a.handleRemoteWorkspaceFiles(w, ws, queryPath)
 		return
 	}
 	root := filepath.Clean(ws.LocalCWD)
@@ -196,9 +230,67 @@ func (a *app) handleWorkspaceFiles(w http.ResponseWriter, ws Workspace, queryPat
 	})
 }
 
+func (a *app) handleRemoteWorkspaceFiles(w http.ResponseWriter, ws Workspace, queryPath string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	proxy, _, err := a.ssh.proxyFor(ctx, ws)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	root := filepath.Clean(ws.SSH.RemoteCWD)
+	target, rel, err := resolveRemoteWorkspacePath(root, queryPath)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	var raw []map[string]any
+	if err := proxy.call(ctx, "list", map[string]any{"path": target}, &raw); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	type fileEntry struct {
+		Name    string `json:"name"`
+		Path    string `json:"path"`
+		Kind    string `json:"kind"`
+		Size    int64  `json:"size,omitempty"`
+		ModTime string `json:"mod_time,omitempty"`
+	}
+	out := make([]fileEntry, 0, len(raw))
+	for _, entry := range raw {
+		name := stringValue(entry["name"])
+		path := stringValue(entry["path"])
+		entryRel, err := filepath.Rel(root, path)
+		if err != nil || strings.HasPrefix(entryRel, "..") {
+			entryRel = filepath.Base(path)
+		}
+		kind := "file"
+		if boolValue(entry["is_dir"]) {
+			kind = "dir"
+		}
+		out = append(out, fileEntry{
+			Name:    name,
+			Path:    filepath.ToSlash(entryRel),
+			Kind:    kind,
+			Size:    int64(numberValue(entry["size"])),
+			ModTime: stringValue(entry["modified"]),
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Kind != out[j].Kind {
+			return out[i].Kind == "dir"
+		}
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	if len(out) > 300 {
+		out = out[:300]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": rel, "root": root, "entries": out})
+}
+
 func (a *app) handleWorkspaceExec(w http.ResponseWriter, ws Workspace, command string) {
-	if ws.Target != "local" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "terminal is only available for local workspaces"})
+	if ws.Target == "ssh" {
+		a.handleRemoteWorkspaceExec(w, ws, command)
 		return
 	}
 	command = strings.TrimSpace(command)
@@ -236,6 +328,28 @@ func (a *app) handleWorkspaceExec(w http.ResponseWriter, ws Workspace, command s
 	})
 }
 
+func (a *app) handleRemoteWorkspaceExec(w http.ResponseWriter, ws Workspace, command string) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is required"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
+	defer cancel()
+	proxy, _, err := a.ssh.proxyFor(ctx, ws)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	var out map[string]any
+	err = proxy.call(ctx, "exec", map[string]any{"cwd": ws.SSH.RemoteCWD, "command": command, "timeout_ms": 60000}, &out)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 type ptyClientMessage struct {
 	Type string `json:"type"`
 	Data string `json:"data,omitempty"`
@@ -244,8 +358,8 @@ type ptyClientMessage struct {
 }
 
 func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Workspace) {
-	if ws.Target != "local" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pty is only available for local workspaces"})
+	if ws.Target == "ssh" {
+		a.handleRemoteWorkspacePTY(w, r, ws)
 		return
 	}
 	conn, err := a.upgrader.Upgrade(w, r, nil)
@@ -319,6 +433,69 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 	}
 }
 
+func (a *app) handleRemoteWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Workspace) {
+	conn, err := a.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	proxy, _, err := a.ssh.proxyFor(ctx, ws)
+	if err != nil {
+		_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+		return
+	}
+	ptyID := "pty_" + randomID(12)
+	events, unsubscribe := proxy.subscribe(ptyID)
+	defer unsubscribe()
+	var started map[string]any
+	err = proxy.call(ctx, "pty_start", map[string]any{"id": ptyID, "cwd": ws.SSH.RemoteCWD, "cols": 100, "rows": 28}, &started)
+	if err != nil {
+		_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+		return
+	}
+	_ = conn.WriteJSON(map[string]any{"type": "ready", "shell": stringValue(started["shell"]), "cwd": ws.SSH.RemoteCWD})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for event := range events {
+			switch event.Event {
+			case "output":
+				if err := conn.WriteJSON(map[string]any{"type": "output", "data": stringValue(event.Result["data"])}); err != nil {
+					return
+				}
+			case "exit":
+				_ = conn.WriteJSON(map[string]any{"type": "exit"})
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		var message ptyClientMessage
+		if err := conn.ReadJSON(&message); err != nil {
+			_ = proxy.call(context.Background(), "pty_kill", map[string]any{"id": ptyID}, nil)
+			return
+		}
+		switch message.Type {
+		case "input":
+			_ = proxy.call(context.Background(), "pty_write", map[string]any{"id": ptyID, "data": message.Data}, nil)
+		case "resize":
+			_ = proxy.call(context.Background(), "pty_resize", map[string]any{"id": ptyID, "cols": message.Cols, "rows": message.Rows}, nil)
+		case "close":
+			_ = proxy.call(context.Background(), "pty_kill", map[string]any{"id": ptyID}, nil)
+			return
+		}
+	}
+}
+
 func resolveWorkspacePath(root, queryPath string) (string, string, error) {
 	if root == "" {
 		return "", "", errors.New("workspace local cwd is empty")
@@ -344,6 +521,35 @@ func resolveWorkspacePath(root, queryPath string) (string, string, error) {
 	}
 	if strings.HasPrefix(resolvedRel, "..") {
 		return "", "", errors.New("path escapes workspace")
+	}
+	return target, filepath.ToSlash(resolvedRel), nil
+}
+
+func resolveRemoteWorkspacePath(root, queryPath string) (string, string, error) {
+	if root == "" {
+		return "", "", errors.New("workspace remote cwd is empty")
+	}
+	rel := strings.TrimSpace(queryPath)
+	if rel == "." || rel == "/" {
+		rel = ""
+	}
+	if filepath.IsAbs(rel) {
+		var err error
+		rel, err = filepath.Rel(root, filepath.Clean(rel))
+		if err != nil {
+			return "", "", err
+		}
+	}
+	target := filepath.Clean(filepath.Join(root, rel))
+	resolvedRel, err := filepath.Rel(root, target)
+	if err != nil {
+		return "", "", err
+	}
+	if resolvedRel == "." {
+		resolvedRel = ""
+	}
+	if strings.HasPrefix(resolvedRel, "..") {
+		return "", "", errors.New("path escapes remote workspace")
 	}
 	return target, filepath.ToSlash(resolvedRel), nil
 }

@@ -1,4 +1,4 @@
-import type { AgentKind, AstralEvent, HealthResponse, ModelInfo, Session, Workspace } from "@astralops/protocol";
+import type { AgentKind, AstralEvent, HealthResponse, ModelInfo, Session, Workspace, WorkspaceConnection } from "@astralops/protocol";
 
 export type DaemonInfo = {
   host: string;
@@ -54,4 +54,4 @@ export type WorkspaceCommandResponse = {
   duration_ms: number;
 };
 
-export type { AgentKind, AstralEvent, HealthResponse, ModelInfo, Session, Workspace };
+export type { AgentKind, AstralEvent, HealthResponse, ModelInfo, Session, Workspace, WorkspaceConnection };

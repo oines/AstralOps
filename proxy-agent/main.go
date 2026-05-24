@@ -2,9 +2,13 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -13,7 +17,10 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 const version = "0.1.0"
@@ -28,16 +35,39 @@ type response struct {
 	ID     string `json:"id"`
 	Result any    `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
+	Event  string `json:"event,omitempty"`
+}
+
+var (
+	rootCWD string
+	encMu   sync.Mutex
+	ptyMu   sync.Mutex
+	ptys    = map[string]*ptySession{}
+	encoder *json.Encoder
+)
+
+type ptySession struct {
+	id   string
+	cmd  *exec.Cmd
+	file *os.File
 }
 
 func main() {
+	flag.StringVar(&rootCWD, "cwd", "", "remote cwd and default access boundary")
+	flag.Parse()
+	if rootCWD == "" {
+		rootCWD, _ = os.Getwd()
+	}
+	if abs, err := filepath.Abs(rootCWD); err == nil {
+		rootCWD = filepath.Clean(abs)
+	}
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	enc := json.NewEncoder(os.Stdout)
+	encoder = json.NewEncoder(os.Stdout)
 	for sc.Scan() {
 		var req request
 		if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
-			_ = enc.Encode(response{Error: err.Error()})
+			writeLine(response{Error: err.Error()})
 			continue
 		}
 		result, err := dispatch(req)
@@ -46,7 +76,7 @@ func main() {
 			res.Error = err.Error()
 			res.Result = nil
 		}
-		_ = enc.Encode(res)
+		writeLine(res)
 	}
 }
 
@@ -54,23 +84,31 @@ func dispatch(req request) (any, error) {
 	switch req.Method {
 	case "hello":
 		host, _ := os.Hostname()
-		return map[string]any{"ok": true, "version": version, "hostname": host, "os": runtimeOS()}, nil
+		return map[string]any{"ok": true, "version": version, "hostname": host, "os": runtimeOS(), "cwd": rootCWD, "shell": os.Getenv("SHELL")}, nil
 	case "stat":
 		var p pathParams
 		if err := parse(req.Params, &p); err != nil {
 			return nil, err
 		}
-		info, err := os.Stat(p.Path)
+		path, err := resolveRemotePath(p.Path)
 		if err != nil {
 			return nil, err
 		}
-		return fileInfo(p.Path, info), nil
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		return fileInfo(path, info), nil
 	case "list":
 		var p pathParams
 		if err := parse(req.Params, &p); err != nil {
 			return nil, err
 		}
-		entries, err := os.ReadDir(p.Path)
+		path, err := resolveRemotePath(p.Path)
+		if err != nil {
+			return nil, err
+		}
+		entries, err := os.ReadDir(path)
 		if err != nil {
 			return nil, err
 		}
@@ -80,7 +118,7 @@ func dispatch(req request) (any, error) {
 			if err != nil {
 				continue
 			}
-			out = append(out, fileInfo(filepath.Join(p.Path, e.Name()), info))
+			out = append(out, fileInfo(filepath.Join(path, e.Name()), info))
 		}
 		return out, nil
 	case "read":
@@ -88,38 +126,64 @@ func dispatch(req request) (any, error) {
 		if err := parse(req.Params, &p); err != nil {
 			return nil, err
 		}
-		body, err := os.ReadFile(p.Path)
+		path, err := resolveRemotePath(p.Path)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"path": p.Path, "content": string(body)}, nil
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"path": path, "content": string(body)}, nil
 	case "write":
 		var p writeParams
 		if err := parse(req.Params, &p); err != nil {
 			return nil, err
 		}
-		if err := os.MkdirAll(filepath.Dir(p.Path), 0o755); err != nil {
+		path, err := resolveRemotePath(p.Path)
+		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"path": p.Path}, os.WriteFile(p.Path, []byte(p.Content), 0o644)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, err
+		}
+		return map[string]any{"path": path}, os.WriteFile(path, []byte(p.Content), 0o644)
 	case "mkdir":
 		var p pathParams
 		if err := parse(req.Params, &p); err != nil {
 			return nil, err
 		}
-		return map[string]any{"path": p.Path}, os.MkdirAll(p.Path, 0o755)
+		path, err := resolveRemotePath(p.Path)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"path": path}, os.MkdirAll(path, 0o755)
 	case "remove":
 		var p pathParams
 		if err := parse(req.Params, &p); err != nil {
 			return nil, err
 		}
-		return map[string]any{"path": p.Path}, os.RemoveAll(p.Path)
+		path, err := resolveRemotePath(p.Path)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"path": path}, os.RemoveAll(path)
+	case "copy":
+		var p copyParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return copyPath(p)
 	case "glob":
 		var p globParams
 		if err := parse(req.Params, &p); err != nil {
 			return nil, err
 		}
-		matches, err := filepath.Glob(filepath.Join(p.CWD, p.Pattern))
+		cwd, err := resolveRemotePath(p.CWD)
+		if err != nil {
+			return nil, err
+		}
+		matches, err := filepath.Glob(filepath.Join(cwd, p.Pattern))
 		if err != nil {
 			return nil, err
 		}
@@ -138,9 +202,35 @@ func dispatch(req request) (any, error) {
 		}
 		return runExec(p)
 	case "apply_patch":
-		return nil, errors.New("apply_patch rpc is reserved for the projection layer and is not implemented in the raw proxy")
-	case "pty_start", "pty_write", "pty_resize", "pty_kill":
-		return nil, errors.New("pty rpc is not implemented in this milestone")
+		var p applyPatchParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return applyPatch(p)
+	case "pty_start":
+		var p ptyStartParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return startPTY(req.ID, p)
+	case "pty_write":
+		var p ptyWriteParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, writePTY(p)
+	case "pty_resize":
+		var p ptyResizeParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, resizePTY(p)
+	case "pty_kill":
+		var p ptyKillParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, killPTY(p.ID)
 	case "git_status":
 		var p cwdParams
 		if err := parse(req.Params, &p); err != nil {
@@ -167,6 +257,11 @@ type writeParams struct {
 	Content string `json:"content"`
 }
 
+type copyParams struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+}
+
 type globParams struct {
 	CWD     string `json:"cwd"`
 	Pattern string `json:"pattern"`
@@ -190,11 +285,70 @@ type cwdParams struct {
 	CWD string `json:"cwd"`
 }
 
+type applyPatchParams struct {
+	CWD   string `json:"cwd"`
+	Patch string `json:"patch"`
+}
+
+type ptyStartParams struct {
+	ID    string `json:"id"`
+	CWD   string `json:"cwd"`
+	Shell string `json:"shell"`
+	Cols  uint16 `json:"cols"`
+	Rows  uint16 `json:"rows"`
+}
+
+type ptyWriteParams struct {
+	ID   string `json:"id"`
+	Data string `json:"data"`
+}
+
+type ptyResizeParams struct {
+	ID   string `json:"id"`
+	Cols uint16 `json:"cols"`
+	Rows uint16 `json:"rows"`
+}
+
+type ptyKillParams struct {
+	ID string `json:"id"`
+}
+
 func parse(raw json.RawMessage, out any) error {
 	if len(raw) == 0 {
 		raw = []byte("{}")
 	}
 	return json.Unmarshal(raw, out)
+}
+
+func writeLine(value any) {
+	encMu.Lock()
+	defer encMu.Unlock()
+	_ = encoder.Encode(value)
+}
+
+func resolveRemotePath(path string) (string, error) {
+	if rootCWD == "" {
+		if filepath.IsAbs(path) {
+			rootCWD = string(filepath.Separator)
+		} else if cwd, err := os.Getwd(); err == nil {
+			rootCWD = cwd
+		}
+	}
+	if strings.TrimSpace(path) == "" || path == "." {
+		path = rootCWD
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(rootCWD, path)
+	}
+	path = filepath.Clean(path)
+	rel, err := filepath.Rel(rootCWD, path)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path %q escapes remote cwd %q", path, rootCWD)
+	}
+	return path, nil
 }
 
 func fileInfo(path string, info fs.FileInfo) map[string]any {
@@ -209,8 +363,9 @@ func fileInfo(path string, info fs.FileInfo) map[string]any {
 }
 
 func grep(p grepParams) (any, error) {
-	if p.CWD == "" {
-		p.CWD = "."
+	cwd, err := resolveRemotePath(p.CWD)
+	if err != nil {
+		return nil, err
 	}
 	if p.Limit <= 0 {
 		p.Limit = 200
@@ -220,7 +375,7 @@ func grep(p grepParams) (any, error) {
 		return nil, err
 	}
 	out := []map[string]any{}
-	err = filepath.WalkDir(p.CWD, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(cwd, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
@@ -251,17 +406,102 @@ func runExec(p execParams) (any, error) {
 	if strings.TrimSpace(p.Command) == "" {
 		return nil, errors.New("command required")
 	}
-	if p.CWD == "" {
-		p.CWD = "."
+	cwd, err := resolveRemotePath(p.CWD)
+	if err != nil {
+		return nil, err
 	}
 	start := time.Now()
-	cmd := exec.Command("/bin/sh", "-lc", p.Command)
-	cmd.Dir = p.CWD
+	timeout := time.Duration(p.Timeout) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", p.Command)
+	cmd.Dir = cwd
 	cmd.Env = os.Environ()
 	for k, v := range p.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	out, err := cmd.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		if ee, ok := err.(*exec.ExitError); ok {
+			exitCode = ee.ExitCode()
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			exitCode = 124
+		}
+	}
+	return map[string]any{
+		"command":     p.Command,
+		"cwd":         cwd,
+		"exit_code":   exitCode,
+		"stdout":      stdout.String(),
+		"stderr":      stderr.String(),
+		"output":      stdout.String() + stderr.String(),
+		"duration_ms": time.Since(start).Milliseconds(),
+	}, nil
+}
+
+func runtimeOS() string {
+	return runtime.GOOS + "/" + runtime.GOARCH
+}
+
+func copyPath(p copyParams) (any, error) {
+	src, err := resolveRemotePath(p.Source)
+	if err != nil {
+		return nil, err
+	}
+	dst, err := resolveRemotePath(p.Destination)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, errors.New("directory copy is not implemented")
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return nil, err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return nil, err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+	if err != nil {
+		return nil, err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return nil, err
+	}
+	return map[string]any{"source": src, "destination": dst}, nil
+}
+
+func applyPatch(p applyPatchParams) (any, error) {
+	cwd, err := resolveRemotePath(p.CWD)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(p.Patch) == "" {
+		return nil, errors.New("patch is required")
+	}
+	cmd := exec.Command("/bin/sh", "-lc", "git apply --whitespace=nowarn -")
+	cmd.Dir = cwd
+	cmd.Stdin = strings.NewReader(p.Patch)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
 	exitCode := 0
 	if err != nil {
 		exitCode = 1
@@ -269,15 +509,102 @@ func runExec(p execParams) (any, error) {
 			exitCode = ee.ExitCode()
 		}
 	}
-	return map[string]any{
-		"command":     p.Command,
-		"cwd":         p.CWD,
-		"exit_code":   exitCode,
-		"output":      string(out),
-		"duration_ms": time.Since(start).Milliseconds(),
-	}, nil
+	return map[string]any{"cwd": cwd, "exit_code": exitCode, "stdout": stdout.String(), "stderr": stderr.String()}, err
 }
 
-func runtimeOS() string {
-	return runtime.GOOS + "/" + runtime.GOARCH
+func startPTY(requestID string, p ptyStartParams) (any, error) {
+	cwd, err := resolveRemotePath(p.CWD)
+	if err != nil {
+		return nil, err
+	}
+	if p.ID == "" {
+		p.ID = requestID
+	}
+	shell := strings.TrimSpace(p.Shell)
+	if shell == "" {
+		shell = os.Getenv("SHELL")
+	}
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	if p.Cols == 0 {
+		p.Cols = 100
+	}
+	if p.Rows == 0 {
+		p.Rows = 28
+	}
+	cmd := exec.Command(shell, "-l")
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
+	file, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: p.Rows, Cols: p.Cols})
+	if err != nil {
+		return nil, err
+	}
+	session := &ptySession{id: p.ID, cmd: cmd, file: file}
+	ptyMu.Lock()
+	ptys[p.ID] = session
+	ptyMu.Unlock()
+	go pumpPTY(session)
+	return map[string]any{"id": p.ID, "cwd": cwd, "shell": filepath.Base(shell)}, nil
+}
+
+func pumpPTY(session *ptySession) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := session.file.Read(buf)
+		if n > 0 {
+			writeLine(response{ID: session.id, Event: "output", Result: map[string]any{"data": string(buf[:n])}})
+		}
+		if err != nil {
+			writeLine(response{ID: session.id, Event: "exit", Result: map[string]any{}})
+			_ = killPTY(session.id)
+			return
+		}
+	}
+}
+
+func lookupPTY(id string) (*ptySession, error) {
+	ptyMu.Lock()
+	defer ptyMu.Unlock()
+	session := ptys[id]
+	if session == nil {
+		return nil, fmt.Errorf("unknown pty %s", id)
+	}
+	return session, nil
+}
+
+func writePTY(p ptyWriteParams) error {
+	session, err := lookupPTY(p.ID)
+	if err != nil {
+		return err
+	}
+	_, err = session.file.Write([]byte(p.Data))
+	return err
+}
+
+func resizePTY(p ptyResizeParams) error {
+	session, err := lookupPTY(p.ID)
+	if err != nil {
+		return err
+	}
+	if p.Cols == 0 || p.Rows == 0 {
+		return nil
+	}
+	return pty.Setsize(session.file, &pty.Winsize{Rows: p.Rows, Cols: p.Cols})
+}
+
+func killPTY(id string) error {
+	ptyMu.Lock()
+	session := ptys[id]
+	delete(ptys, id)
+	ptyMu.Unlock()
+	if session == nil {
+		return nil
+	}
+	_ = session.file.Close()
+	if session.cmd.Process != nil {
+		_ = session.cmd.Process.Kill()
+	}
+	_, _ = session.cmd.Process.Wait()
+	return nil
 }

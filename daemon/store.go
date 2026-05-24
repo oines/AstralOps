@@ -197,8 +197,22 @@ func (s *store) createWorkspace(req createWorkspaceRequest) (Workspace, error) {
 	if ws.Target == "local" && ws.LocalCWD == "" {
 		ws.LocalCWD, _ = os.Getwd()
 	}
-	if ws.Target == "ssh" && ws.SSH == nil {
-		return Workspace{}, errors.New("ssh workspace requires ssh config")
+	if ws.Target == "ssh" {
+		if ws.SSH == nil {
+			return Workspace{}, errors.New("ssh workspace requires ssh config")
+		}
+		ws.SSH.Endpoint = strings.TrimSpace(ws.SSH.Endpoint)
+		ws.SSH.RemoteCWD = filepath.Clean(strings.TrimSpace(ws.SSH.RemoteCWD))
+		if ws.SSH.Endpoint == "" {
+			return Workspace{}, errors.New("ssh endpoint is required")
+		}
+		if ws.SSH.Port <= 0 {
+			ws.SSH.Port = 22
+		}
+		if !filepath.IsAbs(ws.SSH.RemoteCWD) {
+			return Workspace{}, errors.New("ssh remote cwd must be an absolute path")
+		}
+		ws.LocalCWD = ""
 	}
 	if ws.Agent != AgentClaude && ws.Agent != AgentCodex {
 		return Workspace{}, errors.New("agent must be claude or codex")
