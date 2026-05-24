@@ -36,6 +36,8 @@ import type {
 } from "./types";
 
 const EVENT_WINDOW_SIZE = 1000;
+const TITLE_EVENT_WINDOW_SIZE = 40;
+const TITLE_PREFETCH_BATCH_SIZE = 8;
 
 export function App(): React.JSX.Element {
   const [connection, setConnection] = useState<ConnectionState>("booting");
@@ -62,6 +64,8 @@ export function App(): React.JSX.Element {
 
   const sseQueueRef = useRef<AstralEvent[]>([]);
   const sseFrameRef = useRef<number | null>(null);
+  const titlePreviewLoadsRef = useRef(new Set<string>());
+  const titlePreviewLoadedRef = useRef(new Set<string>());
 
   const mergeEvents = useCallback((incoming: AstralEvent[]) => {
     setEventIndex((current) => mergeEventIndex(current, incoming));
@@ -407,6 +411,35 @@ export function App(): React.JSX.Element {
   const sessionTitles = sessionProjection.titles;
   const sessionStates = sessionProjection.states;
   const activeSessionWindow = activeSessionId ? sessionWindows[activeSessionId] : undefined;
+
+  useEffect(() => {
+    if (!api || sessions.length === 0) return;
+    const missing = sessions
+      .filter((session) => {
+        if (sessionTitles[session.id]) return false;
+        if (titlePreviewLoadedRef.current.has(session.id)) return false;
+        if (titlePreviewLoadsRef.current.has(session.id)) return false;
+        return true;
+      })
+      .slice(0, TITLE_PREFETCH_BATCH_SIZE);
+    if (missing.length === 0) return;
+    for (const session of missing) {
+      titlePreviewLoadsRef.current.add(session.id);
+      void api
+        .events({ session_id: session.id, limit: TITLE_EVENT_WINDOW_SIZE })
+        .then((events) => {
+          mergeEvents(events);
+          titlePreviewLoadedRef.current.add(session.id);
+        })
+        .catch((loadError) => {
+          setError(loadError instanceof Error ? loadError.message : String(loadError));
+        })
+        .finally(() => {
+          titlePreviewLoadsRef.current.delete(session.id);
+        });
+    }
+  }, [api, mergeEvents, sessionTitles, sessions]);
+
   return (
     <div className="relative flex h-screen min-h-0 select-none overflow-hidden bg-[#fffefa] text-[#1d1d1f]">
 
