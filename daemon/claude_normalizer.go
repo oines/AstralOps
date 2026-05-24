@@ -65,6 +65,22 @@ func normalizeClaudeSystem(session Session, raw map[string]any) []AstralEvent {
 			"type":              "system",
 			"native_session_id": firstString(raw["session_id"], session.NativeSessionID),
 			"subtype":           subtype,
+			"customTitle":       raw["customTitle"],
+			"aiTitle":           raw["aiTitle"],
+			"summary":           raw["summary"],
+			"firstPrompt":       raw["firstPrompt"],
+			"title":             firstString(raw["customTitle"], raw["aiTitle"], raw["summary"]),
+		}, raw)}
+	case "post_turn_summary":
+		return []AstralEvent{baseClaudeEvent(session, "session.updated", map[string]any{
+			"source":          "claude",
+			"type":            "system",
+			"subtype":         subtype,
+			"title":           raw["title"],
+			"summary":         raw["description"],
+			"description":     raw["description"],
+			"recent_action":   raw["recent_action"],
+			"summarizes_uuid": raw["summarizes_uuid"],
 		}, raw)}
 	case "status":
 		return []AstralEvent{baseClaudeEvent(session, "control.status", map[string]any{
@@ -155,9 +171,34 @@ func normalizeClaudeResultPermissionDenials(session Session, raw map[string]any)
 				"path":        toolInput["planFilePath"],
 				"params":      toolInput,
 			}, raw))
+			continue
+		}
+		if isObservedClaudePermissionDenialTool(toolName) {
+			events = append(events, baseClaudeEvent(session, "approval.requested", map[string]any{
+				"source":      "claude",
+				"approval_id": toolUseID,
+				"request_id":  toolUseID,
+				"kind":        "permission",
+				"tool_name":   toolName,
+				"params":      toolInput,
+				"reason":      claudePermissionDenialReason(toolName),
+			}, raw))
 		}
 	}
 	return events
+}
+
+func isObservedClaudePermissionDenialTool(toolName string) bool {
+	switch toolName {
+	case "WebSearch":
+		return true
+	default:
+		return false
+	}
+}
+
+func claudePermissionDenialReason(toolName string) string {
+	return "Claude Code requested permission to use " + toolName + "."
 }
 
 func normalizeClaudeAssistant(session Session, raw map[string]any) []AstralEvent {

@@ -173,7 +173,13 @@ export function commandKey(event: AstralEvent, fallback: string): string {
 export function commandText(event: AstralEvent): string {
   const value = event.normalized as Record<string, unknown>;
   const input = value.input as Record<string, unknown> | undefined;
-  return textValue(value, "command") || textValue(input ?? {}, "command") || "";
+  return (
+    textValue(value, "remote_command") ||
+    textValue(value, "effective_command") ||
+    textValue(value, "command") ||
+    textValue(input ?? {}, "command") ||
+    ""
+  );
 }
 
 export function commandOutput(event: AstralEvent): string {
@@ -468,7 +474,42 @@ export function collectResolvedInteractionIDs(events: AstralEvent[]): Set<string
     if (event.kind !== "approval.resolved" && event.kind !== "approval.responded" && event.kind !== "ask.resolved") continue;
     for (const id of interactionIDs(event.normalized as Record<string, unknown>)) ids.add(id);
   }
+  for (const id of collectSupersededClaudeAskIDs(events)) ids.add(id);
   return ids;
+}
+
+function collectSupersededClaudeAskIDs(events: AstralEvent[]): Set<string> {
+  const ids = new Set<string>();
+  const turnBySession = new Map<string, string>();
+  const lastAskByTurn = new Map<string, string>();
+
+  for (const event of events) {
+    const sessionID = event.session_id || "";
+    if (event.kind === "message.user" || event.kind === "turn.started") {
+      turnBySession.set(sessionID, `${sessionID}:${event.seq}`);
+    }
+
+    if (event.kind === "ask.requested" && isClaudeAskUserQuestion(event)) {
+      const turnID = turnBySession.get(sessionID) || `${sessionID}:current`;
+      const askID = interactionIDs(event.normalized as Record<string, unknown>)[0];
+      if (askID) {
+        const previous = lastAskByTurn.get(turnID);
+        if (previous) ids.add(previous);
+        lastAskByTurn.set(turnID, askID);
+      }
+    }
+
+    if (event.kind === "turn.completed" || event.kind === "turn.failed" || event.kind === "turn.cancelled") {
+      turnBySession.delete(sessionID);
+    }
+  }
+
+  return ids;
+}
+
+function isClaudeAskUserQuestion(event: AstralEvent): boolean {
+  const value = event.normalized as Record<string, unknown>;
+  return textValue(value, "source") === "claude" && textValue(value, "kind") === "AskUserQuestion";
 }
 
 export function collectPendingQueueIDs(events: AstralEvent[]): Set<string> {
@@ -488,7 +529,7 @@ export function isInteractionResolved(value: Record<string, unknown>, resolvedID
 }
 
 export function interactionIDs(value: Record<string, unknown>): string[] {
-  return [textValue(value, "approval_id"), textValue(value, "request_id"), textValue(value, "ask_id")].filter(Boolean);
+  return [textValue(value, "approval_id"), textValue(value, "ask_id")].filter(Boolean);
 }
 
 export function toolName(event: AstralEvent): string {
@@ -541,9 +582,7 @@ export function isInternalCodexWarning(event: AstralEvent): boolean {
     message.includes("ignoring interface.icon_") ||
     message.includes("codex_core::goals") ||
     message.includes("thread_goals") ||
-    message.includes("codex_core::agents_md") ||
-    (message.includes("codex_core::tools::router") && message.includes("exec-server transport")) ||
-    message.includes("Failed to create unified exec process: exec-server transport disconnected")
+    message.includes("codex_core::agents_md")
   );
 }
 

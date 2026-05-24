@@ -21,7 +21,7 @@ import {
   type EventIndex,
   type SessionWindows,
 } from "./eventStore";
-import { isNonInteractiveClaudeResultPermissionApproval } from "./transcriptModel";
+import { collectResolvedInteractionIDs, isNonInteractiveClaudeResultPermissionApproval } from "./transcriptModel";
 import type {
   AgentKind,
   AstralEvent,
@@ -621,11 +621,7 @@ function latestWorkspaceConnection(events: AstralEvent[]): WorkspaceConnection |
 }
 
 function findPendingInteraction(events: AstralEvent[]): PendingInteraction | null {
-  const resolved = new Set<string>();
-  for (const event of events) {
-    if (event.kind !== "approval.responded" && event.kind !== "approval.resolved" && event.kind !== "ask.resolved") continue;
-    for (const id of interactionIDs(event.normalized as Record<string, unknown>)) resolved.add(id);
-  }
+  const resolved = collectResolvedInteractionIDs(events);
 
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
@@ -671,7 +667,7 @@ function collectPendingQueue(events: AstralEvent[]): QueuedComposerInput[] {
 }
 
 function interactionIDs(value: Record<string, unknown>): string[] {
-  return [textValue(value, "approval_id"), textValue(value, "request_id"), textValue(value, "ask_id")].filter(Boolean);
+  return [textValue(value, "approval_id"), textValue(value, "ask_id")].filter(Boolean);
 }
 
 function textValue(value: Record<string, unknown>, key: string): string {

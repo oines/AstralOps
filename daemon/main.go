@@ -23,19 +23,27 @@ import (
 const version = "0.1.0"
 
 type app struct {
-	store    *store
-	token    string
-	addr     string
-	hub      *eventHub
-	upgrader websocket.Upgrader
-	agents   map[AgentKind]agentInfo
-	runtimes map[AgentKind]AgentRuntime
-	ssh      *sshManager
-	queueMu  sync.Mutex
-	queues   map[string][]queuedTurn
+	store               *store
+	token               string
+	addr                string
+	hub                 *eventHub
+	upgrader            websocket.Upgrader
+	agents              map[AgentKind]agentInfo
+	runtimes            map[AgentKind]AgentRuntime
+	ssh                 *sshManager
+	queueMu             sync.Mutex
+	queues              map[string][]queuedTurn
+	claudeRemoteAllowMu sync.Mutex
+	claudeRemoteAllow   map[string]map[string]bool
+	codexExecMu         sync.Mutex
+	codexExec           map[string]codexExecCommand
 }
 
 func main() {
+	if runClaudeRemoteHookHelper(os.Args[1:]) {
+		return
+	}
+
 	dataDir := defaultDataDir()
 	if err := os.MkdirAll(filepath.Join(dataDir, "runtime"), 0o700); err != nil {
 		log.Fatal(err)
@@ -57,12 +65,13 @@ func main() {
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	a := &app{
-		store:  st,
-		token:  token,
-		addr:   localTCPHostPort(ln.Addr().String()),
-		hub:    newEventHub(),
-		agents: discoverAgents(),
-		queues: map[string][]queuedTurn{},
+		store:     st,
+		token:     token,
+		addr:      localTCPHostPort(ln.Addr().String()),
+		hub:       newEventHub(),
+		agents:    discoverAgents(),
+		queues:    map[string][]queuedTurn{},
+		codexExec: map[string]codexExecCommand{},
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},

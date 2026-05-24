@@ -5,25 +5,31 @@ import (
 	"fmt"
 )
 
-func codexApprovalResponse(method string, response map[string]any) (map[string]any, error) {
-	decision := firstString(response["decision"], response["action"])
-	if decision == "" {
+func codexApprovalResponse(method string, response map[string]any, requestParams map[string]any) (map[string]any, error) {
+	decisionPayload := firstNonNil(response["decision"], response["action"])
+	decision := stringValue(decisionPayload)
+	if decision == "" && decisionPayload == nil {
 		if approved, ok := response["approved"].(bool); ok && approved {
 			decision = "accept"
 		} else {
 			decision = "decline"
 		}
+		decisionPayload = decision
 	}
 	switch method {
 	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
-		return map[string]any{"decision": decision}, nil
+		return map[string]any{"decision": decisionPayload}, nil
 	case "item/permissions/requestApproval":
 		if decision == "accept" || decision == "acceptForSession" {
 			scope := "turn"
 			if decision == "acceptForSession" {
 				scope = "session"
 			}
-			return map[string]any{"permissions": map[string]any{}, "scope": scope}, nil
+			permissions := requestParams["permissions"]
+			if permissions == nil {
+				permissions = map[string]any{}
+			}
+			return map[string]any{"permissions": permissions, "scope": scope}, nil
 		}
 		return nil, errors.New("permission approval was declined")
 	case "item/tool/requestUserInput":

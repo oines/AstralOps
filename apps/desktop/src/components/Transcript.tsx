@@ -140,9 +140,9 @@ export function Transcript({
   }, [hasOlder, loadingOlder, onLoadOlder, rowVirtualizer.getVirtualItems()]);
 
   return (
-    <div className="relative min-h-0 flex-1">
+    <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
       <section
-        className="h-full select-text overflow-auto bg-[#fffefa]"
+        className="h-full select-text overflow-y-auto overflow-x-hidden bg-[#fffefa]"
         ref={scrollRef}
         style={{ paddingBottom: composerHeight + 56 }}
         onScroll={updateScrollState}
@@ -150,8 +150,8 @@ export function Transcript({
         {groups.length === 0 ? (
           <EmptyState activeSession={activeSession} activeWorkspace={activeWorkspace} />
         ) : (
-          <div className="mx-auto w-[min(960px,calc(100%-72px))] px-2 py-8">
-            <div className="relative" style={{ height: rowVirtualizer.getTotalSize() }}>
+          <div className="mx-auto w-[min(960px,calc(100%-72px))] max-w-full px-2 py-8">
+            <div className="relative min-w-0" style={{ height: rowVirtualizer.getTotalSize() }}>
               {rowVirtualizer.getVirtualItems().map((virtualItem) => {
                 const item = items[virtualItem.index];
                 return (
@@ -159,7 +159,7 @@ export function Transcript({
                     data-index={virtualItem.index}
                     key={virtualItem.key}
                     ref={rowVirtualizer.measureElement}
-                    className="absolute left-0 top-0 w-full"
+                    className="absolute left-0 top-0 w-full min-w-0"
                     style={{ transform: `translateY(${virtualItem.start}px)` }}
                   >
                     {item?.type === "loader" ? (
@@ -242,6 +242,7 @@ const TurnBlock = React.memo(function TurnBlock({
   const endTime = group.end?.ts ?? group.start?.ts ?? "";
   const commandEvents = collectCommandEvents(group.details);
   const commandSeqs = new Set(commandEvents.map((event) => event.seq));
+  const waitingForAction = groupHasPendingInteraction(group, resolvedInteractionIDs);
 
   useEffect(() => {
     setExpanded(group.status === "running");
@@ -272,7 +273,7 @@ const TurnBlock = React.memo(function TurnBlock({
   }
 
   return (
-    <motion.article animate={{ opacity: 1, y: 0 }} className="mb-8" initial={{ opacity: 0, y: 4 }} transition={{ duration: 0.14 }}>
+    <motion.article animate={{ opacity: 1, y: 0 }} className="mb-8 min-w-0" initial={{ opacity: 0, y: 4 }} transition={{ duration: 0.14 }}>
       {group.user ? <UserMessage event={group.user} /> : null}
 
       {group.start || group.end ? (
@@ -281,19 +282,33 @@ const TurnBlock = React.memo(function TurnBlock({
           type="button"
           onClick={() => setExpanded((current) => !current)}
         >
-          <span>{isDone ? (group.status === "failed" ? "处理失败" : group.status === "cancelled" ? "已取消" : "已处理") : "正在处理"}</span>
+          <span>{waitingForAction ? "等待确认" : isDone ? (group.status === "failed" ? "处理失败" : group.status === "cancelled" ? "已取消" : "已处理") : "正在处理"}</span>
           {endTime ? <span>{formatTime(endTime)}</span> : null}
           {detailSummary ? <span className="ml-2 truncate text-[14px] text-[#a0a3a7]">{detailSummary}</span> : null}
           <ChevronRight className={`ml-1 transition-transform duration-150 ease-out ${expanded ? "rotate-90" : ""}`} size={18} strokeWidth={2} />
         </button>
       ) : null}
 
-      <div className="mt-6 grid gap-6">
+      <div className="mt-6 grid min-w-0 gap-6">
         {timeline.map((item) => item)}
       </div>
     </motion.article>
   );
 });
+
+function groupHasPendingInteraction(group: TurnGroup, resolvedIDs: Set<string>): boolean {
+  for (const event of [...group.timeline, ...group.details]) {
+    if (event.kind !== "approval.requested" && event.kind !== "ask.requested") continue;
+    const value = event.normalized as Record<string, unknown>;
+    const ids = interactionEventIDs(value);
+    if (ids.length > 0 && ids.every((id) => !resolvedIDs.has(id))) return true;
+  }
+  return false;
+}
+
+function interactionEventIDs(value: Record<string, unknown>): string[] {
+  return [textValue(value, "approval_id"), textValue(value, "ask_id"), textValue(value, "request_id")].filter(Boolean);
+}
 
 function UserMessage({ event }: { event: AstralEvent }): React.JSX.Element {
   const value = event.normalized as Record<string, unknown>;
@@ -363,7 +378,7 @@ function DetailEvent({
         title="文件变更"
         summary={diffSummary(value)}
       >
-        <pre className="max-h-72 overflow-auto rounded-[12px] border border-[#e7e5df] bg-[#f7f6f3] p-3 font-mono text-[12px] leading-5 text-[#343438]">
+        <pre className="max-h-72 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-[12px] border border-[#e7e5df] bg-[#f7f6f3] p-3 font-mono text-[12px] leading-5 text-[#343438] [overflow-wrap:anywhere]">
           {textValue(value, "diff") || JSON.stringify(value.patch ?? value.changes ?? value, null, 2)}
         </pre>
       </FoldableDetail>
@@ -376,7 +391,7 @@ function DetailEvent({
     return (
       <FoldableDetail defaultOpen icon={<TerminalSquare size={16} strokeWidth={1.8} />} title="命令输出">
         {preview.length !== text.length ? <div className="mb-2 text-[12px] font-semibold text-[#a0a3a7]">已显示最新 8000 个字符</div> : null}
-        <pre className="overflow-hidden whitespace-pre-wrap rounded-[12px] bg-[#f4f3ef] px-3 py-2 font-mono text-[12px] leading-5 text-[#77747a]">
+        <pre className="min-w-0 overflow-hidden whitespace-pre-wrap break-words rounded-[12px] bg-[#f4f3ef] px-3 py-2 font-mono text-[12px] leading-5 text-[#77747a] [overflow-wrap:anywhere]">
           {preview}
         </pre>
       </FoldableDetail>
@@ -402,18 +417,18 @@ function CommandGroup({ events, turnStatus }: { events: AstralEvent[]; turnStatu
   if (items.length === 0) return null;
 
   return (
-    <div>
+    <div className="min-w-0">
       <button
         className="flex min-w-0 items-center gap-2 text-left text-[15px] font-semibold leading-7 text-[#a0a3a7] transition-colors duration-150 ease-out hover:text-[#777b80]"
         type="button"
         onClick={() => setOpen((current) => !current)}
       >
-        <TerminalSquare size={16} strokeWidth={1.8} />
+        <TerminalSquare className="shrink-0" size={16} strokeWidth={1.8} />
         <span>{anyRunning ? "正在运行" : "已运行"} {items.length} 条命令</span>
-        <ChevronRight className={`transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`} size={16} strokeWidth={2} />
+        <ChevronRight className={`shrink-0 transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`} size={16} strokeWidth={2} />
       </button>
       {open ? (
-        <div className="mt-2 grid gap-2">
+        <div className="mt-2 grid min-w-0 gap-2">
           {items.map((item) => (
             <CommandRow item={item} key={item.key} />
           ))}
@@ -429,21 +444,21 @@ function CommandRow({ item }: { item: CommandItem }): React.JSX.Element {
   const outputPreview = item.output.length > 12000 ? item.output.slice(-12000) : item.output;
   const outputClipped = outputPreview.length !== item.output.length;
   return (
-    <div className="grid gap-2">
+    <div className="grid min-w-0 gap-2">
       <button
         className="flex min-w-0 items-center gap-2 text-left text-[16px] font-medium leading-7 text-[#6f7378] transition-colors duration-150 ease-out hover:text-[#343438]"
         type="button"
         onClick={() => hasOutput && setOpen((current) => !current)}
       >
         <span className="shrink-0">{item.status === "running" ? "正在运行" : "已运行"}</span>
-        <span className="truncate font-mono text-[15px]">{item.command}</span>
+        <span className="min-w-0 truncate font-mono text-[15px]">{item.command}</span>
         {hasOutput ? <ChevronRight className={`ml-auto shrink-0 transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`} size={16} strokeWidth={2} /> : null}
       </button>
       {open && hasOutput ? (
-        <div className="rounded-[12px] bg-[#eeeeef] px-4 py-3 text-[#5f6368]">
+        <div className="min-w-0 rounded-[12px] bg-[#eeeeef] px-4 py-3 text-[#5f6368]">
           <div className="mb-2 text-[14px] font-medium">Shell</div>
           {outputClipped ? <div className="mb-2 text-[12px] font-semibold text-[#a0a3a7]">已显示最新 12000 个字符</div> : null}
-          <pre className="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-[13px] leading-6">{outputPreview}</pre>
+          <pre className="max-h-72 min-w-0 overflow-auto whitespace-pre-wrap break-words font-mono text-[13px] leading-6 [overflow-wrap:anywhere]">{outputPreview}</pre>
           {item.status === "completed" ? <div className="mt-2 text-right text-[13px] font-semibold text-[#8a8d91]">成功</div> : null}
         </div>
       ) : null}
@@ -564,12 +579,12 @@ function ToolDetail({ value }: { value: Record<string, unknown> }): React.JSX.El
   const visibleInput = input ? detailPayload(input) : {};
 
   return (
-    <div className="grid gap-2 rounded-[14px] bg-[#f6f6f4] px-4 py-3 text-[14px] leading-6 text-[#6f7378]">
+    <div className="grid min-w-0 gap-2 rounded-[14px] bg-[#f6f6f4] px-4 py-3 text-[14px] leading-6 text-[#6f7378]">
       {Object.keys(visibleInput).length > 0 ? <KeyValueList value={visibleInput} /> : null}
       {result !== undefined && result !== "" ? (
         <div className="border-t border-[#e6e3dc] pt-2">
           <div className="mb-1 text-[13px] font-semibold text-[#a0a3a7]">结果</div>
-          <pre className="max-h-56 overflow-auto whitespace-pre-wrap font-mono text-[12px] leading-5">{jsonPreview(result)}</pre>
+          <pre className="max-h-56 min-w-0 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 [overflow-wrap:anywhere]">{jsonPreview(result)}</pre>
         </div>
       ) : null}
       {Object.keys(visibleInput).length === 0 && (result === undefined || result === "") ? <KeyValueList value={value} /> : null}
@@ -598,7 +613,7 @@ function AssistantEvent({ event }: { event: AstralEvent }): React.ReactNode {
   const text = textValue(value, "text");
   if (!text) return null;
   return (
-    <div className="group text-[17px] font-semibold leading-[1.7] text-[#202124]">
+    <div className="group min-w-0 text-[17px] font-semibold leading-[1.7] text-[#202124]">
       <MarkdownText text={text} />
       <div className="mt-2 flex items-center gap-2 text-[#9a9da1] opacity-0 transition group-hover:opacity-100">
         <button
@@ -675,23 +690,23 @@ function FoldableDetail({
 }): React.JSX.Element {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div>
-      <button className="flex min-w-0 items-center gap-2 text-left text-[15px] font-semibold leading-7 text-[#a0a3a7] transition-colors duration-150 ease-out hover:text-[#777b80]" type="button" onClick={() => setOpen((current) => !current)}>
-        {icon}
-        <span>{title}</span>
-        {summary ? <span className="truncate">{summary}</span> : null}
-        <ChevronRight className={`transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`} size={16} strokeWidth={2} />
+    <div className="min-w-0">
+      <button className="flex min-w-0 max-w-full items-center gap-2 text-left text-[15px] font-semibold leading-7 text-[#a0a3a7] transition-colors duration-150 ease-out hover:text-[#777b80]" type="button" onClick={() => setOpen((current) => !current)}>
+        <span className="shrink-0">{icon}</span>
+        <span className="shrink-0">{title}</span>
+        {summary ? <span className="min-w-0 truncate">{summary}</span> : null}
+        <ChevronRight className={`shrink-0 transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`} size={16} strokeWidth={2} />
       </button>
       <AnimatePresence initial={false}>
         {open ? (
           <motion.div
             animate={{ height: "auto", opacity: 1 }}
-            className="overflow-hidden"
+            className="min-w-0 overflow-hidden"
             exit={{ height: 0, opacity: 0 }}
             initial={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
           >
-            <div className="mt-2">{children}</div>
+            <div className="mt-2 min-w-0">{children}</div>
           </motion.div>
         ) : null}
       </AnimatePresence>
@@ -702,7 +717,7 @@ function FoldableDetail({
 const MarkdownText = React.memo(function MarkdownText({ muted = false, text }: { muted?: boolean; text: string }): React.JSX.Element {
   return (
     <div
-      className={`[&_code]:rounded-md [&_code]:bg-[#f4f4f4] [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.92em] [&_ol]:my-3 [&_ol]:pl-6 [&_p]:m-0 [&_p+p]:mt-4 [&_pre]:my-3 [&_pre]:overflow-auto [&_pre]:rounded-xl [&_pre]:bg-[#f4f3ef] [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_ul]:my-3 [&_ul]:pl-6 ${
+      className={`min-w-0 break-words [overflow-wrap:anywhere] [&_code]:break-words [&_code]:rounded-md [&_code]:bg-[#f4f4f4] [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.92em] [&_ol]:my-3 [&_ol]:pl-6 [&_p]:m-0 [&_p+p]:mt-4 [&_pre]:my-3 [&_pre]:min-w-0 [&_pre]:overflow-auto [&_pre]:whitespace-pre-wrap [&_pre]:break-words [&_pre]:rounded-xl [&_pre]:bg-[#f4f3ef] [&_pre]:p-3 [&_pre]:[overflow-wrap:anywhere] [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_ul]:my-3 [&_ul]:pl-6 ${
         muted ? "text-[#6f7378]" : ""
       }`}
     >
@@ -729,9 +744,9 @@ const MarkdownText = React.memo(function MarkdownText({ muted = false, text }: {
 
 function MetaLine({ icon, text, time }: { icon: React.ReactNode; text: string; time: string }): React.JSX.Element {
   return (
-    <div className="flex items-center gap-2 text-[14px] font-semibold leading-6 text-[#a0a3a7]">
-      {icon}
-      <span>{text}</span>
+    <div className="flex min-w-0 items-start gap-2 text-[14px] font-semibold leading-6 text-[#a0a3a7]">
+      <span className="mt-1 shrink-0">{icon}</span>
+      <span className="min-w-0 break-words [overflow-wrap:anywhere]">{text}</span>
       <span>{formatTime(time)}</span>
     </div>
   );
@@ -769,16 +784,16 @@ function QueueEventBlock({
           </button>
         ) : null}
       </div>
-      {text ? <div className="max-h-24 overflow-auto select-text whitespace-pre-wrap text-[14px] font-medium leading-6 text-[#5f6368]">{text}</div> : null}
+      {text ? <div className="max-h-24 min-w-0 overflow-auto select-text whitespace-pre-wrap break-words text-[14px] font-medium leading-6 text-[#5f6368] [overflow-wrap:anywhere]">{text}</div> : null}
     </div>
   );
 }
 
 function Notice({ text, tone }: { text: string; tone: "danger" | "muted" }): React.JSX.Element {
   return (
-    <div className={`flex items-center gap-2 text-[15px] font-semibold leading-7 ${tone === "danger" ? "text-[#b45309]" : "text-[#9a9da1]"}`}>
-      <AlertCircle size={16} strokeWidth={1.8} />
-      <span>{text}</span>
+    <div className={`flex min-w-0 items-start gap-2 text-[15px] font-semibold leading-7 ${tone === "danger" ? "text-[#b45309]" : "text-[#9a9da1]"}`}>
+      <AlertCircle className="mt-1 shrink-0" size={16} strokeWidth={1.8} />
+      <span className="min-w-0 break-words [overflow-wrap:anywhere]">{text}</span>
     </div>
   );
 }
@@ -816,14 +831,14 @@ function KeyValueList({ value }: { value: Record<string, unknown> }): React.JSX.
   if (entries.length === 0) return <div className="text-[14px] font-medium text-[#a0a3a7]">暂无细节</div>;
 
   return (
-    <div className="grid gap-1.5">
+    <div className="grid min-w-0 gap-1.5">
       {entries.map(([key, val]) => (
-        <div className="grid grid-cols-[112px_minmax(0,1fr)] gap-3 text-[13px] leading-6" key={key}>
+        <div className="grid min-w-0 grid-cols-[112px_minmax(0,1fr)] gap-3 text-[13px] leading-6" key={key}>
           <span className="truncate font-semibold text-[#a0a3a7]">{displayKey(key)}</span>
           {isScalar(val) ? (
-            <span className="min-w-0 truncate font-medium text-[#5f6368]">{String(val)}</span>
+            <span className="min-w-0 break-words font-medium text-[#5f6368] [overflow-wrap:anywhere]">{String(val)}</span>
           ) : (
-            <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-[10px] bg-[#eeece8] px-3 py-2 font-mono text-[12px] leading-5 text-[#6f7378]">{jsonPreview(val)}</pre>
+            <pre className="max-h-40 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-[10px] bg-[#eeece8] px-3 py-2 font-mono text-[12px] leading-5 text-[#6f7378] [overflow-wrap:anywhere]">{jsonPreview(val)}</pre>
           )}
         </div>
       ))}

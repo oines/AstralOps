@@ -9,52 +9,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
 
 const maxClaudeHydrateBytes int64 = 2 * 1024 * 1024
 
-func (a *app) ensureClaudeHookScript() (string, error) {
-	dir := filepath.Join(a.store.dataDir, "runtime", "claude-remote")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, "hook_bridge.py")
-	body := `#!/usr/bin/env python3
-import base64, json, os, sys, urllib.request
-
-base = os.environ["ASTRALOPS_DAEMON"]
-token = os.environ["ASTRALOPS_TOKEN"]
-workspace = os.environ["ASTRALOPS_WORKSPACE_ID"]
-
-def post(path, payload):
-    req = urllib.request.Request(base + path, data=json.dumps(payload).encode(), headers={
-        "Authorization": "Bearer " + token,
-        "Content-Type": "application/json",
-    })
-    with urllib.request.urlopen(req, timeout=120) as res:
-        return json.loads(res.read().decode())
-
-if len(sys.argv) > 1 and sys.argv[1] == "exec":
-    command = base64.b64decode(sys.argv[2]).decode()
-    result = post(f"/v1/workspaces/{workspace}/exec", {"command": command})
-    sys.stdout.write(result.get("stdout") or result.get("output") or "")
-    sys.stderr.write(result.get("stderr") or "")
-    sys.exit(int(result.get("exit_code") or 0))
-
-payload = json.loads(sys.stdin.read() or "{}")
-result = post(f"/v1/workspaces/{workspace}/claude-hook", payload)
-sys.stdout.write(json.dumps(result))
-`
-	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
-		return "", err
-	}
-	return path, nil
-}
-
 func (a *app) writeClaudeRemoteSettings(ws Workspace) (string, error) {
-	hook, err := a.ensureClaudeHookScript()
+	helper, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
@@ -66,8 +29,8 @@ func (a *app) writeClaudeRemoteSettings(ws Workspace) (string, error) {
 		"ASTRALOPS_DAEMON=" + shellQuote("http://"+a.addr),
 		"ASTRALOPS_TOKEN=" + shellQuote(a.token),
 		"ASTRALOPS_WORKSPACE_ID=" + shellQuote(ws.ID),
-		"python3",
-		shellQuote(hook),
+		shellQuote(helper),
+		"claude-remote-hook",
 	}, " ")
 	settings := map[string]any{
 		"hooks": map[string]any{
@@ -145,6 +108,10 @@ func (a *app) processClaudeRemoteHook(ctx context.Context, ws Workspace, payload
 		if len(updated) > 0 {
 			out["updatedInput"] = updated
 		}
+		if tool == "Bash" && a.shouldAllowClaudeRemoteBash(ws.ID, stringValue(input["command"])) {
+			out["permissionDecision"] = "allow"
+			out["permissionDecisionReason"] = "read-only or previously approved command"
+		}
 		if contextText != "" {
 			out["additionalContext"] = contextText
 		}
@@ -164,6 +131,87 @@ func (a *app) processClaudeRemoteHook(ctx context.Context, ws Workspace, payload
 	}
 }
 
+func (a *app) shouldAllowClaudeRemoteBash(workspaceID, command string) bool {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return false
+	}
+	return isClaudeRemoteReadOnlyBash(command) || a.consumeClaudeRemoteApprovedCommand(workspaceID, command)
+}
+
+func isClaudeRemoteReadOnlyBash(command string) bool {
+	command = strings.TrimSpace(command)
+	if command == "" || strings.ContainsAny(command, "\n\r;&|><`$(){}\"'") {
+		return false
+	}
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	name := filepath.Base(fields[0])
+	if name == "." || name == string(os.PathSeparator) || strings.Contains(name, "=") {
+		return false
+	}
+	if !claudeBashArgsLookLiteral(fields[1:]) {
+		return false
+	}
+	switch name {
+	case "pwd", "ls", "cat", "head", "tail", "wc", "df", "du", "uname", "whoami", "hostname", "date", "id", "which":
+		return true
+	case "command":
+		return len(fields) >= 3 && fields[1] == "-v"
+	default:
+		return false
+	}
+}
+
+func claudeBashArgsLookLiteral(args []string) bool {
+	for _, arg := range args {
+		if arg == "" || strings.ContainsAny(arg, "\n\r;&|><`$(){}\"'") {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *app) allowClaudeRemoteApprovedCommand(origin AstralEvent) {
+	value := mapValue(origin.Normalized)
+	if stringValue(value["kind"]) != "permission" || firstString(value["tool_name"], "Bash") != "Bash" {
+		return
+	}
+	command := strings.TrimSpace(stringValue(value["command"]))
+	if command == "" {
+		return
+	}
+	ws, ok := a.store.getWorkspace(origin.WorkspaceID)
+	if !ok || ws.Target != "ssh" {
+		return
+	}
+	a.claudeRemoteAllowMu.Lock()
+	defer a.claudeRemoteAllowMu.Unlock()
+	if a.claudeRemoteAllow == nil {
+		a.claudeRemoteAllow = map[string]map[string]bool{}
+	}
+	if a.claudeRemoteAllow[origin.WorkspaceID] == nil {
+		a.claudeRemoteAllow[origin.WorkspaceID] = map[string]bool{}
+	}
+	a.claudeRemoteAllow[origin.WorkspaceID][command] = true
+}
+
+func (a *app) consumeClaudeRemoteApprovedCommand(workspaceID, command string) bool {
+	a.claudeRemoteAllowMu.Lock()
+	defer a.claudeRemoteAllowMu.Unlock()
+	commands := a.claudeRemoteAllow[workspaceID]
+	if commands == nil || !commands[command] {
+		return false
+	}
+	delete(commands, command)
+	if len(commands) == 0 {
+		delete(a.claudeRemoteAllow, workspaceID)
+	}
+	return true
+}
+
 func (a *app) preClaudeRemoteTool(ctx context.Context, ws Workspace, tool string, input map[string]any) (map[string]any, string, error) {
 	updated := copyStringAny(input)
 	switch tool {
@@ -172,7 +220,8 @@ func (a *app) preClaudeRemoteTool(ctx context.Context, ws Workspace, tool string
 		if strings.TrimSpace(command) == "" {
 			return nil, "", nil
 		}
-		hook, err := a.ensureClaudeHookScript()
+		command = remapClaudeRemoteBashCommand(ws, command)
+		helper, err := os.Executable()
 		if err != nil {
 			return nil, "", err
 		}
@@ -181,8 +230,8 @@ func (a *app) preClaudeRemoteTool(ctx context.Context, ws Workspace, tool string
 			"ASTRALOPS_DAEMON=" + shellQuote("http://"+a.addr),
 			"ASTRALOPS_TOKEN=" + shellQuote(a.token),
 			"ASTRALOPS_WORKSPACE_ID=" + shellQuote(ws.ID),
-			"python3",
-			shellQuote(hook),
+			shellQuote(helper),
+			"claude-remote-hook",
 			"exec",
 			shellQuote(encoded),
 		}, " ")
@@ -241,6 +290,42 @@ func (a *app) preClaudeRemoteTool(ctx context.Context, ws Workspace, tool string
 	}
 }
 
+func remapClaudeRemoteBashCommand(ws Workspace, command string) string {
+	if ws.SSH == nil || strings.TrimSpace(ws.LocalProjectionRoot) == "" || strings.TrimSpace(ws.SSH.RemoteCWD) == "" {
+		return command
+	}
+	remoteRoot := filepath.Clean(ws.SSH.RemoteCWD)
+	for _, localRoot := range claudeProjectionRootAliases(ws.LocalProjectionRoot) {
+		command = strings.ReplaceAll(command, localRoot, remoteRoot)
+	}
+	return command
+}
+
+func claudeProjectionRootAliases(root string) []string {
+	clean := filepath.Clean(strings.TrimSpace(root))
+	if clean == "." || clean == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var aliases []string
+	add := func(path string) {
+		path = filepath.Clean(strings.TrimSpace(path))
+		if path == "." || path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		aliases = append(aliases, path)
+	}
+	add(clean)
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+		add(resolved)
+	}
+	sort.SliceStable(aliases, func(i, j int) bool {
+		return len(aliases[i]) > len(aliases[j])
+	})
+	return aliases
+}
+
 func (a *app) postClaudeRemoteTool(ctx context.Context, ws Workspace, tool string, input map[string]any) error {
 	if tool != "Write" && tool != "Edit" && tool != "MultiEdit" {
 		return nil
@@ -262,7 +347,7 @@ func (a *app) postClaudeRemoteTool(ctx context.Context, ws Workspace, tool strin
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	if err := a.ssh.call(callCtx, ws, "write", map[string]any{"path": remote, "content": string(body)}, nil); err != nil {
+	if err := a.ssh.call(callCtx, ws, "write", remoteWriteParams(remote, body), nil); err != nil {
 		return err
 	}
 	a.recordProjectionFile(ws, remote, path, false, false)
@@ -295,7 +380,11 @@ func (a *app) rollbackClaudeRemoteTool(ctx context.Context, ws Workspace, tool s
 	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(local, []byte(stringValue(out["content"])), 0o600); err != nil {
+	body, err := remoteReadBytes(out)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(local, body, 0o600); err != nil {
 		return err
 	}
 	a.recordProjectionFile(ws, remote, local, false, true)
@@ -346,7 +435,11 @@ func (a *app) hydrateClaudePath(ctx context.Context, ws Workspace, requested str
 	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
 		return "", "", err
 	}
-	if err := os.WriteFile(local, []byte(stringValue(out["content"])), 0o600); err != nil {
+	body, err := remoteReadBytes(out)
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.WriteFile(local, body, 0o600); err != nil {
 		return "", "", err
 	}
 	a.recordProjectionFile(ws, remote, local, false, true)

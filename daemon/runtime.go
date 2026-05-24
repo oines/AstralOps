@@ -27,6 +27,7 @@ type TurnOptions struct {
 	Model           string `json:"model,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	PermissionMode  string `json:"permission_mode,omitempty"`
+	AllowedTools    []string `json:"-"`
 	Internal        bool   `json:"-"`
 	DisplayInput    string `json:"-"`
 }

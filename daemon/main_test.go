@@ -3,17 +3,23 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestStoreWorkspacePersistence(t *testing.T) {
@@ -91,18 +97,28 @@ func TestStoreSSHWorkspaceRequiresAbsoluteRemoteCWD(t *testing.T) {
 }
 
 func TestScrubClaudeRemoteBridgeEventHidesHooksAndDecodesCommand(t *testing.T) {
+	bridgeCommand := "ASTRALOPS_DAEMON='http://127.0.0.1:1234' ASTRALOPS_TOKEN='secret' ASTRALOPS_WORKSPACE_ID='ws_1' '/Applications/AstralOps.app/Contents/MacOS/astralops-daemon' claude-remote-hook exec 'bHMgLWxhIC9yb290'"
 	hook := map[string]any{
 		"hook_event_name": "PreToolUse",
 		"name":            "PreToolUse:Bash",
+		"stdout":          `{"hookSpecificOutput":{"updatedInput":{"command":"` + bridgeCommand + `"}}}`,
+		"output":          `{"hookSpecificOutput":{"updatedInput":{"command":"` + bridgeCommand + `"}}}`,
 	}
 	hidden := scrubClaudeRemoteBridgeEvent(hook, "/root").(map[string]any)
 	if hidden["hidden"] != true || hidden["visibility"] != "debug" {
 		t.Fatalf("hook visibility = %#v", hidden)
 	}
+	hiddenPreview, _ := json.Marshal(hidden)
+	if strings.Contains(string(hiddenPreview), "secret") || strings.Contains(string(hiddenPreview), "claude-remote-hook") || strings.Contains(string(hiddenPreview), "AstralOps.app") {
+		t.Fatalf("hidden hook leaked bridge internals: %s", hiddenPreview)
+	}
+	if !strings.Contains(string(hiddenPreview), "ls -la /root") {
+		t.Fatalf("hidden hook did not preserve decoded command: %s", hiddenPreview)
+	}
 
 	value := map[string]any{
 		"params": map[string]any{
-			"command": "ASTRALOPS_TOKEN='secret' python3 '/Users/oines/.AstralOps/runtime/claude-remote/hook_bridge.py' exec 'bHMgLWxhIC9yb290'",
+			"command": bridgeCommand,
 		},
 	}
 	scrubbed := scrubClaudeRemoteBridgeEvent(value, "/root").(map[string]any)
@@ -111,7 +127,7 @@ func TestScrubClaudeRemoteBridgeEventHidesHooksAndDecodesCommand(t *testing.T) {
 		t.Fatalf("command = %q", got)
 	}
 	preview, _ := json.Marshal(scrubbed)
-	if strings.Contains(string(preview), "secret") || strings.Contains(string(preview), "hook_bridge.py") || strings.Contains(string(preview), ".AstralOps") {
+	if strings.Contains(string(preview), "secret") || strings.Contains(string(preview), "claude-remote-hook") || strings.Contains(string(preview), "AstralOps.app") {
 		t.Fatalf("scrubbed value leaked bridge internals: %s", preview)
 	}
 }
@@ -142,6 +158,36 @@ func TestProjectionDirtyRecordDoesNotMarkPushed(t *testing.T) {
 	}
 	if file.LastPushed != "" {
 		t.Fatalf("LastPushed = %q, want empty for dirty record", file.LastPushed)
+	}
+}
+
+func TestProjectionRemoteIOUsesBase64ForBinary(t *testing.T) {
+	body := []byte{0, 1, 2, 0xff, '\n'}
+	params := remoteWriteParams("/root/blob.bin", body)
+	if params["content"] != nil {
+		t.Fatalf("write params included text content: %#v", params)
+	}
+	encoded := stringValue(params["dataBase64"])
+	if encoded == "" {
+		t.Fatalf("write params missing dataBase64: %#v", params)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded, body) {
+		t.Fatalf("decoded write body = %#v, want %#v", decoded, body)
+	}
+
+	readBody, err := remoteReadBytes(map[string]any{"content": "corrupt", "dataBase64": encoded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(readBody, body) {
+		t.Fatalf("read body = %#v, want base64 body %#v", readBody, body)
+	}
+	if _, err := remoteReadBytes(map[string]any{"dataBase64": "***"}); err == nil {
+		t.Fatal("invalid base64 read body was accepted")
 	}
 }
 
@@ -286,6 +332,59 @@ func TestListSessionsTitleSkipsInteractionFollowupText(t *testing.T) {
 	}
 }
 
+func TestListSessionsTitlePrefersNativeAgentTitle(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:     "Local Project",
+		Target:   "local",
+		Agent:    AgentCodex,
+		LocalCWD: dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	for _, event := range []AstralEvent{
+		{
+			WorkspaceID: workspace.ID,
+			SessionID:   session.ID,
+			Agent:       AgentCodex,
+			Kind:        "session.native",
+			Normalized:  map[string]any{"source": "codex", "preview": "first user prompt", "name": nil},
+		},
+		{
+			WorkspaceID: workspace.ID,
+			SessionID:   session.ID,
+			Agent:       AgentCodex,
+			Kind:        "message.user",
+			Normalized:  map[string]any{"text": "later follow-up should not replace preview"},
+		},
+		{
+			WorkspaceID: workspace.ID,
+			SessionID:   session.ID,
+			Agent:       AgentCodex,
+			Kind:        "session.updated",
+			Normalized:  map[string]any{"source": "codex", "thread_name": "Agent native title"},
+		},
+	} {
+		if _, err := st.appendEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sessions := st.listSessions(workspace.ID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	if sessions[0].Title != "Agent native title" {
+		t.Fatalf("title = %q, want native title", sessions[0].Title)
+	}
+}
+
 func TestClaudeResultSkipsStalePermissionDenialsAfterFinalAnswer(t *testing.T) {
 	session := Session{ID: "sess_claude", WorkspaceID: "ws", Agent: AgentClaude}
 	raw := map[string]any{
@@ -326,6 +425,56 @@ func TestClaudeResultSkipsCommandPermissionDenialsBecauseTheyAreNotLiveRequests(
 	events := normalizeClaudeResultPermissionDenials(session, raw)
 	if len(events) != 0 {
 		t.Fatalf("events = %#v, want command denial preserved only in raw result", events)
+	}
+}
+
+func TestClaudeResultWebSearchPermissionDenialRequestsApproval(t *testing.T) {
+	session := Session{ID: "sess_claude", WorkspaceID: "ws", Agent: AgentClaude}
+	raw := map[string]any{
+		"type":    "result",
+		"subtype": "success",
+		"result":  "WebSearch 工具目前还没有获得使用权限。",
+		"permission_denials": []any{
+			map[string]any{
+				"tool_name":   "WebSearch",
+				"tool_use_id": "call_search",
+				"tool_input":  map[string]any{"query": "today's top technology news May 2026"},
+			},
+		},
+	}
+
+	events := normalizeClaudeResultPermissionDenials(session, raw)
+	if len(events) != 1 || events[0].Kind != "approval.requested" {
+		t.Fatalf("events = %#v, want WebSearch approval.requested", events)
+	}
+	value := mapValue(events[0].Normalized)
+	if stringValue(value["kind"]) != "permission" || stringValue(value["tool_name"]) != "WebSearch" || stringValue(value["approval_id"]) != "call_search" {
+		t.Fatalf("approval normalized = %#v", value)
+	}
+	params := mapValue(value["params"])
+	if stringValue(params["query"]) != "today's top technology news May 2026" {
+		t.Fatalf("approval params = %#v", params)
+	}
+}
+
+func TestClaudeResultUnknownPermissionDenialDoesNotGuessApproval(t *testing.T) {
+	session := Session{ID: "sess_claude", WorkspaceID: "ws", Agent: AgentClaude}
+	raw := map[string]any{
+		"type":    "result",
+		"subtype": "success",
+		"result":  "Unknown tool requested permission.",
+		"permission_denials": []any{
+			map[string]any{
+				"tool_name":   "UnobservedTool",
+				"tool_use_id": "call_unknown",
+				"tool_input":  map[string]any{"value": "x"},
+			},
+		},
+	}
+
+	events := normalizeClaudeResultPermissionDenials(session, raw)
+	if len(events) != 0 {
+		t.Fatalf("events = %#v, want unobserved tool denial preserved only in raw result", events)
 	}
 }
 
@@ -547,6 +696,341 @@ func TestEventsSSEStreamsLiveEvents(t *testing.T) {
 	}
 }
 
+func TestLocalWorkspacePTYCloseTerminatesProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PTY process group test is POSIX-only")
+	}
+	dir := t.TempDir()
+	app := &app{
+		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
+	}
+	ws := Workspace{ID: "ws_local_pty", Target: "local", Agent: AgentClaude, LocalCWD: dir}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		app.handleWorkspacePTY(w, r, ws)
+	}))
+	defer server.Close()
+
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var readyMsg map[string]any
+	if err := client.ReadJSON(&readyMsg); err != nil {
+		t.Fatal(err)
+	}
+	if stringValue(readyMsg["type"]) != "ready" {
+		t.Fatalf("ready message = %#v", readyMsg)
+	}
+
+	ready := filepath.Join(dir, "pty-child.ready")
+	marker := filepath.Join(dir, "pty-child.survived")
+	command := fmt.Sprintf(
+		"READY=%s MARKER=%s; (trap '' HUP; printf ready > \"$READY\"; sleep 2; printf survived > \"$MARKER\") & wait\n",
+		shellQuote(ready),
+		shellQuote(marker),
+	)
+	if err := client.WriteJSON(map[string]any{"type": "input", "data": command}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("local PTY child did not signal ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := client.WriteJSON(map[string]any{"type": "close"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2500 * time.Millisecond)
+	if body, err := os.ReadFile(marker); err == nil {
+		t.Fatalf("local PTY background child survived close and wrote marker: %q", body)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("checking marker failed: %v", err)
+	}
+}
+
+func TestRemoteWorkspaceExecCancellationKillsProxyExec(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake proxy is POSIX-only")
+	}
+	dir := t.TempDir()
+	startedMarker := filepath.Join(dir, "exec-started")
+	killedMarker := filepath.Join(dir, "exec-killed")
+	script := filepath.Join(dir, "proxy.sh")
+	body := fmt.Sprintf(`#!/bin/sh
+started=%s
+marker=%s
+while IFS= read -r line; do
+  id=$(printf '%%s' "$line" | sed -n 's/^{"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"exec_start"'*)
+      printf started > "$started"
+      printf '{"id":"%%s","result":{"id":"started"}}\n' "$id"
+      ;;
+    *'"method":"exec_kill"'*)
+      printf killed > "$marker"
+      printf '{"id":"%%s","result":{"running":true}}\n' "$id"
+      ;;
+    *)
+      printf '{"id":"%%s","result":{}}\n' "$id"
+      ;;
+  esac
+done
+`, shellQuote(startedMarker), shellQuote(killedMarker))
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := Workspace{ID: "ws_remote_exec_cancel", Target: "ssh", Agent: AgentCodex, SSH: &SSHConfig{Endpoint: "root@example.com", RemoteCWD: dir}}
+	proxy := newProxyClient(ws, cmd, stdin, stdout, stderr)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	proxy.start()
+	defer proxy.close()
+
+	st, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub()}
+	app.ssh = &sshManager{
+		app: app,
+		by: map[string]*sshTarget{
+			ws.ID: {workspace: ws, proxy: proxy, state: initialSSHConnection(ws, connectionConnected)},
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := app.runRemoteWorkspaceExec(ctx, ws, "sleep 30")
+		done <- runErr
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if body, err := os.ReadFile(startedMarker); err == nil && string(body) == "started" {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("exec_start was not sent to the proxy")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("runRemoteWorkspaceExec error = %v, want context canceled", err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		if body, err := os.ReadFile(killedMarker); err == nil && string(body) == "killed" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("exec_kill was not sent to the proxy after context cancellation")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestSSHManagerContextCancellationDoesNotDegradeWorkspace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake proxy is POSIX-only")
+	}
+	app, ws, proxy := newSilentSSHProxyTestApp(t)
+	defer proxy.close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := app.ssh.call(ctx, ws, "list", map[string]any{"path": ws.SSH.RemoteCWD}, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("call error = %v, want context canceled", err)
+	}
+	state := app.ssh.getConnection(ws)
+	if state.Status != connectionConnected {
+		t.Fatalf("connection status = %s, want connected; message=%s", state.Status, state.Message)
+	}
+	if got := app.ssh.by[ws.ID].proxy; got != proxy {
+		t.Fatal("context cancellation dropped the live proxy")
+	}
+}
+
+func TestSSHManagerStartEventContextCancellationDoesNotDegradeWorkspace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake proxy is POSIX-only")
+	}
+	app, ws, proxy := newSilentSSHProxyTestApp(t)
+	defer proxy.close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, _, _, err := app.ssh.startExec(ctx, ws, "exec_cancel", map[string]any{"cwd": ws.SSH.RemoteCWD, "command": "pwd"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("startExec error = %v, want context canceled", err)
+	}
+	state := app.ssh.getConnection(ws)
+	if state.Status != connectionConnected {
+		t.Fatalf("connection status = %s, want connected; message=%s", state.Status, state.Message)
+	}
+	if got := app.ssh.by[ws.ID].proxy; got != proxy {
+		t.Fatal("context cancellation dropped the live proxy")
+	}
+}
+
+func TestValidateProxyHelloRequiresCoreExecutionMethods(t *testing.T) {
+	err := validateProxyHello(map[string]any{
+		"version":      "0.1.0-old",
+		"capabilities": map[string]any{"methods": []any{"hello", "read", "write", "list", "stat"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exec_start") || !strings.Contains(err.Error(), "pty_start") {
+		t.Fatalf("validateProxyHello err = %v, want missing core methods", err)
+	}
+
+	err = validateProxyHello(map[string]any{
+		"version": "0.1.0",
+		"capabilities": map[string]any{"methods": []string{
+			"hello", "read", "write", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("current proxy hello was rejected: %v", err)
+	}
+}
+
+func TestSSHConnectUpgradesIncompatibleRemoteHelper(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentClaude,
+		SSH: &SSHConfig{
+			Endpoint:  "root@example.test",
+			RemoteCWD: "/root",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}}
+	app.ssh = newSSHManager(app)
+	installFakeSSHProxy(t, dir, "1")
+	t.Setenv("ASTRALOPS_TEST_PROXY_OLD_UNTIL_UPLOAD", "1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	state, err := app.ssh.connect(ctx, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != connectionConnected {
+		t.Fatalf("connection status = %s, want connected; message=%s", state.Status, state.Message)
+	}
+	if state.HelperStatus != "running" {
+		t.Fatalf("helper status = %s, want running", state.HelperStatus)
+	}
+	if uploaded, ok := state.Raw["helper_uploaded"].(bool); !ok || !uploaded {
+		t.Fatalf("helper_uploaded = %#v, want true after incompatible helper upgrade", state.Raw["helper_uploaded"])
+	}
+	if got := readCounter(t, filepath.Join(dir, "proxy-count")); got != 2 {
+		t.Fatalf("proxy attempts = %d, want old helper attempt plus upgraded retry", got)
+	}
+	events := st.queryEvents(workspace.ID, "", 0)
+	if !hasWorkspaceConnectionHelperStatus(events, "upgrading") {
+		t.Fatalf("events = %#v, want helper_status upgrading before retry", events)
+	}
+}
+
+func newSilentSSHProxyTestApp(t *testing.T) (*app, Workspace, *proxyClient) {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "silent-proxy.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(script)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := Workspace{ID: "ws_cancel_keeps_connection", Target: "ssh", Agent: AgentCodex, SSH: &SSHConfig{Endpoint: "root@example.com", RemoteCWD: dir}}
+	proxy := newProxyClient(ws, cmd, stdin, stdout, stderr)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	proxy.start()
+	st, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub()}
+	app.ssh = &sshManager{
+		app: app,
+		by: map[string]*sshTarget{
+			ws.ID: {workspace: ws, proxy: proxy, state: initialSSHConnection(ws, connectionConnected)},
+		},
+	}
+	return app, ws, proxy
+}
+
+func TestWorkspacePathAllowsDotDotPrefixedNames(t *testing.T) {
+	root := t.TempDir()
+	localTarget, localRel, err := resolveWorkspacePath(root, "..inside")
+	if err != nil {
+		t.Fatalf("local ..inside rejected: %v", err)
+	}
+	if localTarget != filepath.Join(root, "..inside") || localRel != "..inside" {
+		t.Fatalf("local path = %q/%q", localTarget, localRel)
+	}
+	if _, _, err := resolveWorkspacePath(root, "../outside"); err == nil {
+		t.Fatal("local ../outside was allowed")
+	}
+
+	remoteRoot := "/tmp/astralops-root"
+	remoteTarget, remoteRel, err := resolveRemoteWorkspacePath(remoteRoot, "..inside")
+	if err != nil {
+		t.Fatalf("remote ..inside rejected: %v", err)
+	}
+	if remoteTarget != "/tmp/astralops-root/..inside" || remoteRel != "..inside" {
+		t.Fatalf("remote path = %q/%q", remoteTarget, remoteRel)
+	}
+	if _, _, err := resolveRemoteWorkspacePath(remoteRoot, "../outside"); err == nil {
+		t.Fatal("remote ../outside was allowed")
+	}
+}
+
 func TestNormalizeClaudeStreamJSON(t *testing.T) {
 	session := Session{ID: "sess_test", WorkspaceID: "ws_test", Agent: AgentClaude, NativeSessionID: "native"}
 	lines := readFixtureLines(t, "../fixtures/claude-stream-json/sample.jsonl")
@@ -626,6 +1110,10 @@ func TestNormalizeClaudeSDKSystemEvents(t *testing.T) {
 			line: `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"},"session_id":"native"}`,
 			kind: "control.rate_limit",
 		},
+		{
+			line: `{"type":"system","subtype":"post_turn_summary","title":"Investigate title behavior","description":"Checked session title semantics","recent_action":"read source","summarizes_uuid":"msg_1","session_id":"native"}`,
+			kind: "session.updated",
+		},
 	}
 
 	for _, tc := range cases {
@@ -636,6 +1124,12 @@ func TestNormalizeClaudeSDKSystemEvents(t *testing.T) {
 		if events[0].Raw == nil {
 			t.Fatalf("event %s did not preserve raw payload", tc.kind)
 		}
+	}
+
+	events := normalizeClaudeStreamJSON(session, []byte(`{"type":"system","subtype":"post_turn_summary","title":"Investigate title behavior","description":"Checked session title semantics","session_id":"native"}`))
+	value := events[0].Normalized.(map[string]any)
+	if stringValue(value["title"]) != "Investigate title behavior" || stringValue(value["description"]) == "" {
+		t.Fatalf("post_turn_summary normalized = %#v, want title and description", value)
 	}
 }
 
@@ -693,6 +1187,22 @@ func TestNormalizeClaudeRealLocalFixtures(t *testing.T) {
 	if stringValue(approvalNormalized["kind"]) != "plan" || stringValue(approvalNormalized["text"]) == "" {
 		t.Fatalf("claude plan approval normalized = %#v, want plan approval with text", approvalNormalized)
 	}
+
+	webSearchEvents := normalizeClaudeFixtureEvents(t, session, "../fixtures/claude-stream-json/real-ssh-websearch-permission.jsonl")
+	var webSearchApproval *AstralEvent
+	for i := range webSearchEvents {
+		if webSearchEvents[i].Kind == "approval.requested" {
+			webSearchApproval = &webSearchEvents[i]
+			break
+		}
+	}
+	if webSearchApproval == nil {
+		t.Fatal("real-ssh-websearch-permission missing approval.requested")
+	}
+	webSearchNormalized := mapValue(webSearchApproval.Normalized)
+	if stringValue(webSearchNormalized["kind"]) != "permission" || stringValue(webSearchNormalized["tool_name"]) != "WebSearch" {
+		t.Fatalf("web search approval normalized = %#v, want permission for WebSearch", webSearchNormalized)
+	}
 }
 
 func TestNormalizeCodexMessage(t *testing.T) {
@@ -707,6 +1217,35 @@ func TestNormalizeCodexMessage(t *testing.T) {
 	}
 	if events[0].Raw == nil {
 		t.Fatalf("codex event did not preserve raw payload")
+	}
+
+	threadStarted := normalizeCodexMessage(session, map[string]any{
+		"method": "thread/started",
+		"params": map[string]any{"thread": map[string]any{
+			"id":      "thread_1",
+			"status":  "idle",
+			"preview": "first prompt from codex",
+			"name":    "codex title",
+		}},
+	})
+	if len(threadStarted) != 1 || threadStarted[0].Kind != "session.native" {
+		t.Fatalf("thread started events = %#v, want one session.native", threadStarted)
+	}
+	threadValue := threadStarted[0].Normalized.(map[string]any)
+	if stringValue(threadValue["preview"]) != "first prompt from codex" || stringValue(threadValue["name"]) != "codex title" {
+		t.Fatalf("thread started normalized = %#v, want preview and name", threadValue)
+	}
+
+	threadNameUpdated := normalizeCodexMessage(session, map[string]any{
+		"method": "thread/name/updated",
+		"params": map[string]any{"threadId": "thread_1", "threadName": "new codex title"},
+	})
+	if len(threadNameUpdated) != 1 || threadNameUpdated[0].Kind != "session.updated" {
+		t.Fatalf("thread name updated events = %#v, want one session.updated", threadNameUpdated)
+	}
+	nameValue := threadNameUpdated[0].Normalized.(map[string]any)
+	if stringValue(nameValue["native_thread_id"]) != "thread_1" || stringValue(nameValue["thread_name"]) != "new codex title" {
+		t.Fatalf("thread name normalized = %#v, want thread id and title", nameValue)
 	}
 
 	request := normalizeCodexServerRequest(session, map[string]any{
@@ -843,6 +1382,46 @@ func TestCodexCompletedPlanRequestsApproval(t *testing.T) {
 	value := events[1].Normalized.(map[string]any)
 	if stringValue(value["kind"]) != "plan" || stringValue(value["approval_id"]) != "turn_1-plan" || stringValue(value["text"]) == "" {
 		t.Fatalf("approval normalized = %#v, want codex plan approval", value)
+	}
+}
+
+func TestCodexApprovalRequestsCarryConcreteTargets(t *testing.T) {
+	session := Session{ID: "sess_codex_targets", WorkspaceID: "ws_codex_targets", Agent: AgentCodex}
+	client := &codexClient{items: map[string]map[string]any{}}
+	client.rememberNotificationItem(map[string]any{
+		"method": "item/started",
+		"params": map[string]any{"item": map[string]any{
+			"id":      "file_1",
+			"type":    "fileChange",
+			"status":  "inProgress",
+			"changes": []any{map[string]any{"path": "/tmp/changed.txt", "kind": map[string]any{"type": "add"}}},
+		}},
+	})
+	event := normalizeCodexServerRequest(session, map[string]any{
+		"id":     float64(12),
+		"method": "item/fileChange/requestApproval",
+		"params": map[string]any{"itemId": "file_1", "turnId": "turn_1"},
+	})
+	client.enrichServerRequestEvent(&event)
+	value := mapValue(event.Normalized)
+	paths, _ := value["file_paths"].([]string)
+	if len(paths) != 1 || paths[0] != "/tmp/changed.txt" || value["changes"] == nil {
+		t.Fatalf("file approval normalized = %#v, want concrete file path and changes", value)
+	}
+
+	permissionEvent := normalizeCodexServerRequest(session, map[string]any{
+		"id":     float64(13),
+		"method": "item/permissions/requestApproval",
+		"params": map[string]any{
+			"itemId":      "perm_1",
+			"turnId":      "turn_1",
+			"reason":      "Need network",
+			"permissions": map[string]any{"network": map[string]any{"enabled": true}},
+		},
+	})
+	permissionValue := mapValue(permissionEvent.Normalized)
+	if stringValue(permissionValue["reason"]) != "Need network" || permissionValue["permissions"] == nil {
+		t.Fatalf("permissions approval normalized = %#v, want reason and permissions", permissionValue)
 	}
 }
 
@@ -987,6 +1566,575 @@ func TestClaudeAskResponseStartsFollowupTurn(t *testing.T) {
 	}
 }
 
+func TestClaudeInteractionCancelInterruptsInsteadOfFollowup(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := Workspace{ID: "ws_claude_cancel", Agent: AgentClaude, Target: "local", LocalCWD: dir}
+	session := st.createSession(workspace, AgentClaude)
+	st.workspaces[workspace.ID] = workspace
+	runtime := &recordingRuntime{}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
+	app.emit(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "ask.requested",
+		Normalized:  map[string]any{"ask_id": "ask_cancel", "request_id": "ask_cancel", "kind": "AskUserQuestion"},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/ask_cancel/respond", strings.NewReader(`{"action":"cancel","cancel":true}`))
+	rr := httptest.NewRecorder()
+	app.handleApprovalAction(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if len(runtime.interrupts) != 1 || runtime.interrupts[0] != session.ID {
+		t.Fatalf("interrupts = %#v, want Claude session interrupt", runtime.interrupts)
+	}
+	if len(runtime.inputs) != 0 {
+		t.Fatalf("followup inputs = %#v, want no followup turn", runtime.inputs)
+	}
+}
+
+func TestClaudeInteractionCancelClearsPausedApprovalWhenRuntimeIdle(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := Workspace{ID: "ws_claude_idle_cancel", Agent: AgentClaude, Target: "ssh", LocalCWD: "", LocalProjectionRoot: dir, SSH: &SSHConfig{Endpoint: "root@example.com", RemoteCWD: "/root"}}
+	session := st.createSession(workspace, AgentClaude)
+	st.workspaces[workspace.ID] = workspace
+	st.updateSessionStatus(session.ID, "requires_action")
+	runtime := &recordingRuntime{interruptErr: ErrSessionIdle}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
+	app.emit(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "approval.requested",
+		Normalized:  map[string]any{"approval_id": "approval_cancel", "request_id": "approval_cancel", "kind": "permission", "tool_name": "Bash", "command": "brew --version"},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_cancel/respond", strings.NewReader(`{"decision":"cancel","cancel":true}`))
+	rr := httptest.NewRecorder()
+	app.handleApprovalAction(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	updated, ok := st.getSession(session.ID)
+	if !ok || updated.Status != "idle" {
+		t.Fatalf("session status = %#v, want idle", updated)
+	}
+	if !containsEventKind(st.events, "turn.cancelled") {
+		t.Fatalf("events = %#v, want turn.cancelled", st.events)
+	}
+	if containsEventKind(st.events, "control.error") {
+		t.Fatalf("events = %#v, did not want control.error for idle cancel", st.events)
+	}
+}
+
+func TestCodexAskCancelInterruptsInsteadOfEmptyAnswer(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := Workspace{ID: "ws_codex_cancel", Agent: AgentCodex, Target: "local", LocalCWD: dir}
+	session := st.createSession(workspace, AgentCodex)
+	st.workspaces[workspace.ID] = workspace
+	runtime := &recordingRuntime{}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
+	app.emit(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentCodex,
+		Kind:        "ask.requested",
+		Normalized:  map[string]any{"ask_id": "ask_cancel", "request_id": "ask_cancel", "kind": "item/tool/requestUserInput"},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/ask_cancel/respond", strings.NewReader(`{"action":"cancel","cancel":true}`))
+	rr := httptest.NewRecorder()
+	app.handleApprovalAction(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if len(runtime.interrupts) != 1 || runtime.interrupts[0] != session.ID {
+		t.Fatalf("interrupts = %#v, want Codex session interrupt", runtime.interrupts)
+	}
+}
+
+func TestCodexExecServerInitializedNotificationDoesNotRespond(t *testing.T) {
+	conn := &execServerConn{}
+	_, _, err, respond := conn.handleMessage([]byte(`{"method":"initialized","params":{}}`))
+	if err != nil {
+		t.Fatalf("initialized notification err = %v, want nil", err)
+	}
+	if respond {
+		t.Fatal("initialized notification produced a response")
+	}
+
+	id, _, err, respond := conn.handleMessage([]byte(`{"method":"bogus","params":{}}`))
+	if !respond || err == nil || id != float64(-1) {
+		t.Fatalf("unknown notification = id %#v err %v respond %v, want -1 error response", id, err, respond)
+	}
+}
+
+func TestCodexExecServerProcessSendsWakeNotifications(t *testing.T) {
+	notifications := []map[string]any{}
+	proc := newExecServerProcess("proc_1", func(method string, params any) error {
+		notifications = append(notifications, map[string]any{"method": method, "params": params})
+		return nil
+	})
+	proc.addChunk("stdout", []byte("hello\n"))
+	proc.finish(0, "")
+
+	if len(notifications) != 3 {
+		t.Fatalf("notifications = %#v, want output/exited/closed", notifications)
+	}
+	if notifications[0]["method"] != "process/output" || mapValue(notifications[0]["params"])["chunk"] == "" {
+		t.Fatalf("output notification = %#v", notifications[0])
+	}
+	if notifications[1]["method"] != "process/exited" || numberValue(mapValue(notifications[1]["params"])["exitCode"]) != 0 {
+		t.Fatalf("exited notification = %#v", notifications[1])
+	}
+	if notifications[2]["method"] != "process/closed" {
+		t.Fatalf("closed notification = %#v", notifications[2])
+	}
+}
+
+func TestCodexExecServerReadNextSeqMatchesCodexCursorContract(t *testing.T) {
+	proc := newExecServerProcess("proc_1", nil)
+	initial := proc.readAfter(0, 0, 0)
+	if numberValue(initial["nextSeq"]) != 1 {
+		t.Fatalf("initial nextSeq = %#v, want 1", initial["nextSeq"])
+	}
+
+	proc.addChunk("stdout", []byte("hello\n"))
+	first := proc.readAfter(0, 0, 0)
+	if numberValue(first["nextSeq"]) != 2 {
+		t.Fatalf("first read nextSeq = %#v, want 2", first["nextSeq"])
+	}
+	if first["failure"] != nil {
+		t.Fatalf("first read failure = %#v, want nil for successful running process", first["failure"])
+	}
+	chunks := first["chunks"].([]execServerChunk)
+	if len(chunks) != 1 || chunks[0].Seq != 1 {
+		t.Fatalf("first chunks = %#v, want seq 1", chunks)
+	}
+
+	second := proc.readAfter(1, 0, 0)
+	if got := len(second["chunks"].([]execServerChunk)); got != 0 {
+		t.Fatalf("second chunks = %d, want no duplicate output", got)
+	}
+
+	proc.finish(0, "")
+	closed := proc.readAfter(1, 0, 0)
+	if closed["failure"] != nil {
+		t.Fatalf("closed failure = %#v, want nil on zero-exit success", closed["failure"])
+	}
+}
+
+func TestCodexExecServerFileSystemUsesBase64ForBinary(t *testing.T) {
+	body := []byte{0, 1, 2, 0xff}
+	var writeParams map[string]any
+	conn := &execServerConn{
+		remote: func(ctx context.Context, method string, params any, out any) error {
+			switch method {
+			case "read":
+				if target, ok := out.(*map[string]any); ok {
+					*target = map[string]any{"dataBase64": "AAEC/w=="}
+				}
+			case "write":
+				writeParams = params.(map[string]any)
+			default:
+				return errors.New("unexpected method " + method)
+			}
+			return nil
+		},
+	}
+	readResult, err := conn.dispatch(execServerRequest{Method: "fs/readFile", Params: json.RawMessage(`{"path":"/root/blob.bin"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stringValue(readResult.(map[string]any)["dataBase64"]); got != "AAEC/w==" {
+		t.Fatalf("read result = %#v, want base64 body", readResult)
+	}
+	writeBody, _ := json.Marshal(map[string]any{"path": "/root/blob.bin", "dataBase64": "AAEC/w=="})
+	if _, err := conn.dispatch(execServerRequest{Method: "fs/writeFile", Params: writeBody}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stringValue(writeParams["dataBase64"]); got != "AAEC/w==" {
+		t.Fatalf("write params = %#v, want base64 body for %#v", writeParams, body)
+	}
+}
+
+func TestCodexExecServerMetadataBoundaryUsesNotFoundError(t *testing.T) {
+	conn := &execServerConn{
+		remote: func(ctx context.Context, method string, params any, out any) error {
+			return fmt.Errorf("path %q escapes remote cwd %q", "/tmp", "/tmp/project")
+		},
+	}
+	_, err := conn.dispatch(execServerRequest{Method: "fs/getMetadata", Params: json.RawMessage(`{"path":"/tmp"}`)})
+	if err == nil {
+		t.Fatal("fs/getMetadata boundary error was nil")
+	}
+	payload := execServerErrorPayload(err)
+	if payload["code"] != -32004 {
+		t.Fatalf("error payload = %#v, want not-found code -32004", payload)
+	}
+
+	_, err = conn.dispatch(execServerRequest{Method: "fs/readDirectory", Params: json.RawMessage(`{"path":"/tmp"}`)})
+	if err == nil {
+		t.Fatal("fs/readDirectory boundary error was nil")
+	}
+	payload = execServerErrorPayload(err)
+	if payload["code"] != -32004 {
+		t.Fatalf("readDirectory error payload = %#v, want not-found code -32004", payload)
+	}
+}
+
+func TestCodexExecServerRejectsDuplicateProcessAndReportsTerminateRunning(t *testing.T) {
+	conn := &execServerConn{processes: map[string]*execServerProcess{}}
+	conn.processes["proc_1"] = newExecServerProcess("proc_1", nil)
+	_, err := conn.processStart(json.RawMessage(`{"processId":"proc_1","argv":["pwd"],"cwd":"/tmp","env":{},"tty":false}`))
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("duplicate process err = %v, want already exists", err)
+	}
+
+	response, err := conn.processTerminate(json.RawMessage(`{"processId":"proc_1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if running := boolValue(response.(map[string]any)["running"]); !running {
+		t.Fatalf("terminate response = %#v, want running true for live process", response)
+	}
+	response, err = conn.processTerminate(json.RawMessage(`{"processId":"proc_1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if running := boolValue(response.(map[string]any)["running"]); running {
+		t.Fatalf("second terminate response = %#v, want running false", response)
+	}
+}
+
+func TestCodexExecServerTerminateKillsNonTTYRemoteExec(t *testing.T) {
+	var killed string
+	conn := &execServerConn{
+		processes: map[string]*execServerProcess{},
+		remote: func(ctx context.Context, method string, params any, out any) error {
+			if method == "exec_kill" {
+				killed = stringValue(params.(map[string]any)["id"])
+			}
+			return nil
+		},
+	}
+	conn.processes["proc_exec"] = newExecServerProcess("proc_exec", nil)
+	response, err := conn.processTerminate(json.RawMessage(`{"processId":"proc_exec"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if running := boolValue(response.(map[string]any)["running"]); !running {
+		t.Fatalf("terminate response = %#v, want running true", response)
+	}
+	if killed != "proc_exec" {
+		t.Fatalf("killed id = %q, want proc_exec", killed)
+	}
+}
+
+func TestCodexExecServerRejectsEmptyArgvWithoutRegisteringProcess(t *testing.T) {
+	conn := &execServerConn{processes: map[string]*execServerProcess{}}
+	_, err := conn.processStart(json.RawMessage(`{"processId":"proc_empty","argv":[],"cwd":"/tmp","env":{},"tty":false}`))
+	if err == nil || !strings.Contains(err.Error(), "argv must not be empty") {
+		t.Fatalf("empty argv err = %v, want argv error", err)
+	}
+	if got := conn.lookupProcess("proc_empty"); got != nil {
+		t.Fatalf("empty argv registered process: %#v", got)
+	}
+}
+
+func TestCodexExecServerPassesExactArgvToRemoteExec(t *testing.T) {
+	paramsCh := make(chan map[string]any, 1)
+	conn := &execServerConn{
+		ws:        Workspace{SSH: &SSHConfig{RemoteCWD: "/tmp"}},
+		processes: map[string]*execServerProcess{},
+		remote: func(ctx context.Context, method string, params any, out any) error {
+			if method != "exec" {
+				return errors.New("unexpected method " + method)
+			}
+			paramsCh <- params.(map[string]any)
+			if target, ok := out.(*map[string]any); ok {
+				*target = map[string]any{"stdout": "ok", "exit_code": 0}
+			}
+			return nil
+		},
+	}
+	_, err := conn.processStart(json.RawMessage(`{"processId":"proc_argv","argv":["/usr/bin/printf","%s","$HOME; echo bad"],"cwd":"/tmp","env":{"X":"Y"},"tty":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var params map[string]any
+	select {
+	case params = <-paramsCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for remote exec")
+	}
+	if !reflect.DeepEqual(params["argv"], []string{"/usr/bin/printf", "%s", "$HOME; echo bad"}) {
+		t.Fatalf("argv = %#v, want exact argv", params["argv"])
+	}
+}
+
+func TestCodexExecServerTranslatesLocalShellWrapperToRemoteShell(t *testing.T) {
+	paramsCh := make(chan map[string]any, 1)
+	app := &app{}
+	conn := &execServerConn{
+		app:         app,
+		ws:          Workspace{SSH: &SSHConfig{RemoteCWD: "/tmp"}},
+		remoteShell: "/bin/bash",
+		processes:   map[string]*execServerProcess{},
+		remote: func(ctx context.Context, method string, params any, out any) error {
+			if method != "exec" {
+				return errors.New("unexpected method " + method)
+			}
+			paramsCh <- params.(map[string]any)
+			if target, ok := out.(*map[string]any); ok {
+				*target = map[string]any{"stdout": "ok", "exit_code": 0}
+			}
+			return nil
+		},
+	}
+	_, err := conn.processStart(json.RawMessage(`{"processId":"proc_shell","argv":["/bin/zsh","-lc","pwd && cat a.txt"],"arg0":"/bin/zsh","cwd":"/tmp","env":{},"tty":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var params map[string]any
+	select {
+	case params = <-paramsCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for remote exec")
+	}
+	if !reflect.DeepEqual(params["argv"], []string{"/bin/bash", "-lc", "pwd && cat a.txt"}) {
+		t.Fatalf("argv = %#v, want remote shell argv", params["argv"])
+	}
+	if params["arg0"] != "/bin/bash" {
+		t.Fatalf("arg0 = %#v, want remote shell", params["arg0"])
+	}
+	recorded, ok := app.codexExecCommand("", "proc_shell")
+	if ok || recorded.EffectiveCommand != "" {
+		t.Fatalf("empty workspace mapping should not be recorded: %#v", recorded)
+	}
+}
+
+func TestCodexExecServerStripsLocalSandboxWrapperForRemoteExec(t *testing.T) {
+	paramsCh := make(chan map[string]any, 1)
+	app := &app{}
+	conn := &execServerConn{
+		app:         app,
+		ws:          Workspace{ID: "ws_remote", SSH: &SSHConfig{RemoteCWD: "/tmp"}},
+		remoteShell: "/bin/bash",
+		processes:   map[string]*execServerProcess{},
+		remote: func(ctx context.Context, method string, params any, out any) error {
+			if method != "exec" {
+				return errors.New("unexpected method " + method)
+			}
+			paramsCh <- params.(map[string]any)
+			if target, ok := out.(*map[string]any); ok {
+				*target = map[string]any{"stdout": "ok", "exit_code": 0}
+			}
+			return nil
+		},
+	}
+	_, err := conn.processStart(json.RawMessage(`{"processId":"proc_sandbox","argv":["/usr/bin/sandbox-exec","-p","(version 1)","-DDARWIN_USER_CACHE_DIR=/tmp/cache","--","/bin/zsh","-lc","pwd"],"arg0":"/usr/bin/sandbox-exec","cwd":"/tmp","env":{},"tty":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var params map[string]any
+	select {
+	case params = <-paramsCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for remote exec")
+	}
+	if !reflect.DeepEqual(params["argv"], []string{"/bin/bash", "-lc", "pwd"}) {
+		t.Fatalf("argv = %#v, want stripped remote shell argv", params["argv"])
+	}
+	if params["arg0"] != "/bin/bash" {
+		t.Fatalf("arg0 = %#v, want remote shell", params["arg0"])
+	}
+	recorded, ok := app.codexExecCommand("ws_remote", "proc_sandbox")
+	if !ok {
+		t.Fatal("remote exec command mapping was not recorded")
+	}
+	if recorded.EffectiveCommand != "/bin/bash -lc pwd" {
+		t.Fatalf("effective command = %q", recorded.EffectiveCommand)
+	}
+}
+
+func TestCodexRuntimeEnrichesRemoteCommandEventsWithEffectiveCommand(t *testing.T) {
+	app := &app{codexExec: map[string]codexExecCommand{}}
+	app.recordCodexExecCommand("ws_remote", "proc_1", []string{"/bin/zsh", "-lc", "pwd"}, []string{"/bin/bash", "-lc", "pwd"})
+	client := &codexClient{
+		runtime:       &codexLocalRuntime{app: app},
+		session:       Session{WorkspaceID: "ws_remote", Agent: AgentCodex},
+		execServerURL: "ws://127.0.0.1/v1/codex-exec/ws_remote",
+	}
+	ev := AstralEvent{
+		Kind: "tool.completed",
+		Normalized: map[string]any{
+			"category": "command",
+			"command":  "/bin/zsh -lc pwd",
+		},
+		Raw: map[string]any{
+			"params": map[string]any{
+				"item": map[string]any{"processId": "proc_1"},
+			},
+		},
+	}
+
+	client.enrichRemoteCommandEvent(&ev)
+	value := mapValue(ev.Normalized)
+	if got := stringValue(value["command"]); got != "/bin/bash -lc pwd" {
+		t.Fatalf("command = %q, want effective remote command", got)
+	}
+	if got := stringValue(value["native_command"]); got != "/bin/zsh -lc pwd" {
+		t.Fatalf("native_command = %q", got)
+	}
+	if got := stringValue(value["remote_command"]); got != "/bin/bash -lc pwd" {
+		t.Fatalf("remote_command = %q", got)
+	}
+}
+
+func TestCodexExecServerShutdownTerminatesManagedProcesses(t *testing.T) {
+	killed := []string{}
+	conn := &execServerConn{
+		processes: map[string]*execServerProcess{},
+		remote: func(ctx context.Context, method string, params any, out any) error {
+			if method == "pty_kill" {
+				killed = append(killed, stringValue(mapValue(params)["id"]))
+			}
+			return nil
+		},
+	}
+	ptyProc := newExecServerProcess("pty_1", nil)
+	ptyProc.pty = true
+	execProc := newExecServerProcess("exec_1", nil)
+	conn.processes["pty_1"] = ptyProc
+	conn.processes["exec_1"] = execProc
+
+	conn.shutdown()
+
+	if !reflect.DeepEqual(killed, []string{"pty_1"}) {
+		t.Fatalf("killed = %#v, want pty_1", killed)
+	}
+	if !ptyProc.isClosed() || !execProc.isClosed() {
+		t.Fatalf("processes not closed: pty=%v exec=%v", ptyProc.isClosed(), execProc.isClosed())
+	}
+}
+
+func TestCodexExecServerWebSocketE2E(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		socket, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade: %v", err)
+			return
+		}
+		conn := &execServerConn{
+			socket:    socket,
+			sessionID: "exec_e2e",
+			processes: map[string]*execServerProcess{},
+			remote: func(ctx context.Context, method string, params any, out any) error {
+				if method != "exec" {
+					return errors.New("unexpected remote method " + method)
+				}
+				if target, ok := out.(*map[string]any); ok {
+					*target = map[string]any{"stdout": "/root\n", "stderr": "", "exit_code": 0}
+				}
+				return nil
+			},
+		}
+		conn.serve()
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	client, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	writeWS := func(value map[string]any) {
+		t.Helper()
+		if err := client.WriteJSON(value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readWS := func() map[string]any {
+		t.Helper()
+		var value map[string]any
+		if err := client.ReadJSON(&value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+
+	writeWS(map[string]any{"id": 1, "method": "initialize", "params": map[string]any{"clientName": "test"}})
+	if msg := readWS(); numberValue(msg["id"]) != 1 || stringValue(mapValue(msg["result"])["sessionId"]) != "exec_e2e" {
+		t.Fatalf("initialize response = %#v", msg)
+	}
+	writeWS(map[string]any{"method": "initialized", "params": map[string]any{}})
+	writeWS(map[string]any{"id": 2, "method": "process/start", "params": map[string]any{
+		"processId": "proc_1",
+		"argv":      []any{"bash", "-lc", "pwd"},
+		"cwd":       "/root",
+		"env":       map[string]any{},
+		"tty":       false,
+	}})
+	if msg := readWS(); numberValue(msg["id"]) != 2 || stringValue(mapValue(msg["result"])["processId"]) != "proc_1" {
+		t.Fatalf("process/start response = %#v", msg)
+	}
+
+	seenOutput := false
+	seenClosed := false
+	for i := 0; i < 3; i++ {
+		msg := readWS()
+		switch stringValue(msg["method"]) {
+		case "process/output":
+			seenOutput = true
+			params := mapValue(msg["params"])
+			if stringValue(params["stream"]) != "stdout" || stringValue(params["chunk"]) == "" {
+				t.Fatalf("output notification = %#v", msg)
+			}
+		case "process/exited":
+			if numberValue(mapValue(msg["params"])["exitCode"]) != 0 {
+				t.Fatalf("exited notification = %#v", msg)
+			}
+		case "process/closed":
+			seenClosed = true
+		default:
+			t.Fatalf("unexpected notification = %#v", msg)
+		}
+	}
+	if !seenOutput || !seenClosed {
+		t.Fatalf("seenOutput=%v seenClosed=%v", seenOutput, seenClosed)
+	}
+
+	writeWS(map[string]any{"id": 3, "method": "process/read", "params": map[string]any{"processId": "proc_1", "afterSeq": 0, "maxBytes": 65536, "waitMs": 0}})
+	firstRead := readWS()
+	result := mapValue(firstRead["result"])
+	if numberValue(result["nextSeq"]) != 2 || len(result["chunks"].([]any)) != 1 {
+		t.Fatalf("first read = %#v", firstRead)
+	}
+	writeWS(map[string]any{"id": 4, "method": "process/read", "params": map[string]any{"processId": "proc_1", "afterSeq": 1, "maxBytes": 65536, "waitMs": 0}})
+	secondRead := readWS()
+	if chunks := mapValue(secondRead["result"])["chunks"].([]any); len(chunks) != 0 {
+		t.Fatalf("second read duplicated output: %#v", secondRead)
+	}
+}
+
 func TestClaudePlanAcceptFollowupIsCompactAndInternal(t *testing.T) {
 	origin := AstralEvent{
 		Agent:      AgentClaude,
@@ -1000,6 +2148,212 @@ func TestClaudePlanAcceptFollowupIsCompactAndInternal(t *testing.T) {
 	display := claudeInteractionDisplayText(origin, map[string]any{"decision": "accept"})
 	if display != "计划已批准" {
 		t.Fatalf("display = %q", display)
+	}
+}
+
+func TestClaudePermissionAcceptPassesExactAllowedTool(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := Workspace{ID: "ws_claude_permission", Agent: AgentClaude, Target: "local", LocalCWD: dir}
+	session := st.createSession(workspace, AgentClaude)
+	st.workspaces[workspace.ID] = workspace
+	runtime := &recordingRuntime{}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
+	app.emit(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "approval.requested",
+		Normalized:  map[string]any{"approval_id": "approval_cmd", "kind": "permission", "tool_name": "Bash", "command": "sw_vers"},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_cmd/respond", strings.NewReader(`{"decision":"accept"}`))
+	rr := httptest.NewRecorder()
+	app.handleApprovalAction(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if len(runtime.options) != 1 || !reflect.DeepEqual(runtime.options[0].AllowedTools, []string{"Bash(sw_vers)"}) {
+		t.Fatalf("options = %#v, want exact Bash allow", runtime.options)
+	}
+}
+
+func TestClaudePermissionAcceptPassesAllowedNonBashTool(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := Workspace{
+		ID:       "ws_claude_websearch",
+		Agent:    AgentClaude,
+		Target:   "ssh",
+		LocalCWD: dir,
+		SSH:      &SSHConfig{Endpoint: "root@example.test", RemoteCWD: "/root"},
+	}
+	session := st.createSession(workspace, AgentClaude)
+	st.workspaces[workspace.ID] = workspace
+	runtime := &recordingRuntime{}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
+	app.emit(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "approval.requested",
+		Normalized:  map[string]any{"approval_id": "approval_search", "kind": "permission", "tool_name": "WebSearch", "params": map[string]any{"query": "today"}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_search/respond", strings.NewReader(`{"decision":"accept"}`))
+	rr := httptest.NewRecorder()
+	app.handleApprovalAction(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if len(runtime.options) != 1 || !reflect.DeepEqual(runtime.options[0].AllowedTools, []string{"WebSearch"}) {
+		t.Fatalf("options = %#v, want WebSearch allowed for retry", runtime.options)
+	}
+}
+
+func TestClaudeRuntimePassesAllowedToolsToCLI(t *testing.T) {
+	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
+echo "$@" > "$ASTRALOPS_TEST_ARGS"
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+`))
+	argsPath := filepath.Join(t.TempDir(), "args.txt")
+	t.Setenv("ASTRALOPS_TEST_ARGS", argsPath)
+
+	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "retry", TurnOptions{AllowedTools: []string{"Bash(sw_vers)"}, Internal: true}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.completed")
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--allowedTools Bash(sw_vers)") {
+		t.Fatalf("claude args did not include allowed tool: %s", args)
+	}
+}
+
+func TestClaudeRemoteReadOnlyBashHookAllowsSafeCommandViaRemoteBridge(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentClaude,
+		SSH:    &SSHConfig{Endpoint: "root@example.com", RemoteCWD: "/root"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, token: "secret", addr: "127.0.0.1:1"}
+	result, err := app.processClaudeRemoteHook(context.Background(), ws, map[string]any{
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Bash",
+		"tool_input":      map[string]any{"command": "ls -la " + ws.LocalProjectionRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := mapValue(result["hookSpecificOutput"])
+	if stringValue(out["permissionDecision"]) != "allow" {
+		t.Fatalf("hook output = %#v, want permissionDecision allow", out)
+	}
+	updated := mapValue(out["updatedInput"])
+	if !strings.Contains(stringValue(updated["command"]), "claude-remote-hook") {
+		t.Fatalf("updated command = %#v, want bridge command", updated["command"])
+	}
+	if got := decodeClaudeBridgeCommand(stringValue(updated["command"])); got != "ls -la /root" {
+		t.Fatalf("decoded bridge command = %q, want remote path", got)
+	}
+}
+
+func TestClaudeRemoteBashCommandRemapsResolvedProjectionRoot(t *testing.T) {
+	dir := t.TempDir()
+	realRoot := filepath.Join(dir, "real", "projection")
+	if err := os.MkdirAll(realRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := filepath.Join(dir, "link")
+	if err := os.MkdirAll(linkParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkRoot := filepath.Join(linkParent, "projection")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	ws := Workspace{
+		ID:                  "ws_symlink_projection",
+		LocalProjectionRoot: linkRoot,
+		SSH:                 &SSHConfig{Endpoint: "root@example.com", RemoteCWD: "/root"},
+	}
+
+	resolvedRoot, err := filepath.EvalSymlinks(linkRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := remapClaudeRemoteBashCommand(ws, "ls -la "+resolvedRoot)
+	if command != "ls -la /root" {
+		t.Fatalf("remapped command = %q, want remote root", command)
+	}
+}
+
+func TestClaudeRemoteReadOnlyBashHookRejectsCompoundCommands(t *testing.T) {
+	if !isClaudeRemoteReadOnlyBash("ls -la /root") {
+		t.Fatal("ls should be treated as read-only")
+	}
+	for _, command := range []string{"ls -la && whoami", "cat /etc/os-release > out", "rm -rf /tmp/x", "python3 script.py"} {
+		if isClaudeRemoteReadOnlyBash(command) {
+			t.Fatalf("command %q was treated as read-only", command)
+		}
+	}
+}
+
+func TestClaudeRemoteApprovedCommandAllowsOnce(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentClaude,
+		SSH:    &SSHConfig{Endpoint: "root@example.com", RemoteCWD: "/root"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, token: "secret", addr: "127.0.0.1:1"}
+	app.allowClaudeRemoteApprovedCommand(AstralEvent{
+		WorkspaceID: ws.ID,
+		SessionID:   "sess_remote",
+		Agent:       AgentClaude,
+		Kind:        "approval.requested",
+		Normalized:  map[string]any{"kind": "permission", "tool_name": "Bash", "command": "brew --version"},
+	})
+
+	payload := map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": map[string]any{"command": "brew --version"}}
+	first, err := app.processClaudeRemoteHook(context.Background(), ws, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stringValue(mapValue(first["hookSpecificOutput"])["permissionDecision"]); got != "allow" {
+		t.Fatalf("first permissionDecision = %q, want allow", got)
+	}
+	second, err := app.processClaudeRemoteHook(context.Background(), ws, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stringValue(mapValue(second["hookSpecificOutput"])["permissionDecision"]); got != "" {
+		t.Fatalf("second permissionDecision = %q, want empty", got)
 	}
 }
 
@@ -1045,9 +2399,10 @@ func containsEventKind(events []AstralEvent, target string) bool {
 }
 
 type recordingRuntime struct {
-	inputs     []string
-	options    []TurnOptions
-	interrupts []string
+	inputs       []string
+	options      []TurnOptions
+	interrupts   []string
+	interruptErr error
 }
 
 func (r *recordingRuntime) StartTurn(session Session, workspace Workspace, input string, options TurnOptions) error {
@@ -1058,7 +2413,7 @@ func (r *recordingRuntime) StartTurn(session Session, workspace Workspace, input
 
 func (r *recordingRuntime) Interrupt(sessionID string) error {
 	r.interrupts = append(r.interrupts, sessionID)
-	return nil
+	return r.interruptErr
 }
 
 type recordingSteerRuntime struct {
@@ -1165,6 +2520,78 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 		if ev.Kind == "message.delta" && strings.Contains(stringValue(mapValue(ev.Normalized)["text"]), "should not continue") {
 			t.Fatalf("claude continued after approval request: %#v", ev)
 		}
+	}
+}
+
+func TestClaudeLocalRuntimePausesOnAskUserQuestion(t *testing.T) {
+	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"ask_1","name":"AskUserQuestion","input":{"questions":[{"question":"Pick A or B?","options":[{"label":"A"},{"label":"B"}]}]}}]}}'
+sleep 1
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"ask_2","name":"AskUserQuestion","input":{"questions":[{"question":"This stale ask should not render"}]}}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","terminal_reason":"completed","result":"stale","permission_denials":[{"tool_name":"AskUserQuestion","tool_use_id":"ask_1","tool_input":{}},{"tool_name":"AskUserQuestion","tool_use_id":"ask_2","tool_input":{}}]}'
+`))
+
+	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "ask", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "ask.requested")
+	time.Sleep(200 * time.Millisecond)
+
+	updated, ok := app.store.getSession(session.ID)
+	if !ok || updated.Status != "requires_action" {
+		t.Fatalf("session status = %#v, want requires_action", updated)
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	askCount := 0
+	for _, ev := range events {
+		if ev.Kind == "ask.requested" {
+			askCount++
+			value := mapValue(ev.Normalized)
+			if stringValue(value["ask_id"]) == "ask_2" {
+				t.Fatalf("runtime continued to stale ask after first AskUserQuestion: %#v", ev)
+			}
+		}
+		if ev.Kind == "turn.completed" {
+			t.Fatalf("ask pause emitted completed turn: %#v", ev)
+		}
+	}
+	if askCount != 1 {
+		t.Fatalf("ask.requested count = %d, want 1; events=%#v", askCount, events)
+	}
+}
+
+func TestClaudeLocalRuntimeMarksResultPermissionDenialRequiresAction(t *testing.T) {
+	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call_search","name":"WebSearch","input":{"query":"today"}}]}}'
+printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_search","content":"Claude requested permissions to use WebSearch, but you haven'\''t granted it yet.","is_error":true}]},"tool_use_result":"Error: Claude requested permissions to use WebSearch, but you haven'\''t granted it yet."}'
+printf '%s\n' '{"type":"result","subtype":"success","terminal_reason":"completed","result":"WebSearch needs permission","permission_denials":[{"tool_name":"WebSearch","tool_use_id":"call_search","tool_input":{"query":"today"}}]}'
+`))
+
+	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "search", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.completed")
+	waitForKind(t, app.store, session.ID, "approval.requested")
+	updated, ok := app.store.getSession(session.ID)
+	if !ok || updated.Status != "requires_action" {
+		t.Fatalf("session status = %#v, want requires_action", updated)
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	var approval *AstralEvent
+	for i := range events {
+		if events[i].Kind == "approval.requested" {
+			approval = &events[i]
+			break
+		}
+	}
+	if approval == nil {
+		t.Fatal("missing WebSearch approval")
+	}
+	value := mapValue(approval.Normalized)
+	if stringValue(value["tool_name"]) != "WebSearch" || stringValue(value["approval_id"]) != "call_search" {
+		t.Fatalf("approval = %#v", value)
 	}
 }
 
@@ -1547,6 +2974,7 @@ func installFakeSSHProxy(t *testing.T, dir string, succeedAt string) {
 	if err := os.WriteFile(counter, []byte("0"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	upgradeMarker := filepath.Join(dir, "proxy-upgraded")
 	binDir := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -1563,7 +2991,7 @@ if [[ "$args" == *"sha256sum"* ]] || [[ "$args" == *"shasum -a 256"* ]]; then
   printf '%s\n' "$ASTRALOPS_TEST_HELPER_SHA"
   exit 0
 fi
-if [[ "$args" == *"astral-proxy-agent"* ]]; then
+if [[ "$args" == *"exec "*"astral-proxy-agent"* ]]; then
   count=$(cat "$ASTRALOPS_TEST_PROXY_COUNT")
   count=$((count + 1))
   printf '%s' "$count" > "$ASTRALOPS_TEST_PROXY_COUNT"
@@ -1571,9 +2999,13 @@ if [[ "$args" == *"astral-proxy-agent"* ]]; then
     exit 255
   fi
   python3 -c 'import json, sys
+import os
 for line in sys.stdin:
     req = json.loads(line)
-    print(json.dumps({"id": req.get("id"), "result": {"shell": "/bin/sh", "user": "root", "hostname": "host", "capabilities": {}}}), flush=True)'
+    methods = ["hello", "read", "write", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill"]
+    if os.environ.get("ASTRALOPS_TEST_PROXY_OLD_UNTIL_UPLOAD") == "1" and not os.path.exists(os.environ["ASTRALOPS_TEST_PROXY_UPGRADE_MARKER"]):
+        methods = ["hello", "read", "write", "list", "stat"]
+    print(json.dumps({"id": req.get("id"), "result": {"shell": "/bin/sh", "user": "root", "hostname": "host", "capabilities": {"methods": methods}}}), flush=True)'
   exit 0
 fi
 exit 0
@@ -1581,11 +3013,21 @@ exit 0
 	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	scp := filepath.Join(binDir, "scp")
+	scpScript := `#!/bin/bash
+set -e
+touch "$ASTRALOPS_TEST_PROXY_UPGRADE_MARKER"
+exit 0
+`
+	if err := os.WriteFile(scp, []byte(scpScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("ASTRALOPS_PROXY_AGENT", helper)
 	t.Setenv("ASTRALOPS_TEST_HELPER_SHA", helperSum)
 	t.Setenv("ASTRALOPS_TEST_PROXY_COUNT", counter)
 	t.Setenv("ASTRALOPS_TEST_PROXY_SUCCEED_AT", succeedAt)
+	t.Setenv("ASTRALOPS_TEST_PROXY_UPGRADE_MARKER", upgradeMarker)
 }
 
 func readCounter(t *testing.T, path string) int {
@@ -1602,28 +3044,35 @@ func readCounter(t *testing.T, path string) int {
 }
 
 func TestCodexApprovalResponsePayloads(t *testing.T) {
-	command, err := codexApprovalResponse("item/commandExecution/requestApproval", map[string]any{"decision": "accept"})
+	command, err := codexApprovalResponse("item/commandExecution/requestApproval", map[string]any{"decision": "accept"}, nil)
 	if err != nil || !reflect.DeepEqual(command, map[string]any{"decision": "accept"}) {
 		t.Fatalf("command response = %#v, %v", command, err)
 	}
 
-	permissions, err := codexApprovalResponse("item/permissions/requestApproval", map[string]any{"decision": "acceptForSession"})
-	if err != nil || !reflect.DeepEqual(permissions, map[string]any{"permissions": map[string]any{}, "scope": "session"}) {
+	amendmentDecision := map[string]any{"acceptWithExecpolicyAmendment": map[string]any{"execpolicy_amendment": []any{map[string]any{"rule": "x"}}}}
+	commandAmendment, err := codexApprovalResponse("item/commandExecution/requestApproval", map[string]any{"decision": amendmentDecision}, nil)
+	if err != nil || !reflect.DeepEqual(commandAmendment, map[string]any{"decision": amendmentDecision}) {
+		t.Fatalf("command amendment response = %#v, %v", commandAmendment, err)
+	}
+
+	requestedPermissions := map[string]any{"network": map[string]any{"enabled": true}}
+	permissions, err := codexApprovalResponse("item/permissions/requestApproval", map[string]any{"decision": "acceptForSession"}, map[string]any{"permissions": requestedPermissions})
+	if err != nil || !reflect.DeepEqual(permissions, map[string]any{"permissions": requestedPermissions, "scope": "session"}) {
 		t.Fatalf("permissions response = %#v, %v", permissions, err)
 	}
 
 	answers := map[string]any{"q": map[string]any{"answers": []any{"A"}}}
-	userInput, err := codexApprovalResponse("item/tool/requestUserInput", map[string]any{"answers": answers})
+	userInput, err := codexApprovalResponse("item/tool/requestUserInput", map[string]any{"answers": answers}, nil)
 	if err != nil || !reflect.DeepEqual(userInput, map[string]any{"answers": answers}) {
 		t.Fatalf("user input response = %#v, %v", userInput, err)
 	}
 
-	mcp, err := codexApprovalResponse("mcpServer/elicitation/request", map[string]any{"decision": "accept", "content": map[string]any{"token": "x"}, "_meta": map[string]any{"id": "mcp"}})
+	mcp, err := codexApprovalResponse("mcpServer/elicitation/request", map[string]any{"decision": "accept", "content": map[string]any{"token": "x"}, "_meta": map[string]any{"id": "mcp"}}, nil)
 	if err != nil || !reflect.DeepEqual(mcp, map[string]any{"action": "accept", "content": map[string]any{"token": "x"}, "_meta": map[string]any{"id": "mcp"}}) {
 		t.Fatalf("mcp response = %#v, %v", mcp, err)
 	}
 
-	if _, err := codexApprovalResponse("item/unknown/request", map[string]any{"decision": "accept"}); err == nil {
+	if _, err := codexApprovalResponse("item/unknown/request", map[string]any{"decision": "accept"}, nil); err == nil {
 		t.Fatal("unsupported codex request returned nil error")
 	}
 }
@@ -1764,6 +3213,246 @@ func TestCodexLocalRuntimeSteersActiveTurn(t *testing.T) {
 	}
 }
 
+func TestCodexSSHRuntimeUsesRemoteShellEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentCodex,
+		SSH: &SSHConfig{
+			Endpoint:  "root@example.test",
+			RemoteCWD: "/root",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	envPath := filepath.Join(dir, "codex-env.json")
+	t.Setenv("ASTRALOPS_TEST_CODEX_ENV", envPath)
+	installFakeSSHProxy(t, dir, "1")
+	app := &app{
+		store: st,
+		hub:   newEventHub(),
+		token: "secret",
+		addr:  "127.0.0.1:12345",
+		agents: map[AgentKind]agentInfo{
+			AgentCodex: {Path: fakeCodexScript(t), Available: true, Version: "fake"},
+		},
+	}
+	app.ssh = newSSHManager(app)
+	app.runtimes = newRuntimeRegistry(app)
+
+	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "remote smoke", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.completed")
+
+	body, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env map[string]string
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env["SHELL"] != "/bin/sh" {
+		t.Fatalf("SHELL = %q, want remote shell /bin/sh", env["SHELL"])
+	}
+	if !strings.Contains(env["CODEX_EXEC_SERVER_URL"], "/v1/codex-exec/"+workspace.ID) {
+		t.Fatalf("CODEX_EXEC_SERVER_URL = %q", env["CODEX_EXEC_SERVER_URL"])
+	}
+}
+
+func TestCodexSSHRuntimeDisablesLocalShellSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentCodex,
+		SSH: &SSHConfig{
+			Endpoint:  "root@example.test",
+			RemoteCWD: "/root",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	messagesPath := filepath.Join(dir, "codex-messages.jsonl")
+	t.Setenv("ASTRALOPS_TEST_CODEX_MESSAGES", messagesPath)
+	installFakeSSHProxy(t, dir, "1")
+	app := &app{
+		store: st,
+		hub:   newEventHub(),
+		token: "secret",
+		addr:  "127.0.0.1:12345",
+		agents: map[AgentKind]agentInfo{
+			AgentCodex: {Path: fakeCodexScript(t), Available: true, Version: "fake"},
+		},
+	}
+	app.ssh = newSSHManager(app)
+	app.runtimes = newRuntimeRegistry(app)
+
+	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "remote smoke", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.completed")
+
+	body, err := os.ReadFile(messagesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var startParams map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var msg map[string]any
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			t.Fatal(err)
+		}
+		if stringValue(msg["method"]) == "thread/start" {
+			startParams = mapValue(msg["params"])
+			break
+		}
+	}
+	if startParams == nil {
+		t.Fatalf("thread/start was not recorded; messages:\n%s", body)
+	}
+	if startParams["cwd"] != "/root" {
+		t.Fatalf("thread/start cwd = %#v, want /root", startParams["cwd"])
+	}
+	config := mapValue(startParams["config"])
+	if config["features.shell_snapshot"] != false {
+		t.Fatalf("thread/start config = %#v, want features.shell_snapshot=false", config)
+	}
+}
+
+func TestCodexSSHRuntimeDisablesLocalNodeREPLMCPServer(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentCodex,
+		SSH: &SSHConfig{
+			Endpoint:  "root@example.test",
+			RemoteCWD: "/root",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	argsPath := filepath.Join(dir, "codex-args.json")
+	t.Setenv("ASTRALOPS_TEST_CODEX_ARGS", argsPath)
+	installFakeSSHProxy(t, dir, "1")
+	app := &app{
+		store: st,
+		hub:   newEventHub(),
+		token: "secret",
+		addr:  "127.0.0.1:12345",
+		agents: map[AgentKind]agentInfo{
+			AgentCodex: {Path: fakeCodexScript(t), Available: true, Version: "fake"},
+		},
+	}
+	app.ssh = newSSHManager(app)
+	app.runtimes = newRuntimeRegistry(app)
+
+	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "remote smoke", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.completed")
+
+	body, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var args []string
+	if err := json.Unmarshal(body, &args); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\x00")
+	if !strings.Contains(joined, "mcp_servers.node_repl.enabled=false") {
+		t.Fatalf("codex args = %#v, want node_repl disabled for ssh sessions", args)
+	}
+}
+
+func TestCodexAppServerArgsKeepLocalNodeREPLMCPServer(t *testing.T) {
+	local := codexAppServerArgs(false)
+	if strings.Contains(strings.Join(local, "\x00"), "mcp_servers") {
+		t.Fatalf("local codex args = %#v, should not disable node_repl", local)
+	}
+	remote := codexAppServerArgs(true)
+	if !reflect.DeepEqual(remote, []string{"app-server", "-c", "mcp_servers.node_repl.enabled=false", "--listen", "stdio://"}) {
+		t.Fatalf("remote codex args = %#v", remote)
+	}
+}
+
+func TestCodexApprovalIDIsSessionScoped(t *testing.T) {
+	params := map[string]any{}
+	if got := codexApprovalID("sess_a", float64(0), params); got != "sess_a:0" {
+		t.Fatalf("approval id = %q, want sess_a:0", got)
+	}
+	if got := codexApprovalID("sess_b", float64(0), params); got != "sess_b:0" {
+		t.Fatalf("approval id = %q, want sess_b:0", got)
+	}
+	if got := codexApprovalID("sess_a", float64(7), map[string]any{"approvalId": "native"}); got != "sess_a:native" {
+		t.Fatalf("approval id with native approvalId = %q, want sess_a:native", got)
+	}
+}
+
+func TestFindInteractionEventDoesNotMatchCodexNativeRequestID(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub()}
+	app.emit(AstralEvent{WorkspaceID: "ws_a", SessionID: "sess_a", Agent: AgentCodex, Kind: "approval.requested", Normalized: map[string]any{
+		"source":      "codex",
+		"approval_id": "sess_a:0",
+		"request_id":  float64(0),
+		"kind":        "command",
+	}})
+	app.emit(AstralEvent{WorkspaceID: "ws_b", SessionID: "sess_b", Agent: AgentCodex, Kind: "approval.requested", Normalized: map[string]any{
+		"source":      "codex",
+		"approval_id": "sess_b:0",
+		"request_id":  float64(0),
+		"kind":        "command",
+	}})
+	if _, ok := app.findInteractionEvent("0"); ok {
+		t.Fatal("findInteractionEvent matched raw Codex request_id 0; want only Astral approval_id")
+	}
+	ev, ok := app.findInteractionEvent("sess_a:0")
+	if !ok || ev.SessionID != "sess_a" {
+		t.Fatalf("findInteractionEvent(sess_a:0) = %#v, %v", ev, ok)
+	}
+	ev, ok = app.findInteractionEvent("sess_b:0")
+	if !ok || ev.SessionID != "sess_b" {
+		t.Fatalf("findInteractionEvent(sess_b:0) = %#v, %v", ev, ok)
+	}
+}
+
+func TestWithEnvValueReplacesExistingValue(t *testing.T) {
+	env := withEnvValue([]string{"A=1", "SHELL=/bin/zsh", "B=2"}, "SHELL", "/bin/bash")
+	if !reflect.DeepEqual(env, []string{"A=1", "B=2", "SHELL=/bin/bash"}) {
+		t.Fatalf("env = %#v", env)
+	}
+}
+
 func newTestClaudeApp(t *testing.T, claudePath string) (*app, Session, Workspace) {
 	t.Helper()
 	dir := t.TempDir()
@@ -1836,10 +3525,22 @@ func fakeCodexScript(t *testing.T) string {
 const readline = require("readline");
 const rl = readline.createInterface({ input: process.stdin });
 function write(payload) { process.stdout.write(JSON.stringify(payload) + "\n"); }
+if (process.env.ASTRALOPS_TEST_CODEX_ARGS) {
+  require("fs").writeFileSync(process.env.ASTRALOPS_TEST_CODEX_ARGS, JSON.stringify(process.argv.slice(2)));
+}
 rl.on("line", (line) => {
   const msg = JSON.parse(line);
+  if (process.env.ASTRALOPS_TEST_CODEX_MESSAGES) {
+    require("fs").appendFileSync(process.env.ASTRALOPS_TEST_CODEX_MESSAGES, JSON.stringify(msg) + "\n");
+  }
   if (process.env.ASTRALOPS_TEST_CODEX_METHODS) {
     require("fs").appendFileSync(process.env.ASTRALOPS_TEST_CODEX_METHODS, msg.method + "\n");
+  }
+  if (msg.method === "initialize" && process.env.ASTRALOPS_TEST_CODEX_ENV) {
+    require("fs").writeFileSync(process.env.ASTRALOPS_TEST_CODEX_ENV, JSON.stringify({
+      SHELL: process.env.SHELL || "",
+      CODEX_EXEC_SERVER_URL: process.env.CODEX_EXEC_SERVER_URL || ""
+    }));
   }
   if (msg.method === "initialize") {
     write({ id: msg.id, result: { userAgent: "fake codex", codexHome: process.env.HOME + "/.codex" } });
@@ -1934,6 +3635,19 @@ func hasWorkspaceConnectionRetry(events []AstralEvent, attempt int, max int) boo
 			continue
 		}
 		if state.RetryAttempt == attempt && state.RetryMax == max {
+			return true
+		}
+	}
+	return false
+}
+
+func hasWorkspaceConnectionHelperStatus(events []AstralEvent, helperStatus string) bool {
+	for _, event := range events {
+		if event.Kind != "workspace.connection" {
+			continue
+		}
+		state := normalizedWorkspaceConnection(event.Normalized)
+		if state.HelperStatus == helperStatus {
 			return true
 		}
 	}

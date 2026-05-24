@@ -172,33 +172,79 @@ func (s *store) listSessions(workspaceID string) []Session {
 }
 
 func (s *store) sessionTitlesLocked() map[string]string {
-	titles := map[string]string{}
+	type candidate struct {
+		text string
+		rank int
+	}
+	titles := map[string]candidate{}
 	for _, ev := range s.events {
-		if ev.Kind != "message.user" {
+		value := mapValue(ev.Normalized)
+		text := ""
+		rank := 0
+		switch ev.Kind {
+		case "session.native", "session.updated":
+			text, rank = normalizedNativeSessionTitle(value)
+		case "message.user":
+			text = normalizedSessionTitleText(value)
+			rank = 10
+		default:
 			continue
 		}
-		if _, exists := titles[ev.SessionID]; exists {
-			continue
-		}
-		text := normalizedSessionTitleText(ev.Normalized)
 		if text == "" {
 			continue
 		}
-		titles[ev.SessionID] = text
+		if current, exists := titles[ev.SessionID]; exists {
+			if current.rank > rank || (current.rank == rank && rank <= 10) {
+				continue
+			}
+		}
+		titles[ev.SessionID] = candidate{text: text, rank: rank}
 	}
-	return titles
+	out := map[string]string{}
+	for sessionID, title := range titles {
+		out[sessionID] = title.text
+	}
+	return out
+}
+
+func normalizedNativeSessionTitle(value map[string]any) (string, int) {
+	candidates := []struct {
+		rank int
+		keys []string
+	}{
+		{50, []string{"agent_name", "agentName", "custom_title", "customTitle"}},
+		{40, []string{"thread_name", "threadName", "name", "title"}},
+		{30, []string{"summary", "ai_title", "aiTitle"}},
+		{10, []string{"preview", "first_prompt", "firstPrompt"}},
+	}
+	for _, candidate := range candidates {
+		for _, key := range candidate.keys {
+			text := normalizeSessionTitleString(stringValue(value[key]))
+			if text != "" {
+				return text, candidate.rank
+			}
+		}
+	}
+	return "", 0
 }
 
 func normalizedSessionTitleText(normalized any) string {
-	text := strings.Join(strings.Fields(stringValue(mapValue(normalized)["text"])), " ")
+	text := normalizeSessionTitleString(stringValue(mapValue(normalized)["text"]))
 	if text == "" || shouldSkipSessionTitleText(text) {
 		return ""
 	}
 	return text
 }
 
+func normalizeSessionTitleString(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
+
 func shouldSkipSessionTitleText(text string) bool {
 	lower := strings.ToLower(strings.TrimSpace(text))
+	if strings.HasPrefix(lower, "<") || strings.HasPrefix(lower, "[request interrupted by user") {
+		return true
+	}
 	for _, prefix := range []string{
 		"user accepted",
 		"user declined",

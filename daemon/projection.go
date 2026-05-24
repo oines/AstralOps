@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -78,7 +79,7 @@ func (a *app) handleProjectionAction(w http.ResponseWriter, r *http.Request, par
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if err := a.ssh.call(r.Context(), ws, "write", map[string]any{"path": remote, "content": string(body)}, nil); err != nil {
+		if err := a.ssh.call(r.Context(), ws, "write", remoteWriteParams(remote, body), nil); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -155,8 +156,15 @@ func (a *app) rollbackDirtyProjection(ctx context.Context, ws Workspace) {
 			manifest.Files[file.RemotePath] = file
 			continue
 		}
+		body, err := remoteReadBytes(out)
+		if err != nil {
+			_ = os.Remove(file.LocalPath)
+			file.Dirty = false
+			manifest.Files[file.RemotePath] = file
+			continue
+		}
 		_ = os.MkdirAll(filepath.Dir(file.LocalPath), 0o700)
-		_ = os.WriteFile(file.LocalPath, []byte(stringValue(out["content"])), 0o600)
+		_ = os.WriteFile(file.LocalPath, body, 0o600)
 		file.Dirty = false
 		file.LastHydrated = time.Now().UTC().Format(time.RFC3339Nano)
 		if info, err := os.Stat(file.LocalPath); err == nil {
@@ -166,4 +174,15 @@ func (a *app) rollbackDirtyProjection(ctx context.Context, ws Workspace) {
 		manifest.Files[file.RemotePath] = file
 	}
 	a.saveProjectionManifest(ws, manifest)
+}
+
+func remoteWriteParams(path string, body []byte) map[string]any {
+	return map[string]any{"path": path, "dataBase64": base64.StdEncoding.EncodeToString(body)}
+}
+
+func remoteReadBytes(out map[string]any) ([]byte, error) {
+	if data := stringValue(out["dataBase64"]); data != "" {
+		return base64.StdEncoding.DecodeString(data)
+	}
+	return []byte(stringValue(out["content"])), nil
 }

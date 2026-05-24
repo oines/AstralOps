@@ -17,7 +17,8 @@ func (c *codexClient) rememberNotificationItem(raw map[string]any) {
 
 func (c *codexClient) enrichServerRequestEvent(ev *AstralEvent) {
 	value := mapValue(ev.Normalized)
-	if stringValue(value["kind"]) != "file_change" {
+	kind := stringValue(value["kind"])
+	if kind != "file_change" && kind != "command" {
 		return
 	}
 	itemID := stringValue(value["item_id"])
@@ -30,9 +31,22 @@ func (c *codexClient) enrichServerRequestEvent(ev *AstralEvent) {
 	if len(item) == 0 {
 		return
 	}
-	if changes := item["changes"]; changes != nil {
-		value["changes"] = changes
-		value["file_paths"] = codexFileChangePaths(changes)
+	if kind == "command" {
+		if command := item["command"]; command != nil && value["command"] == nil {
+			value["command"] = command
+		}
+		if cwd := item["cwd"]; cwd != nil && value["cwd"] == nil {
+			value["cwd"] = cwd
+		}
+		if commandActions := item["commandActions"]; commandActions != nil && value["command_actions"] == nil {
+			value["command_actions"] = commandActions
+		}
+	}
+	if kind == "file_change" {
+		if changes := item["changes"]; changes != nil {
+			value["changes"] = changes
+			value["file_paths"] = codexFileChangePaths(changes)
+		}
 	}
 	if status := item["status"]; status != nil {
 		value["status"] = status

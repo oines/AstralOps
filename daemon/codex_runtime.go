@@ -30,6 +30,7 @@ type codexClient struct {
 	cwd           string
 	processCWD    string
 	execServerURL string
+	remoteShell   string
 	path          string
 
 	cmd    *exec.Cmd
@@ -51,6 +52,7 @@ type codexClient struct {
 type codexPendingApproval struct {
 	RequestID any
 	Method    string
+	Params    map[string]any
 }
 
 type codexRPCResponse struct {
@@ -79,6 +81,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 	cwd := strings.TrimSpace(workspace.LocalCWD)
 	processCWD := cwd
 	execServerURL := ""
+	remoteShell := ""
 	if workspace.Target == "ssh" {
 		if workspace.SSH == nil || strings.TrimSpace(workspace.SSH.RemoteCWD) == "" {
 			return fmt.Errorf("ssh workspace remote cwd is empty")
@@ -93,6 +96,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 		cwd = filepath.Clean(workspace.SSH.RemoteCWD)
 		processCWD = workspace.LocalProjectionRoot
 		execServerURL = r.app.codexExecServerURL(workspace.ID)
+		remoteShell = stringValue(hello["shell"])
 	}
 	if cwd == "" {
 		return fmt.Errorf("workspace cwd is empty")
@@ -101,11 +105,11 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 	r.mu.Lock()
 	client := r.clients[session.ID]
 	if client == nil {
-		client = newCodexClient(r, session, cwd, processCWD, execServerURL, info.Path)
+		client = newCodexClient(r, session, cwd, processCWD, execServerURL, remoteShell, info.Path)
 		r.clients[session.ID] = client
 	} else {
 		client.updateSession(session)
-		client.updateWorkspace(cwd, processCWD, execServerURL)
+		client.updateWorkspace(cwd, processCWD, execServerURL, remoteShell)
 	}
 	if client.isRunning() {
 		r.mu.Unlock()
@@ -177,7 +181,7 @@ func (r *codexLocalRuntime) RespondApproval(approvalID string, response map[stri
 	return fmt.Errorf("approval %s is not pending in codex runtime", approvalID)
 }
 
-func newCodexClient(runtime *codexLocalRuntime, session Session, cwd, processCWD, execServerURL, path string) *codexClient {
+func newCodexClient(runtime *codexLocalRuntime, session Session, cwd, processCWD, execServerURL, remoteShell, path string) *codexClient {
 	if processCWD == "" {
 		processCWD = cwd
 	}
@@ -187,6 +191,7 @@ func newCodexClient(runtime *codexLocalRuntime, session Session, cwd, processCWD
 		cwd:           cwd,
 		processCWD:    processCWD,
 		execServerURL: execServerURL,
+		remoteShell:   remoteShell,
 		path:          path,
 		closed:        make(chan struct{}),
 		pending:       map[int64]chan codexRPCResponse{},
@@ -245,10 +250,14 @@ func (c *codexClient) ensureStarted() error {
 	c.closed = make(chan struct{})
 	c.mu.Unlock()
 
-	cmd := exec.Command(c.path, "app-server", "--listen", "stdio://")
+	cmd := exec.Command(c.path, codexAppServerArgs(c.execServerURL != "")...)
 	cmd.Dir = c.processCWD
+	cmd.Env = os.Environ()
 	if c.execServerURL != "" {
-		cmd.Env = append(os.Environ(), "CODEX_EXEC_SERVER_URL="+c.execServerURL)
+		cmd.Env = withEnvValue(cmd.Env, "CODEX_EXEC_SERVER_URL", c.execServerURL)
+		if strings.TrimSpace(c.remoteShell) != "" {
+			cmd.Env = withEnvValue(cmd.Env, "SHELL", strings.TrimSpace(c.remoteShell))
+		}
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -294,15 +303,34 @@ func (c *codexClient) ensureStarted() error {
 	return nil
 }
 
+func codexAppServerArgs(disableLocalNodeREPL bool) []string {
+	args := []string{"app-server"}
+	if disableLocalNodeREPL {
+		args = append(args, "-c", "mcp_servers.node_repl.enabled=false")
+	}
+	return append(args, "--listen", "stdio://")
+}
+
+func withEnvValue(env []string, key, value string) []string {
+	prefix := key + "="
+	next := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			continue
+		}
+		next = append(next, entry)
+	}
+	return append(next, prefix+value)
+}
+
 func (c *codexClient) ensureThread() error {
 	if c.getThreadID() != "" {
 		return nil
 	}
 	if nativeThreadID := c.persistedThreadID(); nativeThreadID != "" {
-		result, err := c.request("thread/resume", map[string]any{
-			"threadId": nativeThreadID,
-			"cwd":      c.cwd,
-		}, codexRequestTimeout)
+		params := c.threadParams()
+		params["threadId"] = nativeThreadID
+		result, err := c.request("thread/resume", params, codexRequestTimeout)
 		if err == nil {
 			threadID := codexResultThreadID(result)
 			if threadID == "" {
@@ -320,7 +348,7 @@ func (c *codexClient) ensureThread() error {
 			"message": fmt.Sprintf("failed to resume codex thread %s: %s", nativeThreadID, err.Error()),
 		}})
 	}
-	result, err := c.request("thread/start", map[string]any{"cwd": c.cwd}, codexRequestTimeout)
+	result, err := c.request("thread/start", c.threadParams(), codexRequestTimeout)
 	if err != nil {
 		return err
 	}
@@ -334,6 +362,16 @@ func (c *codexClient) ensureThread() error {
 	c.mu.Unlock()
 	c.runtime.app.store.updateSessionNativeThreadID(c.session.ID, threadID)
 	return nil
+}
+
+func (c *codexClient) threadParams() map[string]any {
+	params := map[string]any{"cwd": c.cwd}
+	if c.execServerURL != "" {
+		params["config"] = map[string]any{
+			"features.shell_snapshot": false,
+		}
+	}
+	return params
 }
 
 func (c *codexClient) interrupt() error {
@@ -497,15 +535,16 @@ func (c *codexClient) handleLine(line []byte) {
 		c.enrichServerRequestEvent(&ev)
 		c.runtime.app.emit(ev)
 		method := stringValue(raw["method"])
-		approvalID := codexApprovalID(raw["id"], mapValue(raw["params"]))
+		approvalID := codexApprovalID(c.session.ID, raw["id"], mapValue(raw["params"]))
 		c.mu.Lock()
-		c.approvals[approvalID] = codexPendingApproval{RequestID: raw["id"], Method: method}
+		c.approvals[approvalID] = codexPendingApproval{RequestID: raw["id"], Method: method, Params: mapValue(raw["params"])}
 		c.mu.Unlock()
 		return
 	}
 
 	c.rememberNotificationItem(raw)
 	for _, ev := range normalizeCodexMessage(c.session, raw) {
+		c.enrichRemoteCommandEvent(&ev)
 		c.runtime.app.emit(ev)
 		if ev.Kind == "turn.started" {
 			if value := mapValue(ev.Normalized); stringValue(value["turn_id"]) != "" {
@@ -518,6 +557,34 @@ func (c *codexClient) handleLine(line []byte) {
 			c.markIdle(stringValue(mapValue(ev.Normalized)["status"]))
 		}
 	}
+}
+
+func (c *codexClient) enrichRemoteCommandEvent(ev *AstralEvent) {
+	if c.execServerURL == "" || (ev.Kind != "tool.started" && ev.Kind != "tool.completed") {
+		return
+	}
+	normalized := mapValue(ev.Normalized)
+	if stringValue(normalized["category"]) != "command" {
+		return
+	}
+	raw := mapValue(ev.Raw)
+	params := mapValue(raw["params"])
+	item := mapValue(params["item"])
+	processID := stringValue(item["processId"])
+	if processID == "" {
+		return
+	}
+	command, ok := c.runtime.app.codexExecCommand(c.session.WorkspaceID, processID)
+	if !ok {
+		return
+	}
+	if stringValue(normalized["native_command"]) == "" {
+		normalized["native_command"] = firstString(normalized["command"], command.NativeCommand)
+	}
+	normalized["effective_command"] = command.EffectiveCommand
+	normalized["remote_command"] = command.EffectiveCommand
+	normalized["command"] = command.EffectiveCommand
+	ev.Normalized = normalized
 }
 
 func (c *codexClient) wait() {
@@ -602,7 +669,7 @@ func (c *codexClient) updateSession(session Session) {
 	c.session = session
 }
 
-func (c *codexClient) updateWorkspace(cwd, processCWD, execServerURL string) {
+func (c *codexClient) updateWorkspace(cwd, processCWD, execServerURL, remoteShell string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.cwd = cwd
@@ -611,6 +678,7 @@ func (c *codexClient) updateWorkspace(cwd, processCWD, execServerURL string) {
 	}
 	c.processCWD = processCWD
 	c.execServerURL = execServerURL
+	c.remoteShell = remoteShell
 }
 
 func (c *codexClient) persistedThreadID() string {

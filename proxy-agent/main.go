@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -25,6 +26,27 @@ import (
 
 const version = "0.1.0"
 
+var supportedMethods = []string{
+	"hello",
+	"stat",
+	"list",
+	"read",
+	"write",
+	"mkdir",
+	"remove",
+	"copy",
+	"glob",
+	"grep",
+	"exec",
+	"exec_start",
+	"exec_kill",
+	"apply_patch",
+	"pty_start",
+	"pty_write",
+	"pty_resize",
+	"pty_kill",
+}
+
 type request struct {
 	ID     string          `json:"id"`
 	Method string          `json:"method"`
@@ -43,13 +65,23 @@ var (
 	encMu   sync.Mutex
 	ptyMu   sync.Mutex
 	ptys    = map[string]*ptySession{}
+	execMu  sync.Mutex
+	execs   = map[string]*execSession{}
 	encoder *json.Encoder
 )
 
+type execSession struct {
+	id     string
+	cmd    *exec.Cmd
+	cancel context.CancelFunc
+}
+
 type ptySession struct {
-	id   string
-	cmd  *exec.Cmd
-	file *os.File
+	id       string
+	cmd      *exec.Cmd
+	file     *os.File
+	once     sync.Once
+	exitCode int
 }
 
 func main() {
@@ -97,7 +129,7 @@ func dispatch(req request) (any, error) {
 			"os":           runtimeOS(),
 			"cwd":          rootCWD,
 			"shell":        os.Getenv("SHELL"),
-			"capabilities": map[string]any{"rg": rg},
+			"capabilities": map[string]any{"rg": rg, "methods": supportedMethods},
 		}, nil
 	case "stat":
 		var p pathParams
@@ -148,7 +180,7 @@ func dispatch(req request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"path": path, "content": string(body)}, nil
+		return map[string]any{"path": path, "content": string(body), "dataBase64": base64.StdEncoding.EncodeToString(body)}, nil
 	case "write":
 		var p writeParams
 		if err := parse(req.Params, &p); err != nil {
@@ -161,9 +193,17 @@ func dispatch(req request) (any, error) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return nil, err
 		}
-		return map[string]any{"path": path}, os.WriteFile(path, []byte(p.Content), 0o644)
+		body := []byte(p.Content)
+		if p.DataBase64 != "" {
+			decoded, err := base64.StdEncoding.DecodeString(p.DataBase64)
+			if err != nil {
+				return nil, err
+			}
+			body = decoded
+		}
+		return map[string]any{"path": path}, os.WriteFile(path, body, 0o644)
 	case "mkdir":
-		var p pathParams
+		var p mkdirParams
 		if err := parse(req.Params, &p); err != nil {
 			return nil, err
 		}
@@ -171,9 +211,12 @@ func dispatch(req request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"path": path}, os.MkdirAll(path, 0o755)
+		if p.Recursive == nil || *p.Recursive {
+			return map[string]any{"path": path}, os.MkdirAll(path, 0o755)
+		}
+		return map[string]any{"path": path}, os.Mkdir(path, 0o755)
 	case "remove":
-		var p pathParams
+		var p removeParams
 		if err := parse(req.Params, &p); err != nil {
 			return nil, err
 		}
@@ -181,7 +224,20 @@ func dispatch(req request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"path": path}, os.RemoveAll(path)
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			if os.IsNotExist(statErr) && (p.Force == nil || *p.Force) {
+				return map[string]any{"path": path}, nil
+			}
+			return nil, statErr
+		}
+		if info.IsDir() && (p.Recursive == nil || *p.Recursive) {
+			return map[string]any{"path": path}, os.RemoveAll(path)
+		}
+		if info.IsDir() {
+			return map[string]any{"path": path}, os.Remove(path)
+		}
+		return map[string]any{"path": path}, os.Remove(path)
 	case "copy":
 		var p copyParams
 		if err := parse(req.Params, &p); err != nil {
@@ -206,6 +262,18 @@ func dispatch(req request) (any, error) {
 			return nil, err
 		}
 		return runExec(p)
+	case "exec_start":
+		var p execParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return startExec(p)
+	case "exec_kill":
+		var p ptyKillParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return killExec(p.ID), nil
 	case "apply_patch":
 		var p applyPatchParams
 		if err := parse(req.Params, &p); err != nil {
@@ -257,14 +325,27 @@ type pathParams struct {
 	Path string `json:"path"`
 }
 
+type mkdirParams struct {
+	Path      string `json:"path"`
+	Recursive *bool  `json:"recursive"`
+}
+
+type removeParams struct {
+	Path      string `json:"path"`
+	Recursive *bool  `json:"recursive"`
+	Force     *bool  `json:"force"`
+}
+
 type writeParams struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path       string `json:"path"`
+	Content    string `json:"content"`
+	DataBase64 string `json:"dataBase64"`
 }
 
 type copyParams struct {
 	Source      string `json:"source"`
 	Destination string `json:"destination"`
+	Recursive   bool   `json:"recursive"`
 }
 
 type globParams struct {
@@ -280,8 +361,11 @@ type grepParams struct {
 }
 
 type execParams struct {
+	ID      string            `json:"id"`
 	CWD     string            `json:"cwd"`
 	Command string            `json:"command"`
+	Argv    []string          `json:"argv"`
+	Arg0    string            `json:"arg0"`
 	Env     map[string]string `json:"env"`
 	Timeout int               `json:"timeout_ms"`
 }
@@ -296,11 +380,14 @@ type applyPatchParams struct {
 }
 
 type ptyStartParams struct {
-	ID    string `json:"id"`
-	CWD   string `json:"cwd"`
-	Shell string `json:"shell"`
-	Cols  uint16 `json:"cols"`
-	Rows  uint16 `json:"rows"`
+	ID    string            `json:"id"`
+	CWD   string            `json:"cwd"`
+	Shell string            `json:"shell"`
+	Argv  []string          `json:"argv"`
+	Env   map[string]string `json:"env"`
+	Arg0  string            `json:"arg0"`
+	Cols  uint16            `json:"cols"`
+	Rows  uint16            `json:"rows"`
 }
 
 type ptyWriteParams struct {
@@ -523,12 +610,43 @@ func grepGo(cwd string, p grepParams) (any, error) {
 }
 
 func runExec(p execParams) (any, error) {
-	if strings.TrimSpace(p.Command) == "" {
-		return nil, errors.New("command required")
+	result, _, err := runExecWithSession(p)
+	return result, err
+}
+
+func startExec(p execParams) (any, error) {
+	if strings.TrimSpace(p.ID) == "" {
+		return nil, errors.New("id is required")
+	}
+	if len(p.Argv) == 0 && strings.TrimSpace(p.Command) == "" {
+		return nil, errors.New("command or argv required")
 	}
 	cwd, err := resolveRemotePath(p.CWD)
 	if err != nil {
 		return nil, err
+	}
+	if existing := lookupExec(p.ID); existing != nil {
+		return nil, fmt.Errorf("exec %s already exists", p.ID)
+	}
+	p.CWD = cwd
+	go func() {
+		result, _, err := runExecWithSession(p)
+		if err != nil {
+			writeLine(response{ID: p.ID, Event: "exit", Result: map[string]any{"exit_code": 1, "failure": err.Error()}})
+			return
+		}
+		writeLine(response{ID: p.ID, Event: "exit", Result: result})
+	}()
+	return map[string]any{"id": p.ID}, nil
+}
+
+func runExecWithSession(p execParams) (any, *execSession, error) {
+	if len(p.Argv) == 0 && strings.TrimSpace(p.Command) == "" {
+		return nil, nil, errors.New("command or argv required")
+	}
+	cwd, err := resolveRemotePath(p.CWD)
+	if err != nil {
+		return nil, nil, err
 	}
 	start := time.Now()
 	timeout := time.Duration(p.Timeout) * time.Millisecond
@@ -537,15 +655,31 @@ func runExec(p execParams) (any, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", p.Command)
+	var cmd *exec.Cmd
+	command := p.Command
+	if len(p.Argv) > 0 {
+		cmd = exec.CommandContext(ctx, p.Argv[0], p.Argv[1:]...)
+		command = strings.Join(p.Argv, "\x00")
+		if p.Arg0 != "" {
+			cmd.Args[0] = p.Arg0
+		}
+	} else {
+		cmd = exec.CommandContext(ctx, "/bin/sh", "-lc", p.Command)
+	}
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
 	for k, v := range p.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
+	configureCommandProcessGroup(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	session := &execSession{id: p.ID, cmd: cmd, cancel: cancel}
+	if p.ID != "" {
+		registerExec(session)
+		defer unregisterExec(p.ID, session)
+	}
 	err = cmd.Run()
 	exitCode := 0
 	if err != nil {
@@ -558,14 +692,46 @@ func runExec(p execParams) (any, error) {
 		}
 	}
 	return map[string]any{
-		"command":     p.Command,
+		"command":     command,
 		"cwd":         cwd,
 		"exit_code":   exitCode,
 		"stdout":      stdout.String(),
 		"stderr":      stderr.String(),
 		"output":      stdout.String() + stderr.String(),
 		"duration_ms": time.Since(start).Milliseconds(),
-	}, nil
+	}, session, nil
+}
+
+func registerExec(session *execSession) {
+	execMu.Lock()
+	execs[session.id] = session
+	execMu.Unlock()
+}
+
+func lookupExec(id string) *execSession {
+	execMu.Lock()
+	defer execMu.Unlock()
+	return execs[id]
+}
+
+func unregisterExec(id string, session *execSession) {
+	execMu.Lock()
+	if execs[id] == session {
+		delete(execs, id)
+	}
+	execMu.Unlock()
+}
+
+func killExec(id string) map[string]any {
+	session := lookupExec(id)
+	if session == nil {
+		return map[string]any{"running": false}
+	}
+	session.cancel()
+	if session.cmd != nil && session.cmd.Process != nil {
+		_ = killCommandProcessGroup(session.cmd)
+	}
+	return map[string]any{"running": true}
 }
 
 func runtimeOS() string {
@@ -626,12 +792,32 @@ func copyPath(p copyParams) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	info, err := os.Stat(src)
+	info, err := os.Lstat(src)
 	if err != nil {
 		return nil, err
 	}
 	if info.IsDir() {
-		return nil, errors.New("directory copy is not implemented")
+		if !p.Recursive {
+			return nil, errors.New("copying a directory requires recursive=true")
+		}
+		if destinationIsSameOrDescendant(src, dst) {
+			return nil, errors.New("cannot copy a directory to itself or a descendant")
+		}
+		if err := copyDirRecursive(src, dst); err != nil {
+			return nil, err
+		}
+		return map[string]any{"source": src, "destination": dst}, nil
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(src)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return nil, err
+		}
+		_ = os.Remove(dst)
+		return map[string]any{"source": src, "destination": dst}, os.Symlink(target, dst)
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return nil, err
@@ -650,6 +836,70 @@ func copyPath(p copyParams) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"source": src, "destination": dst}, nil
+}
+
+func copyDirRecursive(src, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		sourcePath := filepath.Join(src, entry.Name())
+		targetPath := filepath.Join(dst, entry.Name())
+		info, err := os.Lstat(sourcePath)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if err := copyDirRecursive(sourcePath, targetPath); err != nil {
+				return err
+			}
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(sourcePath)
+			if err != nil {
+				return err
+			}
+			if err := os.Symlink(target, targetPath); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := copyFile(sourcePath, targetPath, info.Mode().Perm()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyFile(src, dst string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func destinationIsSameOrDescendant(src, dst string) bool {
+	rel, err := filepath.Rel(src, dst)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }
 
 func applyPatch(p applyPatchParams) (any, error) {
@@ -698,9 +948,20 @@ func startPTY(requestID string, p ptyStartParams) (any, error) {
 	if p.Rows == 0 {
 		p.Rows = 28
 	}
-	cmd := exec.Command(shell, "-l")
+	var cmd *exec.Cmd
+	if len(p.Argv) > 0 {
+		cmd = exec.Command(p.Argv[0], p.Argv[1:]...)
+	} else {
+		cmd = exec.Command(shell, "-l")
+	}
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
+	for key, value := range p.Env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	if p.Arg0 != "" {
+		cmd.Args[0] = p.Arg0
+	}
 	file, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: p.Rows, Cols: p.Cols})
 	if err != nil {
 		return nil, err
@@ -721,8 +982,8 @@ func pumpPTY(session *ptySession) {
 			writeLine(response{ID: session.id, Event: "output", Result: map[string]any{"data": string(buf[:n])}})
 		}
 		if err != nil {
-			writeLine(response{ID: session.id, Event: "exit", Result: map[string]any{}})
-			_ = killPTY(session.id)
+			exitCode := finishPTY(session, false)
+			writeLine(response{ID: session.id, Event: "exit", Result: map[string]any{"exit_code": exitCode}})
 			return
 		}
 	}
@@ -761,15 +1022,38 @@ func resizePTY(p ptyResizeParams) error {
 func killPTY(id string) error {
 	ptyMu.Lock()
 	session := ptys[id]
-	delete(ptys, id)
 	ptyMu.Unlock()
 	if session == nil {
 		return nil
 	}
-	_ = session.file.Close()
-	if session.cmd.Process != nil {
-		_ = session.cmd.Process.Kill()
-	}
-	_, _ = session.cmd.Process.Wait()
+	finishPTY(session, true)
 	return nil
+}
+
+func finishPTY(session *ptySession, kill bool) int {
+	session.once.Do(func() {
+		ptyMu.Lock()
+		delete(ptys, session.id)
+		ptyMu.Unlock()
+		if kill && session.cmd.Process != nil {
+			_ = killCommandProcessGroup(session.cmd)
+		}
+		_ = session.file.Close()
+		if session.cmd.Process == nil {
+			session.exitCode = -1
+			return
+		}
+		err := session.cmd.Wait()
+		if err == nil {
+			session.exitCode = 0
+			return
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			session.exitCode = exitErr.ExitCode()
+			return
+		}
+		session.exitCode = -1
+	})
+	return session.exitCode
 }

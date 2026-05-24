@@ -7,6 +7,8 @@ import {
   askQuestionResponse,
   askTextResponse,
   booleanValue,
+  cancelActionLabel,
+  cancelResponse,
   canSubmitAsk,
   canSubmitMcpElicitation,
   detailParams,
@@ -50,7 +52,7 @@ export function PendingInteractionPanel({
   const question = questionRows[Math.min(activeQuestionIndex, Math.max(0, questionRows.length - 1))] ?? {};
   const title = interactionTitle(interaction, value, params, question);
   const options = interactionOptions(interaction, value, question);
-  const approvalRows = interaction.kind === "approval" ? approvalDetailRows(value, params) : [];
+  const detailRows = interaction.kind === "approval" || interaction.kind === "plan" ? approvalDetailRows(value, params) : [];
   const needsText = interaction.kind === "ask" && !isMcpElicitation && questionRows.length === 0 && options.length === 0;
   const isLastQuestion = questionRows.length === 0 || activeQuestionIndex >= questionRows.length - 1;
   const canContinueQuestion = questionRows.length > 0 ? canAnswerQuestion(question, askDrafts[questionIDFor(question, activeQuestionIndex)] ?? { custom: "", selected: [] }) : false;
@@ -65,6 +67,7 @@ export function PendingInteractionPanel({
         : selected !== "";
   const selectedOption = options.find((option) => option.id === selected);
   const secondaryLabel = secondaryActionLabel(interaction, value);
+  const cancelLabel = cancelActionLabel(interaction, value);
 
   useEffect(() => {
     setSelected(options[0]?.id ?? "");
@@ -79,7 +82,7 @@ export function PendingInteractionPanel({
     function onKeyDown(event: KeyboardEvent): void {
       if (event.key === "Escape") {
         event.preventDefault();
-        void ignore();
+        void cancel();
       }
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
@@ -132,6 +135,16 @@ export function PendingInteractionPanel({
     }
   }
 
+  async function cancel(): Promise<void> {
+    if (submitting) return;
+    setSubmitting(true);
+    try {
+      await onRespond(interaction.id, cancelResponse(interaction, value, params));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
     <AnimatePresence mode="wait">
       <motion.div
@@ -143,9 +156,9 @@ export function PendingInteractionPanel({
         transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
       >
         <div className="px-2 pb-3 text-[15px] font-semibold leading-7 text-[#202124]">{title}</div>
-        {approvalRows.length > 0 ? (
+        {detailRows.length > 0 ? (
           <div className="mb-2 grid max-h-48 gap-2 overflow-auto rounded-[16px] bg-[#f3f2ee] px-4 py-3 text-[13px] leading-6 select-text">
-            {approvalRows.map((row) => (
+            {detailRows.map((row) => (
               <div className="grid grid-cols-[68px_minmax(0,1fr)] gap-3" key={row.label}>
                 <span className="font-semibold text-[#9a9da1]">{row.label}</span>
                 {row.mono ? (
@@ -212,12 +225,20 @@ export function PendingInteractionPanel({
         ) : null}
         <div className="mt-3 flex items-center justify-end gap-2 border-t border-[#ece9e2] pt-3">
           <button
+            className="mr-auto rounded-full px-3 py-1.5 text-[13px] font-semibold text-[#9a4c45] transition-colors duration-150 ease-out hover:bg-[#f7e9e6] hover:text-[#7d342e] disabled:opacity-45"
+            disabled={submitting}
+            type="button"
+            onClick={() => void cancel()}
+          >
+            {cancelLabel} <span className="ml-1 rounded-full bg-[#f3dfdb] px-1.5 py-0.5 text-[11px]">ESC</span>
+          </button>
+          <button
             className="rounded-full px-3 py-1.5 text-[13px] font-semibold text-[#8d9095] transition-colors duration-150 ease-out hover:bg-[#f3f2ee] hover:text-[#5f6368] disabled:opacity-45"
             disabled={submitting}
             type="button"
             onClick={() => void ignore()}
           >
-            {secondaryLabel} <span className="ml-1 rounded-full bg-[#eeece8] px-1.5 py-0.5 text-[11px]">ESC</span>
+            {secondaryLabel}
           </button>
           <button
             className="rounded-full bg-[#2f8cff] px-4 py-1.5 text-[13px] font-semibold text-white shadow-[0_6px_18px_rgba(47,140,255,0.22)] transition-[background-color,transform] duration-150 ease-out hover:scale-[1.02] hover:bg-[#1f7df1] disabled:scale-100 disabled:bg-[#b8cbed] disabled:shadow-none"
@@ -434,18 +455,28 @@ function approvalDetailRows(value: Record<string, unknown>, params: Record<strin
   const path = firstText(value, params, ["path", "file_path", "grant_root", "grantRoot"]);
   const filePaths = stringList(value.file_paths).join("\n");
   const kind = textValue(value, "kind");
+  const plan = firstNonNil(value.text, value.plan);
+  const permissions = firstNonNil(value.permissions, params.permissions, value.additional_permissions, params.additionalPermissions);
+  const commandActions = firstNonNil(value.command_actions, params.commandActions);
+  const networkContext = firstNonNil(value.network_approval_context, params.networkApprovalContext);
+  const changes = firstNonNil(value.changes, params.changes);
 
+  if (kind === "plan" && plan) rows.push({ label: "计划", value: jsonPreview(plan) });
   if (toolName) rows.push({ label: "工具", value: toolName });
   if (command) rows.push({ label: "命令", value: command, mono: true });
   if (cwd) rows.push({ label: "目录", value: cwd, mono: true });
   if (filePaths) rows.push({ label: "文件", value: filePaths, mono: true });
   if (path) rows.push({ label: "路径", value: path, mono: true });
   if (reason) rows.push({ label: "原因", value: reason });
+  if (permissions) rows.push({ label: "权限", value: jsonPreview(permissions), mono: true });
+  if (networkContext) rows.push({ label: "网络", value: jsonPreview(networkContext), mono: true });
+  if (!filePaths && changes) rows.push({ label: "变更", value: jsonPreview(changes), mono: true });
+  if (commandActions) rows.push({ label: "动作", value: jsonPreview(commandActions), mono: true });
 
   const visibleParams = detailParams(params);
   if (rows.length === 0 && Object.keys(visibleParams).length > 0) {
     rows.push({ label: "参数", value: jsonPreview(visibleParams), mono: true });
-  } else if (kind === "permission" && Object.keys(visibleParams).length > 0 && !command) {
+  } else if ((kind === "permission" || kind === "permissions") && Object.keys(visibleParams).length > 0 && !command && !permissions) {
     rows.push({ label: "参数", value: jsonPreview(visibleParams), mono: true });
   }
   return rows;

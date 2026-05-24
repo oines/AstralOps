@@ -71,6 +71,25 @@ If an event is not covered by a fixture, preserve it only as hidden control.raw 
 Do not add "best guess" UI branches for event names that have not been observed locally.
 ```
 
+Architecture and fallback rule:
+
+```text
+Do not add speculative fallback logic, broad catch-all mappings, or redundant defensive branches to make an uncertain case appear handled.
+Every behavior mapping, permission response, state transition, and UI surface must be backed by a real Claude/Codex fixture, source-backed protocol shape, or an explicit rule in this file.
+If a real issue points to an architectural mismatch, stop and identify the architectural fix or refactor boundary for user confirmation instead of layering another patch on top of the mismatch.
+Prefer deleting or narrowing unsupported branches over preserving "just in case" behavior.
+Temporary compatibility code is allowed only when tied to a specific observed version/shape and documented with the fixture or source evidence that requires it.
+```
+
+Real-task validation priority:
+
+```text
+Real Claude/Codex validation must prioritize user-visible task flow failures over isolated event rendering.
+The highest-priority failures are repeated Ask/plan/permission loops, non-resumable confirmations presented as resumable, stale pending interactions after a turn has already failed or completed, tasks stuck in requires_action with no valid next action, and agents continuing to ask for the same missing permission after the user has accepted, declined, skipped, or cancelled.
+Every local/SSH and default/full-permission test scenario must record whether the agent made forward progress, stopped correctly, or entered a loop/stuck state. A scenario is not passing just because the UI rendered the latest event.
+If a real task exposes repeated questions, repeated plan confirmations, repeated permission prompts, or a mismatch between the displayed action and the actual agent continuation semantics, treat it as a blocker before expanding coverage to lower-risk event types.
+```
+
 UI implementation rule:
 
 ```text
@@ -97,7 +116,7 @@ assistant tool_use Read/LS/Glob/Grep/WebSearch/Write/Edit/MultiEdit/Bash -> tool
 user tool_result -> tool.completed
 result.permission_denials ExitPlanMode -> approval.requested(kind=plan)
 result.permission_denials AskUserQuestion -> ignored as duplicate ask denial from non-interactive Claude Code output
-result.permission_denials other tools -> approval.requested(kind=permission)
+result.permission_denials WebSearch -> approval.requested(kind=permission)
 system compact_boundary -> memory.compacted
 system status -> control.status
 system api_retry -> control.warning
@@ -111,6 +130,7 @@ Claude Code local interaction semantics:
 
 ```text
 With the current `claude -p --output-format stream-json` runtime, AskUserQuestion and ExitPlanMode are not live resumable ServerRequests. Claude emits the tool_use, then the CLI emits an error tool_result because no interactive answer exists, and the turn can finish with permission_denials. AstralOps may show an Ask/plan/permission surface, but responding must be treated as a follow-up turn sent with --resume, not as unblocking the same Claude turn. Do not label Claude confirmations as if they continue the current turn unless a future real control-protocol fixture proves that behavior.
+Real SSH/local samples show Claude may call AskUserQuestion repeatedly inside one stream-json turn after each non-interactive Ask denial. In that shape, earlier AskUserQuestion requests in the same turn are stale attempts; only the latest AskUserQuestion from that turn may remain actionable in the UI. Cancelling, skipping, or answering that latest Ask must not reveal older AskUserQuestion attempts from the same turn.
 ```
 
 Claude Code not yet covered:

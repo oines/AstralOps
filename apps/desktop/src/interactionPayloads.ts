@@ -47,6 +47,9 @@ export function interactionOptions(interaction: PendingInteraction, value: Recor
     });
   }
 
+  const explicitDecisions = decisionOptionsFromAvailable(firstNonNil(value.available_decisions, value.availableDecisions));
+  if (explicitDecisions.length > 0) return explicitDecisions;
+
   const kind = textValue(value, "kind");
   if (kind === "permissions") {
     return [
@@ -57,6 +60,7 @@ export function interactionOptions(interaction: PendingInteraction, value: Recor
   }
   return [
     { id: "accept", label: kind === "file_change" ? "允许应用变更" : "允许执行", response: { decision: "accept" } },
+    ...(kind === "file_change" ? [{ id: "acceptForSession", label: "本 session 允许", response: { decision: "acceptForSession" } }] : []),
     { id: "decline", label: "拒绝", response: { decision: "decline" } },
   ];
 }
@@ -117,16 +121,29 @@ export function withPlanFeedback(response: Record<string, unknown>, feedback: st
 
 export function secondaryActionLabel(interaction: PendingInteraction, value: Record<string, unknown>): string {
   if (interaction.kind === "plan") return "不接受";
-  if (interaction.kind === "ask") return textValue(value, "kind") === "mcpServer/elicitation/request" ? "取消" : "跳过";
+  if (interaction.kind === "ask") return textValue(value, "kind") === "mcpServer/elicitation/request" ? "拒绝" : "跳过";
   return "拒绝";
 }
 
 export function secondaryResponse(interaction: PendingInteraction, value: Record<string, unknown>, params: Record<string, unknown>): Record<string, unknown> {
   if (interaction.kind === "ask") {
-    if (textValue(value, "kind") === "mcpServer/elicitation/request") return mcpElicitationResponse(params, "{}", "cancel");
+    if (textValue(value, "kind") === "mcpServer/elicitation/request") return mcpElicitationResponse(params, "{}", "decline");
     return { answers: {} };
   }
   return { decision: "decline" };
+}
+
+export function cancelActionLabel(interaction: PendingInteraction, value: Record<string, unknown>): string {
+  if (interaction.kind === "ask" && textValue(value, "kind") === "mcpServer/elicitation/request") return "取消请求";
+  return "取消任务";
+}
+
+export function cancelResponse(interaction: PendingInteraction, value: Record<string, unknown>, params: Record<string, unknown>): Record<string, unknown> {
+  if (interaction.kind === "ask") {
+    if (textValue(value, "kind") === "mcpServer/elicitation/request") return mcpElicitationResponse(params, "{}", "cancel");
+    return { action: "cancel", cancel: true };
+  }
+  return { decision: "cancel", cancel: true };
 }
 
 export function questionIDFor(question: Record<string, unknown>, index: number): string {
@@ -166,6 +183,47 @@ export function firstNonNil(...values: unknown[]): unknown {
     if (value !== undefined && value !== null) return value;
   }
   return undefined;
+}
+
+function decisionOptionsFromAvailable(value: unknown): DecisionOption[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item): DecisionOption | null => {
+      const decision = decisionValue(item);
+      if (!decision) return null;
+      return { id: decision, label: decisionLabel(decision), response: { decision: decisionPayload(item, decision) } };
+    })
+    .filter((item): item is DecisionOption => Boolean(item));
+}
+
+function decisionValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  const keys = Object.keys(value);
+  return keys.length === 1 ? keys[0] : "";
+}
+
+function decisionPayload(value: unknown, decision: string): unknown {
+  return typeof value === "string" ? decision : value;
+}
+
+function decisionLabel(decision: string): string {
+  switch (decision) {
+    case "accept":
+      return "允许一次";
+    case "acceptForSession":
+      return "本 session 允许";
+    case "acceptWithExecpolicyAmendment":
+      return "允许并记住命令";
+    case "applyNetworkPolicyAmendment":
+      return "应用网络规则";
+    case "cancel":
+      return "取消本轮";
+    case "decline":
+      return "拒绝";
+    default:
+      return decision;
+  }
 }
 
 export function textValue(value: Record<string, unknown>, key: string): string {

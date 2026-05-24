@@ -111,7 +111,7 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		a.handleWorkspaceExec(w, ws, req.Command)
+		a.handleWorkspaceExec(r.Context(), w, ws, req.Command)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "pty" && strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
@@ -260,7 +260,7 @@ func (a *app) handleRemoteWorkspaceFiles(w http.ResponseWriter, ws Workspace, qu
 		name := stringValue(entry["name"])
 		path := stringValue(entry["path"])
 		entryRel, err := filepath.Rel(root, path)
-		if err != nil || strings.HasPrefix(entryRel, "..") {
+		if err != nil || pathEscapesRoot(entryRel) {
 			entryRel = filepath.Base(path)
 		}
 		kind := "file"
@@ -287,9 +287,9 @@ func (a *app) handleRemoteWorkspaceFiles(w http.ResponseWriter, ws Workspace, qu
 	writeJSON(w, http.StatusOK, map[string]any{"path": rel, "root": root, "entries": out})
 }
 
-func (a *app) handleWorkspaceExec(w http.ResponseWriter, ws Workspace, command string) {
+func (a *app) handleWorkspaceExec(parent context.Context, w http.ResponseWriter, ws Workspace, command string) {
 	if ws.Target == "ssh" {
-		a.handleRemoteWorkspaceExec(w, ws, command)
+		a.handleRemoteWorkspaceExec(parent, w, ws, command)
 		return
 	}
 	command = strings.TrimSpace(command)
@@ -298,7 +298,7 @@ func (a *app) handleWorkspaceExec(w http.ResponseWriter, ws Workspace, command s
 		return
 	}
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", command)
 	cmd.Dir = ws.LocalCWD
@@ -327,20 +327,58 @@ func (a *app) handleWorkspaceExec(w http.ResponseWriter, ws Workspace, command s
 	})
 }
 
-func (a *app) handleRemoteWorkspaceExec(w http.ResponseWriter, ws Workspace, command string) {
+func (a *app) handleRemoteWorkspaceExec(parent context.Context, w http.ResponseWriter, ws Workspace, command string) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is required"})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 70*time.Second)
 	defer cancel()
-	var out map[string]any
-	if err := a.ssh.call(ctx, ws, "exec", map[string]any{"cwd": ws.SSH.RemoteCWD, "command": command, "timeout_ms": 60000}, &out); err != nil {
+	out, err := a.runRemoteWorkspaceExec(ctx, ws, command)
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *app) runRemoteWorkspaceExec(ctx context.Context, ws Workspace, command string) (map[string]any, error) {
+	execID := "workspace_exec_" + randomID(12)
+	proxy, events, unsubscribe, _, err := a.ssh.startExec(ctx, ws, execID, map[string]any{"cwd": ws.SSH.RemoteCWD, "command": command, "timeout_ms": 60000})
+	if err != nil {
+		return nil, err
+	}
+	defer unsubscribe()
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				return nil, errors.New("ssh exec event stream closed")
+			}
+			if event.Event != "exit" {
+				continue
+			}
+			out := map[string]any{
+				"command":     firstString(stringValue(event.Result["command"]), command),
+				"cwd":         firstString(stringValue(event.Result["cwd"]), ws.SSH.RemoteCWD),
+				"exit_code":   int(numberValue(event.Result["exit_code"])),
+				"stdout":      stringValue(event.Result["stdout"]),
+				"stderr":      stringValue(event.Result["stderr"]),
+				"output":      stringValue(event.Result["output"]),
+				"duration_ms": int64(numberValue(event.Result["duration_ms"])),
+			}
+			if failure := stringValue(event.Result["failure"]); failure != "" {
+				out["failure"] = failure
+			}
+			return out, nil
+		case <-ctx.Done():
+			killCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = proxy.call(killCtx, "exec_kill", map[string]any{"id": execID}, nil)
+			cancel()
+			return nil, ctx.Err()
+		}
+	}
 }
 
 type ptyClientMessage struct {
@@ -374,8 +412,8 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 		return
 	}
 	defer func() {
+		_ = killCommandProcessGroup(cmd)
 		_ = ptmx.Close()
-		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
 	}()
 
@@ -454,7 +492,7 @@ func (a *app) handleRemoteWorkspacePTY(w http.ResponseWriter, r *http.Request, w
 					return
 				}
 			case "exit":
-				_ = conn.WriteJSON(map[string]any{"type": "exit"})
+				_ = conn.WriteJSON(map[string]any{"type": "exit", "exit_code": int(numberValue(event.Result["exit_code"]))})
 				return
 			}
 		}
@@ -505,7 +543,7 @@ func resolveWorkspacePath(root, queryPath string) (string, string, error) {
 	if resolvedRel == "." {
 		resolvedRel = ""
 	}
-	if strings.HasPrefix(resolvedRel, "..") {
+	if pathEscapesRoot(resolvedRel) {
 		return "", "", errors.New("path escapes workspace")
 	}
 	return target, filepath.ToSlash(resolvedRel), nil
@@ -534,10 +572,14 @@ func resolveRemoteWorkspacePath(root, queryPath string) (string, string, error) 
 	if resolvedRel == "." {
 		resolvedRel = ""
 	}
-	if strings.HasPrefix(resolvedRel, "..") {
+	if pathEscapesRoot(resolvedRel) {
 		return "", "", errors.New("path escapes remote workspace")
 	}
 	return target, filepath.ToSlash(resolvedRel), nil
+}
+
+func pathEscapesRoot(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 type createSessionRequest struct {

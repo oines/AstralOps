@@ -16,6 +16,15 @@ func normalizeCodexMessage(session Session, raw map[string]any) []AstralEvent {
 			"source":           "codex",
 			"native_thread_id": stringValue(thread["id"]),
 			"status":           threadStatus(thread["status"]),
+			"preview":          stringValue(thread["preview"]),
+			"name":             thread["name"],
+		}, raw)}
+	case "thread/name/updated":
+		return []AstralEvent{baseCodexEvent(session, "session.updated", map[string]any{
+			"source":           "codex",
+			"native_thread_id": stringValue(params["threadId"]),
+			"thread_name":      params["threadName"],
+			"name":             params["threadName"],
 		}, raw)}
 	case "thread/status/changed":
 		status := mapValue(params["status"])
@@ -184,28 +193,38 @@ func normalizeCodexServerRequest(session Session, raw map[string]any) AstralEven
 	method := stringValue(raw["method"])
 	params := mapValue(raw["params"])
 	requestID := raw["id"]
-	approvalID := codexApprovalID(requestID, params)
+	approvalID := codexApprovalID(session.ID, requestID, params)
 
 	switch method {
 	case "item/commandExecution/requestApproval":
 		return baseCodexEvent(session, "approval.requested", map[string]any{
-			"source":      "codex",
-			"approval_id": approvalID,
-			"request_id":  requestID,
-			"kind":        "command",
-			"command":     params["command"],
-			"cwd":         params["cwd"],
-			"reason":      params["reason"],
+			"source":                        "codex",
+			"approval_id":                   approvalID,
+			"request_id":                    requestID,
+			"kind":                          "command",
+			"turn_id":                       params["turnId"],
+			"item_id":                       params["itemId"],
+			"command":                       params["command"],
+			"cwd":                           params["cwd"],
+			"reason":                        params["reason"],
+			"command_actions":               params["commandActions"],
+			"additional_permissions":        params["additionalPermissions"],
+			"network_approval_context":      params["networkApprovalContext"],
+			"proposed_execpolicy_amendment": params["proposedExecpolicyAmendment"],
+			"proposed_network_amendments":   params["proposedNetworkPolicyAmendments"],
+			"available_decisions":           params["availableDecisions"],
 		}, raw)
 	case "item/fileChange/requestApproval":
 		return baseCodexEvent(session, "approval.requested", map[string]any{
-			"source":      "codex",
-			"approval_id": approvalID,
-			"request_id":  requestID,
-			"kind":        "file_change",
-			"item_id":     params["itemId"],
-			"reason":      params["reason"],
-			"grant_root":  params["grantRoot"],
+			"source":              "codex",
+			"approval_id":         approvalID,
+			"request_id":          requestID,
+			"kind":                "file_change",
+			"turn_id":             params["turnId"],
+			"item_id":             params["itemId"],
+			"reason":              params["reason"],
+			"grant_root":          params["grantRoot"],
+			"available_decisions": params["availableDecisions"],
 		}, raw)
 	case "item/permissions/requestApproval":
 		return baseCodexEvent(session, "approval.requested", map[string]any{
@@ -213,7 +232,10 @@ func normalizeCodexServerRequest(session Session, raw map[string]any) AstralEven
 			"approval_id": approvalID,
 			"request_id":  requestID,
 			"kind":        "permissions",
+			"turn_id":     params["turnId"],
 			"item_id":     params["itemId"],
+			"reason":      params["reason"],
+			"permissions": params["permissions"],
 			"params":      params,
 		}, raw)
 	case "item/tool/requestUserInput", "mcpServer/elicitation/request":
@@ -360,14 +382,19 @@ func baseCodexEvent(session Session, kind string, normalized any, raw any) Astra
 	}
 }
 
-func codexApprovalID(requestID any, params map[string]any) string {
+func codexApprovalID(sessionID string, requestID any, params map[string]any) string {
+	nativeID := ""
 	if s := stringValue(params["approvalId"]); s != "" {
-		return s
+		nativeID = s
+	} else if s := stringValue(requestID); s != "" {
+		nativeID = s
+	} else {
+		nativeID = fmt.Sprint(requestID)
 	}
-	if s := stringValue(requestID); s != "" {
-		return s
+	if sessionID == "" {
+		return nativeID
 	}
-	return fmt.Sprint(requestID)
+	return sessionID + ":" + nativeID
 }
 
 func codexToolCategory(itemType string) string {

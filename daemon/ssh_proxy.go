@@ -138,47 +138,87 @@ func (m *sshManager) connectInternal(ctx context.Context, ws Workspace, emitProg
 		}
 		return state, err
 	}
-	helper, err := m.ensureHelper(ctx, ws, probe)
-	if err != nil {
-		state := initialSSHConnection(ws, connectionFailed)
-		state.RemoteOS = probe.OS
-		state.RemoteArch = probe.Arch
-		state.RemoteShell = probe.Shell
-		state.RemoteUser = probe.User
-		state.RemoteHost = probe.Host
-		state.Capabilities = probeCapabilities(probe)
-		state.Message = err.Error()
-		if emitProgress {
-			m.setState(ws, state)
+	var helper helperUpload
+	var proxy *proxyClient
+	var hello map[string]any
+	for forceUpload := false; ; forceUpload = true {
+		helper, err = m.ensureHelper(ctx, ws, probe, forceUpload)
+		if err != nil {
+			state := initialSSHConnection(ws, connectionFailed)
+			state.RemoteOS = probe.OS
+			state.RemoteArch = probe.Arch
+			state.RemoteShell = probe.Shell
+			state.RemoteUser = probe.User
+			state.RemoteHost = probe.Host
+			state.Capabilities = probeCapabilities(probe)
+			state.Message = err.Error()
+			if emitProgress {
+				m.setState(ws, state)
+			}
+			return state, err
 		}
-		return state, err
-	}
-	proxy, err := startProxyClient(ws, helper)
-	if err != nil {
-		state := initialSSHConnection(ws, connectionFailed)
-		state.RemoteOS = probe.OS
-		state.RemoteArch = probe.Arch
-		state.RemoteShell = probe.Shell
-		state.RemoteUser = probe.User
-		state.RemoteHost = probe.Host
-		state.Capabilities = probeCapabilities(probe)
-		state.HelperPath = helper.RemotePath
-		state.HelperStatus = "uploaded"
-		state.Message = err.Error()
-		if emitProgress {
-			m.setState(ws, state)
+		proxy, err = startProxyClient(ws, helper)
+		if err != nil {
+			state := initialSSHConnection(ws, connectionFailed)
+			state.RemoteOS = probe.OS
+			state.RemoteArch = probe.Arch
+			state.RemoteShell = probe.Shell
+			state.RemoteUser = probe.User
+			state.RemoteHost = probe.Host
+			state.Capabilities = probeCapabilities(probe)
+			state.HelperPath = helper.RemotePath
+			state.HelperStatus = "uploaded"
+			state.Message = err.Error()
+			if emitProgress {
+				m.setState(ws, state)
+			}
+			return state, err
 		}
-		return state, err
-	}
-	hello, err := proxy.hello(ctx)
-	if err != nil {
+		hello, err = proxy.hello(ctx)
+		if err != nil {
+			_ = proxy.close()
+			state := initialSSHConnection(ws, connectionFailed)
+			state.Message = err.Error()
+			if emitProgress {
+				m.setState(ws, state)
+			}
+			return state, err
+		}
+		if err = validateProxyHello(hello); err == nil {
+			break
+		}
 		_ = proxy.close()
-		state := initialSSHConnection(ws, connectionFailed)
-		state.Message = err.Error()
+		if forceUpload || helper.Uploaded {
+			state := initialSSHConnection(ws, connectionFailed)
+			state.RemoteOS = probe.OS
+			state.RemoteArch = probe.Arch
+			state.RemoteShell = probe.Shell
+			state.RemoteUser = probe.User
+			state.RemoteHost = probe.Host
+			state.Capabilities = probeCapabilities(probe)
+			state.HelperPath = helper.RemotePath
+			state.HelperStatus = "incompatible"
+			state.Message = err.Error()
+			if emitProgress {
+				m.setState(ws, state)
+			}
+			return state, err
+		}
 		if emitProgress {
+			state := initialSSHConnection(ws, connectionReconnecting)
+			state.RemoteOS = probe.OS
+			state.RemoteArch = probe.Arch
+			state.RemoteShell = probe.Shell
+			state.RemoteUser = probe.User
+			state.RemoteHost = probe.Host
+			state.Capabilities = probeCapabilities(probe)
+			state.HelperPath = helper.RemotePath
+			state.HelperStatus = "upgrading"
+			state.Message = err.Error()
+			state.RetryAttempt = 1
+			state.RetryMax = 2
 			m.setState(ws, state)
 		}
-		return state, err
 	}
 	state := initialSSHConnection(ws, connectionConnected)
 	state.RemoteOS = probe.OS
@@ -202,6 +242,40 @@ func (m *sshManager) connectInternal(ctx context.Context, ws Workspace, emitProg
 	m.emitConnection(ws, state)
 	go m.watchProxy(ws, proxy)
 	return state, nil
+}
+
+func validateProxyHello(hello map[string]any) error {
+	capabilities := mapValue(hello["capabilities"])
+	methods := map[string]bool{}
+	switch values := capabilities["methods"].(type) {
+	case []any:
+		for _, value := range values {
+			if method := stringValue(value); method != "" {
+				methods[method] = true
+			}
+		}
+	case []string:
+		for _, method := range values {
+			if method != "" {
+				methods[method] = true
+			}
+		}
+	}
+	required := []string{"hello", "read", "write", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill"}
+	missing := []string{}
+	for _, method := range required {
+		if !methods[method] {
+			missing = append(missing, method)
+		}
+	}
+	if len(missing) > 0 {
+		version := stringValue(hello["version"])
+		if version == "" {
+			version = "unknown"
+		}
+		return fmt.Errorf("ssh proxy helper is incompatible: version %s missing methods %s", version, strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func (m *sshManager) disconnect(ws Workspace) WorkspaceConnection {
@@ -252,20 +326,23 @@ func (m *sshManager) call(ctx context.Context, ws Workspace, method string, para
 	for attempt := 1; attempt <= sshProxyMaxAttempts; attempt++ {
 		proxy, _, err := m.proxyForWithProgress(ctx, ws, attempt == 1)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			lastErr = err
 		} else {
 			err = proxy.call(ctx, method, params, out)
 			if err == nil {
 				return nil
 			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			lastErr = err
 			if !isProxyTransportError(err) {
 				return err
 			}
 			m.dropProxy(ws, proxy)
-		}
-		if ctx.Err() != nil {
-			break
 		}
 		m.setReconnecting(ws, attempt, sshProxyMaxAttempts, lastErr)
 		if attempt < sshProxyMaxAttempts {
@@ -284,10 +361,21 @@ func (m *sshManager) call(ctx context.Context, ws Workspace, method string, para
 }
 
 func (m *sshManager) startPTY(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
+	return m.startEventProcess(ctx, ws, id, "pty_start", params)
+}
+
+func (m *sshManager) startExec(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
+	return m.startEventProcess(ctx, ws, id, "exec_start", params)
+}
+
+func (m *sshManager) startEventProcess(ctx context.Context, ws Workspace, id, method string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
 	var lastErr error
 	for attempt := 1; attempt <= sshProxyMaxAttempts; attempt++ {
 		proxy, _, err := m.proxyForWithProgress(ctx, ws, attempt == 1)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, nil, nil, ctx.Err()
+			}
 			lastErr = err
 		} else {
 			events, unsubscribe := proxy.subscribe(id)
@@ -297,19 +385,19 @@ func (m *sshManager) startPTY(ctx context.Context, ws Workspace, id string, para
 			}
 			callParams["id"] = id
 			var started map[string]any
-			err = proxy.call(ctx, "pty_start", callParams, &started)
+			err = proxy.call(ctx, method, callParams, &started)
 			if err == nil {
 				return proxy, events, unsubscribe, started, nil
 			}
 			unsubscribe()
+			if ctx.Err() != nil {
+				return nil, nil, nil, nil, ctx.Err()
+			}
 			lastErr = err
 			if !isProxyTransportError(err) {
 				return nil, nil, nil, nil, err
 			}
 			m.dropProxy(ws, proxy)
-		}
-		if ctx.Err() != nil {
-			break
 		}
 		m.setReconnecting(ws, attempt, sshProxyMaxAttempts, lastErr)
 		if attempt < sshProxyMaxAttempts {
@@ -505,7 +593,7 @@ type helperUpload struct {
 	Uploaded   bool
 }
 
-func (m *sshManager) ensureHelper(ctx context.Context, ws Workspace, probe sshProbe) (helperUpload, error) {
+func (m *sshManager) ensureHelper(ctx context.Context, ws Workspace, probe sshProbe, forceUpload bool) (helperUpload, error) {
 	local, err := m.localHelperBinary(ctx, probe)
 	if err != nil {
 		return helperUpload{}, err
@@ -522,7 +610,7 @@ func (m *sshManager) ensureHelper(ctx context.Context, ws Workspace, probe sshPr
 		return helperUpload{}, err
 	}
 	remoteSum := m.remoteHelperSHA256(ctx, ws, remotePath)
-	if remoteSum != localSum {
+	if forceUpload || remoteSum != localSum {
 		scpArgs := []string{"-P", strconv.Itoa(sshPort(ws))}
 		scpArgs = append(scpArgs, local, ws.SSH.Endpoint+":"+remotePath)
 		if out, err := exec.CommandContext(ctx, "scp", scpArgs...).CombinedOutput(); err != nil {
@@ -563,9 +651,17 @@ func (m *sshManager) localHelperBinary(ctx context.Context, probe sshProbe) (str
 		return bundled, nil
 	}
 	out := filepath.Join(m.app.store.dataDir, "helpers", probe.OS+"-"+probe.Arch, "astral-proxy-agent")
+	root := repoRootGuess()
+	if _, err := os.Stat(filepath.Join(root, "proxy-agent", "main.go")); err == nil {
+		return m.buildLocalHelperBinary(ctx, probe, out, root)
+	}
 	if st, err := os.Stat(out); err == nil && st.Mode()&0o111 != 0 {
 		return out, nil
 	}
+	return m.buildLocalHelperBinary(ctx, probe, out, root)
+}
+
+func (m *sshManager) buildLocalHelperBinary(ctx context.Context, probe sshProbe, out string, root string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {
 		return "", err
 	}
@@ -573,7 +669,7 @@ func (m *sshManager) localHelperBinary(ctx context.Context, probe sshProbe) (str
 	env = append(env, "GOOS="+probe.OS, "GOARCH="+probe.Arch, "CGO_ENABLED=0")
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", out, "./proxy-agent")
 	cmd.Env = env
-	cmd.Dir = repoRootGuess()
+	cmd.Dir = root
 	if body, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("build proxy helper for %s/%s failed: %s%s", probe.OS, probe.Arch, err.Error(), stderrSuffix(string(body)))
 	}

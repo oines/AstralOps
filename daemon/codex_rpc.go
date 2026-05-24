@@ -61,7 +61,7 @@ func (c *codexClient) respondApproval(approvalID string, response map[string]any
 		return fmt.Errorf("approval %s not found", approvalID)
 	}
 
-	result, err := codexApprovalResponse(pending.Method, response)
+	result, err := codexApprovalResponse(pending.Method, response, pending.Params)
 	if err != nil {
 		return c.writeJSON(map[string]any{"id": pending.RequestID, "error": map[string]any{"code": -32000, "message": err.Error()}})
 	}

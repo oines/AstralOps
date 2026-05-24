@@ -31,11 +31,19 @@ func (a *app) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.emit(responded)
+	if hasOrigin && isCancelResponse(req) {
+		if a.cancelInteraction(origin) {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+			return
+		}
+	}
 	if hasOrigin && origin.Agent == AgentClaude {
 		if isDeclineResponse(req) {
 			if ws, ok := a.store.getWorkspace(origin.WorkspaceID); ok {
 				a.rollbackDirtyProjection(r.Context(), ws)
 			}
+		} else {
+			a.allowClaudeRemoteApprovedCommand(origin)
 		}
 		a.startClaudeInteractionFollowup(origin, req)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -58,6 +66,11 @@ func (a *app) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+func isCancelResponse(response map[string]any) bool {
+	decision := firstString(response["decision"], response["action"])
+	return decision == "cancel" || decision == "abort" || boolValue(response["cancel"])
+}
+
 func isDeclineResponse(response map[string]any) bool {
 	decision := firstString(response["decision"], response["action"])
 	switch decision {
@@ -65,6 +78,42 @@ func isDeclineResponse(response map[string]any) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (a *app) cancelInteraction(origin AstralEvent) bool {
+	value := mapValue(origin.Normalized)
+	if origin.Agent == AgentCodex {
+		kind := stringValue(value["kind"])
+		if origin.Kind == "ask.requested" && kind != "mcpServer/elicitation/request" {
+			a.interruptInteractionSession(origin)
+			return true
+		}
+		if kind == "permissions" || kind == "plan" {
+			a.interruptInteractionSession(origin)
+			return true
+		}
+		return false
+	}
+	if origin.Agent == AgentClaude {
+		a.interruptInteractionSession(origin)
+		return true
+	}
+	return false
+}
+
+func (a *app) interruptInteractionSession(origin AstralEvent) {
+	runtime, ok := a.runtimes[origin.Agent]
+	if !ok {
+		return
+	}
+	if err := runtime.Interrupt(origin.SessionID); err != nil {
+		if errors.Is(err, ErrSessionIdle) {
+			a.store.updateSessionStatus(origin.SessionID, "idle")
+			a.emit(AstralEvent{WorkspaceID: origin.WorkspaceID, SessionID: origin.SessionID, Agent: origin.Agent, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle"}})
+			return
+		}
+		a.emit(AstralEvent{WorkspaceID: origin.WorkspaceID, SessionID: origin.SessionID, Agent: origin.Agent, Kind: "control.error", Normalized: map[string]any{"message": err.Error()}})
 	}
 }
 
@@ -110,6 +159,9 @@ func (a *app) startClaudeInteractionFollowup(origin AstralEvent, response map[st
 		return
 	}
 	options := TurnOptions{Internal: true, DisplayInput: claudeInteractionDisplayText(origin, response)}
+	if tools := claudeAllowedToolsForInteraction(origin, response, ws); len(tools) > 0 {
+		options.AllowedTools = tools
+	}
 	if err := runtime.StartTurn(ss, ws, input, options); err != nil {
 		if errors.Is(err, ErrSessionRunning) {
 			a.enqueueTurn(ss, input, options)
@@ -117,6 +169,36 @@ func (a *app) startClaudeInteractionFollowup(origin AstralEvent, response map[st
 		}
 		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": err.Error()}})
 	}
+}
+
+func claudeAllowedToolsForInteraction(origin AstralEvent, response map[string]any, ws Workspace) []string {
+	if isDeclineResponse(response) {
+		return nil
+	}
+	value := mapValue(origin.Normalized)
+	if stringValue(value["kind"]) != "permission" {
+		return nil
+	}
+	toolName := firstString(value["tool_name"], "Bash")
+	if toolName != "Bash" {
+		if toolName == "WebSearch" {
+			return []string{toolName}
+		}
+		return nil
+	}
+	if ws.Target == "ssh" {
+		return nil
+	}
+	command := strings.TrimSpace(stringValue(value["command"]))
+	if command == "" {
+		return nil
+	}
+	return []string{claudePermissionRule("Bash", command)}
+}
+
+func claudePermissionRule(toolName, ruleContent string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `(`, `\(`, `)`, `\)`)
+	return toolName + "(" + replacer.Replace(ruleContent) + ")"
 }
 
 func claudeInteractionFollowupText(origin AstralEvent, response map[string]any) string {
@@ -214,7 +296,10 @@ func (a *app) findInteractionEvent(id string) (AstralEvent, bool) {
 			continue
 		}
 		normalized, _ := ev.Normalized.(map[string]any)
-		if stringValue(normalized["approval_id"]) == id || stringValue(normalized["request_id"]) == id || stringValue(normalized["ask_id"]) == id {
+		if stringValue(normalized["approval_id"]) == id || stringValue(normalized["ask_id"]) == id {
+			return ev, true
+		}
+		if stringValue(normalized["source"]) != "codex" && stringValue(normalized["request_id"]) == id {
 			return ev, true
 		}
 	}

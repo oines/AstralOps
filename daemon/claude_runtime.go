@@ -17,7 +17,8 @@ import (
 	"time"
 )
 
-var claudeBridgeExecPattern = regexp.MustCompile(`\bhook_bridge\.py['"]?\s+exec\s+['"]?([A-Za-z0-9+/=]+)['"]?`)
+var claudeBridgeExecPattern = regexp.MustCompile(`\b(?:hook_bridge\.py|claude-remote-hook)['"]?\s+exec\s+['"]?([A-Za-z0-9+/=]+)['"]?`)
+var claudeBridgeFullExecPattern = regexp.MustCompile(`(?:ASTRALOPS_[A-Z_]+=(?:'[^']*'|"[^"]*"|\S+)\s+)*(?:'[^']*(?:daemon|astralops-daemon)'|"[^"]*(?:daemon|astralops-daemon)"|\S*(?:daemon|astralops-daemon))\s+claude-remote-hook\s+exec\s+['"]?([A-Za-z0-9+/=]+)['"]?`)
 
 type claudeLocalRuntime struct {
 	app     *app
@@ -200,6 +201,9 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 	if mode := strings.TrimSpace(options.PermissionMode); mode != "" && mode != "default" {
 		args = append(args, "--permission-mode", mode)
 	}
+	if len(options.AllowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(options.AllowedTools, ","))
+	}
 	if remote.SettingsPath != "" {
 		args = append(args, "--settings", remote.SettingsPath)
 	}
@@ -305,6 +309,7 @@ func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Sessi
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	toolStarts := map[string]AstralEvent{}
+	pendingInteraction := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -314,6 +319,14 @@ func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Sessi
 		for _, ev := range normalizeClaudeStreamJSON(session, []byte(line)) {
 			ev = r.remapProjectionEventPaths(ev)
 			r.app.emit(ev)
+			if ev.Kind == "approval.requested" || ev.Kind == "ask.requested" {
+				pendingInteraction = true
+				r.app.store.updateSessionStatus(session.ID, "requires_action")
+				if ev.Kind == "ask.requested" && isClaudeAskUserQuestionEvent(ev) {
+					run.pauseForApproval()
+					return
+				}
+			}
 			if ev.Kind == "tool.started" {
 				if id := stringValue(mapValue(ev.Normalized)["id"]); id != "" {
 					toolStarts[id] = ev
@@ -328,6 +341,9 @@ func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Sessi
 		}
 		if resultLine {
 			completeTurn()
+			if pendingInteraction {
+				r.app.store.updateSessionStatus(session.ID, "requires_action")
+			}
 			run.mu.Lock()
 			if run.stdin != nil {
 				_ = run.stdin.Close()
@@ -339,6 +355,11 @@ func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Sessi
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
 		r.finishFailed(session, err.Error(), nil)
 	}
+}
+
+func isClaudeAskUserQuestionEvent(ev AstralEvent) bool {
+	value := mapValue(ev.Normalized)
+	return stringValue(value["source"]) == "claude" && stringValue(value["kind"]) == "AskUserQuestion"
 }
 
 func claudeApprovalFromToolResult(session Session, ev AstralEvent, toolStarts map[string]AstralEvent) (AstralEvent, bool) {
@@ -409,21 +430,35 @@ func scrubClaudeRemoteBridgeEvent(value any, remoteCWD string) any {
 	if !ok {
 		return value
 	}
+	normalized = scrubClaudeBridgeValue(normalized, remoteCWD).(map[string]any)
 	if hook := stringValue(normalized["hook_event_name"]); hook == "PreToolUse" || hook == "PostToolUse" {
 		normalized["hidden"] = true
 		normalized["visibility"] = "debug"
 		return normalized
 	}
-	replaceBridgeCommand(normalized, remoteCWD)
-	if params := mapValue(normalized["params"]); len(params) > 0 {
-		replaceBridgeCommand(params, remoteCWD)
-		normalized["params"] = params
-	}
-	if input := mapValue(normalized["input"]); len(input) > 0 {
-		replaceBridgeCommand(input, remoteCWD)
-		normalized["input"] = input
-	}
 	return normalized
+}
+
+func scrubClaudeBridgeValue(value any, remoteCWD string) any {
+	switch typed := value.(type) {
+	case string:
+		return scrubClaudeBridgeText(typed)
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = scrubClaudeBridgeValue(item, remoteCWD)
+		}
+		return out
+	case map[string]any:
+		out := map[string]any{}
+		for key, item := range typed {
+			out[key] = scrubClaudeBridgeValue(item, remoteCWD)
+		}
+		replaceBridgeCommand(out, remoteCWD)
+		return out
+	default:
+		return value
+	}
 }
 
 func replaceBridgeCommand(value map[string]any, remoteCWD string) {
@@ -442,8 +477,21 @@ func replaceBridgeCommand(value map[string]any, remoteCWD string) {
 	value["remote"] = true
 }
 
+func scrubClaudeBridgeText(text string) string {
+	return claudeBridgeFullExecPattern.ReplaceAllStringFunc(text, func(match string) string {
+		decoded := decodeClaudeBridgeCommand(match)
+		if decoded == "" {
+			return "[remote command]"
+		}
+		return decoded
+	})
+}
+
 func decodeClaudeBridgeCommand(command string) string {
-	match := claudeBridgeExecPattern.FindStringSubmatch(command)
+	match := claudeBridgeFullExecPattern.FindStringSubmatch(command)
+	if len(match) < 2 {
+		match = claudeBridgeExecPattern.FindStringSubmatch(command)
+	}
 	if len(match) < 2 {
 		return ""
 	}
