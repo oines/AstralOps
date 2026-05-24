@@ -1,162 +1,61 @@
 # AstralOps
 
-AstralOps is a macOS desktop workstation for running Claude Code and Codex against local or SSH-backed workspaces.
+**把你的 AI 编程助手带到任何远程服务器。**
 
-It is not a cloud agent service. The desktop app starts a local Go sidecar, keeps event history on disk, and lets the native agents run on your machine while AstralOps projects files and command execution into the selected workspace.
+AstralOps 是一个专为 Claude Code 和 Codex 设计的跨平台可视化工作台。但它的杀手级功能在于：**无缝的 SSH 远程 AI 开发**。
 
-## What It Does
+你不需要在你的 VPS 或远程开发机上安装任何 AI 助手（如 Claude Code 或 Codex），甚至不需要配置复杂的 Node.js 环境。只需通过 SSH 连入，AstralOps 就会接管一切。
 
-- Runs Claude Code and Codex sessions from one desktop UI.
-- Supports local workspaces and sparse SSH workspaces.
-- Streams normalized agent events into a shared transcript model.
-- Renders reasoning, messages, command output, file changes, plans, approvals, Ask forms, MCP elicitation, rate limits, and compaction boundaries.
-- Handles approval, cancel, interrupt, queued prompt, and follow-up semantics for both agents.
-- Uses real runtime events as fixtures before adding semantic UI mappings.
+## 核心能力：真正的远程 AI 工作区
 
-## Architecture
+当你通过 AstralOps 连接到远程服务器时：
 
-AstralOps has four main pieces:
+- **零侵入部署**：AstralOps 会自动通过 SSH 将轻量级的 `proxy-agent` 推送到远端。远程机器**完全不需要**安装 Claude Code / Codex，也不需要配置 API 密钥。
+- **本地化体验**：AI 助手依然在你性能强大的本地电脑上运行，但它的所有命令执行（如 `npm test`）、目录浏览、代码搜索 (`grep`/`glob`) 和文件编辑，都会通过网络精准投射并执行在远程服务器上。
+- **按需文件同步 (Sparse Projection)**：只有 AI 实际访问或修改的文件会被透明地同步到本地。你不必等待把整个庞大的远程代码库克隆到本地，节省大量带宽和时间。
+- **绝对掌控**：所有在远程服务器上的高危命令执行和文件修改，都会在你本地的桌面端触发弹窗拦截，必须经过你的点击批准才会真正在远端执行。
 
-- `apps/desktop`: Electron, React, and Vite desktop UI.
-- `daemon`: local Go sidecar (`astralopsd`) with HTTP/WebSocket APIs, runtime orchestration, event storage, SSH projection, and agent adapters.
-- `proxy-agent`: small Go helper copied to SSH hosts for file operations, async command execution, and PTY sessions.
-- `protocol`: shared TypeScript event and data contracts.
+## 这是怎么做到的？
 
-Runtime state is stored under:
+AstralOps 构建了一套创新的远程代理架构：
 
-```text
-~/.AstralOps
-```
+1. **本地 Daemon (Go)**：在你的电脑上运行，负责管理 AI 助手进程、记录历史日志以及提供桌面 UI。
+2. **远程 Proxy-Agent (Go)**：一个极小且无依赖的二进制文件。每次连接时由 Daemon 自动通过系统 SSH 上传至远端（支持 Linux/macOS, x86/ARM）并拉起。
+3. **JSON-RPC over SSH**：无需在服务器开放任何额外端口。本地 AI 产生的读写意图被转化为结构化请求，直接通过 SSH 的标准输入输出流传递给远端的 `proxy-agent` 执行。
 
-The daemon listens on `127.0.0.1` and writes a short-lived runtime token to `~/.AstralOps/runtime/daemon.json`.
+无论是排查线上服务器的诡异 Bug，还是直接在只对内网开放的测试机上开发新功能，AstralOps 都能让 AI 成为你远程排障的得力副手。
 
-## SSH Workspaces
+## 适用场景
 
-SSH support is a sparse projection, not a full remote filesystem mount.
+- 代码出于安全合规要求只能留在远程开发机上，本地无法拉取。
+- 在配置较低的云服务器或树莓派上开发，跑不动庞大的 Node.js 语言模型工具链。
+- 需要 AI 助手直接在包含特定环境变量和数据库的远端运行环境中测试、修改代码。
 
-For an SSH workspace with remote cwd `/root`, AstralOps creates a local projection root like:
-
-```text
-~/.AstralOps/projections/<workspace_id>/root
-```
-
-File tools hydrate remote files on demand:
-
-```text
-remote /root/a.txt
--> local projection/root/a.txt
--> agent reads or edits the projected file
--> successful writes are pushed back to /root/a.txt
-```
-
-Command execution is remote:
-
-```text
-agent command
--> AstralOps bridge
--> ssh proxy-agent
--> remote shell
-```
-
-Claude and Codex perceive this differently:
-
-- Claude Code runs locally with its cwd set to the projection root. Claude hooks map `Read`, `LS`, `Glob`, `Grep`, `Bash`, `Write`, `Edit`, and `MultiEdit` to remote operations.
-- Codex app-server runs locally, but its turn cwd is the remote cwd and its process execution goes through AstralOps' Codex exec-server bridge.
-
-This means SSH workspaces behave like remote workspaces for normal file and shell operations, but the native agent process and its account-level configuration still live locally.
-
-## Current Limitations
-
-- SSH projection is sparse. Files that have not been read, listed, or otherwise hydrated may not exist locally.
-- Claude Code SSH support uses `claude -p --output-format stream-json` plus hooks, not the full Claude SDK/control protocol.
-- Claude plan and Ask interactions in the current headless runtime are handled as follow-up turns, not live in-turn resumptions.
-- Agent memory and account-level config are not fully isolated per SSH workspace yet. Claude and Codex may still load their local user-level configuration.
-- Some non-critical Codex MCP startup warnings can appear if local connector services are unavailable.
-- macOS is the primary desktop target right now.
-
-## Requirements
-
-- macOS
-- Node.js and npm
-- Go
-- Claude Code CLI on `PATH` for Claude sessions
-- Codex CLI/app-server on `PATH` for Codex sessions
-- SSH access for SSH workspaces
-
-## Development
-
-Install dependencies:
+## 快速上手
 
 ```bash
+# 确保本地已安装 Node.js 和 Go
 npm install
-```
-
-Run the desktop app:
-
-```bash
 npm run dev
 ```
 
-Run checks:
+启动桌面端后，点击“新建工作区”，选择 **SSH**，输入你的目标服务器地址（支持读取你的 `~/.ssh/config`）和目标目录即可开始！
 
-```bash
-npm run check
-```
-
-Build everything:
-
-```bash
-npm run build
-```
-
-Run Go tests only:
-
-```bash
-go test ./...
-```
-
-## Project Layout
+## 技术栈与目录结构
 
 ```text
-apps/desktop/   Electron and React desktop UI
-daemon/         Local sidecar, agent runtimes, SSH bridge, event store
-proxy-agent/    Remote SSH helper binary
-protocol/       Shared TypeScript contracts
-fixtures/       Real observed Claude/Codex event samples
-docs/           Implementation notes and SSH behavior audit
-AGENTS.md       Project-level event contract and agent guidance
+apps/desktop/     桌面界面 (Electron + React)
+daemon/           本地核心层 (Go)：负责管理 AI 会话、稀疏投影目录和 SSH 隧道
+proxy-agent/      远端代理 (Go)：通过 SSH 执行文件操作和命令的无依赖单体
+protocol/         通讯协议 (TypeScript)：JSON-RPC 定义
 ```
 
-## Event Contract
+## 安全与隐私
 
-AstralOps preserves raw Claude/Codex events in `AstralEvent.raw` and drives UI/business logic from normalized event families such as:
+- 所有的 API Keys、AI 思考过程和聊天记录均保存在你的本地电脑 `~/.AstralOps`。
+- SSH 连接完全复用你本地系统的 `ssh` 进程。AstralOps **绝不**触碰、读取或保存你的 SSH 私钥。
+- 绝无任何形式的云端遥测和数据收集。
 
-```text
-session.*
-turn.*
-message.*
-reasoning.*
-tool.*
-approval.*
-ask.*
-plan.*
-queue.*
-workspace.*
-memory.*
-subagent.*
-hook.*
-control.*
-```
+## 许可证
 
-When adding new mappings, capture real Claude Code or Codex samples first, add fixtures, then implement the specific observed shape. Unknown events should remain raw/debug-only until their semantics are proven.
-
-## Security Notes
-
-- The daemon only binds to localhost.
-- Runtime auth uses a random bearer token written under `~/.AstralOps/runtime`.
-- SSH helper binaries are copied to the remote host under `/tmp/.astralops`.
-- Hidden hook output is scrubbed before normalized UI display, but raw event logs intentionally preserve original runtime payloads for replay and debugging.
-
-## License
-
-No license has been declared yet.
+[AGPL-3.0](./LICENSE)

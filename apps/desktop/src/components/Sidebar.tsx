@@ -108,7 +108,7 @@ export function Sidebar({
       <div className={`flex h-full flex-col transition-[opacity,transform] duration-180 ease-out ${collapsed ? "pointer-events-none -translate-x-2 opacity-0" : "translate-x-0 opacity-100"}`} style={{ width }}>
       <div className="h-[72px] shrink-0" />
 
-      <nav className="grid gap-1 px-5 pb-6">
+      <nav className="grid gap-1 px-4 pb-6">
         <button
           className="flex h-9 w-full items-center gap-3 rounded-lg px-2 text-left text-[15px] font-semibold text-[#242426] transition-colors duration-150 ease-out hover:bg-black/[0.04]"
           type="button"
@@ -119,9 +119,7 @@ export function Sidebar({
         </button>
       </nav>
 
-      <div className="px-6 pb-3 pt-1 text-[13px] font-semibold text-[#96949a]">项目</div>
-
-      <nav className="min-h-0 flex-1 overflow-auto px-4 pb-4">
+      <nav className="min-h-0 flex-1 overflow-auto px-3 pb-4">
         {workspaces.length === 0 ? (
           <button
             className="mx-2 mt-1 w-[calc(100%-16px)] rounded-lg border border-dashed border-[#d8d5cd] px-3 py-3 text-center text-[14px] font-semibold text-[#6b6b70] hover:bg-black/[0.035] hover:text-[#1d1d1f]"
@@ -262,7 +260,7 @@ function WorkspaceBlock({
       />
       {sessions.length > 0 ? (
         <div
-          className={`grid overflow-hidden pl-8 transition-[grid-template-rows,opacity,transform] duration-180 ease-out ${
+          className={`grid overflow-hidden pl-5 transition-[grid-template-rows,opacity,transform] duration-180 ease-out ${
             collapsed ? "grid-rows-[0fr] opacity-0 -translate-y-1" : "grid-rows-[1fr] opacity-100 translate-y-0"
           }`}
         >
@@ -306,34 +304,16 @@ function WorkspaceRow({
   const connected = connection?.status === "connected";
   const canCreateSession = target !== "ssh" || connected;
   const rowGridClass = target === "ssh"
-    ? "grid-cols-[28px_14px_17px_minmax(0,1fr)_28px_28px]"
-    : "grid-cols-[28px_14px_17px_minmax(0,1fr)_28px]";
+    ? "grid-cols-[14px_17px_minmax(0,1fr)_28px_28px_28px]"
+    : "grid-cols-[14px_17px_minmax(0,1fr)_28px_28px]";
   return (
     <div
-      className={`group relative grid min-h-11 w-full cursor-default ${rowGridClass} items-center gap-1.5 rounded-xl py-1 pl-1 pr-2 transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.035] ${
+      className={`group relative grid min-h-11 w-full cursor-default ${rowGridClass} items-center gap-1.5 rounded-xl py-1 pl-2 pr-2 transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.035] ${
         collapsed && sessionCount > 0 ? "bg-[#eeece7] text-[#4f5358]" : "text-[#6f7378]"
       }`}
       data-sidebar-menu
       onClick={onClick}
     >
-      <button
-        className={`grid size-7 shrink-0 place-items-center rounded-md transition-all duration-150 ease-out ${
-          confirmDelete
-            ? "bg-[#fde8e4] text-[#e5483f] opacity-100 hover:bg-[#fbd6d0]"
-            : "pointer-events-none text-[#9a9da1] opacity-0 hover:bg-black/[0.06] hover:text-[#b45309] group-hover:pointer-events-auto group-hover:opacity-100"
-        }`}
-        type="button"
-        aria-label={confirmDelete ? "确认移除 workspace" : "移除 workspace"}
-        title={confirmDelete ? "确认移除 workspace" : "移除 workspace"}
-        data-delete-confirm={confirmDelete ? true : undefined}
-        data-delete-trigger={!confirmDelete ? true : undefined}
-        onClick={(event) => {
-          event.stopPropagation();
-          onDelete();
-        }}
-      >
-        {confirmDelete ? <Check size={14} strokeWidth={2.2} /> : <Trash2 size={14} strokeWidth={1.9} />}
-      </button>
       <ChevronRight className={`shrink-0 text-[#9a9da1] transition-transform duration-150 ease-out ${collapsed ? "" : "rotate-90"}`} size={14} strokeWidth={2.1} />
       <Folder className="shrink-0 text-[#74777b]" size={17} strokeWidth={1.8} />
       <div className="min-w-0">
@@ -397,6 +377,24 @@ function WorkspaceRow({
       >
         <Plus size={15} strokeWidth={2.1} />
       </button>
+      <button
+        className={`grid size-7 shrink-0 place-items-center rounded-md transition-all duration-150 ease-out ${
+          confirmDelete
+            ? "bg-[#fde8e4] text-[#e5483f] opacity-100 hover:bg-[#fbd6d0]"
+            : "pointer-events-none text-[#9a9da1] opacity-0 hover:bg-black/[0.06] hover:text-[#b45309] group-hover:pointer-events-auto group-hover:opacity-100"
+        }`}
+        type="button"
+        aria-label={confirmDelete ? "确认移除 workspace" : "移除 workspace"}
+        title={confirmDelete ? "确认移除 workspace" : "移除 workspace"}
+        data-delete-confirm={confirmDelete ? true : undefined}
+        data-delete-trigger={!confirmDelete ? true : undefined}
+        onClick={(event) => {
+          event.stopPropagation();
+          onDelete();
+        }}
+      >
+        {confirmDelete ? <Check size={14} strokeWidth={2.2} /> : <Trash2 size={14} strokeWidth={1.9} />}
+      </button>
       {menuOpen ? (
         <div
           className="absolute left-9 top-10 z-20 w-44 rounded-[18px] border border-[#dedbd3] bg-[#fffefa] p-1.5 shadow-[0_18px_45px_rgba(37,34,29,0.16),0_2px_8px_rgba(37,34,29,0.08)]"
@@ -450,7 +448,7 @@ function SessionRow({
   }
   return (
     <div
-      className={`group grid h-9 cursor-default grid-cols-[28px_minmax(0,1fr)_42px] items-center gap-1 rounded-xl pl-1.5 pr-2 transition-colors duration-150 ease-out ${
+      className={`group relative grid h-9 cursor-default grid-cols-[minmax(0,1fr)_42px] items-center gap-1 rounded-xl pl-3 pr-2 transition-colors duration-150 ease-out ${
         active ? "bg-[#e9e7e1] text-[#202124]" : "text-[#343438] hover:bg-black/[0.035]"
       }`}
       role="button"
@@ -458,12 +456,12 @@ function SessionRow({
       onClick={onClick}
       onKeyDown={handleKeyDown}
     >
-      <div className="relative grid size-7 place-items-center">
+      <div className="pointer-events-none absolute left-1 top-1/2 grid size-6 -translate-y-1/2 place-items-center">
         {running && !confirmDelete ? (
           <LoaderCircle className="animate-spin text-[#2f8cff] opacity-100 transition-opacity duration-150 ease-out" size={15} strokeWidth={2} aria-hidden="true" />
         ) : null}
       </div>
-      <span className="min-w-0 flex-1 truncate text-left text-[15px] font-semibold">
+      <span className={`min-w-0 flex-1 truncate text-left text-[15px] font-semibold ${running && !confirmDelete ? "pl-5" : ""}`}>
         {title}
       </span>
       <div className="relative flex h-7 min-w-0 items-center justify-end">

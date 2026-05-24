@@ -20,6 +20,10 @@ function runtimePath() {
   return path.join(dataDir(), "runtime", "daemon.json");
 }
 
+function appIconPath() {
+  return path.join(repoRoot(), "apps", "desktop", "assets", "AstralOps-AppIcon.png");
+}
+
 function desktopEnv() {
   const env = { ...process.env };
   const pathParts = [
@@ -76,6 +80,7 @@ async function waitForDaemon() {
 }
 
 function createWindow() {
+  const icon = appIconPath();
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -85,6 +90,7 @@ function createWindow() {
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 20, y: 18 },
     backgroundColor: "#f5f5f4",
+    icon,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -128,6 +134,9 @@ ipcMain.handle("astral:choose-files", async () => {
 });
 
 app.whenReady().then(async () => {
+  if (process.platform === "darwin") {
+    app.dock.setIcon(appIconPath());
+  }
   startDaemon();
   await waitForDaemon();
   createWindow();
