@@ -1058,6 +1058,16 @@ func (r *recordingRuntime) Interrupt(sessionID string) error {
 	return nil
 }
 
+type recordingSteerRuntime struct {
+	recordingRuntime
+	steered []string
+}
+
+func (r *recordingSteerRuntime) Steer(sessionID string, input string, options TurnOptions) error {
+	r.steered = append(r.steered, input)
+	return nil
+}
+
 func TestSuppressCodexInternalStderrWarnings(t *testing.T) {
 	lines := []string{
 		`{"timestamp":"2026-05-23T09:05:36.950527Z","level":"WARN","fields":{"message":"ignoring interface.icon_large: icon path must not contain '..'"},"target":"codex_core_skills::loader"}`,
@@ -1142,6 +1152,41 @@ sleep 30
 	waitForKind(t, app.store, session.ID, "turn.cancelled")
 }
 
+func TestClaudeLocalRuntimeSteersViaStreamInput(t *testing.T) {
+	inputsPath := filepath.Join(t.TempDir(), "claude-inputs.jsonl")
+	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+IFS= read -r first
+printf '%s\n' "$first" >> "$ASTRALOPS_TEST_CLAUDE_INPUTS"
+IFS= read -r second
+printf '%s\n' "$second" >> "$ASTRALOPS_TEST_CLAUDE_INPUTS"
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"steered"}]}}'
+`))
+	t.Setenv("ASTRALOPS_TEST_CLAUDE_INPUTS", inputsPath)
+
+	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "first", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "session.native")
+	steerer, ok := app.runtimes[AgentClaude].(TurnSteerer)
+	if !ok {
+		t.Fatal("claude runtime does not implement TurnSteerer")
+	}
+	if err := steerer.Steer(session.ID, "mid task guidance", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.completed")
+
+	inputs, err := os.ReadFile(inputsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(inputs)
+	if !strings.Contains(text, `"text":"first"`) || !strings.Contains(text, `"text":"mid task guidance"`) {
+		t.Fatalf("claude stream inputs did not include initial and steer messages:\n%s", text)
+	}
+}
+
 func TestSessionInputQueuesWhileRuntimeIsBusy(t *testing.T) {
 	app, session, _ := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
@@ -1184,6 +1229,35 @@ func TestCancelQueuedTurnEmitsCancelled(t *testing.T) {
 	events := st.queryEvents(workspace.ID, session.ID, 0)
 	if !containsEventKind(events, "queue.queued") || !containsEventKind(events, "queue.cancelled") {
 		t.Fatalf("events = %#v, want queue.queued and queue.cancelled", events)
+	}
+}
+
+func TestSteerQueuedTurnInjectsAndRemovesQueuedMessage(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := Workspace{ID: "ws_steer_queue", Agent: AgentClaude, Target: "local", LocalCWD: dir}
+	st.workspaces[workspace.ID] = workspace
+	session := st.createSession(workspace, AgentClaude)
+	runtime := &recordingSteerRuntime{}
+	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}, runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
+
+	turn := app.enqueueTurn(session, "steer this", TurnOptions{})
+	if err := app.steerQueuedTurn(session.ID, turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(runtime.steered, []string{"steer this"}) {
+		t.Fatalf("steered = %#v", runtime.steered)
+	}
+	if _, ok := app.peekQueuedTurn(session.ID, turn.ID); ok {
+		t.Fatal("queued turn should be removed after steering")
+	}
+
+	events := st.queryEvents(workspace.ID, session.ID, 0)
+	if !containsEventKind(events, "queue.queued") || !containsEventKind(events, "queue.steered") {
+		t.Fatalf("events = %#v, want queue.queued and queue.steered", events)
 	}
 }
 
@@ -1323,6 +1397,33 @@ func TestCodexLocalRuntimeRejectsConcurrentInputAndInterrupts(t *testing.T) {
 	waitForKind(t, app.store, session.ID, "turn.cancelled")
 }
 
+func TestCodexLocalRuntimeSteersActiveTurn(t *testing.T) {
+	app, session, workspace := newTestCodexApp(t, fakeCodexScript(t))
+	methodsPath := filepath.Join(t.TempDir(), "codex-methods.log")
+	t.Setenv("ASTRALOPS_TEST_CODEX_METHODS", methodsPath)
+
+	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "first", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.started")
+	steerer, ok := app.runtimes[AgentCodex].(TurnSteerer)
+	if !ok {
+		t.Fatal("codex runtime does not implement TurnSteerer")
+	}
+	if err := steerer.Steer(session.ID, "mid task guidance", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "control.steer")
+
+	methods, err := os.ReadFile(methodsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(methods), "turn/steer") {
+		t.Fatalf("codex runtime did not send turn/steer; methods:\n%s", methods)
+	}
+}
+
 func newTestClaudeApp(t *testing.T, claudePath string) (*app, Session, Workspace) {
 	t.Helper()
 	dir := t.TempDir()
@@ -1424,6 +1525,9 @@ rl.on("line", (line) => {
       write({ method: "turn/completed", params: { threadId: "thread_fake", turn: { id: "turn_fake", status: { type: "completed" }, durationMs: 1 } } });
       process.exit(0);
     }, 150);
+  }
+  if (msg.method === "turn/steer") {
+    write({ id: msg.id, result: {} });
   }
   if (msg.method === "turn/interrupt") {
     write({ id: msg.id, result: {} });

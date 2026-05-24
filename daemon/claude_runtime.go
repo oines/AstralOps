@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,13 +21,19 @@ var claudeBridgeExecPattern = regexp.MustCompile(`\bhook_bridge\.py['"]?\s+exec\
 type claudeLocalRuntime struct {
 	app     *app
 	mu      sync.Mutex
-	running map[string]context.CancelFunc
+	running map[string]*claudeRun
+}
+
+type claudeRun struct {
+	cancel context.CancelFunc
+	stdin  io.WriteCloser
+	mu     sync.Mutex
 }
 
 func newClaudeLocalRuntime(a *app) *claudeLocalRuntime {
 	return &claudeLocalRuntime{
 		app:     a,
-		running: map[string]context.CancelFunc{},
+		running: map[string]*claudeRun{},
 	}
 }
 
@@ -69,7 +76,8 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 		cancel()
 		return ErrSessionRunning
 	}
-	r.running[session.ID] = cancel
+	run := &claudeRun{cancel: cancel}
+	r.running[session.ID] = run
 	r.mu.Unlock()
 
 	r.app.store.updateSessionStatus(session.ID, "running")
@@ -82,7 +90,7 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 	}
 	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"status": "running"}})
 
-	go r.runClaude(ctx, session, cwd, info.Path, input, options, claudeRemoteOptions{
+	go r.runClaude(ctx, session, cwd, info.Path, input, options, run, claudeRemoteOptions{
 		SettingsPath: settingsPath,
 		RemoteCWD:    remoteCWD,
 		AppendPrompt: appendPrompt,
@@ -92,7 +100,7 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 
 func (r *claudeLocalRuntime) Interrupt(sessionID string) error {
 	r.mu.Lock()
-	cancel, ok := r.running[sessionID]
+	run, ok := r.running[sessionID]
 	if ok {
 		delete(r.running, sessionID)
 	}
@@ -100,11 +108,31 @@ func (r *claudeLocalRuntime) Interrupt(sessionID string) error {
 	if !ok {
 		return ErrSessionIdle
 	}
-	cancel()
+	run.cancel()
 	session, _ := r.app.store.getSession(sessionID)
 	r.app.store.updateSessionStatus(sessionID, "idle")
 	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.interrupt", Normalized: map[string]any{"status": "requested"}})
 	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle"}})
+	return nil
+}
+
+func (r *claudeLocalRuntime) Steer(sessionID string, input string, options TurnOptions) error {
+	r.mu.Lock()
+	run, ok := r.running[sessionID]
+	r.mu.Unlock()
+	if !ok {
+		return ErrSessionIdle
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if run.stdin == nil {
+		return ErrSessionIdle
+	}
+	if err := writeClaudeUserInput(run.stdin, input); err != nil {
+		return err
+	}
+	session, _ := r.app.store.getSession(sessionID)
+	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.steer", Normalized: map[string]any{"status": "sent"}})
 	return nil
 }
 
@@ -114,7 +142,7 @@ type claudeRemoteOptions struct {
 	AppendPrompt string
 }
 
-func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd, path, input string, options TurnOptions, remote claudeRemoteOptions) {
+func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd, path, input string, options TurnOptions, run *claudeRun, remote claudeRemoteOptions) {
 	defer func() {
 		r.mu.Lock()
 		delete(r.running, session.ID)
@@ -124,6 +152,7 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 
 	args := []string{
 		"-p",
+		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--include-partial-messages",
@@ -150,13 +179,17 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 		args = append(args, "--append-system-prompt", remote.AppendPrompt)
 		args = append(args, "--exclude-dynamic-system-prompt-sections")
 	}
-	args = append(args, input)
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Dir = cwd
 	if remote.RemoteCWD != "" {
 		cmd.Env = append(os.Environ(), "ASTRALOPS_REMOTE_CWD="+remote.RemoteCWD)
 	}
 
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		r.finishFailed(session, err.Error(), nil)
+		return
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		r.finishFailed(session, err.Error(), nil)
@@ -171,13 +204,34 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 		r.finishFailed(session, err.Error(), nil)
 		return
 	}
+	run.mu.Lock()
+	run.stdin = stdin
+	run.mu.Unlock()
+	if err := writeClaudeUserInput(stdin, input); err != nil {
+		r.finishFailed(session, err.Error(), nil)
+		_ = cmd.Process.Kill()
+		return
+	}
 
 	var stderrText strings.Builder
+	var completedMu sync.Mutex
+	completed := false
+	completeTurn := func() {
+		completedMu.Lock()
+		if completed {
+			completedMu.Unlock()
+			return
+		}
+		completed = true
+		completedMu.Unlock()
+		r.app.store.updateSessionStatus(session.ID, "idle")
+		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"status": "idle"}})
+	}
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		r.scanClaudeStream(ctx, session, stdout)
+		r.scanClaudeStream(ctx, session, stdout, run, completeTurn)
 	}()
 	go func() {
 		defer wg.Done()
@@ -186,6 +240,9 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 	wg.Wait()
 
 	err = cmd.Wait()
+	run.mu.Lock()
+	run.stdin = nil
+	run.mu.Unlock()
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
@@ -193,11 +250,30 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 		r.finishFailed(session, strings.TrimSpace(stderrText.String()), err)
 		return
 	}
-	r.app.store.updateSessionStatus(session.ID, "idle")
-	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"status": "idle"}})
+	completeTurn()
 }
 
-func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Session, reader io.Reader) {
+func writeClaudeUserInput(writer io.Writer, input string) error {
+	payload := map[string]any{
+		"type": "user",
+		"message": map[string]any{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": input,
+			}},
+		},
+		"parent_tool_use_id": nil,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = writer.Write(append(data, '\n'))
+	return err
+}
+
+func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Session, reader io.Reader, run *claudeRun, completeTurn func()) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	for scanner.Scan() {
@@ -205,14 +281,32 @@ func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Sessi
 		if line == "" {
 			continue
 		}
+		resultLine := claudeLineType([]byte(line)) == "result"
 		for _, ev := range normalizeClaudeStreamJSON(session, []byte(line)) {
 			ev = r.remapProjectionEventPaths(ev)
 			r.app.emit(ev)
+		}
+		if resultLine {
+			completeTurn()
+			run.mu.Lock()
+			if run.stdin != nil {
+				_ = run.stdin.Close()
+				run.stdin = nil
+			}
+			run.mu.Unlock()
 		}
 	}
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
 		r.finishFailed(session, err.Error(), nil)
 	}
+}
+
+func claudeLineType(line []byte) string {
+	var raw map[string]any
+	if json.Unmarshal(line, &raw) != nil {
+		return ""
+	}
+	return stringValue(raw["type"])
 }
 
 func (r *claudeLocalRuntime) remapProjectionEventPaths(ev AstralEvent) AstralEvent {

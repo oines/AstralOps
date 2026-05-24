@@ -138,6 +138,16 @@ func (r *codexLocalRuntime) Interrupt(sessionID string) error {
 	return nil
 }
 
+func (r *codexLocalRuntime) Steer(sessionID string, input string, options TurnOptions) error {
+	r.mu.Lock()
+	client := r.clients[sessionID]
+	r.mu.Unlock()
+	if client == nil || !client.isRunning() {
+		return ErrSessionIdle
+	}
+	return client.steer(input)
+}
+
 func (r *codexLocalRuntime) RespondApproval(approvalID string, response map[string]any) error {
 	r.mu.Lock()
 	clients := make([]*codexClient, 0, len(r.clients))
@@ -321,6 +331,28 @@ func (c *codexClient) interrupt() error {
 	c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.interrupt", Normalized: map[string]any{"status": "requested"}})
 	c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle", "turn_id": turnID}})
 	c.markIdle("cancelled")
+	return nil
+}
+
+func (c *codexClient) steer(input string) error {
+	threadID := c.getThreadID()
+	turnID := c.getActiveTurn()
+	if threadID == "" || turnID == "" {
+		return ErrSessionIdle
+	}
+	_, err := c.request("turn/steer", map[string]any{
+		"threadId":       threadID,
+		"expectedTurnId": turnID,
+		"input": []map[string]any{{
+			"type":          "text",
+			"text":          input,
+			"text_elements": []any{},
+		}},
+	}, codexRequestTimeout)
+	if err != nil {
+		return err
+	}
+	c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.steer", Normalized: map[string]any{"status": "sent", "turn_id": turnID}})
 	return nil
 }
 

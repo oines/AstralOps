@@ -92,6 +92,10 @@ export class AstralApi {
     return this.post(`/v1/sessions/${sessionId}/queue/${encodeURIComponent(queueId)}/cancel`, {});
   }
 
+  async steerQueuedInput(sessionId: string, queueId: string): Promise<{ ok: boolean }> {
+    return this.post(`/v1/sessions/${sessionId}/queue/${encodeURIComponent(queueId)}/steer`, {});
+  }
+
   async respondApproval(approvalId: string, response: Record<string, unknown>): Promise<{ ok: boolean }> {
     return this.post(`/v1/approvals/${encodeURIComponent(approvalId)}/respond`, response);
   }

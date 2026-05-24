@@ -5,13 +5,18 @@ import (
 )
 
 var (
-	ErrSessionRunning = errors.New("session is already running")
-	ErrSessionIdle    = errors.New("session is not running")
+	ErrSessionRunning   = errors.New("session is already running")
+	ErrSessionIdle      = errors.New("session is not running")
+	ErrSteerUnsupported = errors.New("runtime does not support steering")
 )
 
 type AgentRuntime interface {
 	StartTurn(session Session, workspace Workspace, input string, options TurnOptions) error
 	Interrupt(sessionID string) error
+}
+
+type TurnSteerer interface {
+	Steer(sessionID string, input string, options TurnOptions) error
 }
 
 type TurnOptions struct {

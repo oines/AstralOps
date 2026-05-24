@@ -453,6 +453,8 @@ export function queueLabel(kind: string): string {
       return "排队消息已取消";
     case "queue.dequeued":
       return "排队消息开始执行";
+    case "queue.steered":
+      return "排队消息已插入";
     case "queue.failed":
       return "排队消息执行失败";
     default:
@@ -476,7 +478,7 @@ export function collectPendingQueueIDs(events: AstralEvent[]): Set<string> {
     const id = textValue(value, "queue_id");
     if (!id) continue;
     if (event.kind === "queue.queued") ids.add(id);
-    if (event.kind === "queue.dequeued" || event.kind === "queue.cancelled" || event.kind === "queue.failed" || event.kind === "queue.rejected") ids.delete(id);
+    if (event.kind === "queue.dequeued" || event.kind === "queue.cancelled" || event.kind === "queue.failed" || event.kind === "queue.rejected" || event.kind === "queue.steered") ids.delete(id);
   }
   return ids;
 }
@@ -500,11 +502,13 @@ export function shouldRender(kind: string): boolean {
   if (kind === "session.native") return false;
   if (kind === "control.status") return false;
   if (kind === "control.raw") return false;
+  if (kind === "control.steer") return false;
   return true;
 }
 
 export function shouldRenderEvent(event: AstralEvent): boolean {
   if (!shouldRender(event.kind)) return false;
+  if (event.kind.startsWith("queue.")) return false;
   if (event.kind === "control.rate_limit") return false;
   if (isInternalQueueEcho(event)) return false;
   if (isAskPermissionEcho(event)) return false;

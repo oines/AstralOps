@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanelLeft, PanelRight } from "lucide-react";
 import { AstralApi } from "./api";
-import { Composer } from "./components/Composer";
+import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
@@ -105,7 +105,8 @@ export function App(): React.JSX.Element {
     }
     return running;
   }, [activeSessionEvents]);
-  const queuedCount = useMemo(() => countPendingQueue(activeSessionEvents), [activeSessionEvents]);
+  const queuedInputs = useMemo(() => collectPendingQueue(activeSessionEvents), [activeSessionEvents]);
+  const queuedCount = queuedInputs.length;
   const composerPlaceholder = !activeWorkspace
     ? "创建 workspace 后开始"
     : !activeSession
@@ -359,6 +360,19 @@ export function App(): React.JSX.Element {
     [api],
   );
 
+  const handleSteerQueue = useCallback(
+    async (sessionId: string, queueId: string) => {
+      if (!api) return;
+      setError("");
+      try {
+        await api.steerQueuedInput(sessionId, queueId);
+      } catch (steerError) {
+        setError(steerError instanceof Error ? steerError.message : String(steerError));
+      }
+    },
+    [api],
+  );
+
   const handleEventResponse = useCallback(
     async (requestId: string, response: Record<string, unknown>) => {
       if (!api) return;
@@ -462,6 +476,7 @@ export function App(): React.JSX.Element {
           pendingInteraction={pendingInteraction}
           permissionMode={permissionMode}
           placeholder={composerPlaceholder}
+          queuedInputs={queuedInputs}
           runMode={runMode}
           running={sessionRunning}
           onChooseAttachments={handleChooseFiles}
@@ -473,7 +488,9 @@ export function App(): React.JSX.Element {
           onPermissionModeChange={setPermissionMode}
           onRunModeChange={setRunMode}
           onInterrupt={handleInterrupt}
+          onCancelQueuedInput={handleCancelQueue}
           onSend={handleSend}
+          onSteerQueuedInput={handleSteerQueue}
         />
       </main>
       <RightPanel
@@ -574,16 +591,23 @@ function hasLatestTurnFailure(events: AstralEvent[]): boolean {
   return false;
 }
 
-function countPendingQueue(events: AstralEvent[]): number {
-  const pending = new Set<string>();
+function collectPendingQueue(events: AstralEvent[]): QueuedComposerInput[] {
+  const pending = new Map<string, QueuedComposerInput>();
   for (const event of events) {
     const value = event.normalized as Record<string, unknown>;
     const id = textValue(value, "queue_id");
     if (!id) continue;
-    if (event.kind === "queue.queued") pending.add(id);
-    if (event.kind === "queue.dequeued" || event.kind === "queue.cancelled" || event.kind === "queue.failed" || event.kind === "queue.rejected") pending.delete(id);
+    if (event.kind === "queue.queued") {
+      const text = textValue(value, "text");
+      if (value.internal !== true && text.trim() !== "") {
+        pending.set(id, { id, sessionId: event.session_id, text });
+      }
+    }
+    if (event.kind === "queue.dequeued" || event.kind === "queue.cancelled" || event.kind === "queue.failed" || event.kind === "queue.rejected" || event.kind === "queue.steered") {
+      pending.delete(id);
+    }
   }
-  return pending.size;
+  return Array.from(pending.values());
 }
 
 function interactionIDs(value: Record<string, unknown>): string[] {

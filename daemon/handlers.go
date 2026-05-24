@@ -627,6 +627,19 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 	case action == "queue" && len(parts) == 4 && parts[3] == "cancel" && r.Method == http.MethodPost:
 		a.cancelQueuedTurn(sessionID, parts[2])
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	case action == "queue" && len(parts) == 4 && parts[3] == "steer" && r.Method == http.MethodPost:
+		if err := a.steerQueuedTurn(sessionID, parts[2]); err != nil {
+			status := http.StatusConflict
+			if err.Error() == "session not found" {
+				status = http.StatusNotFound
+			}
+			if errors.Is(err, ErrSteerUnsupported) {
+				status = http.StatusNotImplemented
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}

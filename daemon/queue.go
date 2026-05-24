@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -64,6 +65,40 @@ func (a *app) cancelQueuedTurn(sessionID, queueID string) {
 	if cancelled {
 		a.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: session.Agent, Kind: "queue.cancelled", Normalized: map[string]any{"queue_id": queueID}})
 	}
+}
+
+func (a *app) steerQueuedTurn(sessionID, queueID string) error {
+	ss, ok := a.store.getSession(sessionID)
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+	runtime, ok := a.runtimes[ss.Agent]
+	if !ok {
+		return fmt.Errorf("agent runtime is not implemented")
+	}
+	steerer, ok := runtime.(TurnSteerer)
+	if !ok {
+		return ErrSteerUnsupported
+	}
+	turn, ok := a.peekQueuedTurn(sessionID, queueID)
+	if !ok {
+		return fmt.Errorf("queued message not found")
+	}
+	if err := steerer.Steer(sessionID, turn.Input, turn.Options); err != nil {
+		return err
+	}
+	if !a.removeQueuedTurn(sessionID, queueID) {
+		return fmt.Errorf("queued message not found")
+	}
+	normalized := map[string]any{"queue_id": queueID}
+	if turn.Options.Internal {
+		normalized["internal"] = true
+	}
+	if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
+		normalized["text"] = text
+	}
+	a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.steered", Normalized: normalized})
+	return nil
 }
 
 func (a *app) startNextQueuedTurn(sessionID string) {
@@ -131,6 +166,38 @@ func (a *app) popQueuedTurn(sessionID string) (queuedTurn, bool) {
 		a.queues[sessionID] = append([]queuedTurn(nil), queue[1:]...)
 	}
 	return turn, true
+}
+
+func (a *app) peekQueuedTurn(sessionID, queueID string) (queuedTurn, bool) {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+	for _, turn := range a.queues[sessionID] {
+		if turn.ID == queueID {
+			return turn, true
+		}
+	}
+	return queuedTurn{}, false
+}
+
+func (a *app) removeQueuedTurn(sessionID, queueID string) bool {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+	queue := a.queues[sessionID]
+	next := queue[:0]
+	removed := false
+	for _, turn := range queue {
+		if turn.ID == queueID {
+			removed = true
+			continue
+		}
+		next = append(next, turn)
+	}
+	if len(next) == 0 {
+		delete(a.queues, sessionID)
+	} else {
+		a.queues[sessionID] = next
+	}
+	return removed
 }
 
 func (a *app) requeueFront(sessionID string, turn queuedTurn) {

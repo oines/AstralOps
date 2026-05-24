@@ -1,4 +1,4 @@
-import { ArrowUp, Check, ChevronDown, ChevronLeft, ListTodo, Paperclip, Plus, Shield, Square, Target, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ChevronLeft, CornerDownRight, ListTodo, Paperclip, Plus, Shield, Square, Target, X } from "lucide-react";
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import type { ModelInfo, PendingInteraction, PermissionMode, ReasoningEffort, RunMode } from "../types";
@@ -15,6 +15,7 @@ type ComposerProps = {
   pendingInteraction: PendingInteraction | null;
   permissionMode: PermissionMode;
   placeholder: string;
+  queuedInputs: QueuedComposerInput[];
   runMode: RunMode;
   running: boolean;
   onChooseAttachments: () => Promise<string[]>;
@@ -26,7 +27,15 @@ type ComposerProps = {
   onRespond: (requestId: string, response: Record<string, unknown>) => Promise<void>;
   onRunModeChange: (mode: RunMode) => void;
   onInterrupt: () => Promise<void>;
+  onCancelQueuedInput: (sessionId: string, queueId: string) => Promise<void>;
   onSend: (input: string) => Promise<void>;
+  onSteerQueuedInput: (sessionId: string, queueId: string) => Promise<void>;
+};
+
+export type QueuedComposerInput = {
+  id: string;
+  sessionId: string;
+  text: string;
 };
 
 export function Composer({
@@ -40,6 +49,7 @@ export function Composer({
   pendingInteraction,
   permissionMode,
   placeholder,
+  queuedInputs,
   runMode,
   running,
   onChooseAttachments,
@@ -51,7 +61,9 @@ export function Composer({
   onRespond,
   onRunModeChange,
   onInterrupt,
+  onCancelQueuedInput,
   onSend,
+  onSteerQueuedInput,
 }: ComposerProps): React.JSX.Element {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -122,6 +134,9 @@ export function Composer({
   return (
     <footer className="pointer-events-none absolute inset-x-0 bottom-0 px-6 pb-5" ref={footerRef}>
       <div className="pointer-events-auto mx-auto grid w-[min(760px,calc(100%-72px))] gap-2 rounded-[18px] border border-[#d8d5cd] bg-[#fffefa]/96 px-3 py-2.5 shadow-[0_10px_30px_rgba(37,34,29,0.10),0_1px_4px_rgba(37,34,29,0.08)] backdrop-blur transition-all duration-150 ease-out">
+        {queuedInputs.length > 0 ? (
+          <QueuedInputShelf inputs={queuedInputs} running={running} onCancel={onCancelQueuedInput} onSteer={onSteerQueuedInput} />
+        ) : null}
         {attachments.length > 0 ? (
           <div className="flex flex-wrap gap-1.5 px-0.5">
             {attachments.map((path) => (
@@ -269,6 +284,47 @@ export function Composer({
   );
 }
 
+function QueuedInputShelf({
+  inputs,
+  onCancel,
+  onSteer,
+  running,
+}: {
+  inputs: QueuedComposerInput[];
+  onCancel: (sessionId: string, queueId: string) => Promise<void>;
+  onSteer: (sessionId: string, queueId: string) => Promise<void>;
+  running: boolean;
+}): React.JSX.Element {
+  return (
+    <div className="grid max-h-28 gap-1.5 overflow-y-auto rounded-[14px] bg-[#f7f6f3] p-1.5">
+      {inputs.map((item) => (
+        <div className="flex min-h-8 min-w-0 items-center gap-2 rounded-[11px] px-2 text-[13px] font-semibold text-[#5f6368]" key={item.id}>
+          <span className="min-w-0 flex-1 truncate">{item.text || "等待发送"}</span>
+          {running ? (
+            <button
+              className="flex h-7 shrink-0 items-center gap-1 rounded-full px-2 text-[#5164d8] transition-colors duration-150 ease-out hover:bg-[#eceffd]"
+              type="button"
+              title="插入当前任务"
+              onClick={() => void onSteer(item.sessionId, item.id)}
+            >
+              <CornerDownRight size={14} strokeWidth={2} />
+              <span>引导</span>
+            </button>
+          ) : null}
+          <button
+            className="grid size-7 shrink-0 place-items-center rounded-full text-[#8f9296] transition-colors duration-150 ease-out hover:bg-[#eeece8] hover:text-[#343438]"
+            type="button"
+            title="取消排队"
+            aria-label="取消排队"
+            onClick={() => void onCancel(item.sessionId, item.id)}
+          >
+            <X size={14} strokeWidth={2} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function ActionMenu({
   onAttach,
