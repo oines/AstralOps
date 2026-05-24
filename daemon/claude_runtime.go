@@ -335,7 +335,7 @@ func claudeApprovalFromToolResult(session Session, ev AstralEvent, toolStarts ma
 		return AstralEvent{}, false
 	}
 	result := firstString(value["result"], value["content"])
-	if !strings.Contains(result, "This command requires approval") {
+	if !isClaudeCommandApprovalError(result) {
 		return AstralEvent{}, false
 	}
 	id := stringValue(value["id"])
@@ -350,12 +350,25 @@ func claudeApprovalFromToolResult(session Session, ev AstralEvent, toolStarts ma
 		"request_id":  id,
 		"tool_name":   toolName,
 		"params":      params,
-		"reason":      "This command requires approval",
+		"reason":      claudeCommandApprovalReason(result),
 	}
 	if command != "" {
 		normalized["command"] = command
 	}
 	return baseClaudeEvent(session, "approval.requested", normalized, ev.Raw), true
+}
+
+func isClaudeCommandApprovalError(result string) bool {
+	return strings.Contains(result, "This command requires approval") ||
+		(strings.Contains(result, "require approval") && strings.Contains(result, "contains multiple operations"))
+}
+
+func claudeCommandApprovalReason(result string) string {
+	result = strings.TrimSpace(strings.TrimPrefix(result, "Error:"))
+	if result == "" {
+		return "This command requires approval"
+	}
+	return result
 }
 
 func claudeLineType(line []byte) string {

@@ -515,6 +515,7 @@ export function shouldRenderEvent(event: AstralEvent): boolean {
   if (isNonInteractiveClaudeResultPermissionApproval(event)) return false;
   if (isClaudePlanFileToolResult(event)) return false;
   if (event.kind === "control.warning" && isInternalCodexWarning(event)) return false;
+  if (isClaudeCancelledParallelToolError(event)) return false;
   return true;
 }
 
@@ -544,6 +545,14 @@ export function isInternalCodexWarning(event: AstralEvent): boolean {
     (message.includes("codex_core::tools::router") && message.includes("exec-server transport")) ||
     message.includes("Failed to create unified exec process: exec-server transport disconnected")
   );
+}
+
+export function isClaudeCancelledParallelToolError(event: AstralEvent): boolean {
+  if (event.kind !== "tool.completed") return false;
+  const value = event.normalized as Record<string, unknown>;
+  if (value.is_error !== true) return false;
+  const result = textValue(value, "result") || textValue(value, "content");
+  return result.includes("Cancelled: parallel tool call") && result.includes("errored");
 }
 
 export function isInternalQueueEcho(event: AstralEvent): boolean {

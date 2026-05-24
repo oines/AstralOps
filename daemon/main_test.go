@@ -1111,6 +1111,34 @@ func TestClaudeCommandRequiresApprovalToolResultRequestsPermission(t *testing.T)
 	}
 }
 
+func TestClaudeMultipleOperationApprovalToolResultRequestsPermission(t *testing.T) {
+	session := Session{ID: "sess_fixture", WorkspaceID: "ws_fixture", Agent: AgentClaude}
+	toolStarts := map[string]AstralEvent{}
+	approvals := []AstralEvent{}
+
+	for _, line := range readFixtureLines(t, "../fixtures/claude-stream-json/real-local-command-multiple-operations-approval.jsonl") {
+		for _, ev := range normalizeClaudeStreamJSON(session, []byte(line)) {
+			if ev.Kind == "tool.started" {
+				toolStarts[stringValue(mapValue(ev.Normalized)["id"])] = ev
+			}
+			if approval, ok := claudeApprovalFromToolResult(session, ev, toolStarts); ok {
+				approvals = append(approvals, approval)
+			}
+		}
+	}
+
+	if len(approvals) != 1 {
+		t.Fatalf("approvals = %#v, want one", approvals)
+	}
+	value := mapValue(approvals[0].Normalized)
+	if stringValue(value["command"]) != `sysctl -n hw.memsize | awk '{printf "%.1f GB\n", $1/1073741824}'` {
+		t.Fatalf("approval command = %#v", value["command"])
+	}
+	if !strings.Contains(stringValue(value["reason"]), "contains multiple operations") {
+		t.Fatalf("approval reason = %#v", value["reason"])
+	}
+}
+
 func TestClaudeLocalRuntimePausesWhenCommandRequiresApproval(t *testing.T) {
 	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
