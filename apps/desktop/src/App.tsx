@@ -43,6 +43,7 @@ export function App(): React.JSX.Element {
   const [api, setApi] = useState<AstralApi | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspaceConnections, setWorkspaceConnections] = useState<Record<string, WorkspaceConnection>>({});
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>("");
   const [activeSession, setActiveSession] = useState<Session | null>(null);
@@ -90,8 +91,8 @@ export function App(): React.JSX.Element {
   const activeSessionId = activeSession?.id ?? "";
   const canUseDaemon = connection === "connected" || connection === "reconnecting";
   const activeWorkspaceConnection = useMemo(
-    () => latestWorkspaceConnection(selectWorkspaceEvents(eventIndex, activeWorkspaceId)),
-    [activeWorkspaceId, eventIndex],
+    () => workspaceConnections[activeWorkspaceId] ?? latestWorkspaceConnection(selectWorkspaceEvents(eventIndex, activeWorkspaceId)),
+    [activeWorkspaceId, eventIndex, workspaceConnections],
   );
   const activeSessionEvents = useMemo(
     () => (activeSessionId ? selectSessionEvents(eventIndex, activeSessionId) : []),
@@ -130,11 +131,21 @@ export function App(): React.JSX.Element {
       client.listSessions(),
       client.events({ limit: EVENT_WINDOW_SIZE }),
     ]);
+    const connectionResults = await Promise.allSettled(
+      workspaceResponse
+        .filter((workspace) => workspace.target === "ssh")
+        .map(async (workspace) => client.workspaceConnection(workspace.id)),
+    );
+    const connectionMap: Record<string, WorkspaceConnection> = {};
+    for (const result of connectionResults) {
+      if (result.status === "fulfilled") connectionMap[result.value.workspace_id] = result.value;
+    }
     const initialSession = sessionResponse[0] ?? null;
     const sessionEvents = initialSession ? await client.events({ session_id: initialSession.id, limit: EVENT_WINDOW_SIZE }) : [];
     const eventResponse = [...recentEvents, ...sessionEvents];
     setHealth(healthResponse);
     setWorkspaces(workspaceResponse);
+    setWorkspaceConnections(connectionMap);
     setSessions(sessionResponse);
     setEventIndex(mergeEventIndex(EMPTY_EVENT_INDEX, eventResponse));
     if (initialSession) {
@@ -160,7 +171,12 @@ export function App(): React.JSX.Element {
         source = client.eventsSource(afterSeq);
         source.addEventListener("astral-event", (message) => {
           try {
-            queueLiveEvent(JSON.parse((message as MessageEvent).data) as AstralEvent);
+            const event = JSON.parse((message as MessageEvent).data) as AstralEvent;
+            if (event.kind === "workspace.connection") {
+              const state = event.normalized as WorkspaceConnection;
+              setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
+            }
+            queueLiveEvent(event);
           } catch {
             setError("bad SSE event payload");
           }
@@ -239,7 +255,10 @@ export function App(): React.JSX.Element {
       setActiveWorkspaceId(workspace.id);
       setActiveSession(null);
       setWorkspaceOpen(false);
-      await api.connectWorkspace(workspace.id);
+      if (workspace.target === "ssh") {
+        const state = await api.connectWorkspace(workspace.id);
+        setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
+      }
     },
     [api],
   );
@@ -285,6 +304,11 @@ export function App(): React.JSX.Element {
       setError("");
       await api.deleteWorkspace(workspaceId);
       setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
+      setWorkspaceConnections((current) => {
+        const next = { ...current };
+        delete next[workspaceId];
+        return next;
+      });
       setSessions((current) => current.filter((session) => session.workspace_id !== workspaceId));
       setEventIndex((current) => removeWorkspaceEvents(current, workspaceId));
       if (activeWorkspaceId === workspaceId) {
@@ -435,6 +459,7 @@ export function App(): React.JSX.Element {
         sessionTitles={sessionTitles}
         width={sidebarWidth}
         workspaces={workspaces}
+        workspaceConnections={workspaceConnections}
         onCreateSession={handleCreateSession}
         onCreateWorkspace={() => setWorkspaceOpen(true)}
         onDeleteSession={(sessionId) => void deleteSession(sessionId)}

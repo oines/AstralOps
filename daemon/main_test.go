@@ -1414,6 +1414,10 @@ func TestSSHCallRetriesFiveTransportFailuresThenStopsWorkspace(t *testing.T) {
 	if len(app.queues[session.ID]) != 0 {
 		t.Fatalf("queue was not cleared: %#v", app.queues[session.ID])
 	}
+	events := st.queryEvents(workspace.ID, "", 0)
+	if !hasWorkspaceConnectionRetry(events, sshProxyMaxAttempts, sshProxyMaxAttempts) {
+		t.Fatalf("events = %#v, want reconnecting %d/%d", events, sshProxyMaxAttempts, sshProxyMaxAttempts)
+	}
 }
 
 func TestSSHCallRetriesTransparentlyUntilSuccess(t *testing.T) {
@@ -1453,6 +1457,79 @@ func TestSSHCallRetriesTransparentlyUntilSuccess(t *testing.T) {
 	}
 	if stringValue(out["hostname"]) != "host" {
 		t.Fatalf("hello result = %#v", out)
+	}
+	events := st.queryEvents(workspace.ID, "", 0)
+	if !hasWorkspaceConnectionRetry(events, 1, sshProxyMaxAttempts) {
+		t.Fatalf("events = %#v, want reconnecting 1/%d", events, sshProxyMaxAttempts)
+	}
+}
+
+func TestSSHRestoreReconnectsPreviouslyConnectedWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentClaude,
+		SSH: &SSHConfig{
+			Endpoint:  "root@example.test",
+			RemoteCWD: "/root",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connected := initialSSHConnection(workspace, connectionConnected)
+	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: workspace.Agent, Kind: "workspace.connection", Normalized: connected}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}}
+	app.ssh = newSSHManager(app)
+	installFakeSSHProxy(t, dir, "1")
+
+	app.ssh.restorePersistedConnections(context.Background())
+	waitForWorkspaceConnectionStatus(t, app.ssh, workspace, connectionConnected)
+	if got := readCounter(t, filepath.Join(dir, "proxy-count")); got == 0 {
+		t.Fatal("restore did not reconnect previously connected workspace")
+	}
+}
+
+func TestSSHRestoreDoesNotReconnectDisconnectedWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentClaude,
+		SSH: &SSHConfig{
+			Endpoint:  "root@example.test",
+			RemoteCWD: "/root",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disconnected := initialSSHConnection(workspace, connectionDisconnected)
+	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: workspace.Agent, Kind: "workspace.connection", Normalized: disconnected}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}}
+	app.ssh = newSSHManager(app)
+	installFakeSSHProxy(t, dir, "1")
+
+	app.ssh.restorePersistedConnections(context.Background())
+	time.Sleep(100 * time.Millisecond)
+	if got := readCounter(t, filepath.Join(dir, "proxy-count")); got != 0 {
+		t.Fatalf("proxy attempts = %d, want 0 for disconnected restore", got)
+	}
+	if state := app.ssh.getConnection(workspace); state.Status != connectionDisconnected {
+		t.Fatalf("connection status = %q, want disconnected", state.Status)
 	}
 }
 
@@ -1833,6 +1910,41 @@ func waitForKindCount(t *testing.T, st *store, sessionID, kind string, want int)
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %d events of kind %s", want, kind)
+}
+
+func waitForWorkspaceConnectionStatus(t *testing.T, manager *sshManager, workspace Workspace, status string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if state := manager.getConnection(workspace); state.Status == status {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for workspace connection status %s", status)
+}
+
+func hasWorkspaceConnectionRetry(events []AstralEvent, attempt int, max int) bool {
+	for _, event := range events {
+		if event.Kind != "workspace.connection" {
+			continue
+		}
+		state := normalizedWorkspaceConnection(event.Normalized)
+		if state.Status != connectionReconnecting {
+			continue
+		}
+		if state.RetryAttempt == attempt && state.RetryMax == max {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedWorkspaceConnection(normalized any) WorkspaceConnection {
+	var state WorkspaceConnection
+	body, _ := json.Marshal(normalized)
+	_ = json.Unmarshal(body, &state)
+	return state
 }
 
 func eventKinds(events []AstralEvent) []string {

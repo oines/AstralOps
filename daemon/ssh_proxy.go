@@ -24,6 +24,7 @@ const (
 	connectionDisconnected = "disconnected"
 	connectionConnecting   = "connecting"
 	connectionConnected    = "connected"
+	connectionReconnecting = "reconnecting"
 	connectionDegraded     = "degraded"
 	connectionFailed       = "failed"
 	sshProxyMaxAttempts    = 5
@@ -46,6 +47,8 @@ type WorkspaceConnection struct {
 	HelperStatus string         `json:"helper_status,omitempty"`
 	Capabilities map[string]any `json:"capabilities,omitempty"`
 	Message      string         `json:"message,omitempty"`
+	RetryAttempt int            `json:"retry_attempt,omitempty"`
+	RetryMax     int            `json:"retry_max,omitempty"`
 	UpdatedAt    string         `json:"updated_at"`
 	Raw          map[string]any `json:"raw,omitempty"`
 }
@@ -64,6 +67,33 @@ type sshTarget struct {
 
 func newSSHManager(a *app) *sshManager {
 	return &sshManager{app: a, by: map[string]*sshTarget{}}
+}
+
+func (m *sshManager) restorePersistedConnections(ctx context.Context) {
+	for _, ws := range m.app.store.listWorkspaces() {
+		if ws.Target != "ssh" {
+			continue
+		}
+		last, ok := m.app.store.latestWorkspaceConnection(ws.ID)
+		if !ok {
+			continue
+		}
+		state := mergeSSHConnectionDefaults(ws, last)
+		if shouldRestoreSSHConnection(state.Status) {
+			state.Status = connectionReconnecting
+			state.Message = "restoring previous ssh connection"
+			state.RetryAttempt = 0
+			state.RetryMax = sshProxyMaxAttempts
+			m.setState(ws, state)
+			go func(workspace Workspace) {
+				connectCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+				defer cancel()
+				_, _ = m.connect(connectCtx, workspace)
+			}(ws)
+			continue
+		}
+		m.seedState(ws, state)
+	}
 }
 
 func (m *sshManager) getConnection(ws Workspace) WorkspaceConnection {
@@ -85,19 +115,27 @@ func (m *sshManager) getConnection(ws Workspace) WorkspaceConnection {
 }
 
 func (m *sshManager) connect(ctx context.Context, ws Workspace) (WorkspaceConnection, error) {
+	return m.connectInternal(ctx, ws, true)
+}
+
+func (m *sshManager) connectInternal(ctx context.Context, ws Workspace, emitProgress bool) (WorkspaceConnection, error) {
 	if ws.Target != "ssh" {
 		return m.getConnection(ws), nil
 	}
 	if ws.SSH == nil {
 		return WorkspaceConnection{}, errors.New("ssh workspace is missing ssh config")
 	}
-	m.setState(ws, initialSSHConnection(ws, connectionConnecting))
+	if emitProgress {
+		m.setState(ws, initialSSHConnection(ws, connectionConnecting))
+	}
 
 	probe, err := m.probe(ctx, ws)
 	if err != nil {
 		state := initialSSHConnection(ws, connectionFailed)
 		state.Message = err.Error()
-		m.setState(ws, state)
+		if emitProgress {
+			m.setState(ws, state)
+		}
 		return state, err
 	}
 	helper, err := m.ensureHelper(ctx, ws, probe)
@@ -110,7 +148,9 @@ func (m *sshManager) connect(ctx context.Context, ws Workspace) (WorkspaceConnec
 		state.RemoteHost = probe.Host
 		state.Capabilities = probeCapabilities(probe)
 		state.Message = err.Error()
-		m.setState(ws, state)
+		if emitProgress {
+			m.setState(ws, state)
+		}
 		return state, err
 	}
 	proxy, err := startProxyClient(ws, helper)
@@ -125,7 +165,9 @@ func (m *sshManager) connect(ctx context.Context, ws Workspace) (WorkspaceConnec
 		state.HelperPath = helper.RemotePath
 		state.HelperStatus = "uploaded"
 		state.Message = err.Error()
-		m.setState(ws, state)
+		if emitProgress {
+			m.setState(ws, state)
+		}
 		return state, err
 	}
 	hello, err := proxy.hello(ctx)
@@ -133,7 +175,9 @@ func (m *sshManager) connect(ctx context.Context, ws Workspace) (WorkspaceConnec
 		_ = proxy.close()
 		state := initialSSHConnection(ws, connectionFailed)
 		state.Message = err.Error()
-		m.setState(ws, state)
+		if emitProgress {
+			m.setState(ws, state)
+		}
 		return state, err
 	}
 	state := initialSSHConnection(ws, connectionConnected)
@@ -174,6 +218,10 @@ func (m *sshManager) disconnect(ws Workspace) WorkspaceConnection {
 }
 
 func (m *sshManager) proxyFor(ctx context.Context, ws Workspace) (*proxyClient, WorkspaceConnection, error) {
+	return m.proxyForWithProgress(ctx, ws, true)
+}
+
+func (m *sshManager) proxyForWithProgress(ctx context.Context, ws Workspace, emitConnectProgress bool) (*proxyClient, WorkspaceConnection, error) {
 	if ws.Target != "ssh" {
 		return nil, m.getConnection(ws), errors.New("workspace is not ssh")
 	}
@@ -186,7 +234,7 @@ func (m *sshManager) proxyFor(ctx context.Context, ws Workspace) (*proxyClient, 
 		return proxy, state, nil
 	}
 	m.mu.Unlock()
-	state, err := m.connect(ctx, ws)
+	state, err := m.connectInternal(ctx, ws, emitConnectProgress)
 	if err != nil {
 		return nil, state, err
 	}
@@ -202,7 +250,7 @@ func (m *sshManager) proxyFor(ctx context.Context, ws Workspace) (*proxyClient, 
 func (m *sshManager) call(ctx context.Context, ws Workspace, method string, params any, out any) error {
 	var lastErr error
 	for attempt := 1; attempt <= sshProxyMaxAttempts; attempt++ {
-		proxy, _, err := m.proxyFor(ctx, ws)
+		proxy, _, err := m.proxyForWithProgress(ctx, ws, attempt == 1)
 		if err != nil {
 			lastErr = err
 		} else {
@@ -219,6 +267,7 @@ func (m *sshManager) call(ctx context.Context, ws Workspace, method string, para
 		if ctx.Err() != nil {
 			break
 		}
+		m.setReconnecting(ws, attempt, sshProxyMaxAttempts, lastErr)
 		if attempt < sshProxyMaxAttempts {
 			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
 		}
@@ -237,7 +286,7 @@ func (m *sshManager) call(ctx context.Context, ws Workspace, method string, para
 func (m *sshManager) startPTY(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
 	var lastErr error
 	for attempt := 1; attempt <= sshProxyMaxAttempts; attempt++ {
-		proxy, _, err := m.proxyFor(ctx, ws)
+		proxy, _, err := m.proxyForWithProgress(ctx, ws, attempt == 1)
 		if err != nil {
 			lastErr = err
 		} else {
@@ -262,6 +311,7 @@ func (m *sshManager) startPTY(ctx context.Context, ws Workspace, id string, para
 		if ctx.Err() != nil {
 			break
 		}
+		m.setReconnecting(ws, attempt, sshProxyMaxAttempts, lastErr)
 		if attempt < sshProxyMaxAttempts {
 			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
 		}
@@ -311,6 +361,27 @@ func (m *sshManager) markDegraded(ws Workspace, message string) {
 	m.emitConnection(ws, state)
 }
 
+func (m *sshManager) setReconnecting(ws Workspace, attempt int, max int, err error) {
+	state := m.connectionStateForUpdate(ws)
+	state.Status = connectionReconnecting
+	state.HelperStatus = "reconnecting"
+	state.RetryAttempt = attempt
+	state.RetryMax = max
+	if err != nil {
+		state.Message = err.Error()
+	}
+	m.setState(ws, state)
+}
+
+func (m *sshManager) connectionStateForUpdate(ws Workspace) WorkspaceConnection {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if target := m.by[ws.ID]; target != nil && target.state.WorkspaceID != "" {
+		return target.state
+	}
+	return initialSSHConnection(ws, connectionDisconnected)
+}
+
 func (m *sshManager) setState(ws Workspace, state WorkspaceConnection) {
 	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	m.mu.Lock()
@@ -322,6 +393,18 @@ func (m *sshManager) setState(ws Workspace, state WorkspaceConnection) {
 	target.state = state
 	m.mu.Unlock()
 	m.emitConnection(ws, state)
+}
+
+func (m *sshManager) seedState(ws Workspace, state WorkspaceConnection) {
+	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	m.mu.Lock()
+	target := m.by[ws.ID]
+	if target == nil {
+		target = &sshTarget{workspace: ws}
+		m.by[ws.ID] = target
+	}
+	target.state = state
+	m.mu.Unlock()
 }
 
 func (m *sshManager) emitConnection(ws Workspace, state WorkspaceConnection) {
@@ -541,6 +624,47 @@ func initialSSHConnection(ws Workspace, status string) WorkspaceConnection {
 		RemoteHost:  host,
 		DisplayCWD:  remoteDisplayCWD(user, host, remoteCWD, endpoint),
 		UpdatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func mergeSSHConnectionDefaults(ws Workspace, state WorkspaceConnection) WorkspaceConnection {
+	base := initialSSHConnection(ws, state.Status)
+	if state.WorkspaceID == "" {
+		state.WorkspaceID = base.WorkspaceID
+	}
+	if state.Target == "" {
+		state.Target = base.Target
+	}
+	if state.Endpoint == "" {
+		state.Endpoint = base.Endpoint
+	}
+	if state.Port == 0 {
+		state.Port = base.Port
+	}
+	if state.RemoteCWD == "" {
+		state.RemoteCWD = base.RemoteCWD
+	}
+	if state.RemoteUser == "" {
+		state.RemoteUser = base.RemoteUser
+	}
+	if state.RemoteHost == "" {
+		state.RemoteHost = base.RemoteHost
+	}
+	if state.DisplayCWD == "" {
+		state.DisplayCWD = remoteDisplayCWD(state.RemoteUser, state.RemoteHost, state.RemoteCWD, state.Endpoint)
+	}
+	if state.UpdatedAt == "" {
+		state.UpdatedAt = base.UpdatedAt
+	}
+	return state
+}
+
+func shouldRestoreSSHConnection(status string) bool {
+	switch status {
+	case connectionConnected, connectionConnecting, connectionReconnecting, connectionDegraded:
+		return true
+	default:
+		return false
 	}
 }
 

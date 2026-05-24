@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -68,6 +69,7 @@ func main() {
 	}
 	a.ssh = newSSHManager(a)
 	a.runtimes = newRuntimeRegistry(a)
+	a.ssh.restorePersistedConnections(context.Background())
 
 	if err := writeRuntime(dataDir, port, token); err != nil {
 		log.Fatal(err)

@@ -1,6 +1,6 @@
 import { Bot, Check, ChevronRight, Folder, LoaderCircle, Plus, TerminalSquare, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { AgentKind, Session, Workspace } from "../types";
+import type { AgentKind, Session, Workspace, WorkspaceConnection } from "../types";
 
 type SidebarProps = {
   activeSessionId: string;
@@ -10,6 +10,7 @@ type SidebarProps = {
   sessionTitles: Record<string, string>;
   width: number;
   workspaces: Workspace[];
+  workspaceConnections: Record<string, WorkspaceConnection>;
   onCreateSession: (workspaceId: string, agent: AgentKind) => Promise<void>;
   onCreateWorkspace: () => void;
   onDeleteSession: (sessionId: string) => void;
@@ -27,6 +28,7 @@ export function Sidebar({
   sessionTitles,
   width,
   workspaces,
+  workspaceConnections,
   onCreateSession,
   onCreateWorkspace,
   onDeleteSession,
@@ -138,6 +140,7 @@ export function Sidebar({
               sessionStates={sessionStates}
               sessionTitles={sessionTitles}
               workspace={workspace}
+              workspaceConnection={workspaceConnections[workspace.id]}
               onCreateSession={async (agent) => {
                 setMenuWorkspaceId("");
                 await onCreateSession(workspace.id, agent);
@@ -183,6 +186,8 @@ type WorkspaceRowProps = {
   collapsed: boolean;
   confirmDelete: boolean;
   name: string;
+  connection?: WorkspaceConnection;
+  target: Workspace["target"];
   menuOpen: boolean;
   sessionCount: number;
   onCreateSession: (agent: AgentKind) => Promise<void>;
@@ -200,6 +205,7 @@ type WorkspaceBlockProps = {
   sessionStates: Record<string, string>;
   sessionTitles: Record<string, string>;
   workspace: Workspace;
+  workspaceConnection?: WorkspaceConnection;
   onCreateSession: (agent: AgentKind) => Promise<void>;
   onDeleteSession: (sessionId: string) => void;
   onDeleteWorkspace: () => void;
@@ -223,6 +229,7 @@ function WorkspaceBlock({
   sessionStates,
   sessionTitles,
   workspace,
+  workspaceConnection,
 }: WorkspaceBlockProps): React.JSX.Element {
   return (
     <div className="grid gap-1.5">
@@ -231,7 +238,9 @@ function WorkspaceBlock({
         confirmDelete={confirmDelete?.type === "workspace" && confirmDelete.id === workspace.id}
         menuOpen={menuOpen}
         name={workspace.name}
+        connection={workspaceConnection}
         sessionCount={sessions.length}
+        target={workspace.target}
         onCreateSession={onCreateSession}
         onDelete={onDeleteWorkspace}
         onClick={onToggleCollapsed}
@@ -266,6 +275,7 @@ function WorkspaceBlock({
 function WorkspaceRow({
   collapsed,
   confirmDelete,
+  connection,
   menuOpen,
   name,
   onCreateSession,
@@ -273,10 +283,13 @@ function WorkspaceRow({
   onClick,
   onToggleMenu,
   sessionCount,
+  target,
 }: WorkspaceRowProps): React.JSX.Element {
+  const status = target === "ssh" ? workspaceConnectionLabel(connection) : null;
+  const connecting = connection?.status === "connecting" || connection?.status === "reconnecting";
   return (
     <div
-      className={`group relative flex h-9 w-full cursor-default items-center gap-1.5 rounded-xl pl-1 pr-2 transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.035] ${
+      className={`group relative grid min-h-11 w-full cursor-default grid-cols-[28px_14px_17px_minmax(0,1fr)_28px] items-center gap-1.5 rounded-xl py-1 pl-1 pr-2 transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.035] ${
         collapsed && sessionCount > 0 ? "bg-[#eeece7] text-[#4f5358]" : "text-[#6f7378]"
       }`}
       data-sidebar-menu
@@ -302,14 +315,22 @@ function WorkspaceRow({
       </button>
       <ChevronRight className={`shrink-0 text-[#9a9da1] transition-transform duration-150 ease-out ${collapsed ? "" : "rotate-90"}`} size={14} strokeWidth={2.1} />
       <Folder className="shrink-0 text-[#74777b]" size={17} strokeWidth={1.8} />
-      <span className="min-w-0 flex-1 truncate text-left text-[16px] font-semibold">
-        {name}
-      </span>
-      {collapsed && sessionCount > 0 && !confirmDelete ? (
-        <span className="shrink-0 rounded-full bg-black/[0.045] px-2 py-0.5 text-[11px] font-semibold text-[#8d8f94]">
-          {sessionCount}
-        </span>
-      ) : null}
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="min-w-0 truncate text-left text-[16px] font-semibold">{name}</span>
+          {collapsed && sessionCount > 0 && !confirmDelete ? (
+            <span className="shrink-0 rounded-full bg-black/[0.045] px-2 py-0.5 text-[11px] font-semibold text-[#8d8f94]">
+              {sessionCount}
+            </span>
+          ) : null}
+        </div>
+        {status && !confirmDelete ? (
+          <div className={`mt-0.5 flex min-w-0 items-center gap-1 truncate text-[11px] font-semibold leading-3 ${workspaceConnectionClass(connection?.status)}`} title={status}>
+            {connecting ? <LoaderCircle className="shrink-0 animate-spin" size={11} strokeWidth={2} aria-hidden="true" /> : null}
+            <span className="truncate">{status}</span>
+          </div>
+        ) : null}
+      </div>
       <button
         className="grid size-7 shrink-0 place-items-center rounded-md text-[#9a9da1] transition-colors duration-150 ease-out hover:bg-black/[0.06] hover:text-[#202124]"
         type="button"
@@ -426,4 +447,30 @@ function agentLabel(agent: AgentKind): string {
 
 function shortAgentLabel(agent: AgentKind): string {
   return agent === "claude" ? "Claude" : "Codex";
+}
+
+function workspaceConnectionLabel(connection?: WorkspaceConnection): string {
+  switch (connection?.status) {
+    case "connected":
+      return "已连接";
+    case "connecting":
+      return "连接中";
+    case "reconnecting":
+      if (connection.retry_attempt && connection.retry_max) return `重连中 ${connection.retry_attempt}/${connection.retry_max}`;
+      return "重连中";
+    default:
+      return "已断开";
+  }
+}
+
+function workspaceConnectionClass(status?: string): string {
+  switch (status) {
+    case "connected":
+      return "text-[#2f8c58]";
+    case "connecting":
+    case "reconnecting":
+      return "text-[#2f8cff]";
+    default:
+      return "text-[#a0a3a7]";
+  }
 }

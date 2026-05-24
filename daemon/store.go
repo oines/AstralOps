@@ -221,6 +221,24 @@ func (s *store) getWorkspace(id string) (Workspace, bool) {
 	return ws, ok
 }
 
+func (s *store) latestWorkspaceConnection(workspaceID string) (WorkspaceConnection, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := len(s.events) - 1; index >= 0; index-- {
+		ev := s.events[index]
+		if ev.WorkspaceID != workspaceID || ev.Kind != "workspace.connection" {
+			continue
+		}
+		var state WorkspaceConnection
+		body, _ := json.Marshal(ev.Normalized)
+		if err := json.Unmarshal(body, &state); err != nil || state.WorkspaceID == "" {
+			continue
+		}
+		return state, true
+	}
+	return WorkspaceConnection{}, false
+}
+
 func (s *store) createWorkspace(req createWorkspaceRequest) (Workspace, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	id := "ws_" + randomID(12)
