@@ -155,15 +155,6 @@ func normalizeClaudeResultPermissionDenials(session Session, raw map[string]any)
 				"path":        toolInput["planFilePath"],
 				"params":      toolInput,
 			}, raw))
-		} else {
-			events = append(events, baseClaudeEvent(session, "approval.requested", map[string]any{
-				"source":      "claude",
-				"approval_id": toolUseID,
-				"request_id":  toolUseID,
-				"kind":        "permission",
-				"tool_name":   toolName,
-				"params":      toolInput,
-			}, raw))
 		}
 	}
 	return events

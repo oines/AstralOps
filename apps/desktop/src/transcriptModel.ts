@@ -508,6 +508,7 @@ export function shouldRenderEvent(event: AstralEvent): boolean {
   if (event.kind === "control.rate_limit") return false;
   if (isInternalQueueEcho(event)) return false;
   if (isAskPermissionEcho(event)) return false;
+  if (isNonInteractiveClaudeResultPermissionApproval(event)) return false;
   if (isClaudePlanFileToolResult(event)) return false;
   if (event.kind === "control.warning" && isInternalCodexWarning(event)) return false;
   return true;
@@ -516,6 +517,15 @@ export function shouldRenderEvent(event: AstralEvent): boolean {
 export function isAskPermissionEcho(event: AstralEvent): boolean {
   const value = event.normalized as Record<string, unknown>;
   return event.kind === "approval.requested" && textValue(value, "kind") === "permission" && textValue(value, "tool_name") === "AskUserQuestion";
+}
+
+export function isNonInteractiveClaudeResultPermissionApproval(event: AstralEvent): boolean {
+  if (event.kind !== "approval.requested") return false;
+  const value = event.normalized as Record<string, unknown>;
+  if (textValue(value, "source") !== "claude" || textValue(value, "kind") !== "permission") return false;
+  const raw = event.raw;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  return textValue(raw as Record<string, unknown>, "type") === "result";
 }
 
 export function isInternalCodexWarning(event: AstralEvent): boolean {

@@ -21,6 +21,7 @@ import {
   type EventIndex,
   type SessionWindows,
 } from "./eventStore";
+import { isNonInteractiveClaudeResultPermissionApproval } from "./transcriptModel";
 import type {
   AgentKind,
   AstralEvent,
@@ -554,6 +555,7 @@ function findPendingInteraction(events: AstralEvent[]): PendingInteraction | nul
     if (event.kind !== "approval.requested" && event.kind !== "ask.requested") continue;
     const value = event.normalized as Record<string, unknown>;
     if (isAskPermissionEcho(event.kind, value)) continue;
+    if (isNonInteractiveClaudeResultPermissionApproval(event)) continue;
     const ids = interactionIDs(value);
     const id = ids[0];
     if (!id || ids.some((candidate) => resolved.has(candidate))) continue;

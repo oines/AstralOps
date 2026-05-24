@@ -285,6 +285,49 @@ func TestListSessionsTitleSkipsInteractionFollowupText(t *testing.T) {
 	}
 }
 
+func TestClaudeResultSkipsStalePermissionDenialsAfterFinalAnswer(t *testing.T) {
+	session := Session{ID: "sess_claude", WorkspaceID: "ws", Agent: AgentClaude}
+	raw := map[string]any{
+		"type":            "result",
+		"subtype":         "success",
+		"terminal_reason": "completed",
+		"result":          "以下是系统环境扫描结果。",
+		"permission_denials": []any{
+			map[string]any{
+				"tool_name":   "Bash",
+				"tool_use_id": "call_bash",
+				"tool_input":  map[string]any{"command": "npm -v"},
+			},
+		},
+	}
+
+	events := normalizeClaudeResultPermissionDenials(session, raw)
+	if len(events) != 0 {
+		t.Fatalf("events = %#v, want stale command approval suppressed", events)
+	}
+}
+
+func TestClaudeResultSkipsCommandPermissionDenialsBecauseTheyAreNotLiveRequests(t *testing.T) {
+	session := Session{ID: "sess_claude", WorkspaceID: "ws", Agent: AgentClaude}
+	raw := map[string]any{
+		"type":    "result",
+		"subtype": "success",
+		"result":  "这个 Bash 命令需要授权后才能执行。",
+		"permission_denials": []any{
+			map[string]any{
+				"tool_name":   "Bash",
+				"tool_use_id": "call_bash",
+				"tool_input":  map[string]any{"command": "npm -v"},
+			},
+		},
+	}
+
+	events := normalizeClaudeResultPermissionDenials(session, raw)
+	if len(events) != 0 {
+		t.Fatalf("events = %#v, want command denial preserved only in raw result", events)
+	}
+}
+
 func TestStoreEventWindowQuery(t *testing.T) {
 	dir := t.TempDir()
 	st, err := loadStore(dir)
