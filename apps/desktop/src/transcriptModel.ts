@@ -8,6 +8,7 @@ export type TurnGroup = {
   user?: AstralEvent;
   assistant: AstralEvent[];
   details: AstralEvent[];
+  timeline: AstralEvent[];
 };
 
 export type CommandItem = {
@@ -23,7 +24,7 @@ export function groupTranscriptEvents(events: AstralEvent[]): TurnGroup[] {
 
   function ensureGroup(seed: AstralEvent): TurnGroup {
     if (!current || current.end) {
-      current = { id: `turn-${seed.seq}`, status: "running", assistant: [], details: [] };
+      current = { id: `turn-${seed.seq}`, status: "running", assistant: [], details: [], timeline: [] };
       groups.push(current);
     }
     return current;
@@ -33,8 +34,11 @@ export function groupTranscriptEvents(events: AstralEvent[]): TurnGroup[] {
     if (isHiddenTranscriptEvent(event)) {
       continue;
     }
+    if (isResolutionEvent(event)) {
+      continue;
+    }
     if (event.kind === "message.user") {
-      current = { id: `turn-${event.seq}`, status: "running", user: event, assistant: [], details: [] };
+      current = { id: `turn-${event.seq}`, status: "running", user: event, assistant: [], details: [], timeline: [] };
       groups.push(current);
       continue;
     }
@@ -48,17 +52,26 @@ export function groupTranscriptEvents(events: AstralEvent[]): TurnGroup[] {
     if (event.kind === "turn.completed" || event.kind === "turn.failed" || event.kind === "turn.cancelled") {
       group.end = event;
       group.status = event.kind === "turn.completed" ? "completed" : event.kind === "turn.failed" ? "failed" : "cancelled";
-      if (event.kind !== "turn.completed") group.details.push(event);
+      if (event.kind !== "turn.completed") {
+        group.details.push(event);
+        group.timeline.push(event);
+      }
       continue;
     }
     if (event.kind === "message.delta" || event.kind === "message.assistant" || isTranscriptPlanEvent(event)) {
       group.assistant.push(event);
+      group.timeline.push(event);
       continue;
     }
     group.details.push(event);
+    group.timeline.push(event);
   }
 
   return groups;
+}
+
+function isResolutionEvent(event: AstralEvent): boolean {
+  return event.kind === "approval.resolved" || event.kind === "approval.responded" || event.kind === "ask.resolved";
 }
 
 function isHiddenTranscriptEvent(event: AstralEvent): boolean {
@@ -493,6 +506,7 @@ export function shouldRender(kind: string): boolean {
 export function shouldRenderEvent(event: AstralEvent): boolean {
   if (!shouldRender(event.kind)) return false;
   if (event.kind === "control.rate_limit") return false;
+  if (isInternalQueueEcho(event)) return false;
   if (isAskPermissionEcho(event)) return false;
   if (isClaudePlanFileToolResult(event)) return false;
   if (event.kind === "control.warning" && isInternalCodexWarning(event)) return false;
@@ -511,8 +525,21 @@ export function isInternalCodexWarning(event: AstralEvent): boolean {
     message.includes("codex_core_skills::loader") ||
     message.includes("ignoring interface.icon_") ||
     message.includes("codex_core::goals") ||
-    message.includes("thread_goals")
+    message.includes("thread_goals") ||
+    message.includes("codex_core::agents_md") ||
+    (message.includes("codex_core::tools::router") && message.includes("exec-server transport")) ||
+    message.includes("Failed to create unified exec process: exec-server transport disconnected")
   );
+}
+
+export function isInternalQueueEcho(event: AstralEvent): boolean {
+  if (!event.kind.startsWith("queue.")) return false;
+  if (event.kind === "queue.dequeued") return true;
+  const value = event.normalized as Record<string, unknown>;
+  if (value.internal === true) return true;
+  const text = textValue(value, "text").trim();
+  if (event.kind === "queue.queued" && text === "") return true;
+  return text === "权限已允许" || text === "权限已拒绝" || text === "计划已批准" || text === "计划未批准" || text === "问题已回复";
 }
 
 export function isClaudePlanFileWrite(event: AstralEvent): boolean {

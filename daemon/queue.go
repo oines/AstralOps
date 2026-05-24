@@ -32,6 +32,9 @@ func (a *app) enqueueTurn(session Session, input string, options TurnOptions) qu
 		"queue_id": turn.ID,
 		"position": position,
 	}
+	if options.Internal {
+		normalized["internal"] = true
+	}
 	if text := turnDisplayInput(input, options); text != "" {
 		normalized["text"] = text
 	}
@@ -89,6 +92,9 @@ func (a *app) startNextQueuedTurn(sessionID string) {
 			"queue_id": turn.ID,
 			"message":  err.Error(),
 		}
+		if turn.Options.Internal {
+			normalized["internal"] = true
+		}
 		if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
 			normalized["text"] = text
 		}
@@ -101,6 +107,9 @@ func (a *app) startNextQueuedTurn(sessionID string) {
 	}
 	normalized := map[string]any{
 		"queue_id": turn.ID,
+	}
+	if turn.Options.Internal {
+		normalized["internal"] = true
 	}
 	if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
 		normalized["text"] = text

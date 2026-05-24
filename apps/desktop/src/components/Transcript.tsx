@@ -28,6 +28,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import type { AstralEvent, Session, Workspace } from "../types";
 import {
   buildCommandItems,
+  commandKey,
   collectCommandEvents,
   collectPendingQueueIDs,
   collectResolvedInteractionIDs,
@@ -88,6 +89,7 @@ export function Transcript({
   const renderedEvents = useMemo(() => compactStreamingEvents(events.filter(shouldRenderEvent)), [events]);
   const groups = useMemo(() => groupTranscriptEvents(renderedEvents), [renderedEvents]);
   const pendingQueueIDs = useMemo(() => collectPendingQueueIDs(renderedEvents), [renderedEvents]);
+  const resolvedInteractionIDs = useMemo(() => collectResolvedInteractionIDs(renderedEvents), [renderedEvents]);
   const items = useMemo<TranscriptItem[]>(
     () => [...(hasOlder ? [{ type: "loader" as const, id: "loader" }] : []), ...groups.map((group) => ({ type: "turn" as const, id: group.id, group }))],
     [groups, hasOlder],
@@ -164,7 +166,7 @@ export function Transcript({
                     {item?.type === "loader" ? (
                       <LoadOlderRow loading={loadingOlder} onLoadOlder={onLoadOlder} />
                     ) : item?.type === "turn" ? (
-                      <TurnBlock group={item.group} pendingQueueIDs={pendingQueueIDs} onCancelQueue={onCancelQueue} />
+                      <TurnBlock group={item.group} pendingQueueIDs={pendingQueueIDs} resolvedInteractionIDs={resolvedInteractionIDs} onCancelQueue={onCancelQueue} />
                     ) : null}
                   </div>
                 );
@@ -228,10 +230,12 @@ const TurnBlock = React.memo(function TurnBlock({
   group,
   onCancelQueue,
   pendingQueueIDs,
+  resolvedInteractionIDs,
 }: {
   group: TurnGroup;
   onCancelQueue?: (sessionId: string, queueId: string) => void;
   pendingQueueIDs: Set<string>;
+  resolvedInteractionIDs: Set<string>;
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(group.status === "running");
   const isDone = group.status !== "running";
@@ -239,12 +243,37 @@ const TurnBlock = React.memo(function TurnBlock({
   const endTime = group.end?.ts ?? group.start?.ts ?? "";
   const commandEvents = collectCommandEvents(group.details);
   const commandSeqs = new Set(commandEvents.map((event) => event.seq));
-  const detailEvents = group.details.filter((event) => !commandSeqs.has(event.seq));
-  const resolvedIDs = collectResolvedInteractionIDs(group.details);
+  const commandEventsByKey = useMemo(() => {
+    const byKey = new Map<string, AstralEvent[]>();
+    for (const event of commandEvents) {
+      const key = commandKey(event, `command-${event.seq}`);
+      const bucket = byKey.get(key) ?? [];
+      bucket.push(event);
+      byKey.set(key, bucket);
+    }
+    return byKey;
+  }, [commandEvents]);
 
   useEffect(() => {
     setExpanded(group.status === "running");
   }, [group.status]);
+
+  const renderedCommandKeys = new Set<string>();
+  const timeline = group.timeline.map((event) => {
+    if (commandSeqs.has(event.seq)) {
+      if (!expanded) return null;
+      const key = commandKey(event, `command-${event.seq}`);
+      if (renderedCommandKeys.has(key)) return null;
+      renderedCommandKeys.add(key);
+      const events = commandEventsByKey.get(key) ?? [event];
+      return <CommandGroup events={events} key={`commands-${key}`} turnStatus={group.status} />;
+    }
+    if (event.kind === "message.delta" || event.kind === "message.assistant" || isTranscriptPlanEvent(event)) {
+      return isTranscriptPlanEvent(event) ? <TranscriptPlanBubble event={event} key={event.seq} /> : <AssistantEvent event={event} key={event.seq} />;
+    }
+    if (!expanded) return null;
+    return <DetailEvent event={event} key={event.seq} pendingQueueIDs={pendingQueueIDs} resolvedIDs={resolvedInteractionIDs} onCancelQueue={onCancelQueue} />;
+  });
 
   return (
     <motion.article animate={{ opacity: 1, y: 0 }} className="mb-8" initial={{ opacity: 0, y: 4 }} transition={{ duration: 0.14 }}>
@@ -263,19 +292,8 @@ const TurnBlock = React.memo(function TurnBlock({
         </button>
       ) : null}
 
-      {expanded && group.details.length > 0 ? (
-        <div className="mt-5 grid gap-4">
-          {commandEvents.length > 0 ? <CommandGroup events={commandEvents} turnStatus={group.status} /> : null}
-          {detailEvents.map((event) => (
-            <DetailEvent event={event} key={event.seq} pendingQueueIDs={pendingQueueIDs} resolvedIDs={resolvedIDs} onCancelQueue={onCancelQueue} />
-          ))}
-        </div>
-      ) : null}
-
-      <div className={expanded && group.details.length > 0 ? "mt-6 grid gap-6" : "mt-6 grid gap-6"}>
-        {group.assistant.map((event) => (
-          isTranscriptPlanEvent(event) ? <TranscriptPlanBubble event={event} key={event.seq} /> : <AssistantEvent event={event} key={event.seq} />
-        ))}
+      <div className="mt-6 grid gap-6">
+        {timeline.map((item) => item)}
       </div>
     </motion.article>
   );
