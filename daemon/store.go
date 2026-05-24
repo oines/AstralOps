@@ -159,14 +159,59 @@ func (s *store) listSessions(workspaceID string) []Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]Session, 0, len(s.sessions))
+	titles := s.sessionTitlesLocked()
 	for _, ss := range s.sessions {
 		if workspaceID != "" && ss.WorkspaceID != workspaceID {
 			continue
 		}
+		ss.Title = titles[ss.ID]
 		out = append(out, ss)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
 	return out
+}
+
+func (s *store) sessionTitlesLocked() map[string]string {
+	titles := map[string]string{}
+	for _, ev := range s.events {
+		if ev.Kind != "message.user" {
+			continue
+		}
+		if _, exists := titles[ev.SessionID]; exists {
+			continue
+		}
+		text := normalizedSessionTitleText(ev.Normalized)
+		if text == "" {
+			continue
+		}
+		titles[ev.SessionID] = text
+	}
+	return titles
+}
+
+func normalizedSessionTitleText(normalized any) string {
+	text := strings.Join(strings.Fields(stringValue(mapValue(normalized)["text"])), " ")
+	if text == "" || shouldSkipSessionTitleText(text) {
+		return ""
+	}
+	return text
+}
+
+func shouldSkipSessionTitleText(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	for _, prefix := range []string{
+		"user accepted",
+		"user declined",
+		"user rejected",
+		"plan approved",
+		"plan declined",
+		"plan rejected",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *store) getWorkspace(id string) (Workspace, bool) {

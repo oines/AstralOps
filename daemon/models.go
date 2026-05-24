@@ -42,6 +42,7 @@ type Session struct {
 	ID              string    `json:"id"`
 	WorkspaceID     string    `json:"workspace_id"`
 	Agent           AgentKind `json:"agent"`
+	Title           string    `json:"title,omitempty"`
 	Status          string    `json:"status"`
 	NativeSessionID string    `json:"native_session_id,omitempty"`
 	NativeThreadID  string    `json:"native_thread_id,omitempty"`

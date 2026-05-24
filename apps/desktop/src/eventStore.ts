@@ -86,7 +86,9 @@ export function maxEventSeq(index: EventIndex): number {
 
 export function buildSessionProjection(sessions: Session[], index: EventIndex): SessionProjection {
   const states = Object.fromEntries(sessions.map((session) => [session.id, session.status || "idle"]));
-  const titles: Record<string, string> = {};
+  const titles: Record<string, string> = Object.fromEntries(
+    sessions.flatMap((session) => (session.title ? [[session.id, session.title]] : [])),
+  );
 
   for (const session of sessions) {
     const seqs = index.sessionSeqs[session.id] ?? [];

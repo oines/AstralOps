@@ -202,6 +202,89 @@ func TestStoreEventAppendAndQuery(t *testing.T) {
 	}
 }
 
+func TestListSessionsIncludesTitleFromFullEventHistory(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:     "Local Project",
+		Target:   "local",
+		Agent:    AgentCodex,
+		LocalCWD: dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentCodex,
+		Kind:        "message.user",
+		Normalized:  map[string]any{"text": "  inspect the remote workspace  "},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 80; index++ {
+		if _, err := st.appendEvent(AstralEvent{
+			WorkspaceID: workspace.ID,
+			SessionID:   session.ID,
+			Agent:       AgentCodex,
+			Kind:        "reasoning.delta",
+			Normalized:  map[string]any{"text": "later event"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sessions := st.listSessions(workspace.ID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	if sessions[0].Title != "inspect the remote workspace" {
+		t.Fatalf("title = %q, want first user message", sessions[0].Title)
+	}
+}
+
+func TestListSessionsTitleSkipsInteractionFollowupText(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:     "Local Project",
+		Target:   "local",
+		Agent:    AgentClaude,
+		LocalCWD: dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentClaude)
+	for _, text := range []string{"User accepted the plan", "search the remote files"} {
+		if _, err := st.appendEvent(AstralEvent{
+			WorkspaceID: workspace.ID,
+			SessionID:   session.ID,
+			Agent:       AgentClaude,
+			Kind:        "message.user",
+			Normalized:  map[string]any{"text": text},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sessions := st.listSessions(workspace.ID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	if sessions[0].Title != "search the remote files" {
+		t.Fatalf("title = %q, want real user prompt", sessions[0].Title)
+	}
+}
+
 func TestStoreEventWindowQuery(t *testing.T) {
 	dir := t.TempDir()
 	st, err := loadStore(dir)

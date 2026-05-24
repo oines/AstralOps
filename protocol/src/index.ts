@@ -226,6 +226,7 @@ export type Session = {
   id: string;
   workspace_id: string;
   agent: AgentKind;
+  title?: string;
   status: "idle" | "running" | "requires_action" | "reconnecting" | "failed";
   native_session_id?: string;
   native_thread_id?: string;
