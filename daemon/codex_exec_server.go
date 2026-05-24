@@ -133,7 +133,7 @@ func (c *execServerConn) dispatch(req execServerRequest) (any, error) {
 			return nil, err
 		}
 		var out map[string]any
-		if err := c.proxy.call(ctx, "read", map[string]any{"path": p.Path}, &out); err != nil {
+		if err := c.remoteCall(ctx, "read", map[string]any{"path": p.Path}, &out); err != nil {
 			return nil, err
 		}
 		return map[string]any{"dataBase64": base64.StdEncoding.EncodeToString([]byte(stringValue(out["content"])))}, nil
@@ -149,7 +149,7 @@ func (c *execServerConn) dispatch(req execServerRequest) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{}, c.proxy.call(ctx, "write", map[string]any{"path": p.Path, "content": string(body)}, nil)
+		return map[string]any{}, c.remoteCall(ctx, "write", map[string]any{"path": p.Path, "content": string(body)}, nil)
 	case "fs/createDirectory":
 		var p struct {
 			Path string `json:"path"`
@@ -157,7 +157,7 @@ func (c *execServerConn) dispatch(req execServerRequest) (any, error) {
 		if err := decodeParams(req.Params, &p); err != nil {
 			return nil, err
 		}
-		return map[string]any{}, c.proxy.call(ctx, "mkdir", map[string]any{"path": p.Path}, nil)
+		return map[string]any{}, c.remoteCall(ctx, "mkdir", map[string]any{"path": p.Path}, nil)
 	case "fs/getMetadata":
 		return c.getMetadata(ctx, req.Params)
 	case "fs/readDirectory":
@@ -169,7 +169,7 @@ func (c *execServerConn) dispatch(req execServerRequest) (any, error) {
 		if err := decodeParams(req.Params, &p); err != nil {
 			return nil, err
 		}
-		return map[string]any{}, c.proxy.call(ctx, "remove", map[string]any{"path": p.Path}, nil)
+		return map[string]any{}, c.remoteCall(ctx, "remove", map[string]any{"path": p.Path}, nil)
 	case "fs/copy":
 		var p struct {
 			Source      string `json:"source"`
@@ -178,7 +178,7 @@ func (c *execServerConn) dispatch(req execServerRequest) (any, error) {
 		if err := decodeParams(req.Params, &p); err != nil {
 			return nil, err
 		}
-		return map[string]any{}, c.proxy.call(ctx, "copy", map[string]any{"source": p.Source, "destination": p.Destination}, nil)
+		return map[string]any{}, c.remoteCall(ctx, "copy", map[string]any{"source": p.Source, "destination": p.Destination}, nil)
 	case "process/start":
 		return c.processStart(req.Params)
 	case "process/read":
@@ -192,6 +192,10 @@ func (c *execServerConn) dispatch(req execServerRequest) (any, error) {
 	}
 }
 
+func (c *execServerConn) remoteCall(ctx context.Context, method string, params any, out any) error {
+	return c.app.ssh.call(ctx, c.ws, method, params, out)
+}
+
 func (c *execServerConn) getMetadata(ctx context.Context, raw json.RawMessage) (any, error) {
 	var p struct {
 		Path string `json:"path"`
@@ -200,7 +204,7 @@ func (c *execServerConn) getMetadata(ctx context.Context, raw json.RawMessage) (
 		return nil, err
 	}
 	var out map[string]any
-	if err := c.proxy.call(ctx, "stat", map[string]any{"path": p.Path}, &out); err != nil {
+	if err := c.remoteCall(ctx, "stat", map[string]any{"path": p.Path}, &out); err != nil {
 		return nil, err
 	}
 	modified, _ := time.Parse(time.RFC3339Nano, stringValue(out["modified"]))
@@ -221,7 +225,7 @@ func (c *execServerConn) readDirectory(ctx context.Context, raw json.RawMessage)
 		return nil, err
 	}
 	var rawEntries []map[string]any
-	if err := c.proxy.call(ctx, "list", map[string]any{"path": p.Path}, &rawEntries); err != nil {
+	if err := c.remoteCall(ctx, "list", map[string]any{"path": p.Path}, &rawEntries); err != nil {
 		return nil, err
 	}
 	entries := make([]map[string]any, 0, len(rawEntries))
@@ -271,7 +275,7 @@ func (c *execServerConn) processStart(raw json.RawMessage) (any, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 		defer cancel()
 		var out map[string]any
-		err := c.proxy.call(ctx, "exec", map[string]any{"cwd": p.CWD, "command": command, "env": p.Env, "timeout_ms": int((24 * time.Hour).Milliseconds())}, &out)
+		err := c.remoteCall(ctx, "exec", map[string]any{"cwd": p.CWD, "command": command, "env": p.Env, "timeout_ms": int((24 * time.Hour).Milliseconds())}, &out)
 		if stdout := stringValue(out["stdout"]); stdout != "" {
 			proc.addChunk("stdout", []byte(stdout))
 		}
@@ -295,14 +299,12 @@ func (c *execServerConn) startTTYProcess(p struct {
 	Env       map[string]string `json:"env"`
 	TTY       bool              `json:"tty"`
 }, proc *execServerProcess) (any, error) {
-	events, unsubscribe := c.proxy.subscribe(p.ProcessID)
-	var started map[string]any
-	err := c.proxy.call(context.Background(), "pty_start", map[string]any{"id": p.ProcessID, "cwd": p.CWD}, &started)
+	proxy, events, unsubscribe, _, err := c.app.ssh.startPTY(context.Background(), c.ws, p.ProcessID, map[string]any{"cwd": p.CWD})
 	if err != nil {
-		unsubscribe()
 		proc.finish(1, err.Error())
 		return nil, err
 	}
+	c.proxy = proxy
 	go func() {
 		defer unsubscribe()
 		for event := range events {
@@ -354,7 +356,7 @@ func (c *execServerConn) processWrite(raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = c.proxy.call(context.Background(), "pty_write", map[string]any{"id": p.ProcessID, "data": string(body)}, nil)
+	err = c.remoteCall(context.Background(), "pty_write", map[string]any{"id": p.ProcessID, "data": string(body)}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +375,7 @@ func (c *execServerConn) processTerminate(raw json.RawMessage) (any, error) {
 		return map[string]any{"running": false}, nil
 	}
 	if proc.pty {
-		_ = c.proxy.call(context.Background(), "pty_kill", map[string]any{"id": p.ProcessID}, nil)
+		_ = c.remoteCall(context.Background(), "pty_kill", map[string]any{"id": p.ProcessID}, nil)
 	}
 	proc.finish(143, "")
 	return map[string]any{"running": false}, nil

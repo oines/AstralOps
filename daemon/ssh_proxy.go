@@ -26,6 +26,7 @@ const (
 	connectionConnected    = "connected"
 	connectionDegraded     = "degraded"
 	connectionFailed       = "failed"
+	sshProxyMaxAttempts    = 5
 )
 
 type WorkspaceConnection struct {
@@ -196,6 +197,118 @@ func (m *sshManager) proxyFor(ctx context.Context, ws Workspace) (*proxyClient, 
 		return nil, state, errors.New("ssh proxy did not start")
 	}
 	return target.proxy, state, nil
+}
+
+func (m *sshManager) call(ctx context.Context, ws Workspace, method string, params any, out any) error {
+	var lastErr error
+	for attempt := 1; attempt <= sshProxyMaxAttempts; attempt++ {
+		proxy, _, err := m.proxyFor(ctx, ws)
+		if err != nil {
+			lastErr = err
+		} else {
+			err = proxy.call(ctx, method, params, out)
+			if err == nil {
+				return nil
+			}
+			lastErr = err
+			if !isProxyTransportError(err) {
+				return err
+			}
+			m.dropProxy(ws, proxy)
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		if attempt < sshProxyMaxAttempts {
+			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("ssh operation failed")
+	}
+	message := fmt.Sprintf("ssh operation failed after %d attempts: %s", sshProxyMaxAttempts, lastErr.Error())
+	m.markDegraded(ws, message)
+	if m.app != nil {
+		m.app.stopWorkspaceSessions(ws.ID, message)
+	}
+	return errors.New(message)
+}
+
+func (m *sshManager) startPTY(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
+	var lastErr error
+	for attempt := 1; attempt <= sshProxyMaxAttempts; attempt++ {
+		proxy, _, err := m.proxyFor(ctx, ws)
+		if err != nil {
+			lastErr = err
+		} else {
+			events, unsubscribe := proxy.subscribe(id)
+			callParams := map[string]any{}
+			for key, value := range params {
+				callParams[key] = value
+			}
+			callParams["id"] = id
+			var started map[string]any
+			err = proxy.call(ctx, "pty_start", callParams, &started)
+			if err == nil {
+				return proxy, events, unsubscribe, started, nil
+			}
+			unsubscribe()
+			lastErr = err
+			if !isProxyTransportError(err) {
+				return nil, nil, nil, nil, err
+			}
+			m.dropProxy(ws, proxy)
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		if attempt < sshProxyMaxAttempts {
+			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("ssh operation failed")
+	}
+	message := fmt.Sprintf("ssh operation failed after %d attempts: %s", sshProxyMaxAttempts, lastErr.Error())
+	m.markDegraded(ws, message)
+	if m.app != nil {
+		m.app.stopWorkspaceSessions(ws.ID, message)
+	}
+	return nil, nil, nil, nil, errors.New(message)
+}
+
+func (m *sshManager) dropProxy(ws Workspace, proxy *proxyClient) {
+	m.mu.Lock()
+	target := m.by[ws.ID]
+	if target != nil && target.proxy == proxy {
+		target.proxy = nil
+		target.state.Status = connectionDegraded
+		target.state.HelperStatus = "exited"
+		target.state.Message = proxy.exitMessage()
+		target.state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	m.mu.Unlock()
+	_ = proxy.close()
+}
+
+func (m *sshManager) markDegraded(ws Workspace, message string) {
+	m.mu.Lock()
+	target := m.by[ws.ID]
+	if target == nil {
+		target = &sshTarget{workspace: ws, state: initialSSHConnection(ws, connectionDegraded)}
+		m.by[ws.ID] = target
+	}
+	state := target.state
+	if state.WorkspaceID == "" {
+		state = initialSSHConnection(ws, connectionDegraded)
+	}
+	state.Status = connectionDegraded
+	state.HelperStatus = "exited"
+	state.Message = message
+	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	target.state = state
+	m.mu.Unlock()
+	m.emitConnection(ws, state)
 }
 
 func (m *sshManager) setState(ws Workspace, state WorkspaceConnection) {
@@ -471,10 +584,11 @@ type proxyClient struct {
 }
 
 type proxyResponse struct {
-	ID     string          `json:"id"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
-	Event  string          `json:"event,omitempty"`
+	ID        string          `json:"id"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	Event     string          `json:"event,omitempty"`
+	Transport bool            `json:"-"`
 }
 
 type proxyEvent struct {
@@ -567,11 +681,23 @@ func (p *proxyClient) wait() {
 	}
 	p.mu.Lock()
 	p.alive = false
+	eventListeners := map[string][]chan proxyEvent{}
+	for id, listeners := range p.events {
+		eventListeners[id] = append([]chan proxyEvent(nil), listeners...)
+	}
 	for id, ch := range p.pending {
-		ch <- proxyResponse{ID: id, Error: "ssh proxy exited"}
+		ch <- proxyResponse{ID: id, Error: "ssh proxy exited", Transport: true}
 		delete(p.pending, id)
 	}
 	p.mu.Unlock()
+	for id, listeners := range eventListeners {
+		for _, ch := range listeners {
+			select {
+			case ch <- proxyEvent{ID: id, Event: "exit", Result: map[string]any{"error": p.exitMessage()}}:
+			default:
+			}
+		}
+	}
 	close(p.done)
 }
 
@@ -644,17 +770,23 @@ func (p *proxyClient) call(ctx context.Context, method string, params any, out a
 	p.mu.Lock()
 	if !p.alive {
 		p.mu.Unlock()
-		return errors.New("ssh proxy is not running")
+		return proxyTransportError{err: errors.New("ssh proxy is not running")}
 	}
 	p.pending[id] = ch
 	_, err := p.stdin.Write(append(body, '\n'))
 	p.mu.Unlock()
 	if err != nil {
-		return err
+		p.mu.Lock()
+		delete(p.pending, id)
+		p.mu.Unlock()
+		return proxyTransportError{err: err}
 	}
 	select {
 	case res := <-ch:
 		if res.Error != "" {
+			if res.Transport {
+				return proxyTransportError{err: errors.New(res.Error)}
+			}
 			return errors.New(res.Error)
 		}
 		if out == nil {
@@ -665,8 +797,28 @@ func (p *proxyClient) call(ctx context.Context, method string, params any, out a
 		p.mu.Lock()
 		delete(p.pending, id)
 		p.mu.Unlock()
-		return ctx.Err()
+		return proxyTransportError{err: ctx.Err()}
 	}
+}
+
+type proxyTransportError struct {
+	err error
+}
+
+func (e proxyTransportError) Error() string {
+	if e.err == nil {
+		return "ssh proxy transport failed"
+	}
+	return e.err.Error()
+}
+
+func (e proxyTransportError) Unwrap() error {
+	return e.err
+}
+
+func isProxyTransportError(err error) bool {
+	var transport proxyTransportError
+	return errors.As(err, &transport)
 }
 
 func (p *proxyClient) next() int64 {

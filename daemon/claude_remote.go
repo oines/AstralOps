@@ -260,13 +260,9 @@ func (a *app) postClaudeRemoteTool(ctx context.Context, ws Workspace, tool strin
 	if err != nil {
 		return err
 	}
-	proxy, _, err := a.ssh.proxyFor(ctx, ws)
-	if err != nil {
-		return err
-	}
 	callCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	if err := proxy.call(callCtx, "write", map[string]any{"path": remote, "content": string(body)}, nil); err != nil {
+	if err := a.ssh.call(callCtx, ws, "write", map[string]any{"path": remote, "content": string(body)}, nil); err != nil {
 		return err
 	}
 	a.recordProjectionFile(ws, remote, path, false, false)
@@ -290,12 +286,8 @@ func (a *app) rollbackClaudeRemoteTool(ctx context.Context, ws Workspace, tool s
 			return err
 		}
 	}
-	proxy, _, err := a.ssh.proxyFor(ctx, ws)
-	if err != nil {
-		return err
-	}
 	var out map[string]any
-	if err := proxy.call(ctx, "read", map[string]any{"path": remote}, &out); err != nil {
+	if err := a.ssh.call(ctx, ws, "read", map[string]any{"path": remote}, &out); err != nil {
 		_ = os.Remove(local)
 		a.recordProjectionFile(ws, remote, local, false, false)
 		return nil
@@ -315,15 +307,11 @@ func (a *app) hydrateClaudePath(ctx context.Context, ws Workspace, requested str
 	if err != nil {
 		return "", "", err
 	}
-	proxy, _, err := a.ssh.proxyFor(ctx, ws)
-	if err != nil {
-		return "", "", err
-	}
 	callCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	if dir {
 		var entries []map[string]any
-		if err := proxy.call(callCtx, "list", map[string]any{"path": remote}, &entries); err != nil {
+		if err := a.ssh.call(callCtx, ws, "list", map[string]any{"path": remote}, &entries); err != nil {
 			return "", "", err
 		}
 		if err := os.MkdirAll(local, 0o700); err != nil {
@@ -345,14 +333,14 @@ func (a *app) hydrateClaudePath(ctx context.Context, ws Workspace, requested str
 		return local, remote, nil
 	}
 	var stat map[string]any
-	if err := proxy.call(callCtx, "stat", map[string]any{"path": remote}, &stat); err == nil {
+	if err := a.ssh.call(callCtx, ws, "stat", map[string]any{"path": remote}, &stat); err == nil {
 		size := int64(numberValue(stat["size"]))
 		if size > maxClaudeHydrateBytes {
 			return "", remote, fmt.Errorf("file %s is too large to load automatically (%d bytes)", remote, size)
 		}
 	}
 	var out map[string]any
-	if err := proxy.call(callCtx, "read", map[string]any{"path": remote}, &out); err != nil {
+	if err := a.ssh.call(callCtx, ws, "read", map[string]any{"path": remote}, &out); err != nil {
 		return "", remote, err
 	}
 	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
@@ -366,13 +354,9 @@ func (a *app) hydrateClaudePath(ctx context.Context, ws Workspace, requested str
 }
 
 func (a *app) remoteGlobContext(ctx context.Context, ws Workspace, input map[string]any) (string, error) {
-	proxy, _, err := a.ssh.proxyFor(ctx, ws)
-	if err != nil {
-		return "", err
-	}
 	cwd := firstString(input["path"], ws.SSH.RemoteCWD)
 	var out map[string]any
-	if err := proxy.call(ctx, "glob", map[string]any{"cwd": cwd, "pattern": stringValue(input["pattern"])}, &out); err != nil {
+	if err := a.ssh.call(ctx, ws, "glob", map[string]any{"cwd": cwd, "pattern": stringValue(input["pattern"])}, &out); err != nil {
 		return "", err
 	}
 	matches := []string{}
@@ -386,13 +370,9 @@ func (a *app) remoteGlobContext(ctx context.Context, ws Workspace, input map[str
 }
 
 func (a *app) remoteGrepContext(ctx context.Context, ws Workspace, input map[string]any) (string, error) {
-	proxy, _, err := a.ssh.proxyFor(ctx, ws)
-	if err != nil {
-		return "", err
-	}
 	cwd := firstString(input["path"], ws.SSH.RemoteCWD)
 	var out map[string]any
-	if err := proxy.call(ctx, "grep", map[string]any{"cwd": cwd, "pattern": stringValue(input["pattern"]), "glob": stringValue(input["glob"]), "limit": 200}, &out); err != nil {
+	if err := a.ssh.call(ctx, ws, "grep", map[string]any{"cwd": cwd, "pattern": stringValue(input["pattern"]), "glob": stringValue(input["glob"]), "limit": 200}, &out); err != nil {
 		return "", err
 	}
 	lines := []string{}

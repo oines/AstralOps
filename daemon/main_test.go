@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1044,8 +1045,9 @@ func containsEventKind(events []AstralEvent, target string) bool {
 }
 
 type recordingRuntime struct {
-	inputs  []string
-	options []TurnOptions
+	inputs     []string
+	options    []TurnOptions
+	interrupts []string
 }
 
 func (r *recordingRuntime) StartTurn(session Session, workspace Workspace, input string, options TurnOptions) error {
@@ -1055,6 +1057,7 @@ func (r *recordingRuntime) StartTurn(session Session, workspace Workspace, input
 }
 
 func (r *recordingRuntime) Interrupt(sessionID string) error {
+	r.interrupts = append(r.interrupts, sessionID)
 	return nil
 }
 
@@ -1341,6 +1344,184 @@ func TestSteerQueuedTurnInjectsAndRemovesQueuedMessage(t *testing.T) {
 	if !containsEventKind(events, "queue.queued") || !containsEventKind(events, "queue.steered") {
 		t.Fatalf("events = %#v, want queue.queued and queue.steered", events)
 	}
+}
+
+func TestStopWorkspaceSessionsInterruptsAndClearsQueue(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := Workspace{ID: "ws_stop", Agent: AgentClaude, Target: "local", LocalCWD: dir}
+	st.workspaces[workspace.ID] = workspace
+	session := st.createSession(workspace, AgentClaude)
+	runtime := &recordingRuntime{}
+	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}, runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
+
+	app.enqueueTurn(session, "queued prompt", TurnOptions{})
+	app.stopWorkspaceSessions(workspace.ID, "test stop")
+
+	if len(runtime.interrupts) != 1 || runtime.interrupts[0] != session.ID {
+		t.Fatalf("interrupts = %#v, want session interrupt", runtime.interrupts)
+	}
+	if len(app.queues[session.ID]) != 0 {
+		t.Fatalf("queue was not cleared: %#v", app.queues[session.ID])
+	}
+	events := st.queryEvents(workspace.ID, session.ID, 0)
+	if !containsEventKind(events, "queue.cancelled") {
+		t.Fatalf("events = %#v, want queue.cancelled", events)
+	}
+}
+
+func TestSSHCallRetriesFiveTransportFailuresThenStopsWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentClaude,
+		SSH: &SSHConfig{
+			Endpoint:  "root@example.test",
+			RemoteCWD: "/root",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentClaude)
+	runtime := &recordingRuntime{}
+	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}, runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
+	app.ssh = newSSHManager(app)
+	app.enqueueTurn(session, "queued prompt", TurnOptions{})
+	installFakeSSHProxy(t, dir, "99")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var out map[string]any
+	err = app.ssh.call(ctx, workspace, "hello", map[string]any{}, &out)
+	if err == nil {
+		t.Fatal("ssh call succeeded, want retry exhaustion")
+	}
+	if got := readCounter(t, filepath.Join(dir, "proxy-count")); got != sshProxyMaxAttempts {
+		t.Fatalf("proxy attempts = %d, want %d", got, sshProxyMaxAttempts)
+	}
+	if len(runtime.interrupts) != 1 || runtime.interrupts[0] != session.ID {
+		t.Fatalf("interrupts = %#v, want workspace session stopped", runtime.interrupts)
+	}
+	if len(app.queues[session.ID]) != 0 {
+		t.Fatalf("queue was not cleared: %#v", app.queues[session.ID])
+	}
+}
+
+func TestSSHCallRetriesTransparentlyUntilSuccess(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentClaude,
+		SSH: &SSHConfig{
+			Endpoint:  "root@example.test",
+			RemoteCWD: "/root",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &recordingRuntime{}
+	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}, runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
+	app.ssh = newSSHManager(app)
+	installFakeSSHProxy(t, dir, "5")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var out map[string]any
+	if err := app.ssh.call(ctx, workspace, "hello", map[string]any{}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCounter(t, filepath.Join(dir, "proxy-count")); got != sshProxyMaxAttempts {
+		t.Fatalf("proxy attempts = %d, want %d", got, sshProxyMaxAttempts)
+	}
+	if len(runtime.interrupts) != 0 {
+		t.Fatalf("interrupts = %#v, want no session stop after successful retry", runtime.interrupts)
+	}
+	if stringValue(out["hostname"]) != "host" {
+		t.Fatalf("hello result = %#v", out)
+	}
+}
+
+func installFakeSSHProxy(t *testing.T, dir string, succeedAt string) {
+	t.Helper()
+	helper := filepath.Join(dir, "astral-proxy-agent")
+	if err := os.WriteFile(helper, []byte("fake helper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helperSum, err := fileSHA256(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := filepath.Join(dir, "proxy-count")
+	if err := os.WriteFile(counter, []byte("0"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ssh := filepath.Join(binDir, "ssh")
+	script := `#!/bin/bash
+set -e
+args="$*"
+if [[ "$args" == *"uname -s"* ]]; then
+  printf 'Linux\nx86_64\n/bin/sh\n/root\nroot\nhost\n\n\n'
+  exit 0
+fi
+if [[ "$args" == *"sha256sum"* ]] || [[ "$args" == *"shasum -a 256"* ]]; then
+  printf '%s\n' "$ASTRALOPS_TEST_HELPER_SHA"
+  exit 0
+fi
+if [[ "$args" == *"astral-proxy-agent"* ]]; then
+  count=$(cat "$ASTRALOPS_TEST_PROXY_COUNT")
+  count=$((count + 1))
+  printf '%s' "$count" > "$ASTRALOPS_TEST_PROXY_COUNT"
+  if [[ "$count" -lt "$ASTRALOPS_TEST_PROXY_SUCCEED_AT" ]]; then
+    exit 255
+  fi
+  python3 -c 'import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    print(json.dumps({"id": req.get("id"), "result": {"shell": "/bin/sh", "user": "root", "hostname": "host", "capabilities": {}}}), flush=True)'
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ASTRALOPS_PROXY_AGENT", helper)
+	t.Setenv("ASTRALOPS_TEST_HELPER_SHA", helperSum)
+	t.Setenv("ASTRALOPS_TEST_PROXY_COUNT", counter)
+	t.Setenv("ASTRALOPS_TEST_PROXY_SUCCEED_AT", succeedAt)
+}
+
+func readCounter(t *testing.T, path string) int {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
 }
 
 func TestCodexApprovalResponsePayloads(t *testing.T) {

@@ -78,12 +78,7 @@ func (a *app) handleProjectionAction(w http.ResponseWriter, r *http.Request, par
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		proxy, _, err := a.ssh.proxyFor(r.Context(), ws)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		if err := proxy.call(r.Context(), "write", map[string]any{"path": remote, "content": string(body)}, nil); err != nil {
+		if err := a.ssh.call(r.Context(), ws, "write", map[string]any{"path": remote, "content": string(body)}, nil); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -152,13 +147,9 @@ func (a *app) rollbackDirtyProjection(ctx context.Context, ws Workspace) {
 	if len(dirty) == 0 {
 		return
 	}
-	proxy, _, err := a.ssh.proxyFor(ctx, ws)
-	if err != nil {
-		return
-	}
 	for _, file := range dirty {
 		var out map[string]any
-		if err := proxy.call(ctx, "read", map[string]any{"path": file.RemotePath}, &out); err != nil {
+		if err := a.ssh.call(ctx, ws, "read", map[string]any{"path": file.RemotePath}, &out); err != nil {
 			_ = os.Remove(file.LocalPath)
 			file.Dirty = false
 			manifest.Files[file.RemotePath] = file

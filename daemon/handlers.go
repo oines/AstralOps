@@ -80,6 +80,10 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
 			return
 		}
+		a.stopWorkspaceSessions(ws.ID, "workspace deleted")
+		if ws.Target == "ssh" {
+			a.ssh.disconnect(ws)
+		}
 		a.store.deleteWorkspace(parts[0])
 		a.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.removed", Normalized: map[string]any{"workspace_id": ws.ID}})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -233,11 +237,6 @@ func (a *app) handleWorkspaceFiles(w http.ResponseWriter, ws Workspace, queryPat
 func (a *app) handleRemoteWorkspaceFiles(w http.ResponseWriter, ws Workspace, queryPath string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	proxy, _, err := a.ssh.proxyFor(ctx, ws)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
 	root := filepath.Clean(ws.SSH.RemoteCWD)
 	target, rel, err := resolveRemoteWorkspacePath(root, queryPath)
 	if err != nil {
@@ -245,7 +244,7 @@ func (a *app) handleRemoteWorkspaceFiles(w http.ResponseWriter, ws Workspace, qu
 		return
 	}
 	var raw []map[string]any
-	if err := proxy.call(ctx, "list", map[string]any{"path": target}, &raw); err != nil {
+	if err := a.ssh.call(ctx, ws, "list", map[string]any{"path": target}, &raw); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -336,14 +335,8 @@ func (a *app) handleRemoteWorkspaceExec(w http.ResponseWriter, ws Workspace, com
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
 	defer cancel()
-	proxy, _, err := a.ssh.proxyFor(ctx, ws)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
 	var out map[string]any
-	err = proxy.call(ctx, "exec", map[string]any{"cwd": ws.SSH.RemoteCWD, "command": command, "timeout_ms": 60000}, &out)
-	if err != nil {
+	if err := a.ssh.call(ctx, ws, "exec", map[string]any{"cwd": ws.SSH.RemoteCWD, "command": command, "timeout_ms": 60000}, &out); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -442,20 +435,13 @@ func (a *app) handleRemoteWorkspacePTY(w http.ResponseWriter, r *http.Request, w
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	proxy, _, err := a.ssh.proxyFor(ctx, ws)
-	if err != nil {
-		_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
-		return
-	}
 	ptyID := "pty_" + randomID(12)
-	events, unsubscribe := proxy.subscribe(ptyID)
-	defer unsubscribe()
-	var started map[string]any
-	err = proxy.call(ctx, "pty_start", map[string]any{"id": ptyID, "cwd": ws.SSH.RemoteCWD, "cols": 100, "rows": 28}, &started)
+	_, events, unsubscribe, started, err := a.ssh.startPTY(ctx, ws, ptyID, map[string]any{"cwd": ws.SSH.RemoteCWD, "cols": 100, "rows": 28})
 	if err != nil {
 		_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
+	defer unsubscribe()
 	_ = conn.WriteJSON(map[string]any{"type": "ready", "shell": stringValue(started["shell"]), "cwd": ws.SSH.RemoteCWD})
 
 	done := make(chan struct{})
@@ -481,16 +467,16 @@ func (a *app) handleRemoteWorkspacePTY(w http.ResponseWriter, r *http.Request, w
 		}
 		var message ptyClientMessage
 		if err := conn.ReadJSON(&message); err != nil {
-			_ = proxy.call(context.Background(), "pty_kill", map[string]any{"id": ptyID}, nil)
+			_ = a.ssh.call(context.Background(), ws, "pty_kill", map[string]any{"id": ptyID}, nil)
 			return
 		}
 		switch message.Type {
 		case "input":
-			_ = proxy.call(context.Background(), "pty_write", map[string]any{"id": ptyID, "data": message.Data}, nil)
+			_ = a.ssh.call(context.Background(), ws, "pty_write", map[string]any{"id": ptyID, "data": message.Data}, nil)
 		case "resize":
-			_ = proxy.call(context.Background(), "pty_resize", map[string]any{"id": ptyID, "cols": message.Cols, "rows": message.Rows}, nil)
+			_ = a.ssh.call(context.Background(), ws, "pty_resize", map[string]any{"id": ptyID, "cols": message.Cols, "rows": message.Rows}, nil)
 		case "close":
-			_ = proxy.call(context.Background(), "pty_kill", map[string]any{"id": ptyID}, nil)
+			_ = a.ssh.call(context.Background(), ws, "pty_kill", map[string]any{"id": ptyID}, nil)
 			return
 		}
 	}
@@ -599,6 +585,7 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 			return
 		}
+		a.stopSessionRuntime(ss, "session deleted")
 		a.store.deleteSession(parts[0])
 		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "session.deleted", Normalized: map[string]any{"session_id": ss.ID}})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})

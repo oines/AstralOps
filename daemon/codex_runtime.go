@@ -45,6 +45,7 @@ type codexClient struct {
 	activeTurn  string
 	running     bool
 	initialized bool
+	stopping    bool
 }
 
 type codexPendingApproval struct {
@@ -83,7 +84,8 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 			return fmt.Errorf("ssh workspace remote cwd is empty")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		_, _, err := r.app.ssh.proxyFor(ctx, workspace)
+		var hello map[string]any
+		err := r.app.ssh.call(ctx, workspace, "hello", map[string]any{}, &hello)
 		cancel()
 		if err != nil {
 			return err
@@ -138,6 +140,17 @@ func (r *codexLocalRuntime) Interrupt(sessionID string) error {
 	return nil
 }
 
+func (r *codexLocalRuntime) StopSession(sessionID string, reason string) {
+	r.mu.Lock()
+	client := r.clients[sessionID]
+	delete(r.clients, sessionID)
+	r.mu.Unlock()
+	if client == nil {
+		return
+	}
+	client.stop(reason)
+}
+
 func (r *codexLocalRuntime) Steer(sessionID string, input string, options TurnOptions) error {
 	r.mu.Lock()
 	client := r.clients[sessionID]
@@ -184,10 +197,16 @@ func newCodexClient(runtime *codexLocalRuntime, session Session, cwd, processCWD
 
 func (c *codexClient) startTurn(input string, options TurnOptions) {
 	if err := c.ensureStarted(); err != nil {
+		if c.isStopping() {
+			return
+		}
 		c.finishFailed(err.Error())
 		return
 	}
 	if err := c.ensureThread(); err != nil {
+		if c.isStopping() {
+			return
+		}
 		c.finishFailed(err.Error())
 		return
 	}
@@ -203,6 +222,9 @@ func (c *codexClient) startTurn(input string, options TurnOptions) {
 	applyCodexTurnOptions(params, options, c.cwd, c.defaultModel(), c.defaultReasoningEffort())
 	result, err := c.request("turn/start", params, codexRequestTimeout)
 	if err != nil {
+		if c.isStopping() {
+			return
+		}
 		c.finishFailed(err.Error())
 		return
 	}
@@ -332,6 +354,39 @@ func (c *codexClient) interrupt() error {
 	c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle", "turn_id": turnID}})
 	c.markIdle("cancelled")
 	return nil
+}
+
+func (c *codexClient) stop(reason string) {
+	c.mu.Lock()
+	wasRunning := c.running
+	turnID := c.activeTurn
+	c.stopping = true
+	c.running = false
+	c.activeTurn = ""
+	stdin := c.stdin
+	cmd := c.cmd
+	for id, ch := range c.pending {
+		ch <- codexRPCResponse{ID: id, Error: &codexRPCError{Code: -32000, Message: "session stopped"}}
+		delete(c.pending, id)
+	}
+	c.mu.Unlock()
+	if stdin != nil {
+		_ = stdin.Close()
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	c.runtime.app.store.updateSessionStatus(c.session.ID, "idle")
+	if wasRunning {
+		normalized := map[string]any{"status": "idle"}
+		if turnID != "" {
+			normalized["turn_id"] = turnID
+		}
+		if reason != "" {
+			normalized["reason"] = reason
+		}
+		c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.cancelled", Normalized: normalized})
+	}
 }
 
 func (c *codexClient) steer(input string) error {
@@ -469,16 +524,18 @@ func (c *codexClient) wait() {
 	err := c.cmd.Wait()
 	close(c.closed)
 	c.mu.Lock()
+	stopping := c.stopping
 	c.stdin = nil
 	c.running = false
 	c.initialized = false
 	c.threadID = ""
+	c.stopping = false
 	for id, ch := range c.pending {
 		ch <- codexRPCResponse{ID: id, Error: &codexRPCError{Code: -32000, Message: "codex app-server exited"}}
 		delete(c.pending, id)
 	}
 	c.mu.Unlock()
-	if err != nil {
+	if err != nil && !stopping {
 		c.runtime.app.store.updateSessionStatus(c.session.ID, "failed")
 		c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.failed", Normalized: map[string]any{
 			"status":  "failed",
@@ -519,6 +576,12 @@ func (c *codexClient) isRunning() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.running
+}
+
+func (c *codexClient) isStopping() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stopping
 }
 
 func (c *codexClient) getThreadID() string {

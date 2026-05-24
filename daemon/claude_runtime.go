@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 var claudeBridgeExecPattern = regexp.MustCompile(`\bhook_bridge\.py['"]?\s+exec\s+['"]?([A-Za-z0-9+/=]+)['"]?`)
@@ -51,8 +52,12 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 		if workspace.SSH == nil || strings.TrimSpace(workspace.SSH.RemoteCWD) == "" {
 			return fmt.Errorf("ssh workspace remote cwd is empty")
 		}
-		if _, _, err := r.app.ssh.proxyFor(context.Background(), workspace); err != nil {
-			return err
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		var hello map[string]any
+		callErr := r.app.ssh.call(ctx, workspace, "hello", map[string]any{}, &hello)
+		cancel()
+		if callErr != nil {
+			return callErr
 		}
 		cwd = workspace.LocalProjectionRoot
 		remoteCWD = filepath.Clean(workspace.SSH.RemoteCWD)
@@ -115,6 +120,16 @@ func (r *claudeLocalRuntime) Interrupt(sessionID string) error {
 	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.interrupt", Normalized: map[string]any{"status": "requested"}})
 	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle"}})
 	return nil
+}
+
+func (r *claudeLocalRuntime) StopSession(sessionID string, reason string) {
+	if err := r.Interrupt(sessionID); err != nil && !errors.Is(err, ErrSessionIdle) {
+		session, _ := r.app.store.getSession(sessionID)
+		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.warning", Normalized: map[string]any{
+			"message": err.Error(),
+			"reason":  reason,
+		}})
+	}
 }
 
 func (r *claudeLocalRuntime) Steer(sessionID string, input string, options TurnOptions) error {

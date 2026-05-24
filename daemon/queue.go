@@ -67,6 +67,27 @@ func (a *app) cancelQueuedTurn(sessionID, queueID string) {
 	}
 }
 
+func (a *app) clearSessionQueue(sessionID string, reason string) {
+	session, _ := a.store.getSession(sessionID)
+	a.queueMu.Lock()
+	queue := append([]queuedTurn(nil), a.queues[sessionID]...)
+	delete(a.queues, sessionID)
+	a.queueMu.Unlock()
+	for _, turn := range queue {
+		normalized := map[string]any{"queue_id": turn.ID}
+		if reason != "" {
+			normalized["reason"] = reason
+		}
+		if turn.Options.Internal {
+			normalized["internal"] = true
+		}
+		if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
+			normalized["text"] = text
+		}
+		a.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: session.Agent, Kind: "queue.cancelled", Normalized: normalized})
+	}
+}
+
 func (a *app) steerQueuedTurn(sessionID, queueID string) error {
 	ss, ok := a.store.getSession(sessionID)
 	if !ok {

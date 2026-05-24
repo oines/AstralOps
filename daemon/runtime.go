@@ -15,6 +15,10 @@ type AgentRuntime interface {
 	Interrupt(sessionID string) error
 }
 
+type SessionStopper interface {
+	StopSession(sessionID string, reason string)
+}
+
 type TurnSteerer interface {
 	Steer(sessionID string, input string, options TurnOptions) error
 }
