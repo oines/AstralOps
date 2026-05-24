@@ -1,0 +1,420 @@
+package main
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+const version = "0.1.0"
+
+type app struct {
+	store    *store
+	token    string
+	hub      *eventHub
+	upgrader websocket.Upgrader
+	agents   map[AgentKind]agentInfo
+	runtimes map[AgentKind]AgentRuntime
+	queueMu  sync.Mutex
+	queues   map[string][]queuedTurn
+}
+
+func main() {
+	dataDir := defaultDataDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "runtime"), 0o700); err != nil {
+		log.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "logs"), 0o700); err != nil {
+		log.Fatal(err)
+	}
+
+	st, err := loadStore(dataDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	token := randomToken()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	a := &app{
+		store:  st,
+		token:  token,
+		hub:    newEventHub(),
+		agents: discoverAgents(),
+		queues: map[string][]queuedTurn{},
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool { return true },
+		},
+	}
+	a.runtimes = newRuntimeRegistry(a)
+
+	if err := writeRuntime(dataDir, port, token); err != nil {
+		log.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/health", a.handleHealth)
+	mux.HandleFunc("/v1/workspaces", a.auth(a.handleWorkspaces))
+	mux.HandleFunc("/v1/workspaces/", a.auth(a.handleWorkspaceAction))
+	mux.HandleFunc("/v1/sessions", a.auth(a.handleSessions))
+	mux.HandleFunc("/v1/sessions/", a.auth(a.handleSessionAction))
+	mux.HandleFunc("/v1/approvals/", a.auth(a.handleApprovalAction))
+	mux.HandleFunc("/v1/events", a.auth(a.handleEvents))
+
+	handler := withCORS(mux)
+	log.Printf("astralopsd listening on 127.0.0.1:%d", port)
+	if err := http.Serve(ln, handler); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func defaultDataDir() string {
+	if v := os.Getenv("ASTRALOPS_HOME"); v != "" {
+		return v
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".AstralOps")
+}
+
+func randomToken() string {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func writeRuntime(dataDir string, port int, token string) error {
+	path := filepath.Join(dataDir, "runtime", "daemon.json")
+	body, _ := json.MarshalIndent(map[string]any{
+		"host":       "127.0.0.1",
+		"port":       port,
+		"token":      token,
+		"pid":        os.Getpid(),
+		"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
+	}, "", "  ")
+	return os.WriteFile(path, body, 0o600)
+}
+
+func randomID(n int) string {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(buf)[:n]
+}
+
+func randomUUID() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		panic(err)
+	}
+	buf[6] = (buf[6] & 0x0f) | 0x40
+	buf[8] = (buf[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16])
+}
+
+func discoverAgents() map[AgentKind]agentInfo {
+	claude := discoverAgent("claude", "--version")
+	enrichClaudeAgent(&claude)
+	codex := discoverAgent("codex", "--version")
+	enrichCodexAgent(&codex)
+	return map[AgentKind]agentInfo{
+		AgentClaude: claude,
+		AgentCodex:  codex,
+	}
+}
+
+func discoverAgent(name string, args ...string) agentInfo {
+	path, err := exec.LookPath(name)
+	if err != nil {
+		for _, dir := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"} {
+			candidate := filepath.Join(dir, name)
+			if st, statErr := os.Stat(candidate); statErr == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+				path = candidate
+				err = nil
+				break
+			}
+		}
+		if err != nil {
+			return agentInfo{Available: false}
+		}
+	}
+	info := agentInfo{Path: path, Available: true}
+	ctx := exec.Command(path, args...)
+	out, err := ctx.CombinedOutput()
+	if err == nil {
+		info.Version = strings.TrimSpace(string(out))
+	}
+	return info
+}
+
+func enrichClaudeAgent(info *agentInfo) {
+	claudeEfforts := []string{"low", "medium", "high"}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	settings := mergeJSONSettings(
+		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(home, ".claude", "settings.local.json"),
+	)
+	if len(settings) == 0 {
+		return
+	}
+
+	if model := stringSetting(settings, "model"); model != "" {
+		info.CurrentModel = model
+	}
+	if effort := stringSetting(settings, "effortLevel"); effort != "" {
+		info.CurrentEffort = effort
+	}
+	env := map[string]any{}
+	if envSettings, ok := settings["env"].(map[string]any); ok {
+		env = envSettings
+		if info.CurrentModel == "" {
+			info.CurrentModel = stringSetting(env, "ANTHROPIC_MODEL")
+		}
+	}
+	info.Models = []modelInfo{
+		claudeModelSlot("opus", stringSetting(env, "ANTHROPIC_DEFAULT_OPUS_MODEL"), claudeEfforts),
+		claudeModelSlot("sonnet", stringSetting(env, "ANTHROPIC_DEFAULT_SONNET_MODEL"), claudeEfforts),
+		claudeModelSlot("haiku", stringSetting(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"), claudeEfforts),
+	}
+}
+
+func claudeModelSlot(alias, mapped string, supportedEfforts []string) modelInfo {
+	if mapped == "" {
+		return modelInfo{
+			ID:                        alias,
+			Label:                     titleCase(alias),
+			Source:                    "Claude alias",
+			Slot:                      alias,
+			SupportedReasoningEfforts: supportedEfforts,
+		}
+	}
+	return modelInfo{
+		ID:                        mapped,
+		Label:                     mapped,
+		Source:                    "ANTHROPIC_DEFAULT_" + strings.ToUpper(alias) + "_MODEL",
+		Slot:                      alias,
+		SupportedReasoningEfforts: supportedEfforts,
+	}
+}
+
+func enrichCodexAgent(info *agentInfo) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	add := newModelCollector()
+
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	config := readSimpleTOML(configPath)
+	if model := config["model"]; model != "" {
+		info.CurrentModel = model
+		add.add(model, "Codex config", info.CurrentEffort, nil)
+	}
+	if effort := config["model_reasoning_effort"]; effort != "" {
+		info.CurrentEffort = effort
+	}
+
+	cachePath := filepath.Join(home, ".codex", "models_cache.json")
+	var cache struct {
+		Models []struct {
+			Slug                     string `json:"slug"`
+			DisplayName              string `json:"display_name"`
+			DefaultReasoningLevel    string `json:"default_reasoning_level"`
+			SupportedReasoningLevels []struct {
+				Effort string `json:"effort"`
+			} `json:"supported_reasoning_levels"`
+		} `json:"models"`
+	}
+	if body, err := os.ReadFile(cachePath); err == nil && json.Unmarshal(body, &cache) == nil {
+		for _, model := range cache.Models {
+			id := strings.TrimSpace(model.Slug)
+			if id == "" {
+				continue
+			}
+			label := strings.TrimSpace(model.DisplayName)
+			if label == "" {
+				label = id
+			}
+			efforts := []string{}
+			for _, level := range model.SupportedReasoningLevels {
+				if effort := strings.TrimSpace(level.Effort); effort != "" {
+					efforts = append(efforts, effort)
+				}
+			}
+			add.withLabel(id, label, "Codex models", model.DefaultReasoningLevel, efforts)
+		}
+	}
+	if info.CurrentModel != "" {
+		add.add(info.CurrentModel, "current", info.CurrentEffort, nil)
+	}
+	info.Models = add.models()
+}
+
+func mergeJSONSettings(paths ...string) map[string]any {
+	out := map[string]any{}
+	for _, path := range paths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var next map[string]any
+		if json.Unmarshal(body, &next) != nil {
+			continue
+		}
+		mergeMap(out, next)
+	}
+	return out
+}
+
+func mergeMap(dst, src map[string]any) {
+	for key, value := range src {
+		srcMap, srcIsMap := value.(map[string]any)
+		dstMap, dstIsMap := dst[key].(map[string]any)
+		if srcIsMap && dstIsMap {
+			mergeMap(dstMap, srcMap)
+			continue
+		}
+		dst[key] = value
+	}
+}
+
+func stringSetting(settings map[string]any, key string) string {
+	value, ok := settings[key].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func titleCase(value string) string {
+	if value == "" {
+		return ""
+	}
+	return strings.ToUpper(value[:1]) + value[1:]
+}
+
+func readSimpleTOML(path string) map[string]string {
+	out := map[string]string{}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
+			continue
+		}
+		key, raw, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value := strings.TrimSpace(raw)
+		if cut, _, ok := strings.Cut(value, "#"); ok {
+			value = strings.TrimSpace(cut)
+		}
+		value = strings.Trim(value, `"'`)
+		if key != "" && value != "" {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+type modelCollector struct {
+	order []string
+	seen  map[string]modelInfo
+}
+
+func newModelCollector() *modelCollector {
+	return &modelCollector{seen: map[string]modelInfo{}}
+}
+
+func (c *modelCollector) withLabel(id, label, source, defaultEffort string, supportedEfforts []string) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	if _, ok := c.seen[id]; !ok {
+		c.order = append(c.order, id)
+	}
+	existing := c.seen[id]
+	if label == "" {
+		label = existing.Label
+	}
+	if source == "" {
+		source = existing.Source
+	}
+	if defaultEffort == "" {
+		defaultEffort = existing.DefaultReasoningEffort
+	}
+	if len(supportedEfforts) == 0 {
+		supportedEfforts = existing.SupportedReasoningEfforts
+	}
+	c.seen[id] = modelInfo{ID: id, Label: label, Source: source, Slot: existing.Slot, DefaultReasoningEffort: defaultEffort, SupportedReasoningEfforts: dedupeStrings(supportedEfforts)}
+}
+
+func (c *modelCollector) models() []modelInfo {
+	out := make([]modelInfo, 0, len(c.order))
+	for _, id := range c.order {
+		out = append(out, c.seen[id])
+	}
+	return out
+}
+
+func (c *modelCollector) add(id, source, defaultEffort string, supportedEfforts []string) {
+	c.withLabel(id, id, source, defaultEffort, supportedEfforts)
+}
+
+func dedupeStrings(values []string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func (s Session) String() string {
+	return fmt.Sprintf("%s/%s", s.WorkspaceID, s.ID)
+}

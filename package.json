@@ -1,0 +1,15 @@
+{
+  "name": "astralops",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/desktop",
+    "protocol"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/desktop",
+    "build": "npm run build -w apps/desktop && npm run build -w protocol && go build ./daemon ./proxy-agent",
+    "test": "go test ./...",
+    "check": "npm run check -w apps/desktop && npm run check -w protocol && go test ./..."
+  }
+}

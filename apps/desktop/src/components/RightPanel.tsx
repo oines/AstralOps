@@ -1,0 +1,711 @@
+import { ChevronLeft, File, Folder, Palette, Plus, TerminalSquare, Type, X } from "lucide-react";
+import { closestCenter, DndContext, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
+import type { DragEndEvent } from "@dnd-kit/core";
+import { arrayMove, horizontalListSortingStrategy, SortableContext, useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
+import type { ITheme } from "@xterm/xterm";
+import { motion } from "framer-motion";
+import "@xterm/xterm/css/xterm.css";
+import type React from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { AstralApi } from "../api";
+import type { FileListResponse, PanelTabKind, Workspace } from "../types";
+
+type PanelTab = {
+  id: string;
+  kind: PanelTabKind;
+  title?: string;
+};
+
+type RightPanelProps = {
+  api: AstralApi | null;
+  open: boolean;
+  width: number;
+  workspace: Workspace | null;
+  onResize: (width: number) => void;
+};
+
+export function RightPanel({ api, open, width, workspace, onResize }: RightPanelProps): React.JSX.Element | null {
+  const [tabs, setTabs] = useState<PanelTab[]>([]);
+  const [activeTabId, setActiveTabId] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const tabDragSensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 6 },
+    }),
+  );
+
+  useEffect(() => {
+    if (!open || tabs.length > 0) return;
+    const tab = createTab("files");
+    setTabs([tab]);
+    setActiveTabId(tab.id);
+  }, [open, tabs.length]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function close(event: PointerEvent): void {
+      if ((event.target as Element | null)?.closest("[data-right-panel-menu]")) return;
+      setMenuOpen(false);
+    }
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [menuOpen]);
+
+  useEffect(() => {
+    if (!dragging) return;
+    function move(event: MouseEvent): void {
+      onResize(Math.min(720, Math.max(320, window.innerWidth - event.clientX)));
+    }
+    function stop(): void {
+      setDragging(false);
+    }
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", stop);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", stop);
+    };
+  }, [dragging, onResize]);
+
+  const updateTabTitle = useCallback((id: string, title: string): void => {
+    setTabs((current) => current.map((tab) => (tab.id === id && tab.title !== title ? { ...tab, title } : tab)));
+  }, []);
+
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+
+  function addTab(kind: PanelTabKind): void {
+    const tab = createTab(kind);
+    setTabs((current) => [...current, tab]);
+    setActiveTabId(tab.id);
+    setMenuOpen(false);
+  }
+
+  function closeTab(id: string): void {
+    setTabs((current) => {
+      const next = current.filter((tab) => tab.id !== id);
+      if (activeTabId === id) {
+        setActiveTabId(next.at(-1)?.id ?? "");
+      }
+      return next;
+    });
+  }
+
+  function handleTabDragEnd(event: DragEndEvent): void {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setTabs((current) => {
+      const oldIndex = current.findIndex((tab) => tab.id === active.id);
+      const newIndex = current.findIndex((tab) => tab.id === over.id);
+      if (oldIndex < 0 || newIndex < 0) return current;
+      return arrayMove(current, oldIndex, newIndex);
+    });
+  }
+
+  return (
+    <motion.aside
+      className={`relative flex h-screen shrink-0 flex-col overflow-hidden bg-[#fbfaf7] ${
+        open ? "border-l border-[#e4e1da]" : "border-l border-transparent"
+      }`}
+      animate={{ width: open ? width : 0 }}
+      initial={false}
+      transition={{ type: "spring", stiffness: 360, damping: 36, mass: 0.85 }}
+      aria-hidden={!open}
+    >
+      <div
+        className={`absolute inset-y-0 left-[-3px] z-20 w-1.5 cursor-col-resize transition-colors duration-150 ease-out hover:bg-[#d8d5cd] ${open ? "" : "hidden"}`}
+        onMouseDown={(event) => {
+          event.preventDefault();
+          setDragging(true);
+        }}
+      />
+      <motion.div
+        className={`flex h-full flex-col ${open ? "" : "pointer-events-none"}`}
+        style={{ width }}
+        animate={{ opacity: open ? 1 : 0, x: open ? 0 : 16 }}
+        initial={false}
+        transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+      >
+      <div className="flex h-[64px] shrink-0 items-center gap-2 border-b border-[#ebe8e1] pl-4 pr-[68px]">
+        <DndContext sensors={tabDragSensors} collisionDetection={closestCenter} onDragEnd={handleTabDragEnd}>
+          <SortableContext items={tabs.map((tab) => tab.id)} strategy={horizontalListSortingStrategy}>
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-2">
+              {tabs.map((tab) => (
+                <SortablePanelTab
+                  active={tab.id === activeTabId}
+                  key={tab.id}
+                  tab={tab}
+                  title={tabTitle(tab, workspace)}
+                  onClose={() => closeTab(tab.id)}
+                  onSelect={() => setActiveTabId(tab.id)}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
+        <div className="relative shrink-0" data-right-panel-menu>
+          <button
+            className="grid size-8 place-items-center rounded-lg text-[#8f9296] transition-colors duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438]"
+            type="button"
+            aria-label="新增右侧标签"
+            title="新增标签"
+            onClick={() => setMenuOpen((current) => !current)}
+          >
+            <Plus size={17} strokeWidth={2} />
+          </button>
+          {menuOpen ? (
+            <div className="absolute right-0 top-10 z-30 w-44 rounded-[16px] border border-[#dedbd3] bg-[#fffefa] p-1.5 shadow-[0_18px_45px_rgba(37,34,29,0.16),0_2px_8px_rgba(37,34,29,0.08)]">
+              <PanelMenuButton icon={<TerminalSquare size={16} strokeWidth={1.8} />} label="终端" onClick={() => addTab("terminal")} />
+              <PanelMenuButton icon={<Folder size={16} strokeWidth={1.8} />} label="文件浏览" onClick={() => addTab("files")} />
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-hidden">
+        {tabs.length === 0 ? (
+          <PanelMessage title="没有标签页" body="点右上角 + 新建终端或文件浏览。" />
+        ) : null}
+        {tabs.map((tab) => (
+          <div className={tab.id === activeTab?.id ? "h-full" : "hidden h-full"} key={tab.id}>
+            {tab.kind === "terminal" ? (
+              <TerminalTab api={api} workspace={workspace} onTitleChange={(title) => updateTabTitle(tab.id, title)} />
+            ) : (
+              <FilesTab api={api} workspace={workspace} />
+            )}
+          </div>
+        ))}
+      </div>
+      </motion.div>
+    </motion.aside>
+  );
+}
+
+function PanelMenuButton({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }): React.JSX.Element {
+  return (
+    <button className="flex h-10 w-full items-center gap-2 rounded-xl px-3 text-left text-[14px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]" type="button" onClick={onClick}>
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function SortablePanelTab({
+  active,
+  onClose,
+  onSelect,
+  tab,
+  title,
+}: {
+  active: boolean;
+  onClose: () => void;
+  onSelect: () => void;
+  tab: PanelTab;
+  title: string;
+}): React.JSX.Element {
+  const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({ id: tab.id });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 10 : undefined,
+  };
+
+  return (
+    <div
+      className={`group flex h-9 max-w-[198px] shrink-0 cursor-default items-center gap-2 rounded-xl border px-3 text-left text-[13px] font-semibold transition-[background-color,border-color,color,opacity] duration-150 ease-out ${
+        active
+          ? "border-[#e3dfd7] bg-[#f3f2ee] text-[#202124]"
+          : "border-transparent bg-transparent text-[#8e8d91] hover:bg-black/[0.035] hover:text-[#4f4f53]"
+      } ${isDragging ? "opacity-75" : "opacity-100"}`}
+      ref={setNodeRef}
+      style={style}
+    >
+      <button
+        className="flex min-w-0 flex-1 touch-none items-center gap-2 text-left outline-none"
+        type="button"
+        onClick={onSelect}
+        {...attributes}
+        {...listeners}
+      >
+        {tab.kind === "terminal" ? <TerminalSquare className="shrink-0" size={14} strokeWidth={1.9} /> : <Folder className="shrink-0" size={14} strokeWidth={1.8} />}
+        <span className="truncate">{title}</span>
+      </button>
+      <button
+        className="grid size-5 shrink-0 place-items-center rounded-md opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] group-hover:opacity-100"
+        data-tab-close
+        type="button"
+        aria-label="关闭标签"
+        title="关闭标签"
+        onClick={(event) => {
+          event.stopPropagation();
+          onClose();
+        }}
+      >
+        <X size={12} strokeWidth={2} />
+      </button>
+    </div>
+  );
+}
+
+function FilesTab({ api, workspace }: { api: AstralApi | null; workspace: Workspace | null }): React.JSX.Element {
+  const [path, setPath] = useState("");
+  const [data, setData] = useState<FileListResponse | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setPath("");
+  }, [workspace?.id]);
+
+  useEffect(() => {
+    if (!api || !workspace) return;
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    api
+      .listWorkspaceFiles(workspace.id, path)
+      .then((response) => {
+        if (!cancelled) setData(response);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, path, workspace]);
+
+  const parentPath = useMemo(() => {
+    if (!path) return "";
+    const parts = path.split("/").filter(Boolean);
+    parts.pop();
+    return parts.join("/");
+  }, [path]);
+
+  if (!workspace) {
+    return <PanelMessage title="没有工作区" body="创建或选择一个本地工作区后可以浏览文件。" />;
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="border-b border-[#ebe8e1] px-4 py-3">
+        <div className="truncate text-[13px] font-semibold text-[#96949a]">{data?.root ?? workspace.local_cwd}</div>
+        <div className="mt-1 flex items-center gap-2">
+          <button
+            className="grid size-7 place-items-center rounded-lg text-[#8f9296] transition-colors duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] disabled:opacity-35"
+            type="button"
+            disabled={!path}
+            onClick={() => setPath(parentPath)}
+          >
+            <ChevronLeft size={17} strokeWidth={2} />
+          </button>
+          <div className="min-w-0 flex-1 truncate text-[15px] font-semibold text-[#202124]">{path || "/"}</div>
+          {loading ? <div className="text-[12px] font-semibold text-[#a0a3a7]">读取中</div> : null}
+        </div>
+      </div>
+      {error ? <div className="px-4 py-3 text-[13px] font-semibold text-[#b45309]">{error}</div> : null}
+      <div className="min-h-0 flex-1 overflow-auto px-2 py-2">
+        {(data?.entries ?? []).map((entry) => (
+          <button
+            className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left transition-colors duration-150 ease-out hover:bg-black/[0.035]"
+            type="button"
+            key={entry.path}
+            onClick={() => {
+              if (entry.kind === "dir") setPath(entry.path);
+            }}
+          >
+            {entry.kind === "dir" ? <Folder className="shrink-0 text-[#74777b]" size={16} strokeWidth={1.8} /> : <File className="shrink-0 text-[#9a9da1]" size={16} strokeWidth={1.8} />}
+            <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[#343438]">{entry.name}</span>
+            {entry.kind === "file" ? <span className="shrink-0 text-[12px] font-medium text-[#a0a3a7]">{formatBytes(entry.size ?? 0)}</span> : null}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null; onTitleChange: (title: string) => void; workspace: Workspace | null }): React.JSX.Element {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const connectionIdRef = useRef(0);
+  const onTitleChangeRef = useRef(onTitleChange);
+  const [themeId, setThemeId] = useState(() => storedTerminalPreference("astralops-terminal-theme", "studio-light"));
+  const [fontId, setFontId] = useState(() => storedTerminalPreference("astralops-terminal-font", "sf-mono"));
+  const theme = terminalThemes.find((item) => item.id === themeId) ?? terminalThemes[0];
+  const font = terminalFonts.find((item) => item.id === fontId) ?? terminalFonts[0];
+
+  useEffect(() => {
+    onTitleChangeRef.current = onTitleChange;
+  }, [onTitleChange]);
+
+  useEffect(() => {
+    localStorage.setItem("astralops-terminal-theme", themeId);
+    const term = termRef.current;
+    if (!term) return;
+    term.options.theme = theme.theme;
+  }, [theme.theme, themeId]);
+
+  useEffect(() => {
+    localStorage.setItem("astralops-terminal-font", fontId);
+    const term = termRef.current;
+    if (!term) return;
+    term.options.fontFamily = font.family;
+    term.options.fontSize = font.size;
+    term.options.lineHeight = font.lineHeight;
+    fitRef.current?.fit();
+  }, [font.family, font.lineHeight, font.size, fontId]);
+
+  useEffect(() => {
+    if (!api || !workspace || !hostRef.current) return;
+    const connectionId = connectionIdRef.current + 1;
+    connectionIdRef.current = connectionId;
+    let disposed = false;
+    let opened = false;
+    const term = new Terminal({
+      cursorBlink: true,
+      convertEol: true,
+      fontFamily: font.family,
+      fontSize: font.size,
+      lineHeight: font.lineHeight,
+      scrollback: 12000,
+      theme: theme.theme,
+    });
+    const fit = new FitAddon();
+    termRef.current = term;
+    fitRef.current = fit;
+    term.loadAddon(fit);
+    term.open(hostRef.current);
+    fit.fit();
+
+    const socket = api.workspacePTYSocket(workspace.id);
+    const sendResize = (): void => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+      }
+    };
+    const resizeObserver = new ResizeObserver(() => {
+      fit.fit();
+      sendResize();
+    });
+    resizeObserver.observe(hostRef.current);
+
+    const input = term.onData((data) => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "input", data }));
+      }
+    });
+    const isCurrent = (): boolean => !disposed && connectionIdRef.current === connectionId;
+    socket.onopen = () => {
+      if (!isCurrent()) return;
+      opened = true;
+      sendResize();
+    };
+    socket.onmessage = (event) => {
+      if (!isCurrent()) return;
+      try {
+        const message = JSON.parse(event.data as string) as { type: string; data?: string; message?: string; shell?: string; cwd?: string };
+        if (message.type === "ready") {
+          const nextShell = message.shell || "shell";
+          onTitleChangeRef.current(`${nextShell} · ${basename(message.cwd || workspace.local_cwd || "")}`);
+        }
+        if (message.type === "output" && message.data) term.write(message.data);
+        if (message.type === "error") {
+          const text = message.message || "PTY error";
+          term.writeln(`\r\n\x1b[31m${text}\x1b[0m`);
+        }
+      } catch {
+        term.write(String(event.data));
+      }
+    };
+    socket.onerror = () => {
+      if (!isCurrent() || opened) return;
+      term.writeln("\r\n\x1b[31mPTY 连接失败\x1b[0m");
+    };
+    socket.onclose = () => {
+      input.dispose();
+    };
+
+    return () => {
+      disposed = true;
+      input.dispose();
+      resizeObserver.disconnect();
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "close" }));
+      }
+      socket.close();
+      term.dispose();
+      if (termRef.current === term) termRef.current = null;
+      if (fitRef.current === fit) fitRef.current = null;
+    };
+  }, [api, workspace]);
+
+  if (!workspace) {
+    return <PanelMessage title="没有工作区" body="创建或选择一个本地工作区后可以运行命令。" />;
+  }
+
+  return (
+    <div className="flex h-full flex-col" style={{ backgroundColor: theme.theme.background }}>
+      <div className="flex h-10 shrink-0 items-center justify-end gap-1.5 border-b px-3" style={{ borderColor: theme.border, backgroundColor: theme.chrome }}>
+        <TerminalSelect
+          icon={<Palette size={14} strokeWidth={1.9} />}
+          label="终端配色"
+          value={themeId}
+          options={terminalThemes}
+          onChange={setThemeId}
+        />
+        <TerminalSelect
+          icon={<Type size={14} strokeWidth={1.9} />}
+          label="终端字体"
+          value={fontId}
+          options={terminalFonts}
+          onChange={setFontId}
+        />
+      </div>
+      <div className="min-h-0 flex-1 p-3">
+        <div ref={hostRef} className="h-full overflow-hidden select-text" style={{ backgroundColor: theme.theme.background }} />
+      </div>
+    </div>
+  );
+}
+
+function TerminalSelect({
+  icon,
+  label,
+  onChange,
+  options,
+  value,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onChange: (value: string) => void;
+  options: Array<{ id: string; label: string }>;
+  value: string;
+}): React.JSX.Element {
+  return (
+    <label className="relative flex h-7 items-center gap-1.5 rounded-md border border-black/[0.07] bg-white/70 pl-2 pr-1.5 text-[12px] font-semibold text-[#4f5358] transition-colors duration-150 ease-out hover:bg-white">
+      <span className="shrink-0 text-[#7d8187]">{icon}</span>
+      <span className="sr-only">{label}</span>
+      <select
+        className="h-full max-w-[132px] appearance-none bg-transparent pr-4 text-[12px] font-semibold outline-none"
+        aria-label={label}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {options.map((option) => (
+          <option key={option.id} value={option.id}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      <ChevronLeft className="pointer-events-none absolute right-1.5 rotate-[-90deg] text-[#9a9da1]" size={13} strokeWidth={2} />
+    </label>
+  );
+}
+
+function PanelMessage({ body, title }: { body: string; title: string }): React.JSX.Element {
+  return (
+    <div className="p-5">
+      <div className="text-[15px] font-semibold text-[#202124]">{title}</div>
+      <div className="mt-1 text-[13px] font-medium leading-5 text-[#8f9296]">{body}</div>
+    </div>
+  );
+}
+
+function createTab(kind: PanelTabKind): PanelTab {
+  return {
+    id: `${kind}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    kind,
+    title: kind === "terminal" ? undefined : "文件",
+  };
+}
+
+function tabTitle(tab: PanelTab, workspace: Workspace | null): string {
+  if (tab.title) return tab.title;
+  if (tab.kind === "terminal") return `shell · ${basename(workspace?.local_cwd || "") || "workspace"}`;
+  return "文件";
+}
+
+function basename(path: string): string {
+  return path.split("/").filter(Boolean).at(-1) || path || "/";
+}
+
+const terminalScrollbarTheme = {
+  scrollbarSliderBackground: "rgba(216, 213, 205, 0.7)",
+  scrollbarSliderHoverBackground: "rgba(190, 186, 176, 0.85)",
+  scrollbarSliderActiveBackground: "rgba(176, 171, 161, 0.95)",
+};
+
+const terminalThemes: Array<{ id: string; label: string; border: string; chrome: string; theme: ITheme }> = [
+  {
+    id: "studio-light",
+    label: "Studio Light",
+    border: "#e5e7eb",
+    chrome: "#f8fafc",
+    theme: {
+      background: "#ffffff",
+      foreground: "#24292f",
+      cursor: "#24292f",
+      cursorAccent: "#ffffff",
+      selectionBackground: "#c8ddff",
+      ...terminalScrollbarTheme,
+      black: "#24292f",
+      red: "#cf222e",
+      green: "#00a33f",
+      yellow: "#f0b400",
+      blue: "#2f81f7",
+      magenta: "#8250df",
+      cyan: "#1f9bab",
+      white: "#d0d7de",
+      brightBlack: "#8c959f",
+      brightRed: "#ff5a5f",
+      brightGreen: "#00b84a",
+      brightYellow: "#f5c542",
+      brightBlue: "#4090ff",
+      brightMagenta: "#a371f7",
+      brightCyan: "#39c5cf",
+      brightWhite: "#ffffff",
+    },
+  },
+  {
+    id: "paper",
+    label: "Paper",
+    border: "#e9e5dc",
+    chrome: "#fbfaf7",
+    theme: {
+      background: "#fffefa",
+      foreground: "#202124",
+      cursor: "#202124",
+      cursorAccent: "#fffefa",
+      selectionBackground: "#d8d5cd",
+      ...terminalScrollbarTheme,
+      black: "#202124",
+      red: "#c43e1c",
+      green: "#0a9f4a",
+      yellow: "#b78600",
+      blue: "#2563eb",
+      magenta: "#9a4fd3",
+      cyan: "#008c99",
+      white: "#d8d5cd",
+      brightBlack: "#8f9296",
+      brightRed: "#ef5f45",
+      brightGreen: "#12b85d",
+      brightYellow: "#e2aa14",
+      brightBlue: "#4388ff",
+      brightMagenta: "#b56af0",
+      brightCyan: "#20b7c4",
+      brightWhite: "#ffffff",
+    },
+  },
+  {
+    id: "contrast-light",
+    label: "Contrast",
+    border: "#d6dbe3",
+    chrome: "#f5f7fb",
+    theme: {
+      background: "#fdfdfd",
+      foreground: "#111827",
+      cursor: "#111827",
+      cursorAccent: "#ffffff",
+      selectionBackground: "#b7d2ff",
+      ...terminalScrollbarTheme,
+      black: "#111827",
+      red: "#b91c1c",
+      green: "#008c3a",
+      yellow: "#d99a00",
+      blue: "#006cff",
+      magenta: "#7c3aed",
+      cyan: "#008ea1",
+      white: "#d1d5db",
+      brightBlack: "#6b7280",
+      brightRed: "#dc2626",
+      brightGreen: "#00a846",
+      brightYellow: "#f0b429",
+      brightBlue: "#2388ff",
+      brightMagenta: "#9f67ff",
+      brightCyan: "#20b8c7",
+      brightWhite: "#ffffff",
+    },
+  },
+  {
+    id: "night",
+    label: "Night",
+    border: "#232832",
+    chrome: "#111827",
+    theme: {
+      background: "#0d1117",
+      foreground: "#d6deeb",
+      cursor: "#d6deeb",
+      cursorAccent: "#0d1117",
+      selectionBackground: "#264f78",
+      ...terminalScrollbarTheme,
+      black: "#0d1117",
+      red: "#ff6b6b",
+      green: "#42d392",
+      yellow: "#f6c177",
+      blue: "#7aa2f7",
+      magenta: "#bb9af7",
+      cyan: "#7dcfff",
+      white: "#c9d1d9",
+      brightBlack: "#6e7681",
+      brightRed: "#ff7b72",
+      brightGreen: "#56d364",
+      brightYellow: "#e3b341",
+      brightBlue: "#79c0ff",
+      brightMagenta: "#d2a8ff",
+      brightCyan: "#a5d6ff",
+      brightWhite: "#f0f6fc",
+    },
+  },
+];
+
+const terminalFonts = [
+  {
+    id: "sf-mono",
+    label: "SF Mono",
+    family: "SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace",
+    size: 13,
+    lineHeight: 1.38,
+  },
+  {
+    id: "jetbrains",
+    label: "JetBrains",
+    family: "\"JetBrains Mono\", SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace",
+    size: 13,
+    lineHeight: 1.4,
+  },
+  {
+    id: "menlo",
+    label: "Menlo",
+    family: "Menlo, Monaco, Consolas, monospace",
+    size: 13,
+    lineHeight: 1.35,
+  },
+  {
+    id: "large",
+    label: "Large",
+    family: "SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace",
+    size: 14,
+    lineHeight: 1.42,
+  },
+];
+
+function storedTerminalPreference(key: string, fallback: string): string {
+  try {
+    return localStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+coverage/
+tmp/
+daemon/astralopsd
+proxy-agent/astral-proxy-agent
