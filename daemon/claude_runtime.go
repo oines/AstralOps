@@ -3,15 +3,19 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 )
+
+var claudeBridgeExecPattern = regexp.MustCompile(`\bhook_bridge\.py['"]?\s+exec\s+['"]?([A-Za-z0-9+/=]+)['"]?`)
 
 type claudeLocalRuntime struct {
 	app     *app
@@ -217,7 +221,58 @@ func (r *claudeLocalRuntime) remapProjectionEventPaths(ev AstralEvent) AstralEve
 		return ev
 	}
 	ev.Normalized = remapProjectionValue(ev.Normalized, filepath.Clean(ws.LocalProjectionRoot), filepath.Clean(ws.SSH.RemoteCWD))
+	ev.Normalized = scrubClaudeRemoteBridgeEvent(ev.Normalized, filepath.Clean(ws.SSH.RemoteCWD))
 	return ev
+}
+
+func scrubClaudeRemoteBridgeEvent(value any, remoteCWD string) any {
+	normalized, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	if hook := stringValue(normalized["hook_event_name"]); hook == "PreToolUse" || hook == "PostToolUse" {
+		normalized["hidden"] = true
+		normalized["visibility"] = "debug"
+		return normalized
+	}
+	replaceBridgeCommand(normalized, remoteCWD)
+	if params := mapValue(normalized["params"]); len(params) > 0 {
+		replaceBridgeCommand(params, remoteCWD)
+		normalized["params"] = params
+	}
+	if input := mapValue(normalized["input"]); len(input) > 0 {
+		replaceBridgeCommand(input, remoteCWD)
+		normalized["input"] = input
+	}
+	return normalized
+}
+
+func replaceBridgeCommand(value map[string]any, remoteCWD string) {
+	command := stringValue(value["command"])
+	if command == "" {
+		return
+	}
+	decoded := decodeClaudeBridgeCommand(command)
+	if decoded == "" {
+		return
+	}
+	value["command"] = decoded
+	if _, ok := value["cwd"]; !ok {
+		value["cwd"] = remoteCWD
+	}
+	value["remote"] = true
+}
+
+func decodeClaudeBridgeCommand(command string) string {
+	match := claudeBridgeExecPattern.FindStringSubmatch(command)
+	if len(match) < 2 {
+		return ""
+	}
+	body, err := base64.StdEncoding.DecodeString(match[1])
+	if err != nil {
+		return ""
+	}
+	return string(body)
 }
 
 func remapProjectionValue(value any, localRoot string, remoteRoot string) any {

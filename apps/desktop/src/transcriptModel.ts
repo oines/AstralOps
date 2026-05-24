@@ -30,6 +30,9 @@ export function groupTranscriptEvents(events: AstralEvent[]): TurnGroup[] {
   }
 
   for (const event of events) {
+    if (isHiddenTranscriptEvent(event)) {
+      continue;
+    }
     if (event.kind === "message.user") {
       current = { id: `turn-${event.seq}`, status: "running", user: event, assistant: [], details: [] };
       groups.push(current);
@@ -56,6 +59,11 @@ export function groupTranscriptEvents(events: AstralEvent[]): TurnGroup[] {
   }
 
   return groups;
+}
+
+function isHiddenTranscriptEvent(event: AstralEvent): boolean {
+  const value = event.normalized as Record<string, unknown>;
+  return value.hidden === true || value.visibility === "debug";
 }
 
 export function summarizeDetails(events: AstralEvent[]): string {
