@@ -611,15 +611,18 @@ func (m *sshManager) ensureHelper(ctx context.Context, ws Workspace, probe sshPr
 	}
 	remoteSum := m.remoteHelperSHA256(ctx, ws, remotePath)
 	if forceUpload || remoteSum != localSum {
+		remoteTemp := remotePath + ".upload-" + randomID(8)
 		scpArgs := []string{"-P", strconv.Itoa(sshPort(ws))}
-		scpArgs = append(scpArgs, local, ws.SSH.Endpoint+":"+remotePath)
+		scpArgs = append(scpArgs, local, ws.SSH.Endpoint+":"+remoteTemp)
 		if out, err := exec.CommandContext(ctx, "scp", scpArgs...).CombinedOutput(); err != nil {
 			return helperUpload{}, fmt.Errorf("helper upload failed: %s%s", err.Error(), stderrSuffix(string(out)))
 		}
 		uploaded = true
-		chmod := "chmod 700 " + shellQuote(remotePath)
-		if out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, chmod)...).CombinedOutput(); err != nil {
-			return helperUpload{}, fmt.Errorf("chmod remote helper failed: %s%s", err.Error(), stderrSuffix(string(out)))
+		install := "chmod 700 " + shellQuote(remoteTemp) + " && mv -f " + shellQuote(remoteTemp) + " " + shellQuote(remotePath)
+		if out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, install)...).CombinedOutput(); err != nil {
+			cleanup := "rm -f " + shellQuote(remoteTemp)
+			_, _ = exec.CommandContext(context.Background(), "ssh", append(sshArgs(ws), ws.SSH.Endpoint, cleanup)...).CombinedOutput()
+			return helperUpload{}, fmt.Errorf("install remote helper failed: %s%s", err.Error(), stderrSuffix(string(out)))
 		}
 	}
 	return helperUpload{LocalPath: local, RemoteDir: remoteDir, RemotePath: remotePath, Uploaded: uploaded}, nil

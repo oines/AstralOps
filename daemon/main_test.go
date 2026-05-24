@@ -3016,6 +3016,11 @@ exit 0
 	scp := filepath.Join(binDir, "scp")
 	scpScript := `#!/bin/bash
 set -e
+dest="${@: -1}"
+if [[ "$dest" != *".upload-"* ]]; then
+  echo "helper upload did not use a temporary destination: $dest" >&2
+  exit 1
+fi
 touch "$ASTRALOPS_TEST_PROXY_UPGRADE_MARKER"
 exit 0
 `
