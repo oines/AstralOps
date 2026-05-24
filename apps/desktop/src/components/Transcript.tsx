@@ -28,7 +28,6 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import type { AstralEvent, Session, Workspace } from "../types";
 import {
   buildCommandItems,
-  commandKey,
   collectCommandEvents,
   collectPendingQueueIDs,
   collectResolvedInteractionIDs,
@@ -243,37 +242,34 @@ const TurnBlock = React.memo(function TurnBlock({
   const endTime = group.end?.ts ?? group.start?.ts ?? "";
   const commandEvents = collectCommandEvents(group.details);
   const commandSeqs = new Set(commandEvents.map((event) => event.seq));
-  const commandEventsByKey = useMemo(() => {
-    const byKey = new Map<string, AstralEvent[]>();
-    for (const event of commandEvents) {
-      const key = commandKey(event, `command-${event.seq}`);
-      const bucket = byKey.get(key) ?? [];
-      bucket.push(event);
-      byKey.set(key, bucket);
-    }
-    return byKey;
-  }, [commandEvents]);
 
   useEffect(() => {
     setExpanded(group.status === "running");
   }, [group.status]);
 
-  const renderedCommandKeys = new Set<string>();
-  const timeline = group.timeline.map((event) => {
+  const timeline: React.ReactNode[] = [];
+  for (let index = 0; index < group.timeline.length; index += 1) {
+    const event = group.timeline[index];
     if (commandSeqs.has(event.seq)) {
-      if (!expanded) return null;
-      const key = commandKey(event, `command-${event.seq}`);
-      if (renderedCommandKeys.has(key)) return null;
-      renderedCommandKeys.add(key);
-      const events = commandEventsByKey.get(key) ?? [event];
-      return <CommandGroup events={events} key={`commands-${key}`} turnStatus={group.status} />;
+      if (expanded) {
+        const run: AstralEvent[] = [];
+        while (index < group.timeline.length && commandSeqs.has(group.timeline[index].seq)) {
+          run.push(group.timeline[index]);
+          index += 1;
+        }
+        index -= 1;
+        timeline.push(<CommandGroup events={run} key={`commands-${run[0]?.seq ?? event.seq}`} turnStatus={group.status} />);
+      }
+      continue;
     }
     if (event.kind === "message.delta" || event.kind === "message.assistant" || isTranscriptPlanEvent(event)) {
-      return isTranscriptPlanEvent(event) ? <TranscriptPlanBubble event={event} key={event.seq} /> : <AssistantEvent event={event} key={event.seq} />;
+      timeline.push(isTranscriptPlanEvent(event) ? <TranscriptPlanBubble event={event} key={event.seq} /> : <AssistantEvent event={event} key={event.seq} />);
+      continue;
     }
-    if (!expanded) return null;
-    return <DetailEvent event={event} key={event.seq} pendingQueueIDs={pendingQueueIDs} resolvedIDs={resolvedInteractionIDs} onCancelQueue={onCancelQueue} />;
-  });
+    if (expanded) {
+      timeline.push(<DetailEvent event={event} key={event.seq} pendingQueueIDs={pendingQueueIDs} resolvedIDs={resolvedInteractionIDs} onCancelQueue={onCancelQueue} />);
+    }
+  }
 
   return (
     <motion.article animate={{ opacity: 1, y: 0 }} className="mb-8" initial={{ opacity: 0, y: 4 }} transition={{ duration: 0.14 }}>

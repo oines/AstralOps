@@ -276,6 +276,7 @@ func writeClaudeUserInput(writer io.Writer, input string) error {
 func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Session, reader io.Reader, run *claudeRun, completeTurn func()) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
+	toolStarts := map[string]AstralEvent{}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -285,6 +286,14 @@ func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Sessi
 		for _, ev := range normalizeClaudeStreamJSON(session, []byte(line)) {
 			ev = r.remapProjectionEventPaths(ev)
 			r.app.emit(ev)
+			if ev.Kind == "tool.started" {
+				if id := stringValue(mapValue(ev.Normalized)["id"]); id != "" {
+					toolStarts[id] = ev
+				}
+			}
+			if approval, ok := claudeApprovalFromToolResult(session, ev, toolStarts); ok {
+				r.app.emit(r.remapProjectionEventPaths(approval))
+			}
 		}
 		if resultLine {
 			completeTurn()
@@ -299,6 +308,38 @@ func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Sessi
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
 		r.finishFailed(session, err.Error(), nil)
 	}
+}
+
+func claudeApprovalFromToolResult(session Session, ev AstralEvent, toolStarts map[string]AstralEvent) (AstralEvent, bool) {
+	if ev.Kind != "tool.completed" {
+		return AstralEvent{}, false
+	}
+	value := mapValue(ev.Normalized)
+	if !boolValue(value["is_error"]) {
+		return AstralEvent{}, false
+	}
+	result := firstString(value["result"], value["content"])
+	if !strings.Contains(result, "This command requires approval") {
+		return AstralEvent{}, false
+	}
+	id := stringValue(value["id"])
+	started := mapValue(toolStarts[id].Normalized)
+	params := mapValue(started["input"])
+	toolName := firstString(started["name"], "Bash")
+	command := stringValue(params["command"])
+	normalized := map[string]any{
+		"source":      "claude",
+		"kind":        "permission",
+		"approval_id": id,
+		"request_id":  id,
+		"tool_name":   toolName,
+		"params":      params,
+		"reason":      "This command requires approval",
+	}
+	if command != "" {
+		normalized["command"] = command
+	}
+	return baseClaudeEvent(session, "approval.requested", normalized, ev.Raw), true
 }
 
 func claudeLineType(line []byte) string {

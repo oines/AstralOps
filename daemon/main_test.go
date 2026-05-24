@@ -1083,6 +1083,34 @@ func TestSuppressCodexInternalStderrWarnings(t *testing.T) {
 	}
 }
 
+func TestClaudeCommandRequiresApprovalToolResultRequestsPermission(t *testing.T) {
+	session := Session{ID: "sess_fixture", WorkspaceID: "ws_fixture", Agent: AgentClaude}
+	toolStarts := map[string]AstralEvent{}
+	approvals := []AstralEvent{}
+
+	for _, line := range readFixtureLines(t, "../fixtures/claude-stream-json/real-local-command-requires-approval.jsonl") {
+		for _, ev := range normalizeClaudeStreamJSON(session, []byte(line)) {
+			if ev.Kind == "tool.started" {
+				toolStarts[stringValue(mapValue(ev.Normalized)["id"])] = ev
+			}
+			if approval, ok := claudeApprovalFromToolResult(session, ev, toolStarts); ok {
+				approvals = append(approvals, approval)
+			}
+		}
+	}
+
+	if len(approvals) != 1 {
+		t.Fatalf("approvals = %#v, want one", approvals)
+	}
+	value := mapValue(approvals[0].Normalized)
+	if approvals[0].Kind != "approval.requested" || stringValue(value["kind"]) != "permission" || stringValue(value["command"]) != "git --version" {
+		t.Fatalf("approval = %#v", approvals[0])
+	}
+	if stringValue(value["approval_id"]) != "call_b4ebd018695542a0bd3b3bbe" || stringValue(value["tool_name"]) != "Bash" {
+		t.Fatalf("approval metadata = %#v", value)
+	}
+}
+
 func readFixtureLines(t *testing.T, path string) []string {
 	t.Helper()
 	file, err := os.Open(path)
