@@ -89,6 +89,82 @@ func TestStoreSSHWorkspaceRequiresAbsoluteRemoteCWD(t *testing.T) {
 	}
 }
 
+func TestScrubClaudeRemoteBridgeEventHidesHooksAndDecodesCommand(t *testing.T) {
+	hook := map[string]any{
+		"hook_event_name": "PreToolUse",
+		"name":            "PreToolUse:Bash",
+	}
+	hidden := scrubClaudeRemoteBridgeEvent(hook, "/root").(map[string]any)
+	if hidden["hidden"] != true || hidden["visibility"] != "debug" {
+		t.Fatalf("hook visibility = %#v", hidden)
+	}
+
+	value := map[string]any{
+		"params": map[string]any{
+			"command": "ASTRALOPS_TOKEN='secret' python3 '/Users/oines/.AstralOps/runtime/claude-remote/hook_bridge.py' exec 'bHMgLWxhIC9yb290'",
+		},
+	}
+	scrubbed := scrubClaudeRemoteBridgeEvent(value, "/root").(map[string]any)
+	params := scrubbed["params"].(map[string]any)
+	if got := stringValue(params["command"]); got != "ls -la /root" {
+		t.Fatalf("command = %q", got)
+	}
+	preview, _ := json.Marshal(scrubbed)
+	if strings.Contains(string(preview), "secret") || strings.Contains(string(preview), "hook_bridge.py") || strings.Contains(string(preview), ".AstralOps") {
+		t.Fatalf("scrubbed value leaked bridge internals: %s", preview)
+	}
+}
+
+func TestProjectionDirtyRecordDoesNotMarkPushed(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st}
+	ws := Workspace{
+		ID:                  "ws_projection",
+		Target:              "ssh",
+		LocalProjectionRoot: filepath.Join(dir, "projection"),
+		SSH:                 &SSHConfig{Endpoint: "root@example.com", RemoteCWD: "/root"},
+	}
+	local := filepath.Join(ws.LocalProjectionRoot, "a.txt")
+	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, []byte("dirty"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file := app.recordProjectionFile(ws, "/root/a.txt", local, true, false)
+	if !file.Dirty {
+		t.Fatalf("dirty = false")
+	}
+	if file.LastPushed != "" {
+		t.Fatalf("LastPushed = %q, want empty for dirty record", file.LastPushed)
+	}
+}
+
+func TestFileSHA256ChangesWithContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "helper")
+	if err := os.WriteFile(path, []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := fileSHA256(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := fileSHA256(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("checksum did not change after content update")
+	}
+}
 
 func TestStoreEventAppendAndQuery(t *testing.T) {
 	dir := t.TempDir()

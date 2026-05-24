@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -125,7 +126,7 @@ func (a *app) recordProjectionFile(ws Workspace, remote, local string, dirty boo
 	file.Dirty = dirty
 	if hydrated {
 		file.LastHydrated = now
-	} else {
+	} else if !dirty {
 		file.LastPushed = now
 	}
 	if info, err := os.Stat(local); err == nil {
@@ -135,4 +136,43 @@ func (a *app) recordProjectionFile(ws Workspace, remote, local string, dirty boo
 	manifest.Files[remote] = file
 	a.saveProjectionManifest(ws, manifest)
 	return file
+}
+
+func (a *app) rollbackDirtyProjection(ctx context.Context, ws Workspace) {
+	if ws.Target != "ssh" || ws.SSH == nil {
+		return
+	}
+	manifest := a.loadProjectionManifest(ws)
+	dirty := []projectionFile{}
+	for _, file := range manifest.Files {
+		if file.Dirty {
+			dirty = append(dirty, file)
+		}
+	}
+	if len(dirty) == 0 {
+		return
+	}
+	proxy, _, err := a.ssh.proxyFor(ctx, ws)
+	if err != nil {
+		return
+	}
+	for _, file := range dirty {
+		var out map[string]any
+		if err := proxy.call(ctx, "read", map[string]any{"path": file.RemotePath}, &out); err != nil {
+			_ = os.Remove(file.LocalPath)
+			file.Dirty = false
+			manifest.Files[file.RemotePath] = file
+			continue
+		}
+		_ = os.MkdirAll(filepath.Dir(file.LocalPath), 0o700)
+		_ = os.WriteFile(file.LocalPath, []byte(stringValue(out["content"])), 0o600)
+		file.Dirty = false
+		file.LastHydrated = time.Now().UTC().Format(time.RFC3339Nano)
+		if info, err := os.Stat(file.LocalPath); err == nil {
+			file.Size = info.Size()
+			file.MTime = info.ModTime().UTC().Format(time.RFC3339Nano)
+		}
+		manifest.Files[file.RemotePath] = file
+	}
+	a.saveProjectionManifest(ws, manifest)
 }

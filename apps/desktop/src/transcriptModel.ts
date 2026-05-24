@@ -63,6 +63,7 @@ export function groupTranscriptEvents(events: AstralEvent[]): TurnGroup[] {
 
 function isHiddenTranscriptEvent(event: AstralEvent): boolean {
   const value = event.normalized as Record<string, unknown>;
+  if (event.kind === "workspace.connection") return true;
   return value.hidden === true || value.visibility === "debug";
 }
 

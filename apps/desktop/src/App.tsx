@@ -32,6 +32,7 @@ import type {
   RunMode,
   Session,
   Workspace,
+  WorkspaceConnection,
 } from "./types";
 
 const EVENT_WINDOW_SIZE = 1000;
@@ -87,6 +88,10 @@ export function App(): React.JSX.Element {
   const activeAgent = activeSession?.agent ?? activeWorkspace?.agent;
   const activeSessionId = activeSession?.id ?? "";
   const canUseDaemon = connection === "connected" || connection === "reconnecting";
+  const activeWorkspaceConnection = useMemo(
+    () => latestWorkspaceConnection(selectWorkspaceEvents(eventIndex, activeWorkspaceId)),
+    [activeWorkspaceId, eventIndex],
+  );
   const activeSessionEvents = useMemo(
     () => (activeSessionId ? selectSessionEvents(eventIndex, activeSessionId) : []),
     [activeSessionId, eventIndex],
@@ -426,6 +431,7 @@ export function App(): React.JSX.Element {
       <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[#fffefa]">
         <StatusBar
           activeWorkspace={activeWorkspace}
+          activeWorkspaceConnection={activeWorkspaceConnection}
           connectionState={connection}
           queuedCount={queuedCount}
           sidebarCollapsed={sidebarCollapsed}
@@ -523,6 +529,16 @@ export function App(): React.JSX.Element {
       </button>
     </div>
   );
+}
+
+function latestWorkspaceConnection(events: AstralEvent[]): WorkspaceConnection | null {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.kind === "workspace.connection") {
+      return event.normalized as WorkspaceConnection;
+    }
+  }
+  return null;
 }
 
 function findPendingInteraction(events: AstralEvent[]): PendingInteraction | null {

@@ -53,7 +53,7 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 		if err != nil {
 			return err
 		}
-		appendPrompt = "You are operating inside a transparent SSH workspace. Treat the current working directory as the remote path " + remoteCWD + ". Do not mention or expose the local sparse projection path. File reads, searches, shell commands, and edits are mirrored through AstralOps to the remote machine. Use remote absolute paths when referring to files."
+		appendPrompt = "Treat the current working directory as " + remoteCWD + ". Use absolute paths from that directory when referring to files."
 	}
 	if cwd == "" {
 		return fmt.Errorf("workspace cwd is empty")

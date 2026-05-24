@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const maxClaudeHydrateBytes int64 = 2 * 1024 * 1024
+
 func (a *app) ensureClaudeHookScript() (string, error) {
 	dir := filepath.Join(a.store.dataDir, "runtime", "claude-remote")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -85,6 +87,14 @@ func (a *app) writeClaudeRemoteSettings(ws Workspace) (string, error) {
 					"timeout": 60,
 				}},
 			}},
+			"PostToolUseFailure": []map[string]any{{
+				"matcher": "Write|Edit|MultiEdit",
+				"hooks": []map[string]any{{
+					"type":    "command",
+					"command": command,
+					"timeout": 60,
+				}},
+			}},
 		},
 	}
 	path := filepath.Join(dir, "settings.json")
@@ -110,7 +120,7 @@ func (a *app) handleClaudeRemoteHook(w http.ResponseWriter, r *http.Request, ws 
 		writeJSON(w, http.StatusOK, map[string]any{
 			"hookSpecificOutput": map[string]any{
 				"hookEventName":     firstString(payload["hook_event_name"], payload["hookEventName"], "PreToolUse"),
-				"additionalContext": "AstralOps remote hook failed: " + err.Error(),
+				"additionalContext": "Remote operation failed: " + err.Error(),
 			},
 		})
 		return
@@ -144,6 +154,11 @@ func (a *app) processClaudeRemoteHook(ctx context.Context, ws Workspace, payload
 			return nil, err
 		}
 		return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PostToolUse"}}, nil
+	case "PostToolUseFailure":
+		if err := a.rollbackClaudeRemoteTool(ctx, ws, tool, input); err != nil {
+			return nil, err
+		}
+		return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PostToolUseFailure"}}, nil
 	default:
 		return map[string]any{}, nil
 	}
@@ -171,33 +186,35 @@ func (a *app) preClaudeRemoteTool(ctx context.Context, ws Workspace, tool string
 			"exec",
 			shellQuote(encoded),
 		}, " ")
-		return updated, "AstralOps will execute this Bash command in remote cwd " + ws.SSH.RemoteCWD + ".", nil
+		return updated, "", nil
 	case "Read":
-		local, remote, err := a.hydrateClaudePath(ctx, ws, stringValue(input["file_path"]), false)
+		local, _, err := a.hydrateClaudePath(ctx, ws, stringValue(input["file_path"]), false)
 		if err != nil {
 			return nil, "", err
 		}
 		updated["file_path"] = local
-		return updated, "AstralOps hydrated " + remote + " into sparse projection.", nil
+		return updated, "", nil
 	case "LS":
-		local, remote, err := a.hydrateClaudePath(ctx, ws, stringValue(input["path"]), true)
+		local, _, err := a.hydrateClaudePath(ctx, ws, stringValue(input["path"]), true)
 		if err != nil {
 			return nil, "", err
 		}
 		updated["path"] = local
-		return updated, "AstralOps listed remote directory " + remote + " through sparse projection.", nil
+		return updated, "", nil
 	case "Glob":
-		if err := a.hydrateGlobMatches(ctx, ws, input); err != nil {
+		contextText, err := a.remoteGlobContext(ctx, ws, input)
+		if err != nil {
 			return nil, "", err
 		}
 		updated["path"] = ws.LocalProjectionRoot
-		return updated, "AstralOps created projection placeholders for remote glob matches.", nil
+		return updated, contextText, nil
 	case "Grep":
-		if err := a.hydrateGrepMatches(ctx, ws, input); err != nil {
+		contextText, err := a.remoteGrepContext(ctx, ws, input)
+		if err != nil {
 			return nil, "", err
 		}
 		updated["path"] = ws.LocalProjectionRoot
-		return updated, "AstralOps hydrated remote grep matches into sparse projection.", nil
+		return updated, contextText, nil
 	case "Write", "Edit", "MultiEdit":
 		key := "file_path"
 		if stringValue(input[key]) == "" {
@@ -217,7 +234,8 @@ func (a *app) preClaudeRemoteTool(ctx context.Context, ws Workspace, tool string
 			}
 		}
 		updated[key] = local
-		return updated, "AstralOps mapped write target " + remote + " into sparse projection.", nil
+		a.recordProjectionFile(ws, remote, local, true, false)
+		return updated, "", nil
 	default:
 		return nil, "", nil
 	}
@@ -255,6 +273,43 @@ func (a *app) postClaudeRemoteTool(ctx context.Context, ws Workspace, tool strin
 	return nil
 }
 
+func (a *app) rollbackClaudeRemoteTool(ctx context.Context, ws Workspace, tool string, input map[string]any) error {
+	if tool != "Write" && tool != "Edit" && tool != "MultiEdit" {
+		return nil
+	}
+	path := stringValue(input["file_path"])
+	if path == "" {
+		return nil
+	}
+	local, remote, err := a.projectedLocalPath(ws, path)
+	if err != nil {
+		if remapped, remapErr := a.remotePathFromProjected(ws, path); remapErr == nil {
+			remote = remapped
+			local = path
+		} else {
+			return err
+		}
+	}
+	proxy, _, err := a.ssh.proxyFor(ctx, ws)
+	if err != nil {
+		return err
+	}
+	var out map[string]any
+	if err := proxy.call(ctx, "read", map[string]any{"path": remote}, &out); err != nil {
+		_ = os.Remove(local)
+		a.recordProjectionFile(ws, remote, local, false, false)
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(local, []byte(stringValue(out["content"])), 0o600); err != nil {
+		return err
+	}
+	a.recordProjectionFile(ws, remote, local, false, true)
+	return nil
+}
+
 func (a *app) hydrateClaudePath(ctx context.Context, ws Workspace, requested string, dir bool) (string, string, error) {
 	local, remote, err := a.projectedLocalPath(ws, requested)
 	if err != nil {
@@ -281,13 +336,20 @@ func (a *app) hydrateClaudePath(ctx context.Context, ws Workspace, requested str
 			}
 			if boolValue(entry["is_dir"]) {
 				_ = os.MkdirAll(entryLocal, 0o700)
-			} else if _, err := os.Stat(entryLocal); os.IsNotExist(err) {
-				_ = os.MkdirAll(filepath.Dir(entryLocal), 0o700)
-				_ = os.WriteFile(entryLocal, nil, 0o600)
+				a.recordProjectionFile(ws, stringValue(entry["path"]), entryLocal, false, true)
+			} else {
+				a.recordProjectionFile(ws, stringValue(entry["path"]), entryLocal, false, false)
 			}
 		}
 		a.recordProjectionFile(ws, remote, local, false, true)
 		return local, remote, nil
+	}
+	var stat map[string]any
+	if err := proxy.call(callCtx, "stat", map[string]any{"path": remote}, &stat); err == nil {
+		size := int64(numberValue(stat["size"]))
+		if size > maxClaudeHydrateBytes {
+			return "", remote, fmt.Errorf("file %s is too large to load automatically (%d bytes)", remote, size)
+		}
 	}
 	var out map[string]any
 	if err := proxy.call(callCtx, "read", map[string]any{"path": remote}, &out); err != nil {
@@ -303,49 +365,59 @@ func (a *app) hydrateClaudePath(ctx context.Context, ws Workspace, requested str
 	return local, remote, nil
 }
 
-func (a *app) hydrateGlobMatches(ctx context.Context, ws Workspace, input map[string]any) error {
+func (a *app) remoteGlobContext(ctx context.Context, ws Workspace, input map[string]any) (string, error) {
 	proxy, _, err := a.ssh.proxyFor(ctx, ws)
 	if err != nil {
-		return err
+		return "", err
 	}
 	cwd := firstString(input["path"], ws.SSH.RemoteCWD)
 	var out map[string]any
 	if err := proxy.call(ctx, "glob", map[string]any{"cwd": cwd, "pattern": stringValue(input["pattern"])}, &out); err != nil {
-		return err
+		return "", err
 	}
+	matches := []string{}
 	for _, value := range arrayValue(out["matches"]) {
-		local, _, err := a.projectedLocalPath(ws, stringValue(value))
-		if err != nil {
-			continue
-		}
-		_ = os.MkdirAll(filepath.Dir(local), 0o700)
-		if _, err := os.Stat(local); os.IsNotExist(err) {
-			_ = os.WriteFile(local, nil, 0o600)
+		path := stringValue(value)
+		if path != "" {
+			matches = append(matches, path)
 		}
 	}
-	return nil
+	return matchContext("Matched paths", matches, nil), nil
 }
 
-func (a *app) hydrateGrepMatches(ctx context.Context, ws Workspace, input map[string]any) error {
+func (a *app) remoteGrepContext(ctx context.Context, ws Workspace, input map[string]any) (string, error) {
 	proxy, _, err := a.ssh.proxyFor(ctx, ws)
 	if err != nil {
-		return err
+		return "", err
 	}
 	cwd := firstString(input["path"], ws.SSH.RemoteCWD)
 	var out map[string]any
 	if err := proxy.call(ctx, "grep", map[string]any{"cwd": cwd, "pattern": stringValue(input["pattern"]), "glob": stringValue(input["glob"]), "limit": 200}, &out); err != nil {
-		return err
+		return "", err
 	}
-	seen := map[string]bool{}
+	lines := []string{}
 	for _, value := range arrayValue(out["matches"]) {
-		path := stringValue(mapValue(value)["path"])
-		if path == "" || seen[path] {
+		match := mapValue(value)
+		path := stringValue(match["path"])
+		if path == "" {
 			continue
 		}
-		seen[path] = true
-		_, _, _ = a.hydrateClaudePath(ctx, ws, path, false)
+		lines = append(lines, fmt.Sprintf("%s:%d:%s", path, int(numberValue(match["line"])), stringValue(match["text"])))
 	}
-	return nil
+	return matchContext("Search matches", lines, nil), nil
+}
+
+func matchContext(title string, lines []string, extra []string) string {
+	if len(lines) == 0 {
+		return title + ": none"
+	}
+	if len(lines) > 200 {
+		lines = lines[:200]
+	}
+	out := []string{title + ":"}
+	out = append(out, lines...)
+	out = append(out, extra...)
+	return strings.Join(out, "\n")
 }
 
 func (a *app) projectedLocalPath(ws Workspace, requested string) (string, string, error) {
@@ -381,7 +453,7 @@ func (a *app) remotePathFromProjected(ws Workspace, local string) (string, error
 		rel = ""
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("local path %q escapes projection", local)
+		return "", fmt.Errorf("local path %q escapes workspace cache", local)
 	}
 	return filepath.Clean(filepath.Join(ws.SSH.RemoteCWD, rel)), nil
 }

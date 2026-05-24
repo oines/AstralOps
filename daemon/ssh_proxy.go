@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,11 +35,15 @@ type WorkspaceConnection struct {
 	Endpoint     string         `json:"endpoint,omitempty"`
 	Port         int            `json:"port,omitempty"`
 	RemoteCWD    string         `json:"remote_cwd,omitempty"`
+	RemoteUser   string         `json:"remote_user,omitempty"`
+	RemoteHost   string         `json:"remote_host,omitempty"`
 	RemoteOS     string         `json:"remote_os,omitempty"`
 	RemoteArch   string         `json:"remote_arch,omitempty"`
 	RemoteShell  string         `json:"remote_shell,omitempty"`
+	DisplayCWD   string         `json:"display_cwd,omitempty"`
 	HelperPath   string         `json:"helper_path,omitempty"`
 	HelperStatus string         `json:"helper_status,omitempty"`
+	Capabilities map[string]any `json:"capabilities,omitempty"`
 	Message      string         `json:"message,omitempty"`
 	UpdatedAt    string         `json:"updated_at"`
 	Raw          map[string]any `json:"raw,omitempty"`
@@ -99,6 +105,9 @@ func (m *sshManager) connect(ctx context.Context, ws Workspace) (WorkspaceConnec
 		state.RemoteOS = probe.OS
 		state.RemoteArch = probe.Arch
 		state.RemoteShell = probe.Shell
+		state.RemoteUser = probe.User
+		state.RemoteHost = probe.Host
+		state.Capabilities = probeCapabilities(probe)
 		state.Message = err.Error()
 		m.setState(ws, state)
 		return state, err
@@ -109,6 +118,9 @@ func (m *sshManager) connect(ctx context.Context, ws Workspace) (WorkspaceConnec
 		state.RemoteOS = probe.OS
 		state.RemoteArch = probe.Arch
 		state.RemoteShell = probe.Shell
+		state.RemoteUser = probe.User
+		state.RemoteHost = probe.Host
+		state.Capabilities = probeCapabilities(probe)
 		state.HelperPath = helper.RemotePath
 		state.HelperStatus = "uploaded"
 		state.Message = err.Error()
@@ -127,8 +139,16 @@ func (m *sshManager) connect(ctx context.Context, ws Workspace) (WorkspaceConnec
 	state.RemoteOS = probe.OS
 	state.RemoteArch = probe.Arch
 	state.RemoteShell = firstString(probe.Shell, stringValue(hello["shell"]))
+	state.RemoteUser = firstString(probe.User, stringValue(hello["user"]))
+	state.RemoteHost = firstString(probe.Host, stringValue(hello["hostname"]))
+	state.DisplayCWD = remoteDisplayCWD(state.RemoteUser, state.RemoteHost, state.RemoteCWD, state.Endpoint)
 	state.HelperPath = helper.RemotePath
 	state.HelperStatus = "running"
+	state.Capabilities = probeCapabilities(probe)
+	if caps := mapValue(hello["capabilities"]); len(caps) > 0 {
+		state.Capabilities = caps
+	}
+	hello["helper_uploaded"] = helper.Uploaded
 	state.Raw = hello
 
 	m.mu.Lock()
@@ -214,15 +234,25 @@ func (m *sshManager) watchProxy(ws Workspace, proxy *proxyClient) {
 }
 
 type sshProbe struct {
-	OS    string
-	Arch  string
-	Shell string
-	CWD   string
+	OS        string
+	Arch      string
+	Shell     string
+	CWD       string
+	User      string
+	Host      string
+	RGPath    string
+	RGVersion string
 }
 
 func (m *sshManager) probe(ctx context.Context, ws Workspace) (sshProbe, error) {
 	remoteCWD := strings.TrimSpace(ws.SSH.RemoteCWD)
-	script := "printf '%s\\n' \"$(uname -s)\" \"$(uname -m)\" \"${SHELL:-/bin/sh}\" \"$(pwd)\"; test -d " + shellQuote(remoteCWD) + "; test -r " + shellQuote(remoteCWD) + "; test -x " + shellQuote(remoteCWD)
+	script := strings.Join([]string{
+		"printf '%s\\n' \"$(uname -s)\" \"$(uname -m)\" \"${SHELL:-/bin/sh}\" \"$(pwd)\" \"$(whoami 2>/dev/null || id -un)\" \"$(hostname -s 2>/dev/null || hostname)\"",
+		"if command -v rg >/dev/null 2>&1; then command -v rg; rg --version | head -n 1; else printf '%s\\n' '' ''; fi",
+		"test -d " + shellQuote(remoteCWD),
+		"test -r " + shellQuote(remoteCWD),
+		"test -x " + shellQuote(remoteCWD),
+	}, "; ")
 	cmd := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, script)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -244,16 +274,39 @@ func (m *sshManager) probe(ctx context.Context, ws Workspace) (sshProbe, error) 
 	if len(lines) > 3 {
 		probe.CWD = strings.TrimSpace(lines[3])
 	}
+	if len(lines) > 4 {
+		probe.User = strings.TrimSpace(lines[4])
+	}
+	if len(lines) > 5 {
+		probe.Host = strings.TrimSpace(lines[5])
+	}
+	if len(lines) > 6 {
+		probe.RGPath = strings.TrimSpace(lines[6])
+	}
+	if len(lines) > 7 {
+		probe.RGVersion = strings.TrimSpace(lines[7])
+	}
 	if probe.OS == "" || probe.Arch == "" {
 		return probe, fmt.Errorf("unsupported remote platform %q/%q", probe.OS, probe.Arch)
 	}
 	return probe, nil
 }
 
+func probeCapabilities(probe sshProbe) map[string]any {
+	return map[string]any{
+		"rg": map[string]any{
+			"available": probe.RGPath != "",
+			"path":      probe.RGPath,
+			"version":   probe.RGVersion,
+		},
+	}
+}
+
 type helperUpload struct {
 	LocalPath  string
 	RemoteDir  string
 	RemotePath string
+	Uploaded   bool
 }
 
 func (m *sshManager) ensureHelper(ctx context.Context, ws Workspace, probe sshProbe) (helperUpload, error) {
@@ -267,16 +320,43 @@ func (m *sshManager) ensureHelper(ctx context.Context, ws Workspace, probe sshPr
 	if out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, mkdir)...).CombinedOutput(); err != nil {
 		return helperUpload{}, fmt.Errorf("create remote helper dir failed: %s%s", err.Error(), stderrSuffix(string(out)))
 	}
-	scpArgs := []string{"-P", strconv.Itoa(sshPort(ws))}
-	scpArgs = append(scpArgs, local, ws.SSH.Endpoint+":"+remotePath)
-	if out, err := exec.CommandContext(ctx, "scp", scpArgs...).CombinedOutput(); err != nil {
-		return helperUpload{}, fmt.Errorf("helper upload failed: %s%s", err.Error(), stderrSuffix(string(out)))
+	uploaded := false
+	localSum, err := fileSHA256(local)
+	if err != nil {
+		return helperUpload{}, err
 	}
-	chmod := "chmod 700 " + shellQuote(remotePath)
-	if out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, chmod)...).CombinedOutput(); err != nil {
-		return helperUpload{}, fmt.Errorf("chmod remote helper failed: %s%s", err.Error(), stderrSuffix(string(out)))
+	remoteSum := m.remoteHelperSHA256(ctx, ws, remotePath)
+	if remoteSum != localSum {
+		scpArgs := []string{"-P", strconv.Itoa(sshPort(ws))}
+		scpArgs = append(scpArgs, local, ws.SSH.Endpoint+":"+remotePath)
+		if out, err := exec.CommandContext(ctx, "scp", scpArgs...).CombinedOutput(); err != nil {
+			return helperUpload{}, fmt.Errorf("helper upload failed: %s%s", err.Error(), stderrSuffix(string(out)))
+		}
+		uploaded = true
+		chmod := "chmod 700 " + shellQuote(remotePath)
+		if out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, chmod)...).CombinedOutput(); err != nil {
+			return helperUpload{}, fmt.Errorf("chmod remote helper failed: %s%s", err.Error(), stderrSuffix(string(out)))
+		}
 	}
-	return helperUpload{LocalPath: local, RemoteDir: remoteDir, RemotePath: remotePath}, nil
+	return helperUpload{LocalPath: local, RemoteDir: remoteDir, RemotePath: remotePath, Uploaded: uploaded}, nil
+}
+
+func (m *sshManager) remoteHelperSHA256(ctx context.Context, ws Workspace, remotePath string) string {
+	script := "if command -v sha256sum >/dev/null 2>&1; then sha256sum " + shellQuote(remotePath) + " 2>/dev/null | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 " + shellQuote(remotePath) + " 2>/dev/null | awk '{print $1}'; fi"
+	out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, script)...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func fileSHA256(path string) (string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (m *sshManager) localHelperBinary(ctx context.Context, probe sshProbe) (string, error) {
@@ -336,6 +416,7 @@ func initialSSHConnection(ws Workspace, status string) WorkspaceConnection {
 		port = sshPort(ws)
 		remoteCWD = ws.SSH.RemoteCWD
 	}
+	user, host := userHostFromEndpoint(endpoint)
 	return WorkspaceConnection{
 		WorkspaceID: ws.ID,
 		Target:      ws.Target,
@@ -343,6 +424,9 @@ func initialSSHConnection(ws Workspace, status string) WorkspaceConnection {
 		Endpoint:    endpoint,
 		Port:        port,
 		RemoteCWD:   remoteCWD,
+		RemoteUser:  user,
+		RemoteHost:  host,
+		DisplayCWD:  remoteDisplayCWD(user, host, remoteCWD, endpoint),
 		UpdatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 	}
 }
@@ -641,6 +725,34 @@ func normalizeRemoteArch(value string) string {
 	default:
 		return strings.ToLower(strings.TrimSpace(value))
 	}
+}
+
+func userHostFromEndpoint(endpoint string) (string, string) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", ""
+	}
+	if at := strings.LastIndex(endpoint, "@"); at >= 0 {
+		return endpoint[:at], endpoint[at+1:]
+	}
+	return "", endpoint
+}
+
+func remoteDisplayCWD(user, host, cwd, endpoint string) string {
+	if host == "" {
+		_, host = userHostFromEndpoint(endpoint)
+	}
+	prefix := host
+	if user != "" && host != "" {
+		prefix = user + "@" + host
+	}
+	if prefix == "" {
+		return cwd
+	}
+	if cwd == "" {
+		return prefix
+	}
+	return prefix + ":" + cwd
 }
 
 func repoRootGuess() string {

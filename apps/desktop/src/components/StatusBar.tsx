@@ -1,7 +1,8 @@
-import type { AgentKind, ConnectionState, Workspace } from "../types";
+import type { AgentKind, ConnectionState, Workspace, WorkspaceConnection } from "../types";
 
 type StatusBarProps = {
   activeWorkspace: Workspace | null;
+  activeWorkspaceConnection?: WorkspaceConnection | null;
   connectionState: ConnectionState;
   queuedCount?: number;
   sidebarCollapsed: boolean;
@@ -12,6 +13,7 @@ type StatusBarProps = {
 
 export function StatusBar({
   activeWorkspace,
+  activeWorkspaceConnection,
   connectionState,
   queuedCount = 0,
   sidebarCollapsed,
@@ -21,7 +23,7 @@ export function StatusBar({
 }: StatusBarProps): React.JSX.Element {
   const agent = sessionAgent ?? activeWorkspace?.agent;
   const title = sessionTitle || activeWorkspace?.name || "AstralOps";
-  const path = activeWorkspace?.target === "ssh" ? activeWorkspace.ssh?.remote_cwd : activeWorkspace?.local_cwd;
+  const path = activeWorkspace?.target === "ssh" ? sshDisplayPath(activeWorkspace, activeWorkspaceConnection) : activeWorkspace?.local_cwd;
   const effectiveState = connectionState === "connected" ? sessionState : connectionState === "failed" ? "failed" : "reconnecting";
 
   return (
@@ -48,6 +50,18 @@ export function StatusBar({
 
 function agentLabel(agent: AgentKind): string {
   return agent === "claude" ? "Claude" : "Codex";
+}
+
+function sshDisplayPath(workspace: Workspace, connection?: WorkspaceConnection | null): string {
+  if (connection?.display_cwd) return connection.display_cwd;
+  const cwd = workspace.ssh?.remote_cwd ?? "";
+  const endpoint = workspace.ssh?.endpoint ?? "";
+  const at = endpoint.lastIndexOf("@");
+  const user = connection?.remote_user || (at >= 0 ? endpoint.slice(0, at) : "");
+  const host = connection?.remote_host || (at >= 0 ? endpoint.slice(at + 1) : endpoint);
+  if (user && host) return `${user}@${host}:${cwd}`;
+  if (host) return `${host}:${cwd}`;
+  return cwd;
 }
 
 function sessionStateLabel(state: NonNullable<StatusBarProps["sessionState"]>): string {

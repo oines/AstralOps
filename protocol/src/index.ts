@@ -26,11 +26,22 @@ export type WorkspaceConnection = {
   endpoint?: string;
   port?: number;
   remote_cwd?: string;
+  remote_user?: string;
+  remote_host?: string;
   remote_os?: string;
   remote_arch?: string;
   remote_shell?: string;
+  display_cwd?: string;
   helper_path?: string;
   helper_status?: string;
+  capabilities?: {
+    rg?: {
+      available?: boolean;
+      path?: string;
+      version?: string;
+    };
+    [key: string]: unknown;
+  };
   message?: string;
   updated_at: string;
   raw?: Record<string, unknown>;

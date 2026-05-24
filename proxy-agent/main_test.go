@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -81,5 +82,72 @@ func TestResolveRemotePathConfinesToRootCWD(t *testing.T) {
 	}
 	if _, err := resolveRemotePath(filepath.Join(root, "..", "outside.txt")); err == nil {
 		t.Fatal("path outside root was allowed")
+	}
+}
+
+func TestGlobAndGrepPreferRGWhenAvailable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake rg is POSIX-only")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rgPath := filepath.Join(bin, "rg")
+	script := `#!/bin/sh
+if [ "$1" = "--files" ]; then
+  printf 'notes/todo.txt\n'
+  exit 0
+fi
+printf '%s\n' '{"type":"match","data":{"path":{"text":"notes/todo.txt"},"line_number":2,"lines":{"text":"needle here\\n"}}}'
+`
+	if err := os.WriteFile(rgPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	previous := rootCWD
+	rootCWD = dir
+	defer func() { rootCWD = previous }()
+
+	globResult, err := glob(globParams{CWD: dir, Pattern: "*.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	globMap := globResult.(map[string]any)
+	if globMap["backend"] != "rg" {
+		t.Fatalf("glob backend = %#v, want rg", globMap["backend"])
+	}
+	if got := globMap["matches"].([]string)[0]; got != filepath.Join(dir, "notes", "todo.txt") {
+		t.Fatalf("glob match = %s", got)
+	}
+
+	grepResult, err := grep(grepParams{CWD: dir, Pattern: "needle", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grepMap := grepResult.(map[string]any)
+	if grepMap["backend"] != "rg" {
+		t.Fatalf("grep backend = %#v, want rg", grepMap["backend"])
+	}
+	matches := grepMap["matches"].([]map[string]any)
+	if len(matches) != 1 || matches[0]["path"] != filepath.Join(dir, "notes", "todo.txt") {
+		t.Fatalf("grep matches = %#v", matches)
+	}
+}
+
+func TestGrepFallsBackWithoutRG(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	result, err := grep(grepParams{CWD: dir, Pattern: "needle", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := result.(map[string]any)
+	if value["backend"] != "go" {
+		t.Fatalf("backend = %#v, want go", value["backend"])
 	}
 }

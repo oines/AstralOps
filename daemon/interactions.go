@@ -32,6 +32,11 @@ func (a *app) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 	}
 	a.emit(responded)
 	if hasOrigin && origin.Agent == AgentClaude {
+		if isDeclineResponse(req) {
+			if ws, ok := a.store.getWorkspace(origin.WorkspaceID); ok {
+				a.rollbackDirtyProjection(r.Context(), ws)
+			}
+		}
 		a.startClaudeInteractionFollowup(origin, req)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
@@ -51,6 +56,16 @@ func (a *app) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func isDeclineResponse(response map[string]any) bool {
+	decision := firstString(response["decision"], response["action"])
+	switch decision {
+	case "reject", "decline", "deny", "cancel", "refuse":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *app) startCodexPlanFollowup(origin AstralEvent, response map[string]any) {

@@ -84,7 +84,21 @@ func dispatch(req request) (any, error) {
 	switch req.Method {
 	case "hello":
 		host, _ := os.Hostname()
-		return map[string]any{"ok": true, "version": version, "hostname": host, "os": runtimeOS(), "cwd": rootCWD, "shell": os.Getenv("SHELL")}, nil
+		user := os.Getenv("USER")
+		if user == "" {
+			user = os.Getenv("LOGNAME")
+		}
+		rg := rgCapability()
+		return map[string]any{
+			"ok":           true,
+			"version":      version,
+			"hostname":     host,
+			"user":         user,
+			"os":           runtimeOS(),
+			"cwd":          rootCWD,
+			"shell":        os.Getenv("SHELL"),
+			"capabilities": map[string]any{"rg": rg},
+		}, nil
 	case "stat":
 		var p pathParams
 		if err := parse(req.Params, &p); err != nil {
@@ -179,16 +193,7 @@ func dispatch(req request) (any, error) {
 		if err := parse(req.Params, &p); err != nil {
 			return nil, err
 		}
-		cwd, err := resolveRemotePath(p.CWD)
-		if err != nil {
-			return nil, err
-		}
-		matches, err := filepath.Glob(filepath.Join(cwd, p.Pattern))
-		if err != nil {
-			return nil, err
-		}
-		sort.Strings(matches)
-		return map[string]any{"matches": matches}, nil
+		return glob(p)
 	case "grep":
 		var p grepParams
 		if err := parse(req.Params, &p); err != nil {
@@ -362,6 +367,67 @@ func fileInfo(path string, info fs.FileInfo) map[string]any {
 	}
 }
 
+func rgCapability() map[string]any {
+	path, err := exec.LookPath("rg")
+	if err != nil {
+		return map[string]any{"available": false}
+	}
+	version := ""
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "--version").Output()
+	if err == nil {
+		version = strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
+	}
+	return map[string]any{"available": true, "path": path, "version": version}
+}
+
+func glob(p globParams) (any, error) {
+	cwd, err := resolveRemotePath(p.CWD)
+	if err != nil {
+		return nil, err
+	}
+	if matches, err := globRG(cwd, p.Pattern); err == nil {
+		return map[string]any{"matches": matches, "backend": "rg"}, nil
+	}
+	matches, err := filepath.Glob(filepath.Join(cwd, p.Pattern))
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(matches)
+	return map[string]any{"matches": matches, "backend": "go"}, nil
+}
+
+func globRG(cwd, pattern string) ([]string, error) {
+	if strings.TrimSpace(pattern) == "" {
+		pattern = "*"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "rg", "--files", "-g", pattern)
+	cmd.Dir = cwd
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("rg glob failed: %w%s", err, stderrSuffix(stderr.String()))
+	}
+	matches := []string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		path, err := resolveRemotePath(filepath.Join(cwd, line))
+		if err != nil {
+			continue
+		}
+		matches = append(matches, path)
+	}
+	sort.Strings(matches)
+	return matches, nil
+}
+
 func grep(p grepParams) (any, error) {
 	cwd, err := resolveRemotePath(p.CWD)
 	if err != nil {
@@ -370,6 +436,60 @@ func grep(p grepParams) (any, error) {
 	if p.Limit <= 0 {
 		p.Limit = 200
 	}
+	if matches, err := grepRG(cwd, p); err == nil {
+		return map[string]any{"matches": matches, "backend": "rg"}, nil
+	}
+	return grepGo(cwd, p)
+}
+
+func grepRG(cwd string, p grepParams) ([]map[string]any, error) {
+	args := []string{"--json", "--line-number", "--color", "never"}
+	if strings.TrimSpace(p.Glob) != "" {
+		args = append(args, "-g", p.Glob)
+	}
+	args = append(args, p.Pattern)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "rg", args...)
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+			return []map[string]any{}, nil
+		}
+		return nil, err
+	}
+	matches := []map[string]any{}
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		var item map[string]any
+		if json.Unmarshal(scanner.Bytes(), &item) != nil || stringValue(item["type"]) != "match" {
+			continue
+		}
+		data := mapValue(item["data"])
+		pathText := stringValue(mapValue(data["path"])["text"])
+		lineText := stringValue(mapValue(data["lines"])["text"])
+		path, err := resolveRemotePath(filepath.Join(cwd, pathText))
+		if err != nil {
+			continue
+		}
+		matches = append(matches, map[string]any{
+			"path": path,
+			"line": int(numberValue(data["line_number"])),
+			"text": strings.TrimRight(lineText, "\r\n"),
+		})
+		if len(matches) >= p.Limit {
+			return matches, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return matches, nil
+}
+
+func grepGo(cwd string, p grepParams) (any, error) {
 	re, err := regexp.Compile(p.Pattern)
 	if err != nil {
 		return nil, err
@@ -399,7 +519,7 @@ func grep(p grepParams) (any, error) {
 		}
 		return nil
 	})
-	return map[string]any{"matches": out}, err
+	return map[string]any{"matches": out, "backend": "go"}, err
 }
 
 func runExec(p execParams) (any, error) {
@@ -450,6 +570,51 @@ func runExec(p execParams) (any, error) {
 
 func runtimeOS() string {
 	return runtime.GOOS + "/" + runtime.GOARCH
+}
+
+func mapValue(v any) map[string]any {
+	m, _ := v.(map[string]any)
+	if m == nil {
+		return map[string]any{}
+	}
+	return m
+}
+
+func stringValue(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case fmt.Stringer:
+		return t.String()
+	default:
+		return ""
+	}
+}
+
+func numberValue(v any) float64 {
+	switch t := v.(type) {
+	case float64:
+		return t
+	case float32:
+		return float64(t)
+	case int:
+		return float64(t)
+	case int64:
+		return float64(t)
+	case json.Number:
+		n, _ := t.Float64()
+		return n
+	default:
+		return 0
+	}
+}
+
+func stderrSuffix(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	return ": " + text
 }
 
 func copyPath(p copyParams) (any, error) {
