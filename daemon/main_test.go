@@ -1111,6 +1111,32 @@ func TestClaudeCommandRequiresApprovalToolResultRequestsPermission(t *testing.T)
 	}
 }
 
+func TestClaudeLocalRuntimePausesWhenCommandRequiresApproval(t *testing.T) {
+	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call_needs_approval","name":"Bash","input":{"command":"sw_vers"}}]}}'
+printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_needs_approval","content":"This command requires approval","is_error":true}]},"tool_use_result":"Error: This command requires approval"}'
+sleep 1
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"should not continue"}]}}'
+`))
+
+	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "scan", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "approval.requested")
+	time.Sleep(200 * time.Millisecond)
+
+	updated, ok := app.store.getSession(session.ID)
+	if !ok || updated.Status != "requires_action" {
+		t.Fatalf("session status = %#v, want requires_action", updated)
+	}
+	for _, ev := range app.store.queryEvents(workspace.ID, session.ID, 0) {
+		if ev.Kind == "message.delta" && strings.Contains(stringValue(mapValue(ev.Normalized)["text"]), "should not continue") {
+			t.Fatalf("claude continued after approval request: %#v", ev)
+		}
+	}
+}
+
 func readFixtureLines(t *testing.T, path string) []string {
 	t.Helper()
 	file, err := os.Open(path)

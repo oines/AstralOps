@@ -25,9 +25,10 @@ type claudeLocalRuntime struct {
 }
 
 type claudeRun struct {
-	cancel context.CancelFunc
-	stdin  io.WriteCloser
-	mu     sync.Mutex
+	cancel            context.CancelFunc
+	stdin             io.WriteCloser
+	mu                sync.Mutex
+	pausedForApproval bool
 }
 
 func newClaudeLocalRuntime(a *app) *claudeLocalRuntime {
@@ -134,6 +135,18 @@ func (r *claudeLocalRuntime) Steer(sessionID string, input string, options TurnO
 	session, _ := r.app.store.getSession(sessionID)
 	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.steer", Normalized: map[string]any{"status": "sent"}})
 	return nil
+}
+
+func (run *claudeRun) pauseForApproval() {
+	run.mu.Lock()
+	run.pausedForApproval = true
+	if run.stdin != nil {
+		_ = run.stdin.Close()
+		run.stdin = nil
+	}
+	cancel := run.cancel
+	run.mu.Unlock()
+	cancel()
 }
 
 type claudeRemoteOptions struct {
@@ -293,6 +306,9 @@ func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Sessi
 			}
 			if approval, ok := claudeApprovalFromToolResult(session, ev, toolStarts); ok {
 				r.app.emit(r.remapProjectionEventPaths(approval))
+				r.app.store.updateSessionStatus(session.ID, "requires_action")
+				run.pauseForApproval()
+				return
 			}
 		}
 		if resultLine {
