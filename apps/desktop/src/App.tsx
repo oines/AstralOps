@@ -94,6 +94,7 @@ export function App(): React.JSX.Element {
     () => workspaceConnections[activeWorkspaceId] ?? latestWorkspaceConnection(selectWorkspaceEvents(eventIndex, activeWorkspaceId)),
     [activeWorkspaceId, eventIndex, workspaceConnections],
   );
+  const workspaceInteractive = activeWorkspace?.target !== "ssh" || activeWorkspaceConnection?.status === "connected";
   const activeSessionEvents = useMemo(
     () => (activeSessionId ? selectSessionEvents(eventIndex, activeSessionId) : []),
     [activeSessionId, eventIndex],
@@ -112,6 +113,8 @@ export function App(): React.JSX.Element {
     ? "创建 workspace 后开始"
     : !activeSession
       ? "点项目旁边 + 新建 session"
+      : !workspaceInteractive
+        ? "SSH 已断开，先连接工作区"
       : sessionRunning
         ? queuedCount > 0
           ? `继续输入；前面还有 ${queuedCount} 条已排队`
@@ -263,6 +266,34 @@ export function App(): React.JSX.Element {
     [api],
   );
 
+  const handleConnectWorkspace = useCallback(
+    async (workspaceId: string) => {
+      if (!api) return;
+      setError("");
+      try {
+        const state = await api.connectWorkspace(workspaceId);
+        setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
+      } catch (connectError) {
+        setError(connectError instanceof Error ? connectError.message : String(connectError));
+      }
+    },
+    [api],
+  );
+
+  const handleDisconnectWorkspace = useCallback(
+    async (workspaceId: string) => {
+      if (!api) return;
+      setError("");
+      try {
+        const state = await api.disconnectWorkspace(workspaceId);
+        setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
+      } catch (disconnectError) {
+        setError(disconnectError instanceof Error ? disconnectError.message : String(disconnectError));
+      }
+    },
+    [api],
+  );
+
   const handleSelectWorkspace = useCallback(
     (workspaceId: string) => {
       setActiveWorkspaceId(workspaceId);
@@ -278,13 +309,15 @@ export function App(): React.JSX.Element {
   const handleCreateSession = useCallback(
     async (workspaceId: string, agent: AgentKind) => {
       if (!api) return;
+      const workspace = workspaces.find((item) => item.id === workspaceId);
+      if (workspace?.target === "ssh" && workspaceConnections[workspaceId]?.status !== "connected") return;
       setError("");
       const session = await api.createSession(workspaceId, agent);
       setSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
       setActiveWorkspaceId(workspaceId);
       setActiveSession(session);
     },
-    [api],
+    [api, workspaces, workspaceConnections],
   );
 
   const handleSelectSession = useCallback(
@@ -345,7 +378,7 @@ export function App(): React.JSX.Element {
 
   const handleSend = useCallback(
     async (input: string) => {
-      if (!api || !activeWorkspace || !activeSession) return;
+      if (!api || !activeWorkspace || !activeSession || !workspaceInteractive) return;
       setError("");
       try {
         await api.sendInput(activeSession.id, input, {
@@ -358,22 +391,22 @@ export function App(): React.JSX.Element {
         throw sendError;
       }
     },
-    [activeSession, activeWorkspace, api, permissionMode, runMode, selectedModel, selectedReasoningEffort],
+    [activeSession, activeWorkspace, api, permissionMode, runMode, selectedModel, selectedReasoningEffort, workspaceInteractive],
   );
 
   const handleInterrupt = useCallback(async () => {
-    if (!api || !activeSession) return;
+    if (!api || !activeSession || !workspaceInteractive) return;
     setError("");
     try {
       await api.interrupt(activeSession.id);
     } catch (interruptError) {
       setError(interruptError instanceof Error ? interruptError.message : String(interruptError));
     }
-  }, [activeSession, api]);
+  }, [activeSession, api, workspaceInteractive]);
 
   const handleCancelQueue = useCallback(
     async (sessionId: string, queueId: string) => {
-      if (!api) return;
+      if (!api || !workspaceInteractive) return;
       setError("");
       try {
         await api.cancelQueuedInput(sessionId, queueId);
@@ -381,12 +414,12 @@ export function App(): React.JSX.Element {
         setError(cancelError instanceof Error ? cancelError.message : String(cancelError));
       }
     },
-    [api],
+    [api, workspaceInteractive],
   );
 
   const handleSteerQueue = useCallback(
     async (sessionId: string, queueId: string) => {
-      if (!api) return;
+      if (!api || !workspaceInteractive) return;
       setError("");
       try {
         await api.steerQueuedInput(sessionId, queueId);
@@ -394,12 +427,12 @@ export function App(): React.JSX.Element {
         setError(steerError instanceof Error ? steerError.message : String(steerError));
       }
     },
-    [api],
+    [api, workspaceInteractive],
   );
 
   const handleEventResponse = useCallback(
     async (requestId: string, response: Record<string, unknown>) => {
-      if (!api) return;
+      if (!api || !workspaceInteractive) return;
       setError("");
       try {
         await api.respondApproval(requestId, response);
@@ -407,7 +440,7 @@ export function App(): React.JSX.Element {
         setError(responseError instanceof Error ? responseError.message : String(responseError));
       }
     },
-    [api],
+    [api, workspaceInteractive],
   );
 
   const handleLoadOlderEvents = useCallback(async () => {
@@ -460,8 +493,10 @@ export function App(): React.JSX.Element {
         width={sidebarWidth}
         workspaces={workspaces}
         workspaceConnections={workspaceConnections}
+        onConnectWorkspace={(workspaceId) => void handleConnectWorkspace(workspaceId)}
         onCreateSession={handleCreateSession}
         onCreateWorkspace={() => setWorkspaceOpen(true)}
+        onDisconnectWorkspace={(workspaceId) => void handleDisconnectWorkspace(workspaceId)}
         onDeleteSession={(sessionId) => void deleteSession(sessionId)}
         onDeleteWorkspace={(workspaceId) => void deleteWorkspace(workspaceId)}
         onResize={setSidebarWidth}
@@ -493,17 +528,17 @@ export function App(): React.JSX.Element {
         <Composer
           currentModel={currentModel}
           currentEffort={currentEffort}
-          disabled={!canUseDaemon || !activeWorkspace || !activeSession}
+          disabled={!canUseDaemon || !activeWorkspace || !activeSession || !workspaceInteractive}
           effortOverride={reasoningEffort}
           modelOptions={modelOptions}
           modelOverride={modelOverride}
           modelSlotOverride={modelSlotOverride}
-          pendingInteraction={pendingInteraction}
+          pendingInteraction={workspaceInteractive ? pendingInteraction : null}
           permissionMode={permissionMode}
           placeholder={composerPlaceholder}
-          queuedInputs={queuedInputs}
+          queuedInputs={workspaceInteractive ? queuedInputs : []}
           runMode={runMode}
-          running={sessionRunning}
+          running={workspaceInteractive ? sessionRunning : false}
           onChooseAttachments={handleChooseFiles}
           onModelOverrideChange={setModelOverride}
           onModelSlotOverrideChange={setModelSlotOverride}

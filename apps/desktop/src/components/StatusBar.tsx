@@ -7,7 +7,7 @@ type StatusBarProps = {
   queuedCount?: number;
   sidebarCollapsed: boolean;
   sessionAgent?: AgentKind;
-  sessionState?: "idle" | "running" | "requires_action" | "reconnecting" | "failed";
+  sessionState?: "idle" | "running" | "requires_action" | "reconnecting" | "disconnected" | "failed";
   sessionTitle?: string;
 };
 
@@ -24,7 +24,7 @@ export function StatusBar({
   const agent = sessionAgent ?? activeWorkspace?.agent;
   const title = sessionTitle || activeWorkspace?.name || "AstralOps";
   const path = activeWorkspace?.target === "ssh" ? sshDisplayPath(activeWorkspace, activeWorkspaceConnection) : activeWorkspace?.local_cwd;
-  const effectiveState = connectionState === "connected" ? sessionState : connectionState === "failed" ? "failed" : "reconnecting";
+  const effectiveState = statusBarState(activeWorkspace, activeWorkspaceConnection, connectionState, sessionState);
 
   return (
     <header className={`[-webkit-app-region:drag] relative flex h-[64px] shrink-0 items-center justify-between border-b border-[#ebe8e1] bg-[#fffefa] pr-[68px] transition-[padding] duration-180 ease-out ${sidebarCollapsed ? "pl-[144px]" : "pl-8"}`}>
@@ -46,6 +46,27 @@ export function StatusBar({
       </div>
     </header>
   );
+}
+
+function statusBarState(
+  workspace: Workspace | null,
+  connection: WorkspaceConnection | null | undefined,
+  appConnection: ConnectionState,
+  sessionState: NonNullable<StatusBarProps["sessionState"]>,
+): NonNullable<StatusBarProps["sessionState"]> {
+  if (appConnection !== "connected") return appConnection === "failed" ? "failed" : "reconnecting";
+  if (workspace?.target !== "ssh") return sessionState;
+  switch (connection?.status) {
+    case "connected":
+      return sessionState;
+    case "connecting":
+    case "reconnecting":
+      return "reconnecting";
+    case "failed":
+      return "failed";
+    default:
+      return "disconnected";
+  }
 }
 
 function agentLabel(agent: AgentKind): string {
@@ -72,6 +93,8 @@ function sessionStateLabel(state: NonNullable<StatusBarProps["sessionState"]>): 
       return "等待确认";
     case "reconnecting":
       return "重连中";
+    case "disconnected":
+      return "已断开";
     case "failed":
       return "失败";
     default:
@@ -87,6 +110,8 @@ function sessionStateClass(state: NonNullable<StatusBarProps["sessionState"]>): 
       return "text-[#b7791f]";
     case "reconnecting":
       return "text-[#6f7378]";
+    case "disconnected":
+      return "text-[#a0a3a7]";
     case "failed":
       return "text-[#c43e1c]";
     default:

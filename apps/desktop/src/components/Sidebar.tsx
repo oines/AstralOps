@@ -1,4 +1,4 @@
-import { Bot, Check, ChevronRight, Folder, LoaderCircle, Plus, TerminalSquare, Trash2 } from "lucide-react";
+import { Bot, Check, ChevronRight, Folder, Link2, LoaderCircle, Plus, TerminalSquare, Trash2, Unlink2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AgentKind, Session, Workspace, WorkspaceConnection } from "../types";
 
@@ -12,7 +12,9 @@ type SidebarProps = {
   workspaces: Workspace[];
   workspaceConnections: Record<string, WorkspaceConnection>;
   onCreateSession: (workspaceId: string, agent: AgentKind) => Promise<void>;
+  onConnectWorkspace: (workspaceId: string) => void;
   onCreateWorkspace: () => void;
+  onDisconnectWorkspace: (workspaceId: string) => void;
   onDeleteSession: (sessionId: string) => void;
   onDeleteWorkspace: (workspaceId: string) => void;
   onResize: (width: number) => void;
@@ -30,7 +32,9 @@ export function Sidebar({
   workspaces,
   workspaceConnections,
   onCreateSession,
+  onConnectWorkspace,
   onCreateWorkspace,
+  onDisconnectWorkspace,
   onDeleteSession,
   onDeleteWorkspace,
   onResize,
@@ -145,6 +149,8 @@ export function Sidebar({
                 setMenuWorkspaceId("");
                 await onCreateSession(workspace.id, agent);
               }}
+              onConnectWorkspace={() => onConnectWorkspace(workspace.id)}
+              onDisconnectWorkspace={() => onDisconnectWorkspace(workspace.id)}
               onDeleteSession={(sessionId) => {
                 if (confirmDelete?.type === "session" && confirmDelete.id === sessionId) {
                   setConfirmDelete(null);
@@ -191,7 +197,9 @@ type WorkspaceRowProps = {
   menuOpen: boolean;
   sessionCount: number;
   onCreateSession: (agent: AgentKind) => Promise<void>;
+  onConnect: () => void;
   onDelete: () => void;
+  onDisconnect: () => void;
   onClick: () => void;
   onToggleMenu: () => void;
 };
@@ -207,8 +215,10 @@ type WorkspaceBlockProps = {
   workspace: Workspace;
   workspaceConnection?: WorkspaceConnection;
   onCreateSession: (agent: AgentKind) => Promise<void>;
+  onConnectWorkspace: () => void;
   onDeleteSession: (sessionId: string) => void;
   onDeleteWorkspace: () => void;
+  onDisconnectWorkspace: () => void;
   onSelectSession: (sessionId: string) => void;
   onToggleCollapsed: () => void;
   onToggleMenu: () => void;
@@ -220,8 +230,10 @@ function WorkspaceBlock({
   confirmDelete,
   menuOpen,
   onCreateSession,
+  onConnectWorkspace,
   onDeleteSession,
   onDeleteWorkspace,
+  onDisconnectWorkspace,
   onSelectSession,
   onToggleCollapsed,
   onToggleMenu,
@@ -242,7 +254,9 @@ function WorkspaceBlock({
         sessionCount={sessions.length}
         target={workspace.target}
         onCreateSession={onCreateSession}
+        onConnect={onConnectWorkspace}
         onDelete={onDeleteWorkspace}
+        onDisconnect={onDisconnectWorkspace}
         onClick={onToggleCollapsed}
         onToggleMenu={onToggleMenu}
       />
@@ -279,7 +293,9 @@ function WorkspaceRow({
   menuOpen,
   name,
   onCreateSession,
+  onConnect,
   onDelete,
+  onDisconnect,
   onClick,
   onToggleMenu,
   sessionCount,
@@ -287,9 +303,14 @@ function WorkspaceRow({
 }: WorkspaceRowProps): React.JSX.Element {
   const status = target === "ssh" ? workspaceConnectionLabel(connection) : null;
   const connecting = connection?.status === "connecting" || connection?.status === "reconnecting";
+  const connected = connection?.status === "connected";
+  const canCreateSession = target !== "ssh" || connected;
+  const rowGridClass = target === "ssh"
+    ? "grid-cols-[28px_14px_17px_minmax(0,1fr)_28px_28px]"
+    : "grid-cols-[28px_14px_17px_minmax(0,1fr)_28px]";
   return (
     <div
-      className={`group relative grid min-h-11 w-full cursor-default grid-cols-[28px_14px_17px_minmax(0,1fr)_28px] items-center gap-1.5 rounded-xl py-1 pl-1 pr-2 transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.035] ${
+      className={`group relative grid min-h-11 w-full cursor-default ${rowGridClass} items-center gap-1.5 rounded-xl py-1 pl-1 pr-2 transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.035] ${
         collapsed && sessionCount > 0 ? "bg-[#eeece7] text-[#4f5358]" : "text-[#6f7378]"
       }`}
       data-sidebar-menu
@@ -331,13 +352,46 @@ function WorkspaceRow({
           </div>
         ) : null}
       </div>
+      {target === "ssh" ? (
+        <button
+          className={`grid size-7 shrink-0 place-items-center rounded-md transition-colors duration-150 ease-out ${
+            connecting
+              ? "cursor-default text-[#2f8cff]"
+              : connected
+                ? "text-[#9a9da1] hover:bg-black/[0.06] hover:text-[#b45309]"
+                : "bg-[#e8f1ff] text-[#2563eb] hover:bg-[#dceaff]"
+          } ${confirmDelete ? "pointer-events-none opacity-0" : ""}`}
+          type="button"
+          aria-label={connected ? "断开 SSH" : connecting ? "SSH 连接中" : "连接 SSH"}
+          title={connected ? "断开 SSH" : connecting ? "SSH 连接中" : "连接 SSH"}
+          disabled={connecting}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (connecting) return;
+            if (connected) onDisconnect();
+            else onConnect();
+          }}
+        >
+          {connecting ? (
+            <LoaderCircle className="animate-spin" size={14} strokeWidth={2} />
+          ) : connected ? (
+            <Unlink2 size={14} strokeWidth={2} />
+          ) : (
+            <Link2 size={14} strokeWidth={2} />
+          )}
+        </button>
+      ) : null}
       <button
-        className="grid size-7 shrink-0 place-items-center rounded-md text-[#9a9da1] transition-colors duration-150 ease-out hover:bg-black/[0.06] hover:text-[#202124]"
+        className={`grid size-7 shrink-0 place-items-center rounded-md transition-colors duration-150 ease-out ${
+          canCreateSession ? "text-[#9a9da1] hover:bg-black/[0.06] hover:text-[#202124]" : "cursor-not-allowed text-[#c1bfb8]"
+        }`}
         type="button"
         aria-label="新建 session"
         title="新建 session"
+        disabled={!canCreateSession}
         onClick={(event) => {
           event.stopPropagation();
+          if (!canCreateSession) return;
           onToggleMenu();
         }}
       >

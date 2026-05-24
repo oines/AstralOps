@@ -86,6 +86,10 @@ export function Composer({
   }, [openMenu]);
 
   useEffect(() => {
+    if (disabled) setOpenMenu(null);
+  }, [disabled]);
+
+  useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
     textarea.style.height = "0px";
@@ -123,7 +127,7 @@ export function Composer({
     setOpenMenu(null);
   }
 
-  if (pendingInteraction) {
+  if (pendingInteraction && !disabled) {
     return (
       <footer className="pointer-events-none absolute inset-x-0 bottom-0 px-6 pb-5" ref={footerRef}>
         <PendingInteractionPanel interaction={pendingInteraction} onRespond={onRespond} />
@@ -133,7 +137,9 @@ export function Composer({
 
   return (
     <footer className="pointer-events-none absolute inset-x-0 bottom-0 px-6 pb-5" ref={footerRef}>
-      <div className="pointer-events-auto mx-auto grid w-[min(760px,calc(100%-72px))] gap-2 rounded-[18px] border border-[#d8d5cd] bg-[#fffefa]/96 px-3 py-2.5 shadow-[0_10px_30px_rgba(37,34,29,0.10),0_1px_4px_rgba(37,34,29,0.08)] backdrop-blur transition-all duration-150 ease-out">
+      <div className={`pointer-events-auto mx-auto grid w-[min(760px,calc(100%-72px))] gap-2 rounded-[18px] border px-3 py-2.5 shadow-[0_10px_30px_rgba(37,34,29,0.10),0_1px_4px_rgba(37,34,29,0.08)] backdrop-blur transition-all duration-150 ease-out ${
+        disabled ? "border-[#e1ded7] bg-[#f3f2ee]/94 opacity-80" : "border-[#d8d5cd] bg-[#fffefa]/96"
+      }`}>
         {queuedInputs.length > 0 ? (
           <QueuedInputShelf inputs={queuedInputs} running={running} onCancel={onCancelQueuedInput} onSteer={onSteerQueuedInput} />
         ) : null}
@@ -175,11 +181,14 @@ export function Composer({
             <div className="relative" data-composer-menu>
               <button
                 className={`grid size-8 place-items-center rounded-full transition-colors duration-150 ease-out ${
-                  openMenu === "actions" || runMode !== "normal" || attachments.length > 0
+                  disabled
+                    ? "cursor-not-allowed bg-[#e7e5df] text-[#aaa7a0]"
+                    : openMenu === "actions" || runMode !== "normal" || attachments.length > 0
                     ? "bg-[#eceae5] text-[#202124]"
                     : "bg-[#f3f2ee] text-[#6f7378] hover:bg-[#eceae5] hover:text-[#202124]"
                 }`}
                 type="button"
+                disabled={disabled}
                 aria-label="更多输入选项"
                 title="更多输入选项"
                 onClick={() => setOpenMenu((current) => (current === "actions" ? null : "actions"))}
@@ -197,7 +206,7 @@ export function Composer({
                 />
               ) : null}
             </div>
-            {runMode !== "normal" ? (
+            {runMode !== "normal" && !disabled ? (
               <button
                 className="flex h-8 shrink-0 items-center gap-1 rounded-full bg-[#eef1ff] px-2.5 text-[13px] font-semibold text-[#5164d8] transition-colors duration-150 ease-out hover:bg-[#e4e8ff]"
                 type="button"
@@ -214,6 +223,7 @@ export function Composer({
                 label={permissionLabel(permissionMode)}
                 open={openMenu === "permission"}
                 tone={permissionMode === "bypassPermissions" ? "danger" : "normal"}
+                disabled={disabled}
                 onClick={() => setOpenMenu((current) => (current === "permission" ? null : "permission"))}
               />
               {openMenu === "permission" ? (
@@ -230,8 +240,11 @@ export function Composer({
           <div className="flex min-w-0 shrink-0 items-center gap-1.5">
             <div className="relative" data-composer-menu>
               <button
-                className="flex h-8 max-w-[180px] items-center gap-1.5 rounded-full bg-[#f3f2ee] px-2.5 text-[13px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-[#eceae5]"
+                className={`flex h-8 max-w-[180px] items-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors duration-150 ease-out ${
+                  disabled ? "cursor-not-allowed bg-[#e7e5df] text-[#aaa7a0]" : "bg-[#f3f2ee] text-[#202124] hover:bg-[#eceae5]"
+                }`}
                 type="button"
+                disabled={disabled}
                 onClick={() => setOpenMenu((current) => (current === "model" ? null : "model"))}
               >
                 <span className="truncate">{compactModelLabel(effectiveModel)}</span>
@@ -381,12 +394,14 @@ function ActionMenuButton({
 }
 
 function MenuButton({
+  disabled = false,
   icon,
   label,
   onClick,
   open = false,
   tone = "normal",
 }: {
+  disabled?: boolean;
   icon?: React.ReactNode;
   label: string;
   onClick: () => void;
@@ -396,9 +411,14 @@ function MenuButton({
   return (
     <button
       type="button"
+      disabled={disabled}
       onClick={onClick}
       className={`relative flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors duration-150 ease-out ${
-        tone === "danger" ? "bg-[#fff1ed] text-[#f04b23] hover:bg-[#ffe8df]" : "bg-[#f3f2ee] text-[#6f7378] hover:bg-[#eceae5]"
+        disabled
+          ? "cursor-not-allowed bg-[#e7e5df] text-[#aaa7a0]"
+          : tone === "danger"
+            ? "bg-[#fff1ed] text-[#f04b23] hover:bg-[#ffe8df]"
+            : "bg-[#f3f2ee] text-[#6f7378] hover:bg-[#eceae5]"
       }`}
     >
       {icon}
