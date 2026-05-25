@@ -411,7 +411,7 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 	}
 	cmd := exec.Command(shell, "-l")
 	cmd.Dir = ws.LocalCWD
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
+	cmd.Env = terminalEnv(os.Environ())
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 28, Cols: 100})
 	if err != nil {
 		_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})

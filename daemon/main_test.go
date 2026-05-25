@@ -757,6 +757,32 @@ func TestLocalWorkspacePTYCloseTerminatesProcessGroup(t *testing.T) {
 	}
 }
 
+func TestTerminalEnvDefaultsToUTF8Locale(t *testing.T) {
+	env := terminalEnv([]string{"PATH=/bin", "LANG=", "LC_CTYPE=C"})
+	if got := envValue(env, "TERM"); got != "xterm-256color" {
+		t.Fatalf("TERM = %q", got)
+	}
+	if got := envValue(env, "COLORTERM"); got != "truecolor" {
+		t.Fatalf("COLORTERM = %q", got)
+	}
+	if got := envValue(env, "LANG"); got != defaultTerminalLocale {
+		t.Fatalf("LANG = %q", got)
+	}
+	if got := envValue(env, "LC_CTYPE"); got != defaultTerminalLocale {
+		t.Fatalf("LC_CTYPE = %q", got)
+	}
+}
+
+func TestTerminalEnvPreservesExistingUTF8Locale(t *testing.T) {
+	env := terminalEnv([]string{"LANG=zh_CN.UTF-8", "LC_CTYPE=zh_CN.UTF-8", "LC_ALL="})
+	if got := envValue(env, "LANG"); got != "zh_CN.UTF-8" {
+		t.Fatalf("LANG = %q", got)
+	}
+	if got := envValue(env, "LC_CTYPE"); got != "zh_CN.UTF-8" {
+		t.Fatalf("LC_CTYPE = %q", got)
+	}
+}
+
 func TestRemoteWorkspaceExecCancellationKillsProxyExec(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fake proxy is POSIX-only")

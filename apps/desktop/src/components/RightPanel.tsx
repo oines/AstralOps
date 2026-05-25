@@ -30,6 +30,7 @@ type RightPanelProps = {
 
 export function RightPanel({ api, health, open, width, workspace, onResize }: RightPanelProps): React.JSX.Element | null {
   const [tabs, setTabs] = useState<PanelTab[]>([]);
+  const contentOrderRef = useRef<string[]>([]);
   const [activeTabId, setActiveTabId] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -43,6 +44,7 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
   useEffect(() => {
     if (!open || tabs.length > 0) return;
     const tab = createTab("files");
+    contentOrderRef.current = [tab.id];
     setTabs([tab]);
     setActiveTabId(tab.id);
   }, [open, tabs.length]);
@@ -78,15 +80,18 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
   }, []);
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+  const contentTabs = panelContentTabs(tabs, contentOrderRef);
 
   function addTab(kind: PanelTabKind): void {
     const tab = createTab(kind);
+    contentOrderRef.current = [...contentOrderRef.current, tab.id];
     setTabs((current) => [...current, tab]);
     setActiveTabId(tab.id);
     setMenuOpen(false);
   }
 
   function closeTab(id: string): void {
+    contentOrderRef.current = contentOrderRef.current.filter((tabId) => tabId !== id);
     setTabs((current) => {
       const next = current.filter((tab) => tab.id !== id);
       if (activeTabId === id) {
@@ -132,9 +137,9 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
         transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
       >
       <div className="flex h-[64px] shrink-0 items-center gap-2 border-b border-[#ebe8e1] pl-4 pr-[68px]">
-        <DndContext sensors={tabDragSensors} collisionDetection={closestCenter} onDragEnd={handleTabDragEnd}>
+        <DndContext sensors={tabDragSensors} collisionDetection={closestCenter} autoScroll={false} onDragEnd={handleTabDragEnd}>
           <SortableContext items={tabs.map((tab) => tab.id)} strategy={horizontalListSortingStrategy}>
-            <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-2">
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto overflow-y-hidden py-2">
               {tabs.map((tab) => (
                 <SortablePanelTab
                   active={tab.id === activeTabId}
@@ -171,7 +176,7 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
         {tabs.length === 0 ? (
           <PanelMessage title="没有标签页" body="点右上角 + 新建终端或文件浏览。" />
         ) : null}
-        {tabs.map((tab) => (
+        {contentTabs.map((tab) => (
           <div className={tab.id === activeTab?.id ? "h-full" : "hidden h-full"} key={tab.id}>
             {tab.kind === "terminal" && !terminalAvailable ? (
               <PanelMessage title="终端不可用" body="Windows 当前禁用内置终端。文件浏览和 agent 任务仍可使用。" />
@@ -211,8 +216,9 @@ function SortablePanelTab({
   title: string;
 }): React.JSX.Element {
   const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({ id: tab.id });
+  const horizontalTransform = transform ? { ...transform, y: 0 } : null;
   const style: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
+    transform: CSS.Transform.toString(horizontalTransform),
     transition,
     zIndex: isDragging ? 10 : undefined,
   };
@@ -259,18 +265,20 @@ function FilesTab({ api, workspace }: { api: AstralApi | null; workspace: Worksp
   const [data, setData] = useState<FileListResponse | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const workspaceId = workspace?.id ?? "";
+  const workspaceRoot = workspace?.local_cwd ?? "";
 
   useEffect(() => {
     setPath("");
-  }, [workspace?.id]);
+  }, [workspaceId]);
 
   useEffect(() => {
-    if (!api || !workspace) return;
+    if (!api || !workspaceId) return;
     let cancelled = false;
     setLoading(true);
     setError("");
     api
-      .listWorkspaceFiles(workspace.id, path)
+      .listWorkspaceFiles(workspaceId, path)
       .then((response) => {
         if (!cancelled) setData(response);
       })
@@ -283,7 +291,7 @@ function FilesTab({ api, workspace }: { api: AstralApi | null; workspace: Worksp
     return () => {
       cancelled = true;
     };
-  }, [api, path, workspace]);
+  }, [api, path, workspaceId]);
 
   const parentPath = useMemo(() => {
     if (!path) return "";
@@ -299,7 +307,7 @@ function FilesTab({ api, workspace }: { api: AstralApi | null; workspace: Worksp
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-[#ebe8e1] px-4 py-3">
-        <div className="truncate text-[13px] font-semibold text-[#96949a]">{data?.root ?? workspace.local_cwd}</div>
+        <div className="truncate text-[13px] font-semibold text-[#96949a]">{data?.root ?? workspaceRoot}</div>
         <div className="mt-1 flex items-center gap-2">
           <button
             className="grid size-7 place-items-center rounded-lg text-[#8f9296] transition-colors duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] disabled:opacity-35"
@@ -340,6 +348,8 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
   const fitRef = useRef<FitAddon | null>(null);
   const connectionIdRef = useRef(0);
   const onTitleChangeRef = useRef(onTitleChange);
+  const workspaceId = workspace?.id ?? "";
+  const workspaceRoot = workspace?.local_cwd ?? "";
   const [themeId, setThemeId] = useState(() => storedTerminalPreference("astralops-terminal-theme", "studio-light"));
   const [fontId, setFontId] = useState(() => storedTerminalPreference("astralops-terminal-font", "sf-mono"));
   const theme = terminalThemes.find((item) => item.id === themeId) ?? terminalThemes[0];
@@ -367,7 +377,7 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
   }, [font.family, font.lineHeight, font.size, fontId]);
 
   useEffect(() => {
-    if (!api || !workspace || !hostRef.current) return;
+    if (!api || !workspaceId || !hostRef.current) return;
     const connectionId = connectionIdRef.current + 1;
     connectionIdRef.current = connectionId;
     let disposed = false;
@@ -388,7 +398,7 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
     term.open(hostRef.current);
     fit.fit();
 
-    const socket = api.workspacePTYSocket(workspace.id);
+    const socket = api.workspacePTYSocket(workspaceId);
     const sendResize = (): void => {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
@@ -417,7 +427,7 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
         const message = JSON.parse(event.data as string) as { type: string; data?: string; message?: string; shell?: string; cwd?: string };
         if (message.type === "ready") {
           const nextShell = message.shell || "shell";
-          onTitleChangeRef.current(`${nextShell} · ${basename(message.cwd || workspace.local_cwd || "")}`);
+          onTitleChangeRef.current(`${nextShell} · ${basename(message.cwd || workspaceRoot)}`);
         }
         if (message.type === "output" && message.data) term.write(message.data);
         if (message.type === "error") {
@@ -448,7 +458,7 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
       if (termRef.current === term) termRef.current = null;
       if (fitRef.current === fit) fitRef.current = null;
     };
-  }, [api, workspace]);
+  }, [api, workspaceId, workspaceRoot]);
 
   if (!workspace) {
     return <PanelMessage title="没有工作区" body="创建或选择一个本地工作区后可以运行命令。" />;
@@ -528,6 +538,18 @@ function createTab(kind: PanelTabKind): PanelTab {
     kind,
     title: kind === "terminal" ? undefined : "文件",
   };
+}
+
+function panelContentTabs(tabs: PanelTab[], orderRef: React.MutableRefObject<string[]>): PanelTab[] {
+  const byId = new Map(tabs.map((tab) => [tab.id, tab]));
+  const nextOrder = orderRef.current.filter((id) => byId.has(id));
+  for (const tab of tabs) {
+    if (!nextOrder.includes(tab.id)) {
+      nextOrder.push(tab.id);
+    }
+  }
+  orderRef.current = nextOrder;
+  return nextOrder.map((id) => byId.get(id)).filter((tab): tab is PanelTab => Boolean(tab));
 }
 
 function tabTitle(tab: PanelTab, workspace: Workspace | null): string {

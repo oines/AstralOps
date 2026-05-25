@@ -68,6 +68,10 @@ var (
 	execMu  sync.Mutex
 	execs   = map[string]*execSession{}
 	encoder *json.Encoder
+
+	proxyAgentShutdownOnce sync.Once
+	proxyAgentExecutable   = os.Executable
+	removeProxyAgentFile   = os.Remove
 )
 
 type execSession struct {
@@ -93,6 +97,8 @@ func main() {
 	if abs, err := filepath.Abs(rootCWD); err == nil {
 		rootCWD = filepath.Clean(abs)
 	}
+	defer shutdownProxyAgent()
+	installShutdownSignalHandler(shutdownProxyAgent)
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	encoder = json.NewEncoder(os.Stdout)
@@ -110,6 +116,63 @@ func main() {
 		}
 		writeLine(res)
 	}
+}
+
+func shutdownProxyAgent() {
+	proxyAgentShutdownOnce.Do(func() {
+		cleanupManagedProcesses()
+		removeSelfExecutable()
+	})
+}
+
+func cleanupManagedProcesses() {
+	cleanupManagedPTYs()
+	cleanupManagedExecs()
+}
+
+func cleanupManagedPTYs() {
+	ptyMu.Lock()
+	sessions := make([]*ptySession, 0, len(ptys))
+	for _, session := range ptys {
+		sessions = append(sessions, session)
+	}
+	ptyMu.Unlock()
+	for _, session := range sessions {
+		finishPTY(session, true)
+	}
+}
+
+func cleanupManagedExecs() {
+	execMu.Lock()
+	sessions := make([]*execSession, 0, len(execs))
+	for _, session := range execs {
+		sessions = append(sessions, session)
+	}
+	execMu.Unlock()
+	for _, session := range sessions {
+		session.cancel()
+		if session.cmd != nil && session.cmd.Process != nil {
+			_ = killCommandProcessGroup(session.cmd)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(sessions) > 0 && time.Now().Before(deadline) {
+		execMu.Lock()
+		remaining := len(execs)
+		execMu.Unlock()
+		if remaining == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func removeSelfExecutable() {
+	path, err := proxyAgentExecutable()
+	if err != nil || strings.TrimSpace(path) == "" {
+		return
+	}
+	_ = removeProxyAgentFile(path)
 }
 
 func dispatch(req request) (any, error) {
@@ -955,7 +1018,7 @@ func startPTY(requestID string, p ptyStartParams) (any, error) {
 		cmd = exec.Command(shell, "-l")
 	}
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
+	cmd.Env = terminalEnv(os.Environ())
 	for key, value := range p.Env {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}

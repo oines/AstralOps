@@ -226,6 +226,32 @@ func TestHelloAdvertisesCoreExecutionMethods(t *testing.T) {
 	}
 }
 
+func TestTerminalEnvDefaultsToUTF8Locale(t *testing.T) {
+	env := terminalEnv([]string{"PATH=/bin", "LANG=", "LC_CTYPE=C"})
+	if got := envValue(env, "TERM"); got != "xterm-256color" {
+		t.Fatalf("TERM = %q", got)
+	}
+	if got := envValue(env, "COLORTERM"); got != "truecolor" {
+		t.Fatalf("COLORTERM = %q", got)
+	}
+	if got := envValue(env, "LANG"); got != defaultTerminalLocale {
+		t.Fatalf("LANG = %q", got)
+	}
+	if got := envValue(env, "LC_CTYPE"); got != defaultTerminalLocale {
+		t.Fatalf("LC_CTYPE = %q", got)
+	}
+}
+
+func TestTerminalEnvPreservesExistingUTF8Locale(t *testing.T) {
+	env := terminalEnv([]string{"LANG=zh_CN.UTF-8", "LC_CTYPE=zh_CN.UTF-8", "LC_ALL="})
+	if got := envValue(env, "LANG"); got != "zh_CN.UTF-8" {
+		t.Fatalf("LANG = %q", got)
+	}
+	if got := envValue(env, "LC_CTYPE"); got != "zh_CN.UTF-8" {
+		t.Fatalf("LC_CTYPE = %q", got)
+	}
+}
+
 func TestRunExecPreservesArgvWithoutShellExpansion(t *testing.T) {
 	dir := t.TempDir()
 	result, err := runExec(execParams{
@@ -436,6 +462,103 @@ func TestPTYKillTerminatesProcessGroup(t *testing.T) {
 		t.Fatalf("pty background child survived kill and wrote marker: %q", body)
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("checking marker failed: %v", err)
+	}
+}
+
+func TestCleanupManagedProcessesTerminatesPTYAndExecProcessGroups(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process group test is POSIX-only")
+	}
+	dir := t.TempDir()
+	previousRoot := rootCWD
+	rootCWD = dir
+	defer func() { rootCWD = previousRoot }()
+
+	var buf bytes.Buffer
+	previousEncoder := encoder
+	encoder = json.NewEncoder(&buf)
+	defer func() { encoder = previousEncoder }()
+
+	ptyReady := filepath.Join(dir, "pty-child.ready")
+	ptyMarker := filepath.Join(dir, "pty-child.survived")
+	if _, err := startPTY("cleanup-pty", ptyStartParams{
+		ID:  "cleanup-pty",
+		CWD: dir,
+		Argv: []string{
+			"/bin/sh",
+			"-c",
+			`(trap '' HUP; printf ready > "$READY"; sleep 2; printf survived > "$MARKER") & wait`,
+		},
+		Env: map[string]string{
+			"READY":  ptyReady,
+			"MARKER": ptyMarker,
+		},
+		Rows: 24,
+		Cols: 80,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	execReady := filepath.Join(dir, "exec-child.ready")
+	execMarker := filepath.Join(dir, "exec-child.survived")
+	if _, err := startExec(execParams{
+		ID:  "cleanup-exec",
+		CWD: dir,
+		Argv: []string{
+			"/bin/sh",
+			"-c",
+			`(trap '' HUP; printf ready > "$READY"; sleep 2; printf survived > "$MARKER") & wait`,
+		},
+		Env: map[string]string{
+			"READY":  execReady,
+			"MARKER": execMarker,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, ptyErr := os.Stat(ptyReady)
+		_, execErr := os.Stat(execReady)
+		if ptyErr == nil && execErr == nil && lookupExec("cleanup-exec") != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("managed children did not signal ready; events=%q", buf.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cleanupManagedProcesses()
+	time.Sleep(2500 * time.Millisecond)
+	for _, marker := range []string{ptyMarker, execMarker} {
+		if body, err := os.ReadFile(marker); err == nil {
+			t.Fatalf("managed child survived cleanup and wrote %s: %q", marker, body)
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("checking marker failed: %v", err)
+		}
+	}
+}
+
+func TestRemoveSelfExecutableDeletesConfiguredPath(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "astral-proxy-agent")
+	if err := os.WriteFile(target, []byte("helper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previousExecutable := proxyAgentExecutable
+	previousRemove := removeProxyAgentFile
+	proxyAgentExecutable = func() (string, error) { return target, nil }
+	removeProxyAgentFile = os.Remove
+	defer func() {
+		proxyAgentExecutable = previousExecutable
+		removeProxyAgentFile = previousRemove
+	}()
+
+	removeSelfExecutable()
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("self executable still exists or stat failed: %v", err)
 	}
 }
 
