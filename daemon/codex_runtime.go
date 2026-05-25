@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -93,7 +92,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 		if err != nil {
 			return err
 		}
-		cwd = filepath.Clean(workspace.SSH.RemoteCWD)
+		cwd = remotePathClean(workspace.SSH.RemoteCWD)
 		processCWD = workspace.LocalProjectionRoot
 		execServerURL = r.app.codexExecServerURL(workspace.ID)
 		remoteShell = stringValue(hello["shell"])

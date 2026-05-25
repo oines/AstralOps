@@ -265,6 +265,16 @@ export type HealthResponse = {
   version: string;
   data_dir: string;
   agents: Record<AgentKind, AgentInfo>;
+  platform?: {
+    os: string;
+    arch: string;
+  };
+  features?: {
+    terminal?: {
+      available: boolean;
+      reason?: string;
+    };
+  };
 };
 
 export type AgentInfo = {

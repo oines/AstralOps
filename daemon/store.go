@@ -311,14 +311,14 @@ func (s *store) createWorkspace(req createWorkspaceRequest) (Workspace, error) {
 			return Workspace{}, errors.New("ssh workspace requires ssh config")
 		}
 		ws.SSH.Endpoint = strings.TrimSpace(ws.SSH.Endpoint)
-		ws.SSH.RemoteCWD = filepath.Clean(strings.TrimSpace(ws.SSH.RemoteCWD))
+		ws.SSH.RemoteCWD = remotePathClean(ws.SSH.RemoteCWD)
 		if ws.SSH.Endpoint == "" {
 			return Workspace{}, errors.New("ssh endpoint is required")
 		}
 		if ws.SSH.Port <= 0 {
 			ws.SSH.Port = 22
 		}
-		if !filepath.IsAbs(ws.SSH.RemoteCWD) {
+		if !remotePathIsAbs(ws.SSH.RemoteCWD) {
 			return Workspace{}, errors.New("ssh remote cwd must be an absolute path")
 		}
 		ws.LocalCWD = ""

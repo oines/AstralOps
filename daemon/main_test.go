@@ -1031,6 +1031,50 @@ func TestWorkspacePathAllowsDotDotPrefixedNames(t *testing.T) {
 	}
 }
 
+func TestLocalShellCommandForOS(t *testing.T) {
+	windowsCmd := localShellCommandForOS(context.Background(), "windows", "echo hello")
+	if !reflect.DeepEqual(windowsCmd.Args, []string{"cmd.exe", "/d", "/s", "/c", "echo hello"}) {
+		t.Fatalf("windows shell args = %#v", windowsCmd.Args)
+	}
+
+	linuxCmd := localShellCommandForOS(context.Background(), "linux", "echo hello")
+	if !reflect.DeepEqual(linuxCmd.Args, []string{"/bin/sh", "-lc", "echo hello"}) {
+		t.Fatalf("linux shell args = %#v", linuxCmd.Args)
+	}
+}
+
+func TestHostTerminalFeatureForOS(t *testing.T) {
+	if feature := hostFeaturesForOS("windows").Terminal; feature.Available || feature.Reason != windowsTerminalDisabledReason {
+		t.Fatalf("windows terminal feature = %#v", feature)
+	}
+	if feature := hostFeaturesForOS("linux").Terminal; !feature.Available || feature.Reason != "" {
+		t.Fatalf("linux terminal feature = %#v", feature)
+	}
+}
+
+func TestClaudeRemoteHookCommandForOS(t *testing.T) {
+	posix := claudeRemoteHookCommandForOS("linux", "/opt/AstralOps/daemon", "http://127.0.0.1:1234", "tok", "ws_1", "exec", "YWJj")
+	if !strings.Contains(posix, "ASTRALOPS_DAEMON='http://127.0.0.1:1234'") ||
+		!strings.Contains(posix, "ASTRALOPS_TOKEN='tok'") ||
+		!strings.Contains(posix, "ASTRALOPS_WORKSPACE_ID='ws_1'") ||
+		!strings.Contains(posix, "'/opt/AstralOps/daemon' claude-remote-hook exec 'YWJj'") {
+		t.Fatalf("posix hook command = %q", posix)
+	}
+
+	windows := claudeRemoteHookCommandForOS("windows", `C:\Program Files\AstralOps\daemon.exe`, "http://127.0.0.1:1234", "tok", "ws_1", "exec", "YWJj")
+	for _, want := range []string{
+		"cmd.exe /d /s /c ",
+		`set "ASTRALOPS_DAEMON=http://127.0.0.1:1234"`,
+		`set "ASTRALOPS_TOKEN=tok"`,
+		`set "ASTRALOPS_WORKSPACE_ID=ws_1"`,
+		`"C:\Program Files\AstralOps\daemon.exe" claude-remote-hook "exec" "YWJj"`,
+	} {
+		if !strings.Contains(windows, want) {
+			t.Fatalf("windows hook command = %q, missing %q", windows, want)
+		}
+	}
+}
+
 func TestNormalizeClaudeStreamJSON(t *testing.T) {
 	session := Session{ID: "sess_test", WorkspaceID: "ws_test", Agent: AgentClaude, NativeSessionID: "native"}
 	lines := readFixtureLines(t, "../fixtures/claude-stream-json/sample.jsonl")

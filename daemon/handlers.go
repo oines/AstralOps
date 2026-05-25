@@ -39,6 +39,8 @@ func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"version":  version,
 		"data_dir": a.store.dataDir,
 		"agents":   a.agents,
+		"platform": currentHostPlatform(),
+		"features": currentHostFeatures(),
 	})
 }
 
@@ -237,7 +239,7 @@ func (a *app) handleWorkspaceFiles(w http.ResponseWriter, ws Workspace, queryPat
 func (a *app) handleRemoteWorkspaceFiles(w http.ResponseWriter, ws Workspace, queryPath string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	root := filepath.Clean(ws.SSH.RemoteCWD)
+	root := remotePathClean(ws.SSH.RemoteCWD)
 	target, rel, err := resolveRemoteWorkspacePath(root, queryPath)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -259,9 +261,9 @@ func (a *app) handleRemoteWorkspaceFiles(w http.ResponseWriter, ws Workspace, qu
 	for _, entry := range raw {
 		name := stringValue(entry["name"])
 		path := stringValue(entry["path"])
-		entryRel, err := filepath.Rel(root, path)
+		entryRel, err := remotePathRel(root, path)
 		if err != nil || pathEscapesRoot(entryRel) {
-			entryRel = filepath.Base(path)
+			entryRel = remotePathBase(path)
 		}
 		kind := "file"
 		if boolValue(entry["is_dir"]) {
@@ -269,7 +271,7 @@ func (a *app) handleRemoteWorkspaceFiles(w http.ResponseWriter, ws Workspace, qu
 		}
 		out = append(out, fileEntry{
 			Name:    name,
-			Path:    filepath.ToSlash(entryRel),
+			Path:    entryRel,
 			Kind:    kind,
 			Size:    int64(numberValue(entry["size"])),
 			ModTime: stringValue(entry["modified"]),
@@ -300,7 +302,7 @@ func (a *app) handleWorkspaceExec(parent context.Context, w http.ResponseWriter,
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", command)
+	cmd := localShellCommand(ctx, command)
 	cmd.Dir = ws.LocalCWD
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -389,6 +391,10 @@ type ptyClientMessage struct {
 }
 
 func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Workspace) {
+	if !terminalAvailableOnHost() {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": windowsTerminalDisabledReason})
+		return
+	}
 	if ws.Target == "ssh" {
 		a.handleRemoteWorkspacePTY(w, r, ws)
 		return
@@ -553,19 +559,20 @@ func resolveRemoteWorkspacePath(root, queryPath string) (string, string, error) 
 	if root == "" {
 		return "", "", errors.New("workspace remote cwd is empty")
 	}
+	root = remotePathClean(root)
 	rel := strings.TrimSpace(queryPath)
 	if rel == "." || rel == "/" {
 		rel = ""
 	}
-	if filepath.IsAbs(rel) {
+	if remotePathIsAbs(rel) {
 		var err error
-		rel, err = filepath.Rel(root, filepath.Clean(rel))
+		rel, err = remotePathRel(root, remotePathClean(rel))
 		if err != nil {
 			return "", "", err
 		}
 	}
-	target := filepath.Clean(filepath.Join(root, rel))
-	resolvedRel, err := filepath.Rel(root, target)
+	target := remotePathClean(remotePathJoin(root, rel))
+	resolvedRel, err := remotePathRel(root, target)
 	if err != nil {
 		return "", "", err
 	}
@@ -576,10 +583,6 @@ func resolveRemoteWorkspacePath(root, queryPath string) (string, string, error) 
 		return "", "", errors.New("path escapes remote workspace")
 	}
 	return target, filepath.ToSlash(resolvedRel), nil
-}
-
-func pathEscapesRoot(rel string) bool {
-	return rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 type createSessionRequest struct {
