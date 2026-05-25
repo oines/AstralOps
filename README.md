@@ -1,5 +1,7 @@
 # AstralOps
 
+[Telegram 群](https://t.me/Project_AstralOps)
+
 **把你的 AI 编程助手带到任何远程服务器。**
 
 AstralOps 是一个专为 Claude Code 和 Codex 设计的跨平台可视化工作台。但它的杀手级功能在于：**无缝的 SSH 远程 AI 开发**。
