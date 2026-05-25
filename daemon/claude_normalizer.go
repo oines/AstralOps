@@ -376,12 +376,17 @@ func normalizeClaudeUser(session Session, raw map[string]any) []AstralEvent {
 				}, raw))
 				continue
 			}
-			events = append(events, baseClaudeEvent(session, "tool.completed", map[string]any{
+			normalized := map[string]any{
 				"id":       stringValue(block["tool_use_id"]),
 				"content":  block["content"],
 				"is_error": boolValue(block["is_error"]),
 				"result":   raw["tool_use_result"],
-			}, raw))
+			}
+			if boolValue(block["is_error"]) && isClaudeCancelledParallelToolErrorText(firstString(block["content"], raw["tool_use_result"])) {
+				normalized["hidden"] = true
+				normalized["visibility"] = "debug"
+			}
+			events = append(events, baseClaudeEvent(session, "tool.completed", normalized, raw))
 		}
 	}
 	if len(events) == 0 {
@@ -391,6 +396,10 @@ func normalizeClaudeUser(session Session, raw map[string]any) []AstralEvent {
 		}, raw)}
 	}
 	return events
+}
+
+func isClaudeCancelledParallelToolErrorText(text string) bool {
+	return strings.Contains(text, "Cancelled: parallel tool call") && strings.Contains(text, "errored")
 }
 
 func isClaudePlanFilePath(path string) bool {

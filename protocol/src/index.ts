@@ -236,6 +236,70 @@ export type Session = {
   updated_at: string;
 };
 
+export type SessionView = {
+  session: Session;
+  title?: string;
+  status: "idle" | "running" | "requires_action" | "reconnecting" | "failed";
+  pending_interaction?: PendingInteractionView | null;
+  queued_inputs?: QueuedInputView[];
+};
+
+export type PendingInteractionView = {
+  id: string;
+  kind: "ask" | "approval" | "plan" | string;
+  title: string;
+  detail_rows?: InteractionDetailRow[];
+  actions: InteractionActionView[];
+  form?: InteractionFormView | null;
+};
+
+export type InteractionDetailRow = {
+  label: string;
+  value: string;
+  mono?: boolean;
+};
+
+export type InteractionActionView = {
+  id: string;
+  label: string;
+  description?: string;
+  role?: "primary" | "secondary" | "danger" | string;
+  requires_feedback?: boolean;
+};
+
+export type InteractionFormView = {
+  kind: "questions" | "text" | "mcp_json" | "mcp_url" | string;
+  fields?: InteractionFormFieldView[];
+  message?: string;
+  url?: string;
+  schema?: unknown;
+  initial_content?: string;
+};
+
+export type InteractionFormFieldView = {
+  id: string;
+  label: string;
+  description?: string;
+  type: "choice" | "text" | string;
+  options?: InteractionFormOptionView[];
+  multi_select?: boolean;
+  allow_custom?: boolean;
+  secret?: boolean;
+};
+
+export type InteractionFormOptionView = {
+  id: string;
+  label: string;
+  value: string;
+  description?: string;
+};
+
+export type QueuedInputView = {
+  id: string;
+  session_id: string;
+  text: string;
+};
+
 export type CreateWorkspaceRequest = {
   name: string;
   target: WorkspaceTarget;

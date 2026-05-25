@@ -696,6 +696,238 @@ func TestEventsSSEStreamsLiveEvents(t *testing.T) {
 	}
 }
 
+func TestNotificationIntentGeneratedForActionableEvent(t *testing.T) {
+	source := AstralEvent{
+		Seq:         42,
+		WorkspaceID: "ws_notify",
+		SessionID:   "sess_notify",
+		Agent:       AgentCodex,
+		Kind:        "approval.requested",
+		Normalized: map[string]any{
+			"kind":    "command",
+			"command": "npm test",
+		},
+	}
+
+	notification, ok := notificationEventForSource(source, "回复问候", source.SessionID, nil)
+	if !ok {
+		t.Fatal("notification intent was not generated")
+	}
+	if notification.Kind != "control.notification" {
+		t.Fatalf("kind = %q, want control.notification", notification.Kind)
+	}
+	value := mapValue(notification.Normalized)
+	if stringValue(value["reason"]) != "approval_required" || stringValue(value["title"]) != "回复问候" || stringValue(value["body"]) != "等待命令审批：npm test" {
+		t.Fatalf("notification normalized = %#v", value)
+	}
+	sourceEvent := mapValue(value["source_event"])
+	if sourceEvent["seq"] != float64(42) && sourceEvent["seq"] != int64(42) && sourceEvent["seq"] != 42 {
+		t.Fatalf("source_event = %#v, want seq 42", sourceEvent)
+	}
+	target := mapValue(value["target"])
+	if stringValue(target["kind"]) != "session" || stringValue(target["session_id"]) != "sess_notify" || stringValue(target["workspace_id"]) != "ws_notify" {
+		t.Fatalf("target = %#v, want session target", target)
+	}
+}
+
+func TestNotificationIntentSkipsNonActionableEvent(t *testing.T) {
+	_, ok := notificationEventForSource(AstralEvent{
+		Seq:         7,
+		WorkspaceID: "ws_notify",
+		SessionID:   "sess_notify",
+		Agent:       AgentCodex,
+		Kind:        "message.delta",
+		Normalized:  map[string]any{"text": "hello"},
+	}, "回复问候", "sess_notify", nil)
+	if ok {
+		t.Fatal("message delta generated a notification intent")
+	}
+}
+
+func TestNotificationIntentUsesFinalAssistantMessageForCompletedTurn(t *testing.T) {
+	events := []AstralEvent{
+		{
+			Seq:         10,
+			WorkspaceID: "ws_notify",
+			SessionID:   "sess_notify",
+			Agent:       AgentCodex,
+			Kind:        "message.assistant",
+			Normalized:  map[string]any{"text": "已经改好了：通知会显示最终回复内容。"},
+		},
+	}
+	source := AstralEvent{
+		Seq:         11,
+		WorkspaceID: "ws_notify",
+		SessionID:   "sess_notify",
+		Agent:       AgentCodex,
+		Kind:        "turn.completed",
+		Normalized:  map[string]any{"status": "idle"},
+	}
+
+	notification, ok := notificationEventForSource(source, "评估代码实现优雅性", source.SessionID, events)
+	if !ok {
+		t.Fatal("notification intent was not generated")
+	}
+	value := mapValue(notification.Normalized)
+	if stringValue(value["title"]) != "评估代码实现优雅性" || stringValue(value["body"]) != "已经改好了：通知会显示最终回复内容。" {
+		t.Fatalf("notification normalized = %#v", value)
+	}
+}
+
+func TestNotificationIntentUsesAssistantDeltasForCompletedTurn(t *testing.T) {
+	events := []AstralEvent{
+		{
+			Seq:         20,
+			WorkspaceID: "ws_notify",
+			SessionID:   "sess_notify",
+			Agent:       AgentCodex,
+			Kind:        "turn.started",
+			Normalized:  map[string]any{"status": "running"},
+		},
+		{
+			Seq:         21,
+			WorkspaceID: "ws_notify",
+			SessionID:   "sess_notify",
+			Agent:       AgentCodex,
+			Kind:        "message.delta",
+			Normalized:  map[string]any{"text": "你好，"},
+		},
+		{
+			Seq:         22,
+			WorkspaceID: "ws_notify",
+			SessionID:   "sess_notify",
+			Agent:       AgentCodex,
+			Kind:        "message.delta",
+			Normalized:  map[string]any{"text": "已经完成了。"},
+		},
+	}
+	source := AstralEvent{
+		Seq:         23,
+		WorkspaceID: "ws_notify",
+		SessionID:   "sess_notify",
+		Agent:       AgentCodex,
+		Kind:        "turn.completed",
+		Normalized:  map[string]any{"status": "idle"},
+	}
+
+	notification, ok := notificationEventForSource(source, "你好", source.SessionID, events)
+	if !ok {
+		t.Fatal("notification intent was not generated")
+	}
+	value := mapValue(notification.Normalized)
+	if stringValue(value["body"]) != "你好，已经完成了。" {
+		t.Fatalf("notification body = %q, want assistant deltas", stringValue(value["body"]))
+	}
+}
+
+func TestNotificationIntentSkipsCompletedTurnWithoutAssistantText(t *testing.T) {
+	_, ok := notificationEventForSource(AstralEvent{
+		Seq:         24,
+		WorkspaceID: "ws_notify",
+		SessionID:   "sess_notify",
+		Agent:       AgentCodex,
+		Kind:        "turn.completed",
+		Normalized:  map[string]any{"status": "idle"},
+	}, "你好", "sess_notify", nil)
+	if ok {
+		t.Fatal("completed turn without assistant text generated a notification intent")
+	}
+}
+
+func TestNotificationIntentGeneratedForUnexpectedSSHDisconnect(t *testing.T) {
+	source := AstralEvent{
+		Seq:         12,
+		WorkspaceID: "ws_notify",
+		Agent:       AgentCodex,
+		Kind:        "workspace.connection",
+		Normalized: WorkspaceConnection{
+			WorkspaceID: "ws_notify",
+			Target:      "ssh",
+			Status:      connectionDegraded,
+			Message:     "ssh proxy transport failed",
+		},
+	}
+
+	notification, ok := notificationEventForSource(source, "远程开发", "sess_notify", nil)
+	if !ok {
+		t.Fatal("notification intent was not generated")
+	}
+	value := mapValue(notification.Normalized)
+	if stringValue(value["reason"]) != "ssh_disconnected" || stringValue(value["title"]) != "远程开发" || stringValue(value["body"]) != "SSH 连接已断开：ssh proxy transport failed" {
+		t.Fatalf("notification normalized = %#v", value)
+	}
+	if notification.SessionID != "sess_notify" {
+		t.Fatalf("notification session = %q, want target session", notification.SessionID)
+	}
+}
+
+func TestNotificationIntentSkipsManualSSHDisconnect(t *testing.T) {
+	_, ok := notificationEventForSource(AstralEvent{
+		Seq:         13,
+		WorkspaceID: "ws_notify",
+		Agent:       AgentCodex,
+		Kind:        "workspace.connection",
+		Normalized: WorkspaceConnection{
+			WorkspaceID: "ws_notify",
+			Target:      "ssh",
+			Status:      connectionDisconnected,
+			Message:     "user disconnected",
+		},
+	}, "远程开发", "sess_notify", nil)
+	if ok {
+		t.Fatal("manual ssh disconnect generated a notification intent")
+	}
+}
+
+func TestSessionViewProjectsAskQuestionFields(t *testing.T) {
+	pending := projectPendingInteraction([]AstralEvent{{
+		Seq:         1,
+		WorkspaceID: "ws_view",
+		SessionID:   "sess_view",
+		Agent:       AgentCodex,
+		Kind:        "ask.requested",
+		Normalized: map[string]any{
+			"ask_id": "ask_1",
+			"kind":   "item/tool/requestUserInput",
+			"params": map[string]any{
+				"questions": []any{
+					map[string]any{
+						"id":          "choice",
+						"question":    "Pick one",
+						"multiSelect": true,
+						"isOther":     true,
+						"options": []any{
+							map[string]any{"id": "a", "label": "A", "value": "alpha", "description": "first"},
+						},
+					},
+				},
+			},
+		},
+	}})
+	if pending == nil {
+		t.Fatal("pending interaction = nil")
+	}
+	form := pending.Form
+	if stringValue(form["kind"]) != "questions" {
+		t.Fatalf("form = %#v, want questions", form)
+	}
+	fields, ok := form["fields"].([]map[string]any)
+	if !ok || len(fields) != 1 {
+		t.Fatalf("fields = %#v, want one normalized field", form["fields"])
+	}
+	field := fields[0]
+	if stringValue(field["id"]) != "choice" || stringValue(field["label"]) != "Pick one" || boolValue(field["multi_select"]) != true || boolValue(field["allow_custom"]) != true {
+		t.Fatalf("field = %#v, want normalized question shape", field)
+	}
+	options, ok := field["options"].([]map[string]any)
+	if !ok || len(options) != 1 {
+		t.Fatalf("options = %#v, want one normalized option", field["options"])
+	}
+	if stringValue(options[0]["id"]) != "a" || stringValue(options[0]["label"]) != "A" || stringValue(options[0]["value"]) != "alpha" || stringValue(options[0]["description"]) != "first" {
+		t.Fatalf("option = %#v, want normalized option", options[0])
+	}
+}
+
 func TestLocalWorkspacePTYCloseTerminatesProcessGroup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("PTY process group test is POSIX-only")
@@ -1534,7 +1766,7 @@ func TestApprovalRespondedKeepsSessionAttribution(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
 	events := st.queryEvents("ws_approval", "sess_approval", 0)
-	if len(events) != 2 || events[1].Kind != "approval.responded" {
+	if !containsEventKind(events, "approval.responded") {
 		t.Fatalf("events = %#v, want attributed approval.responded", events)
 	}
 }
@@ -1594,7 +1826,7 @@ func TestAskResponseEmitsAskResolved(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
 	events := st.queryEvents("ws_ask", "sess_ask", 0)
-	if len(events) != 2 || events[1].Kind != "ask.resolved" {
+	if !containsEventKind(events, "ask.resolved") {
 		t.Fatalf("events = %#v, want attributed ask.resolved", events)
 	}
 }
@@ -2702,7 +2934,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 	waitForKind(t, app.store, session.ID, "turn.completed")
 
 	gotKinds := eventKinds(app.store.queryEvents(workspace.ID, session.ID, 0))
-	wantKinds := []string{"message.user", "turn.started", "session.native", "message.delta", "turn.completed"}
+	wantKinds := []string{"message.user", "turn.started", "session.native", "message.delta", "turn.completed", "control.notification"}
 	if !reflect.DeepEqual(gotKinds, wantKinds) {
 		t.Fatalf("kinds = %#v, want %#v", gotKinds, wantKinds)
 	}
@@ -3190,6 +3422,7 @@ func TestCodexLocalRuntimeStreamsFakeAppServer(t *testing.T) {
 		"message.delta",
 		"message.delta",
 		"turn.completed",
+		"control.notification",
 	}
 	if !reflect.DeepEqual(gotKinds, wantKinds) {
 		t.Fatalf("kinds = %#v, want %#v", gotKinds, wantKinds)

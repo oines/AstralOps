@@ -24,6 +24,31 @@ func (a *app) emit(ev AstralEvent) {
 		return
 	}
 	a.hub.broadcast(saved)
+	notificationTitle, targetSessionID := a.notificationTarget(saved)
+	if notification, ok := notificationEventForSource(saved, notificationTitle, targetSessionID, a.store.allEvents()); ok {
+		savedNotification, err := a.store.appendEvent(notification)
+		if err != nil {
+			log.Printf("append notification event: %v", err)
+			return
+		}
+		a.hub.broadcast(savedNotification)
+	}
+}
+
+func (a *app) notificationTarget(ev AstralEvent) (string, string) {
+	if ev.SessionID != "" {
+		return a.store.sessionTitle(ev.SessionID), ev.SessionID
+	}
+	if ev.WorkspaceID == "" {
+		return "", ""
+	}
+	if sessionID, ok := a.store.latestSessionIDForWorkspace(ev.WorkspaceID); ok {
+		return a.store.sessionTitle(sessionID), sessionID
+	}
+	if ws, ok := a.store.getWorkspace(ev.WorkspaceID); ok {
+		return ws.Name, ""
+	}
+	return "", ""
 }
 
 func newEventHub() *eventHub {

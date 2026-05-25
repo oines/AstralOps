@@ -284,7 +284,7 @@ export function isTranscriptPlanEvent(event: AstralEvent): boolean {
     if (Array.isArray(value.plan)) return false;
     return transcriptPlanText(event).trim() !== "";
   }
-  return isClaudePlanFileWrite(event);
+  return false;
 }
 
 export function transcriptPlanText(event: AstralEvent): string {
@@ -468,70 +468,6 @@ export function queueLabel(kind: string): string {
   }
 }
 
-export function collectResolvedInteractionIDs(events: AstralEvent[]): Set<string> {
-  const ids = new Set<string>();
-  for (const event of events) {
-    if (event.kind !== "approval.resolved" && event.kind !== "approval.responded" && event.kind !== "ask.resolved") continue;
-    for (const id of interactionIDs(event.normalized as Record<string, unknown>)) ids.add(id);
-  }
-  for (const id of collectSupersededClaudeAskIDs(events)) ids.add(id);
-  return ids;
-}
-
-function collectSupersededClaudeAskIDs(events: AstralEvent[]): Set<string> {
-  const ids = new Set<string>();
-  const turnBySession = new Map<string, string>();
-  const lastAskByTurn = new Map<string, string>();
-
-  for (const event of events) {
-    const sessionID = event.session_id || "";
-    if (event.kind === "message.user" || event.kind === "turn.started") {
-      turnBySession.set(sessionID, `${sessionID}:${event.seq}`);
-    }
-
-    if (event.kind === "ask.requested" && isClaudeAskUserQuestion(event)) {
-      const turnID = turnBySession.get(sessionID) || `${sessionID}:current`;
-      const askID = interactionIDs(event.normalized as Record<string, unknown>)[0];
-      if (askID) {
-        const previous = lastAskByTurn.get(turnID);
-        if (previous) ids.add(previous);
-        lastAskByTurn.set(turnID, askID);
-      }
-    }
-
-    if (event.kind === "turn.completed" || event.kind === "turn.failed" || event.kind === "turn.cancelled") {
-      turnBySession.delete(sessionID);
-    }
-  }
-
-  return ids;
-}
-
-function isClaudeAskUserQuestion(event: AstralEvent): boolean {
-  const value = event.normalized as Record<string, unknown>;
-  return textValue(value, "source") === "claude" && textValue(value, "kind") === "AskUserQuestion";
-}
-
-export function collectPendingQueueIDs(events: AstralEvent[]): Set<string> {
-  const ids = new Set<string>();
-  for (const event of events) {
-    const value = event.normalized as Record<string, unknown>;
-    const id = textValue(value, "queue_id");
-    if (!id) continue;
-    if (event.kind === "queue.queued") ids.add(id);
-    if (event.kind === "queue.dequeued" || event.kind === "queue.cancelled" || event.kind === "queue.failed" || event.kind === "queue.rejected" || event.kind === "queue.steered") ids.delete(id);
-  }
-  return ids;
-}
-
-export function isInteractionResolved(value: Record<string, unknown>, resolvedIDs: Set<string>): boolean {
-  return interactionIDs(value).some((id) => resolvedIDs.has(id));
-}
-
-export function interactionIDs(value: Record<string, unknown>): string[] {
-  return [textValue(value, "approval_id"), textValue(value, "ask_id")].filter(Boolean);
-}
-
 export function toolName(event: AstralEvent): string {
   const value = event.normalized as Record<string, unknown>;
   return textValue(value, "name") || textValue(value, "command");
@@ -552,46 +488,7 @@ export function shouldRenderEvent(event: AstralEvent): boolean {
   if (event.kind.startsWith("queue.")) return false;
   if (event.kind === "control.rate_limit") return false;
   if (isInternalQueueEcho(event)) return false;
-  if (isAskPermissionEcho(event)) return false;
-  if (isNonInteractiveClaudeResultPermissionApproval(event)) return false;
-  if (isClaudePlanFileToolResult(event)) return false;
-  if (event.kind === "control.warning" && isInternalCodexWarning(event)) return false;
-  if (isClaudeCancelledParallelToolError(event)) return false;
   return true;
-}
-
-export function isAskPermissionEcho(event: AstralEvent): boolean {
-  const value = event.normalized as Record<string, unknown>;
-  return event.kind === "approval.requested" && textValue(value, "kind") === "permission" && textValue(value, "tool_name") === "AskUserQuestion";
-}
-
-export function isNonInteractiveClaudeResultPermissionApproval(event: AstralEvent): boolean {
-  if (event.kind !== "approval.requested") return false;
-  const value = event.normalized as Record<string, unknown>;
-  if (textValue(value, "source") !== "claude" || textValue(value, "kind") !== "permission") return false;
-  const raw = event.raw;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
-  return textValue(raw as Record<string, unknown>, "type") === "result";
-}
-
-export function isInternalCodexWarning(event: AstralEvent): boolean {
-  const value = event.normalized as Record<string, unknown>;
-  const message = textValue(value, "message");
-  return (
-    message.includes("codex_core_skills::loader") ||
-    message.includes("ignoring interface.icon_") ||
-    message.includes("codex_core::goals") ||
-    message.includes("thread_goals") ||
-    message.includes("codex_core::agents_md")
-  );
-}
-
-export function isClaudeCancelledParallelToolError(event: AstralEvent): boolean {
-  if (event.kind !== "tool.completed") return false;
-  const value = event.normalized as Record<string, unknown>;
-  if (value.is_error !== true) return false;
-  const result = textValue(value, "result") || textValue(value, "content");
-  return result.includes("Cancelled: parallel tool call") && result.includes("errored");
 }
 
 export function isInternalQueueEcho(event: AstralEvent): boolean {
@@ -602,27 +499,6 @@ export function isInternalQueueEcho(event: AstralEvent): boolean {
   const text = textValue(value, "text").trim();
   if (event.kind === "queue.queued" && text === "") return true;
   return text === "权限已允许" || text === "权限已拒绝" || text === "计划已批准" || text === "计划未批准" || text === "问题已回复";
-}
-
-export function isClaudePlanFileWrite(event: AstralEvent): boolean {
-  if (event.kind !== "tool.started") return false;
-  const value = event.normalized as Record<string, unknown>;
-  if (textValue(value, "source") !== "claude" || textValue(value, "name") !== "Write") return false;
-  const input = value.input as Record<string, unknown> | undefined;
-  const path = textValue(input ?? {}, "file_path") || textValue(input ?? {}, "path");
-  return isClaudePlanFilePath(path) && transcriptPlanText(event).trim() !== "";
-}
-
-export function isClaudePlanFileToolResult(event: AstralEvent): boolean {
-  if (event.kind !== "tool.completed") return false;
-  const value = event.normalized as Record<string, unknown>;
-  const result = value.result as Record<string, unknown> | undefined;
-  const path = textValue(result ?? {}, "filePath") || textValue(result ?? {}, "file_path") || textValue(result ?? {}, "path");
-  return isClaudePlanFilePath(path);
-}
-
-export function isClaudePlanFilePath(path: string): boolean {
-  return path.includes("/.claude/plans/") && path.endsWith(".md");
 }
 
 export function compactStreamingEvents(events: AstralEvent[]): AstralEvent[] {

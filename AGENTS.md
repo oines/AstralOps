@@ -81,6 +81,17 @@ Prefer deleting or narrowing unsupported branches over preserving "just in case"
 Temporary compatibility code is allowed only when tied to a specific observed version/shape and documented with the fixture or source evidence that requires it.
 ```
 
+Core/UI boundary rule:
+
+```text
+Frontend clients are delivery and rendering surfaces, not business-logic owners.
+Daemon/Core must decide facts, derived state, pending interactions, notification intent, notification title/body, notification target, and notification de-duplication semantics.
+Desktop/mobile/web clients must not independently map agent/runtime events into notification copy, session state, pending-action semantics, or business decisions.
+For notifications, clients only consume control.notification.normalized as a delivery payload and apply local delivery policy such as focused/unfocused, foreground/background, system permission, and click handling.
+Client notification code must not know or branch on source event kinds such as turn.completed, ask.requested, approval.requested, workspace.connection, message.delta, or message.assistant.
+If a new client needs different notification delivery, extend the daemon/Core notification payload rather than duplicating notification logic in that client.
+```
+
 Real-task validation priority:
 
 ```text

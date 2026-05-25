@@ -642,6 +642,13 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID, action := parts[0], parts[1]
 	switch {
+	case action == "view" && r.Method == http.MethodGet:
+		view, ok := a.buildSessionView(sessionID)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, view)
 	case action == "input" && r.Method == http.MethodPost:
 		var req struct {
 			Input           string `json:"input"`

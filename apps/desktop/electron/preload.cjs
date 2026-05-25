@@ -4,4 +4,10 @@ contextBridge.exposeInMainWorld("astral", {
   getDaemonInfo: () => ipcRenderer.invoke("astral:get-daemon-info"),
   chooseDirectory: () => ipcRenderer.invoke("astral:choose-directory"),
   chooseFiles: () => ipcRenderer.invoke("astral:choose-files"),
+  showNotification: (payload) => ipcRenderer.invoke("astral:show-notification", payload),
+  onOpenSession: (callback) => {
+    const listener = (_event, sessionId) => callback(sessionId);
+    ipcRenderer.on("astral:open-session", listener);
+    return () => ipcRenderer.removeListener("astral:open-session", listener);
+  },
 });

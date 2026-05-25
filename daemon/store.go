@@ -207,6 +207,36 @@ func (s *store) sessionTitlesLocked() map[string]string {
 	return out
 }
 
+func (s *store) sessionTitle(sessionID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionTitlesLocked()[sessionID]
+}
+
+func (s *store) allEvents() []AstralEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]AstralEvent(nil), s.events...)
+}
+
+func (s *store) latestSessionIDForWorkspace(workspaceID string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var latest Session
+	for _, ss := range s.sessions {
+		if ss.WorkspaceID != workspaceID {
+			continue
+		}
+		if latest.ID == "" || ss.UpdatedAt > latest.UpdatedAt {
+			latest = ss
+		}
+	}
+	if latest.ID == "" {
+		return "", false
+	}
+	return latest.ID, true
+}
+
 func normalizedNativeSessionTitle(value map[string]any) (string, int) {
 	candidates := []struct {
 		rank int

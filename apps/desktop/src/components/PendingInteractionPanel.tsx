@@ -3,33 +3,29 @@ import { AnimatePresence, motion } from "framer-motion";
 import type React from "react";
 import { useEffect, useState } from "react";
 import type { PendingInteraction } from "../types";
-import {
-  askQuestionResponse,
-  askTextResponse,
-  booleanValue,
-  cancelActionLabel,
-  cancelResponse,
-  canSubmitAsk,
-  canSubmitMcpElicitation,
-  detailParams,
-  firstNonNil,
-  firstText,
-  initialAskDrafts,
-  interactionOptions,
-  isMultiSelectQuestion,
-  jsonPreview,
-  mcpElicitationResponse,
-  questionAllowsCustom,
-  questionIDFor,
-  questionOptions,
-  secondaryActionLabel,
-  secondaryResponse,
-  stringList,
-  textValue,
-  toggleString,
-  withPlanFeedback,
-  type AskAnswerDraft,
-} from "../interactionPayloads";
+
+type AskAnswerDraft = {
+  custom: string;
+  selected: string[];
+};
+
+type FormField = {
+  id: string;
+  label: string;
+  description?: string;
+  type: string;
+  options?: FormOption[];
+  multi_select?: boolean;
+  allow_custom?: boolean;
+  secret?: boolean;
+};
+
+type FormOption = {
+  id: string;
+  label: string;
+  value: string;
+  description?: string;
+};
 
 export function PendingInteractionPanel({
   interaction,
@@ -38,7 +34,6 @@ export function PendingInteractionPanel({
   interaction: PendingInteraction;
   onRespond: (requestId: string, response: Record<string, unknown>) => Promise<void>;
 }): React.JSX.Element {
-  const value = interaction.event.normalized as Record<string, unknown>;
   const [selected, setSelected] = useState("");
   const [askDrafts, setAskDrafts] = useState<Record<string, AskAnswerDraft>>({});
   const [planFeedback, setPlanFeedback] = useState("");
@@ -46,34 +41,35 @@ export function PendingInteractionPanel({
   const [textAnswer, setTextAnswer] = useState("");
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
   const [submitting, setSubmitting] = useState(false);
-  const params = (value.params as Record<string, unknown> | undefined) ?? {};
-  const isMcpElicitation = interaction.kind === "ask" && textValue(value, "kind") === "mcpServer/elicitation/request";
-  const questionRows = Array.isArray(params.questions) ? (params.questions as Array<Record<string, unknown>>) : [];
-  const question = questionRows[Math.min(activeQuestionIndex, Math.max(0, questionRows.length - 1))] ?? {};
-  const title = interactionTitle(interaction, value, params, question);
-  const options = interactionOptions(interaction, value, question);
-  const detailRows = interaction.kind === "approval" || interaction.kind === "plan" ? approvalDetailRows(value, params) : [];
-  const needsText = interaction.kind === "ask" && !isMcpElicitation && questionRows.length === 0 && options.length === 0;
-  const isLastQuestion = questionRows.length === 0 || activeQuestionIndex >= questionRows.length - 1;
-  const canContinueQuestion = questionRows.length > 0 ? canAnswerQuestion(question, askDrafts[questionIDFor(question, activeQuestionIndex)] ?? { custom: "", selected: [] }) : false;
+  const form = (interaction.form ?? {}) as Record<string, unknown>;
+  const formKind = textValue(form, "kind");
+  const isMcpElicitation = formKind === "mcp_json" || formKind === "mcp_url";
+  const fields = Array.isArray(form.fields) ? (form.fields as FormField[]) : [];
+  const field = fields[Math.min(activeQuestionIndex, Math.max(0, fields.length - 1))] ?? null;
+  const title = interaction.title;
+  const options = interaction.actions ?? [];
+  const detailRows = interaction.detail_rows ?? [];
+  const needsText = formKind === "text";
+  const isLastQuestion = fields.length === 0 || activeQuestionIndex >= fields.length - 1;
+  const canContinueQuestion = field ? canAnswerField(field, askDrafts[field.id] ?? { custom: "", selected: [] }) : false;
   const canSubmit = isMcpElicitation
-    ? canSubmitMcpElicitation(params, elicitationContent)
+    ? formKind === "mcp_url" || parseJSONContent(elicitationContent) !== undefined
     : needsText
       ? textAnswer.trim() !== ""
-      : questionRows.length > 0
+      : fields.length > 0
         ? isLastQuestion
-          ? canSubmitAsk(questionRows, askDrafts)
+          ? fields.every((row) => canAnswerField(row, askDrafts[row.id] ?? { custom: "", selected: [] }))
           : canContinueQuestion
         : selected !== "";
   const selectedOption = options.find((option) => option.id === selected);
-  const secondaryLabel = secondaryActionLabel(interaction, value);
-  const cancelLabel = cancelActionLabel(interaction, value);
+  const secondaryAction = options.find((option) => option.role === "secondary");
+  const cancelAction = options.find((option) => option.role === "danger");
 
   useEffect(() => {
     setSelected(options[0]?.id ?? "");
-    setAskDrafts(initialAskDrafts(questionRows));
+    setAskDrafts(Object.fromEntries(fields.map((row) => [row.id, { custom: "", selected: [] }])));
     setPlanFeedback("");
-    setElicitationContent("{}");
+    setElicitationContent(textValue(form, "initial_content") || "{}");
     setTextAnswer("");
     setActiveQuestionIndex(0);
   }, [interaction.id]);
@@ -82,7 +78,7 @@ export function PendingInteractionPanel({
     function onKeyDown(event: KeyboardEvent): void {
       if (event.key === "Escape") {
         event.preventDefault();
-        void cancel();
+        void respondAction(cancelAction?.id);
       }
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
@@ -95,51 +91,44 @@ export function PendingInteractionPanel({
 
   async function submit(): Promise<void> {
     if (submitting || !canSubmit) return;
-    if (questionRows.length > 0 && !isLastQuestion) {
+    if (fields.length > 0 && !isLastQuestion) {
       goToQuestion(activeQuestionIndex + 1);
       return;
     }
     setSubmitting(true);
     try {
-      if (isMcpElicitation) {
-        await onRespond(interaction.id, mcpElicitationResponse(params, elicitationContent, "accept"));
-      } else if (questionRows.length > 0) {
-        await onRespond(interaction.id, askQuestionResponse(questionRows, askDrafts));
-      } else if (needsText) {
-        await onRespond(interaction.id, askTextResponse(questionRows, textAnswer.trim()));
-      } else if (selectedOption) {
-        await onRespond(interaction.id, withPlanFeedback(selectedOption.response, planFeedback));
-      }
+      const actionID = selectedOption?.id || (isMcpElicitation || fields.length > 0 || needsText ? "submit" : "");
+      await respond(actionID);
     } finally {
       setSubmitting(false);
     }
   }
 
   function goToQuestion(index: number): void {
-    if (questionRows.length === 0) return;
-    setActiveQuestionIndex(Math.max(0, Math.min(questionRows.length - 1, index)));
+    if (fields.length === 0) return;
+    setActiveQuestionIndex(Math.max(0, Math.min(fields.length - 1, index)));
   }
 
   function advanceAfterAnswer(index: number): void {
-    if (index >= questionRows.length - 1) return;
+    if (index >= fields.length - 1) return;
     window.requestAnimationFrame(() => goToQuestion(index + 1));
   }
 
-  async function ignore(): Promise<void> {
-    if (submitting) return;
-    setSubmitting(true);
-    try {
-      await onRespond(interaction.id, secondaryResponse(interaction, value, params));
-    } finally {
-      setSubmitting(false);
-    }
+  async function respond(actionID: string): Promise<void> {
+    if (!actionID) return;
+    const payload: Record<string, unknown> = { action_id: actionID };
+    if (fields.length > 0) payload.answers = fieldAnswers(fields, askDrafts);
+    if (needsText) payload.text = textAnswer.trim();
+    if (isMcpElicitation && formKind !== "mcp_url") payload.content = parseJSONContent(elicitationContent) ?? {};
+    if (planFeedback.trim()) payload.feedback = planFeedback.trim();
+    await onRespond(interaction.id, payload);
   }
 
-  async function cancel(): Promise<void> {
-    if (submitting) return;
+  async function respondAction(actionID?: string): Promise<void> {
+    if (!actionID || submitting) return;
     setSubmitting(true);
     try {
-      await onRespond(interaction.id, cancelResponse(interaction, value, params));
+      await respond(actionID);
     } finally {
       setSubmitting(false);
     }
@@ -171,12 +160,12 @@ export function PendingInteractionPanel({
           </div>
         ) : null}
         {isMcpElicitation ? (
-          <McpElicitationFields params={params} content={elicitationContent} onContentChange={setElicitationContent} />
-        ) : questionRows.length > 0 ? (
+          <McpElicitationFields form={form} content={elicitationContent} onContentChange={setElicitationContent} />
+        ) : fields.length > 0 ? (
           <AskQuestionFields
             activeIndex={activeQuestionIndex}
             drafts={askDrafts}
-            questions={questionRows}
+            fields={fields}
             submitting={submitting}
             onAnswerComplete={advanceAfterAnswer}
             onChange={setAskDrafts}
@@ -214,7 +203,7 @@ export function PendingInteractionPanel({
             ))}
           </div>
         )}
-        {interaction.kind === "plan" && selected === "decline" ? (
+        {selectedOption?.requires_feedback ? (
           <textarea
             className="mt-2 block max-h-32 min-h-20 w-full resize-none rounded-[16px] bg-[#f3f2ee] px-4 py-3 text-[14px] font-medium leading-6 text-[#202124] outline-none placeholder:text-[#aeb0b4] focus:bg-[#efeeeb] select-text"
             disabled={submitting}
@@ -226,19 +215,19 @@ export function PendingInteractionPanel({
         <div className="mt-3 flex items-center justify-end gap-2 border-t border-[#ece9e2] pt-3">
           <button
             className="mr-auto rounded-full px-3 py-1.5 text-[13px] font-semibold text-[#9a4c45] transition-colors duration-150 ease-out hover:bg-[#f7e9e6] hover:text-[#7d342e] disabled:opacity-45"
-            disabled={submitting}
+            disabled={submitting || !cancelAction}
             type="button"
-            onClick={() => void cancel()}
+            onClick={() => void respondAction(cancelAction?.id)}
           >
-            {cancelLabel} <span className="ml-1 rounded-full bg-[#f3dfdb] px-1.5 py-0.5 text-[11px]">ESC</span>
+            {cancelAction?.label ?? "取消"} <span className="ml-1 rounded-full bg-[#f3dfdb] px-1.5 py-0.5 text-[11px]">ESC</span>
           </button>
           <button
             className="rounded-full px-3 py-1.5 text-[13px] font-semibold text-[#8d9095] transition-colors duration-150 ease-out hover:bg-[#f3f2ee] hover:text-[#5f6368] disabled:opacity-45"
-            disabled={submitting}
+            disabled={submitting || !secondaryAction}
             type="button"
-            onClick={() => void ignore()}
+            onClick={() => void respondAction(secondaryAction?.id)}
           >
-            {secondaryLabel}
+            {secondaryAction?.label ?? "跳过"}
           </button>
           <button
             className="rounded-full bg-[#2f8cff] px-4 py-1.5 text-[13px] font-semibold text-white shadow-[0_6px_18px_rgba(47,140,255,0.22)] transition-[background-color,transform] duration-150 ease-out hover:scale-[1.02] hover:bg-[#1f7df1] disabled:scale-100 disabled:bg-[#b8cbed] disabled:shadow-none"
@@ -246,7 +235,7 @@ export function PendingInteractionPanel({
             type="button"
             onClick={() => void submit()}
           >
-            {questionRows.length > 0 && !isLastQuestion ? "继续" : "提交"}
+            {fields.length > 0 && !isLastQuestion ? "继续" : "提交"}
           </button>
         </div>
       </motion.div>
@@ -260,7 +249,7 @@ function AskQuestionFields({
   onAnswerComplete,
   onChange,
   onNavigate,
-  questions,
+  fields,
   submitting,
 }: {
   activeIndex: number;
@@ -268,30 +257,27 @@ function AskQuestionFields({
   onAnswerComplete: (index: number) => void;
   onChange: (drafts: Record<string, AskAnswerDraft>) => void;
   onNavigate: (index: number) => void;
-  questions: Array<Record<string, unknown>>;
+  fields: FormField[];
   submitting: boolean;
 }): React.JSX.Element {
-  function update(questionID: string, updater: (draft: AskAnswerDraft) => AskAnswerDraft): void {
+  function update(fieldID: string, updater: (draft: AskAnswerDraft) => AskAnswerDraft): void {
     onChange({
       ...drafts,
-      [questionID]: updater(drafts[questionID] ?? { custom: "", selected: [] }),
+      [fieldID]: updater(drafts[fieldID] ?? { custom: "", selected: [] }),
     });
   }
 
-  const index = Math.max(0, Math.min(questions.length - 1, activeIndex));
-  const question = questions[index] ?? {};
-  const questionID = questionIDFor(question, index);
-  const options = questionOptions(question);
-  const draft = drafts[questionID] ?? { custom: "", selected: [] };
-  const multi = isMultiSelectQuestion(question);
-  const custom = questionAllowsCustom(question) || options.length === 0;
-  const secret = booleanValue(question, "isSecret");
+  const index = Math.max(0, Math.min(fields.length - 1, activeIndex));
+  const field = fields[index] ?? { id: "field_0", label: "输入", type: "text" };
+  const options = field.options ?? [];
+  const draft = drafts[field.id] ?? { custom: "", selected: [] };
+  const custom = Boolean(field.allow_custom);
 
   return (
     <div className="grid gap-2">
       <div className="flex items-center justify-between px-1 text-[13px] font-semibold leading-6 text-[#8a8d91]">
-        <span>{textValue(question, "header") || `问题 ${index + 1}`}</span>
-        {questions.length > 1 ? (
+        <span className="min-w-0 break-words">{field.label || `问题 ${index + 1}`}</span>
+        {fields.length > 1 ? (
           <div className="flex items-center gap-2">
             <button
               className="grid size-7 place-items-center rounded-md text-[#a0a3a7] transition-colors hover:bg-[#f3f2ee] hover:text-[#343438] disabled:opacity-35"
@@ -302,10 +288,10 @@ function AskQuestionFields({
             >
               <ChevronLeft size={18} strokeWidth={2} />
             </button>
-            <span className="min-w-12 text-center text-[14px] text-[#8a8d91]">{index + 1} of {questions.length}</span>
+            <span className="min-w-12 text-center text-[14px] text-[#8a8d91]">{index + 1} of {fields.length}</span>
             <button
               className="grid size-7 place-items-center rounded-md text-[#a0a3a7] transition-colors hover:bg-[#f3f2ee] hover:text-[#343438] disabled:opacity-35"
-              disabled={submitting || index === questions.length - 1}
+              disabled={submitting || index === fields.length - 1}
               type="button"
               aria-label="下一个问题"
               onClick={() => onNavigate(index + 1)}
@@ -315,25 +301,27 @@ function AskQuestionFields({
           </div>
         ) : null}
       </div>
+      {field.description ? <div className="px-1 text-[12px] font-medium leading-5 text-[#9a9da1]">{field.description}</div> : null}
       <div className="grid gap-1.5 rounded-[16px] bg-[#f3f2ee] px-3 py-3">
         {options.length > 0 ? (
           options.map((option, optionIndex) => {
-            const label = textValue(option, "label") || textValue(option, "value");
-            const checked = draft.selected.includes(label);
+            const label = option.label || option.value;
+            const value = option.value || label;
+            const checked = draft.selected.includes(value);
             return (
               <button
                 className={`flex min-w-0 items-center gap-3 rounded-[12px] px-3 py-2.5 text-left transition-colors duration-150 ease-out ${
                   checked ? "bg-[#fffefa] text-[#202124]" : "text-[#5f6368] hover:bg-[#fffefa]/72"
                 }`}
                 disabled={submitting}
-                key={label}
+                key={option.id || value}
                 type="button"
                 onClick={() => {
-                  update(questionID, (current) => ({
+                  update(field.id, (current) => ({
                     ...current,
-                    selected: multi ? toggleString(current.selected, label) : [label],
+                    selected: field.multi_select ? toggleString(current.selected, value) : [value],
                   }));
-                  if (!multi) onAnswerComplete(index);
+                  if (!field.multi_select) onAnswerComplete(index);
                 }}
               >
                 <span className="w-5 shrink-0 text-right text-[15px] font-medium text-[#b0b2b6]">{optionIndex + 1}.</span>
@@ -342,7 +330,7 @@ function AskQuestionFields({
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[14px] font-semibold leading-5">{label}</span>
-                  {textValue(option, "description") ? <span className="block truncate text-[12px] font-medium leading-5 text-[#9a9da1]">{textValue(option, "description")}</span> : null}
+                  {option.description ? <span className="block truncate text-[12px] font-medium leading-5 text-[#9a9da1]">{option.description}</span> : null}
                 </span>
               </button>
             );
@@ -353,9 +341,9 @@ function AskQuestionFields({
             className="h-10 rounded-[12px] bg-[#fffefa] px-3 text-[14px] font-medium text-[#202124] outline-none placeholder:text-[#aeb0b4]"
             disabled={submitting}
             placeholder={options.length > 0 ? "其他答案" : "输入答案"}
-            type={secret ? "password" : "text"}
+            type={field.secret ? "password" : "text"}
             value={draft.custom}
-            onChange={(event) => update(questionID, (current) => ({ ...current, custom: event.target.value }))}
+            onChange={(event) => update(field.id, (current) => ({ ...current, custom: event.target.value }))}
           />
         ) : null}
       </div>
@@ -363,30 +351,29 @@ function AskQuestionFields({
   );
 }
 
-function canAnswerQuestion(question: Record<string, unknown>, draft: AskAnswerDraft): boolean {
-  if (questionOptions(question).length === 0) return draft.custom.trim() !== "";
-  if (questionAllowsCustom(question) && draft.custom.trim() !== "") return true;
+function canAnswerField(field: FormField, draft: AskAnswerDraft): boolean {
+  if ((field.options ?? []).length === 0) return draft.custom.trim() !== "";
+  if (field.allow_custom && draft.custom.trim() !== "") return true;
   return draft.selected.length > 0;
 }
 
 function McpElicitationFields({
   content,
+  form,
   onContentChange,
-  params,
 }: {
   content: string;
+  form: Record<string, unknown>;
   onContentChange: (value: string) => void;
-  params: Record<string, unknown>;
 }): React.JSX.Element {
-  const mode = textValue(params, "mode");
-  const url = textValue(params, "url");
-  const message = textValue(params, "message");
-  const schema = firstNonNil(params.requestedSchema, params.schema);
+  const url = textValue(form, "url");
+  const message = textValue(form, "message");
+  const schema = form.schema;
 
   return (
     <div className="grid gap-2 rounded-[16px] bg-[#f3f2ee] px-4 py-3 text-[13px] leading-6">
       {message ? <div className="font-medium text-[#4f5358]">{message}</div> : null}
-      {mode === "url" || url ? (
+      {textValue(form, "kind") === "mcp_url" || url ? (
         <div className="flex min-w-0 items-center gap-2">
           <code className="min-w-0 flex-1 truncate rounded-[10px] bg-[#fffefa] px-3 py-2 font-mono text-[12px] font-semibold text-[#343438]">{url}</code>
           {url ? (
@@ -412,72 +399,39 @@ function McpElicitationFields({
   );
 }
 
-function interactionTitle(
-  interaction: PendingInteraction,
-  value: Record<string, unknown>,
-  params: Record<string, unknown>,
-  question: Record<string, unknown>,
-): string {
-  if (interaction.kind === "plan") return textValue(value, "source") === "claude" ? "确认这个计划草案？" : "批准这个计划并继续执行？";
-  if (interaction.kind === "ask") {
-    if (textValue(value, "kind") === "mcpServer/elicitation/request") return textValue(params, "serverName") ? `${textValue(params, "serverName")} 请求输入` : "MCP 请求输入";
-    return (
-      textValue(question, "question") ||
-      textValue(question, "header") ||
-      textValue(params, "message") ||
-      textValue(params, "prompt") ||
-      textValue(value, "message") ||
-      "Agent 需要你补充一个答案"
-    );
-  }
-  const kind = textValue(value, "kind");
-  const toolName = textValue(value, "tool_name") || textValue(params, "tool_name") || textValue(params, "toolName") || textValue(params, "name");
-  if (kind === "command") return "允许运行这条命令？";
-  if (kind === "file_change") return "允许应用这些文件变更？";
-  if (kind === "permissions") return "允许这次权限请求？";
-  if (kind === "permission" && toolName) return `允许 ${toolName} 执行？`;
-  if (kind === "permission") return "允许这次工具调用？";
-  return "允许继续执行？";
+function fieldAnswers(fields: FormField[], drafts: Record<string, AskAnswerDraft>): Record<string, string[]> {
+  return Object.fromEntries(
+    fields.map((field) => {
+      const draft = drafts[field.id] ?? { custom: "", selected: [] };
+      const answers = [...draft.selected];
+      if (draft.custom.trim()) answers.push(draft.custom.trim());
+      return [field.id, answers];
+    }),
+  );
 }
 
-type ApprovalDetailRow = {
-  label: string;
-  value: string;
-  mono?: boolean;
-};
+function toggleString(values: string[], target: string): string[] {
+  return values.includes(target) ? values.filter((value) => value !== target) : [...values, target];
+}
 
-function approvalDetailRows(value: Record<string, unknown>, params: Record<string, unknown>): ApprovalDetailRow[] {
-  const rows: ApprovalDetailRow[] = [];
-  const command = firstText(value, params, ["command"]);
-  const cwd = firstText(value, params, ["cwd"]);
-  const toolName = firstText(value, params, ["tool_name", "toolName", "name"]);
-  const reason = firstText(value, params, ["reason"]);
-  const path = firstText(value, params, ["path", "file_path", "grant_root", "grantRoot"]);
-  const filePaths = stringList(value.file_paths).join("\n");
-  const kind = textValue(value, "kind");
-  const plan = firstNonNil(value.text, value.plan);
-  const permissions = firstNonNil(value.permissions, params.permissions, value.additional_permissions, params.additionalPermissions);
-  const commandActions = firstNonNil(value.command_actions, params.commandActions);
-  const networkContext = firstNonNil(value.network_approval_context, params.networkApprovalContext);
-  const changes = firstNonNil(value.changes, params.changes);
-
-  if (kind === "plan" && plan) rows.push({ label: "计划", value: jsonPreview(plan) });
-  if (toolName) rows.push({ label: "工具", value: toolName });
-  if (command) rows.push({ label: "命令", value: command, mono: true });
-  if (cwd) rows.push({ label: "目录", value: cwd, mono: true });
-  if (filePaths) rows.push({ label: "文件", value: filePaths, mono: true });
-  if (path) rows.push({ label: "路径", value: path, mono: true });
-  if (reason) rows.push({ label: "原因", value: reason });
-  if (permissions) rows.push({ label: "权限", value: jsonPreview(permissions), mono: true });
-  if (networkContext) rows.push({ label: "网络", value: jsonPreview(networkContext), mono: true });
-  if (!filePaths && changes) rows.push({ label: "变更", value: jsonPreview(changes), mono: true });
-  if (commandActions) rows.push({ label: "动作", value: jsonPreview(commandActions), mono: true });
-
-  const visibleParams = detailParams(params);
-  if (rows.length === 0 && Object.keys(visibleParams).length > 0) {
-    rows.push({ label: "参数", value: jsonPreview(visibleParams), mono: true });
-  } else if ((kind === "permission" || kind === "permissions") && Object.keys(visibleParams).length > 0 && !command && !permissions) {
-    rows.push({ label: "参数", value: jsonPreview(visibleParams), mono: true });
+function parseJSONContent(value: string): unknown | undefined {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
   }
-  return rows;
+}
+
+function textValue(value: Record<string, unknown>, key: string): string {
+  const raw = value?.[key];
+  return typeof raw === "string" ? raw : "";
+}
+
+function jsonPreview(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value ?? {}, null, 2);
+  } catch {
+    return String(value);
+  }
 }

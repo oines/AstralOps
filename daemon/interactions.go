@@ -22,6 +22,7 @@ func (a *app) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 	if found, ok := a.findInteractionEvent(id); ok {
 		origin = found
 		hasOrigin = true
+		req = interactionResponseForClientAction(origin, req)
 		responded.WorkspaceID = origin.WorkspaceID
 		responded.SessionID = origin.SessionID
 		responded.Agent = origin.Agent
@@ -100,6 +101,99 @@ func (a *app) cancelInteraction(origin AstralEvent) bool {
 		return true
 	}
 	return false
+}
+
+func interactionResponseForClientAction(origin AstralEvent, req map[string]any) map[string]any {
+	actionID := firstString(req["action_id"], req["action"])
+	if actionID == "" {
+		return req
+	}
+	value := mapValue(origin.Normalized)
+	params := mapValue(value["params"])
+	if origin.Kind == "ask.requested" {
+		if stringValue(value["kind"]) == "mcpServer/elicitation/request" {
+			switch actionID {
+			case "accept":
+				content := firstNonNil(req["content"], map[string]any{})
+				if stringValue(params["mode"]) == "url" || stringValue(params["url"]) != "" {
+					content = map[string]any{}
+				}
+				return map[string]any{"action": "accept", "content": content, "_meta": firstNonNil(params["_meta"], nil)}
+			case "decline", "cancel":
+				return map[string]any{"action": actionID, "content": nil, "_meta": firstNonNil(params["_meta"], nil)}
+			default:
+				return req
+			}
+		}
+		switch actionID {
+		case "submit":
+			return map[string]any{"answers": clientAnswersPayload(req)}
+		case "skip":
+			return map[string]any{"answers": map[string]any{}}
+		case "cancel":
+			return map[string]any{"action": "cancel", "cancel": true}
+		default:
+			return req
+		}
+	}
+	if actionID == "cancel" {
+		return map[string]any{"decision": "cancel", "cancel": true}
+	}
+	response := map[string]any{"decision": clientDecisionPayload(firstNonNil(value["available_decisions"], value["availableDecisions"]), actionID)}
+	if feedback := strings.TrimSpace(stringValue(req["feedback"])); feedback != "" {
+		response["feedback"] = feedback
+	}
+	return response
+}
+
+func clientAnswersPayload(req map[string]any) map[string]any {
+	out := map[string]any{}
+	answers := mapValue(req["answers"])
+	for id, raw := range answers {
+		switch value := raw.(type) {
+		case []any:
+			out[id] = map[string]any{"answers": value}
+		case []string:
+			items := make([]any, 0, len(value))
+			for _, item := range value {
+				items = append(items, item)
+			}
+			out[id] = map[string]any{"answers": items}
+		case string:
+			if strings.TrimSpace(value) != "" {
+				out[id] = map[string]any{"answers": []any{strings.TrimSpace(value)}}
+			}
+		default:
+			out[id] = value
+		}
+	}
+	if len(out) == 0 {
+		if text := strings.TrimSpace(stringValue(req["text"])); text != "" {
+			out["question_0"] = map[string]any{"answers": []any{text}}
+		}
+	}
+	return out
+}
+
+func clientDecisionPayload(available any, actionID string) any {
+	values, ok := available.([]any)
+	if !ok {
+		return actionID
+	}
+	for _, item := range values {
+		if stringValue(item) == actionID {
+			return actionID
+		}
+		mapped := mapValue(item)
+		if len(mapped) == 1 {
+			for key, value := range mapped {
+				if key == actionID {
+					return map[string]any{key: value}
+				}
+			}
+		}
+	}
+	return actionID
 }
 
 func (a *app) interruptInteractionSession(origin AstralEvent) {

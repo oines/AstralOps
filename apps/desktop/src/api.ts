@@ -4,6 +4,7 @@ import type {
   FileListResponse,
   HealthResponse,
   Session,
+  SessionView,
   WorkspaceCommandResponse,
   WorkspaceConnection,
   Workspace,
@@ -70,6 +71,10 @@ export class AstralApi {
 
   async createSession(workspace_id: string, agent?: Workspace["agent"]): Promise<Session> {
     return this.post("/v1/sessions", { workspace_id, agent });
+  }
+
+  async sessionView(sessionId: string): Promise<SessionView> {
+    return this.get(`/v1/sessions/${sessionId}/view`);
   }
 
   async deleteSession(sessionId: string): Promise<{ ok: boolean }> {

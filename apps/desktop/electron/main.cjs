@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, Notification, dialog, ipcMain } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -7,6 +7,8 @@ const path = require("path");
 let mainWindow;
 let daemonProcess;
 let daemonInfo;
+const recentNotificationIDs = [];
+const recentNotificationIDSet = new Set();
 
 function repoRoot() {
   return path.resolve(__dirname, "../../..");
@@ -138,6 +140,26 @@ function createWindow() {
   }
 }
 
+function focusMainWindow() {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function rememberNotificationID(id) {
+  if (!id || recentNotificationIDSet.has(id)) return false;
+  recentNotificationIDSet.add(id);
+  recentNotificationIDs.push(id);
+  while (recentNotificationIDs.length > 200) {
+    const oldest = recentNotificationIDs.shift();
+    if (oldest) recentNotificationIDSet.delete(oldest);
+  }
+  return true;
+}
+
 ipcMain.handle("astral:get-daemon-info", async () => {
   if (daemonInfo) return daemonInfo;
   return waitForDaemon();
@@ -157,6 +179,33 @@ ipcMain.handle("astral:choose-files", async () => {
   });
   if (result.canceled) return [];
   return result.filePaths;
+});
+
+ipcMain.handle("astral:show-notification", async (_event, payload) => {
+  if (!payload || typeof payload !== "object") return { shown: false };
+  if (!mainWindow || mainWindow.isFocused()) return { shown: false };
+  if (!Notification.isSupported()) return { shown: false };
+
+  const id = typeof payload.notification_id === "string" ? payload.notification_id : "";
+  const title = typeof payload.title === "string" ? payload.title : "";
+  const body = typeof payload.body === "string" ? payload.body : "";
+  const target = payload.target && typeof payload.target === "object" ? payload.target : {};
+  const sessionId = typeof target.session_id === "string" ? target.session_id : "";
+  if (!id || !title || !body || !rememberNotificationID(id)) return { shown: false };
+
+  const notification = new Notification({
+    title,
+    body,
+    icon: appIconPath(),
+  });
+  notification.on("click", () => {
+    focusMainWindow();
+    if (sessionId) {
+      mainWindow?.webContents.send("astral:open-session", sessionId);
+    }
+  });
+  notification.show();
+  return { shown: true };
 });
 
 app.whenReady().then(async () => {

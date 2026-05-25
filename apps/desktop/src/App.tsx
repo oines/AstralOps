@@ -9,7 +9,6 @@ import { Transcript } from "./components/Transcript";
 import { WorkspaceModal } from "./components/WorkspaceModal";
 import {
   EMPTY_EVENT_INDEX,
-  buildSessionProjection,
   mergeEventIndex,
   removeSessionEvents,
   removeWorkspaceEvents,
@@ -21,17 +20,16 @@ import {
   type EventIndex,
   type SessionWindows,
 } from "./eventStore";
-import { collectResolvedInteractionIDs, isNonInteractiveClaudeResultPermissionApproval } from "./transcriptModel";
 import type {
   AgentKind,
   AstralEvent,
   ConnectionState,
   HealthResponse,
-  PendingInteraction,
   PermissionMode,
   ReasoningEffort,
   RunMode,
   Session,
+  SessionView,
   Workspace,
   WorkspaceConnection,
 } from "./types";
@@ -45,8 +43,10 @@ export function App(): React.JSX.Element {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceConnections, setWorkspaceConnections] = useState<Record<string, WorkspaceConnection>>({});
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessionViews, setSessionViews] = useState<Record<string, SessionView>>({});
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>("");
   const [activeSession, setActiveSession] = useState<Session | null>(null);
+  const [pendingOpenSessionId, setPendingOpenSessionId] = useState("");
   const [eventIndex, setEventIndex] = useState<EventIndex>(EMPTY_EVENT_INDEX);
   const [sessionWindows, setSessionWindows] = useState<SessionWindows>({});
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
@@ -64,9 +64,23 @@ export function App(): React.JSX.Element {
 
   const sseQueueRef = useRef<AstralEvent[]>([]);
   const sseFrameRef = useRef<number | null>(null);
+  const notifiedIntentIDsRef = useRef<Set<string>>(new Set());
 
   const mergeEvents = useCallback((incoming: AstralEvent[]) => {
     setEventIndex((current) => mergeEventIndex(current, incoming));
+  }, []);
+
+  const maybeNotifyLiveEvent = useCallback((event: AstralEvent) => {
+    if (event.kind !== "control.notification") return;
+    const payload = event.normalized as Record<string, unknown>;
+    const notificationID = typeof payload.notification_id === "string" ? payload.notification_id : "";
+    if (!notificationID || notifiedIntentIDsRef.current.has(notificationID)) return;
+    notifiedIntentIDsRef.current.add(notificationID);
+    if (notifiedIntentIDsRef.current.size > 300) {
+      notifiedIntentIDsRef.current.clear();
+      notifiedIntentIDsRef.current.add(notificationID);
+    }
+    void window.astral.showNotification(payload);
   }, []);
 
   const queueLiveEvent = useCallback(
@@ -99,15 +113,12 @@ export function App(): React.JSX.Element {
     () => (activeSessionId ? selectSessionEvents(eventIndex, activeSessionId) : []),
     [activeSessionId, eventIndex],
   );
-  const sessionRunning = useMemo(() => {
-    let running = false;
-    for (const event of activeSessionEvents) {
-      if (event.kind === "turn.started") running = true;
-      if (event.kind === "turn.completed" || event.kind === "turn.failed" || event.kind === "turn.cancelled") running = false;
-    }
-    return running;
-  }, [activeSessionEvents]);
-  const queuedInputs = useMemo(() => collectPendingQueue(activeSessionEvents), [activeSessionEvents]);
+  const activeSessionView = activeSessionId ? sessionViews[activeSessionId] : undefined;
+  const sessionRunning = activeSessionView?.status === "running";
+  const queuedInputs = useMemo<QueuedComposerInput[]>(
+    () => (activeSessionView?.queued_inputs ?? []).map((item) => ({ id: item.id, sessionId: item.session_id, text: item.text })),
+    [activeSessionView],
+  );
   const queuedCount = queuedInputs.length;
   const composerPlaceholder = !activeWorkspace
     ? "创建 workspace 后开始"
@@ -127,6 +138,12 @@ export function App(): React.JSX.Element {
   const selectedModel = modelOverride.trim() || undefined;
   const selectedReasoningEffort = reasoningEffort || undefined;
 
+  const storeSessionView = useCallback((view: SessionView) => {
+    setSessionViews((current) => ({ ...current, [view.session.id]: view }));
+    setSessions((current) => current.map((session) => (session.id === view.session.id ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session)));
+    setActiveSession((current) => (current?.id === view.session.id ? { ...current, ...view.session, title: view.title || view.session.title, status: view.status } : current));
+  }, []);
+
   const loadInitialState = useCallback(async (client: AstralApi) => {
     const [healthResponse, workspaceResponse, sessionResponse, recentEvents] = await Promise.all([
       client.health(),
@@ -145,11 +162,20 @@ export function App(): React.JSX.Element {
     }
     const initialSession = sessionResponse[0] ?? null;
     const sessionEvents = initialSession ? await client.events({ session_id: initialSession.id, limit: EVENT_WINDOW_SIZE }) : [];
+    const viewResults = await Promise.allSettled(sessionResponse.map((session) => client.sessionView(session.id)));
+    const viewMap: Record<string, SessionView> = {};
+    for (const result of viewResults) {
+      if (result.status === "fulfilled") viewMap[result.value.session.id] = result.value;
+    }
     const eventResponse = [...recentEvents, ...sessionEvents];
     setHealth(healthResponse);
     setWorkspaces(workspaceResponse);
     setWorkspaceConnections(connectionMap);
-    setSessions(sessionResponse);
+    setSessions(sessionResponse.map((session) => {
+      const view = viewMap[session.id];
+      return view ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session;
+    }));
+    setSessionViews(viewMap);
     setEventIndex(mergeEventIndex(EMPTY_EVENT_INDEX, eventResponse));
     if (initialSession) {
       setSessionWindows((current) => updateWindowAfterLatest(current, initialSession.id, sessionEvents, EVENT_WINDOW_SIZE));
@@ -179,6 +205,12 @@ export function App(): React.JSX.Element {
               const state = event.normalized as WorkspaceConnection;
               setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
             }
+            if (event.session_id) {
+              void client.sessionView(event.session_id).then((view) => {
+                if (!cancelled) storeSessionView(view);
+              }).catch(() => undefined);
+            }
+            maybeNotifyLiveEvent(event);
             queueLiveEvent(event);
           } catch {
             setError("bad SSE event payload");
@@ -204,7 +236,7 @@ export function App(): React.JSX.Element {
       sseQueueRef.current = [];
       source?.close();
     };
-  }, [loadInitialState, queueLiveEvent]);
+  }, [loadInitialState, maybeNotifyLiveEvent, queueLiveEvent, storeSessionView]);
 
   useEffect(() => {
     if (!modelOverride) return;
@@ -313,11 +345,14 @@ export function App(): React.JSX.Element {
       if (workspace?.target === "ssh" && workspaceConnections[workspaceId]?.status !== "connected") return;
       setError("");
       const session = await api.createSession(workspaceId, agent);
-      setSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
+      const view = await api.sessionView(session.id).catch(() => null);
+      const displaySession = view ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session;
+      if (view) storeSessionView(view);
+      setSessions((current) => [displaySession, ...current.filter((item) => item.id !== session.id)]);
       setActiveWorkspaceId(workspaceId);
-      setActiveSession(session);
+      setActiveSession(displaySession);
     },
-    [api, workspaces, workspaceConnections],
+    [api, storeSessionView, workspaces, workspaceConnections],
   );
 
   const handleSelectSession = useCallback(
@@ -343,6 +378,7 @@ export function App(): React.JSX.Element {
         return next;
       });
       setSessions((current) => current.filter((session) => session.workspace_id !== workspaceId));
+      setSessionViews((current) => Object.fromEntries(Object.entries(current).filter(([, view]) => view.session.workspace_id !== workspaceId)));
       setEventIndex((current) => removeWorkspaceEvents(current, workspaceId));
       if (activeWorkspaceId === workspaceId) {
         setActiveWorkspaceId("");
@@ -359,6 +395,11 @@ export function App(): React.JSX.Element {
     setError("");
     await api.deleteSession(targetSession.id);
     setSessions((current) => current.filter((session) => session.id !== targetSession.id));
+    setSessionViews((current) => {
+      const next = { ...current };
+      delete next[targetSession.id];
+      return next;
+    });
     setEventIndex((current) => removeSessionEvents(current, targetSession.id));
     setSessionWindows((current) => {
       const next = { ...current };
@@ -386,12 +427,14 @@ export function App(): React.JSX.Element {
           reasoning_effort: selectedReasoningEffort,
           permission_mode: runMode === "plan" ? "plan" : permissionMode,
         });
+        const view = await api.sessionView(activeSession.id).catch(() => null);
+        if (view) storeSessionView(view);
       } catch (sendError) {
         setError(sendError instanceof Error ? sendError.message : String(sendError));
         throw sendError;
       }
     },
-    [activeSession, activeWorkspace, api, permissionMode, runMode, selectedModel, selectedReasoningEffort, workspaceInteractive],
+    [activeSession, activeWorkspace, api, permissionMode, runMode, selectedModel, selectedReasoningEffort, storeSessionView, workspaceInteractive],
   );
 
   const handleInterrupt = useCallback(async () => {
@@ -399,10 +442,12 @@ export function App(): React.JSX.Element {
     setError("");
     try {
       await api.interrupt(activeSession.id);
+      const view = await api.sessionView(activeSession.id).catch(() => null);
+      if (view) storeSessionView(view);
     } catch (interruptError) {
       setError(interruptError instanceof Error ? interruptError.message : String(interruptError));
     }
-  }, [activeSession, api, workspaceInteractive]);
+  }, [activeSession, api, storeSessionView, workspaceInteractive]);
 
   const handleCancelQueue = useCallback(
     async (sessionId: string, queueId: string) => {
@@ -410,11 +455,13 @@ export function App(): React.JSX.Element {
       setError("");
       try {
         await api.cancelQueuedInput(sessionId, queueId);
+        const view = await api.sessionView(sessionId).catch(() => null);
+        if (view) storeSessionView(view);
       } catch (cancelError) {
         setError(cancelError instanceof Error ? cancelError.message : String(cancelError));
       }
     },
-    [api, workspaceInteractive],
+    [api, storeSessionView, workspaceInteractive],
   );
 
   const handleSteerQueue = useCallback(
@@ -423,11 +470,13 @@ export function App(): React.JSX.Element {
       setError("");
       try {
         await api.steerQueuedInput(sessionId, queueId);
+        const view = await api.sessionView(sessionId).catch(() => null);
+        if (view) storeSessionView(view);
       } catch (steerError) {
         setError(steerError instanceof Error ? steerError.message : String(steerError));
       }
     },
-    [api, workspaceInteractive],
+    [api, storeSessionView, workspaceInteractive],
   );
 
   const handleEventResponse = useCallback(
@@ -436,11 +485,15 @@ export function App(): React.JSX.Element {
       setError("");
       try {
         await api.respondApproval(requestId, response);
+        if (activeSessionId) {
+          const view = await api.sessionView(activeSessionId).catch(() => null);
+          if (view) storeSessionView(view);
+        }
       } catch (responseError) {
         setError(responseError instanceof Error ? responseError.message : String(responseError));
       }
     },
-    [api, workspaceInteractive],
+    [activeSessionId, api, storeSessionView, workspaceInteractive],
   );
 
   const handleLoadOlderEvents = useCallback(async () => {
@@ -462,22 +515,37 @@ export function App(): React.JSX.Element {
     }
   }, [activeSessionId, api, mergeEvents, sessionWindows]);
 
+  useEffect(() => {
+    return window.astral.onOpenSession((sessionId) => {
+      setPendingOpenSessionId(sessionId);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!pendingOpenSessionId) return;
+    const session = sessions.find((item) => item.id === pendingOpenSessionId);
+    if (!session) return;
+    setError("");
+    setActiveWorkspaceId(session.workspace_id);
+    setActiveSession(session);
+    setPendingOpenSessionId("");
+  }, [pendingOpenSessionId, sessions]);
+
   const visibleEvents = useMemo(() => {
     if (activeSessionId) return activeSessionEvents;
     if (!activeWorkspaceId) return [];
     return selectWorkspaceEvents(eventIndex, activeWorkspaceId);
   }, [activeSessionEvents, activeSessionId, activeWorkspaceId, eventIndex]);
-  const pendingInteraction = useMemo(() => findPendingInteraction(visibleEvents), [visibleEvents]);
-  const sessionState = useMemo(() => {
-    if (!activeSession) return "idle";
-    if (pendingInteraction) return "requires_action";
-    if (sessionRunning) return "running";
-    if (hasLatestTurnFailure(activeSessionEvents)) return "failed";
-    return "idle";
-  }, [activeSession, activeSessionEvents, pendingInteraction, sessionRunning]);
-  const sessionProjection = useMemo(() => buildSessionProjection(sessions, eventIndex), [eventIndex, sessions]);
-  const sessionTitles = sessionProjection.titles;
-  const sessionStates = sessionProjection.states;
+  const pendingInteraction = activeSessionView?.pending_interaction ?? null;
+  const sessionState = activeSession ? activeSessionView?.status ?? activeSession.status ?? "idle" : "idle";
+  const sessionTitles = useMemo(
+    () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),
+    [sessionViews, sessions],
+  );
+  const sessionStates = useMemo(
+    () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.status || session.status || "idle"])),
+    [sessionViews, sessions],
+  );
   const activeSessionWindow = activeSessionId ? sessionWindows[activeSessionId] : undefined;
 
   return (
@@ -522,7 +590,6 @@ export function App(): React.JSX.Element {
           events={visibleEvents}
           hasOlder={activeSessionWindow?.hasOlder ?? false}
           loadingOlder={activeSessionWindow?.loadingOlder ?? false}
-          onCancelQueue={(sessionId, queueId) => void handleCancelQueue(sessionId, queueId)}
           onLoadOlder={() => void handleLoadOlderEvents()}
         />
         <Composer
@@ -619,63 +686,4 @@ function latestWorkspaceConnection(events: AstralEvent[]): WorkspaceConnection |
     }
   }
   return null;
-}
-
-function findPendingInteraction(events: AstralEvent[]): PendingInteraction | null {
-  const resolved = collectResolvedInteractionIDs(events);
-
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (event.kind !== "approval.requested" && event.kind !== "ask.requested") continue;
-    const value = event.normalized as Record<string, unknown>;
-    if (isAskPermissionEcho(event.kind, value)) continue;
-    if (isNonInteractiveClaudeResultPermissionApproval(event)) continue;
-    const ids = interactionIDs(value);
-    const id = ids[0];
-    if (!id || ids.some((candidate) => resolved.has(candidate))) continue;
-    const interactionKind = event.kind === "ask.requested" ? "ask" : textValue(value, "kind") === "plan" ? "plan" : "approval";
-    return { id, kind: interactionKind, event };
-  }
-  return null;
-}
-
-function hasLatestTurnFailure(events: AstralEvent[]): boolean {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const kind = events[index].kind;
-    if (kind === "turn.failed") return true;
-    if (kind === "turn.started" || kind === "turn.completed" || kind === "turn.cancelled") return false;
-  }
-  return false;
-}
-
-function collectPendingQueue(events: AstralEvent[]): QueuedComposerInput[] {
-  const pending = new Map<string, QueuedComposerInput>();
-  for (const event of events) {
-    const value = event.normalized as Record<string, unknown>;
-    const id = textValue(value, "queue_id");
-    if (!id) continue;
-    if (event.kind === "queue.queued") {
-      const text = textValue(value, "text");
-      if (value.internal !== true && text.trim() !== "") {
-        pending.set(id, { id, sessionId: event.session_id, text });
-      }
-    }
-    if (event.kind === "queue.dequeued" || event.kind === "queue.cancelled" || event.kind === "queue.failed" || event.kind === "queue.rejected" || event.kind === "queue.steered") {
-      pending.delete(id);
-    }
-  }
-  return Array.from(pending.values());
-}
-
-function interactionIDs(value: Record<string, unknown>): string[] {
-  return [textValue(value, "approval_id"), textValue(value, "ask_id")].filter(Boolean);
-}
-
-function textValue(value: Record<string, unknown>, key: string): string {
-  const raw = value?.[key];
-  return typeof raw === "string" ? raw : "";
-}
-
-function isAskPermissionEcho(kind: string, value: Record<string, unknown>): boolean {
-  return kind === "approval.requested" && textValue(value, "kind") === "permission" && textValue(value, "tool_name") === "AskUserQuestion";
 }

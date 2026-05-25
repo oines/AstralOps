@@ -29,8 +29,6 @@ import type { AstralEvent, Session, Workspace } from "../types";
 import {
   buildCommandItems,
   collectCommandEvents,
-  collectPendingQueueIDs,
-  collectResolvedInteractionIDs,
   compactStreamingEvents,
   detailPayload,
   diffSummary,
@@ -39,7 +37,6 @@ import {
   groupTranscriptEvents,
   hookEventName,
   isHookEvent,
-  isInteractionResolved,
   isScalar,
   isTodoToolEvent,
   isTranscriptPlanEvent,
@@ -69,7 +66,6 @@ type TranscriptProps = {
   events: AstralEvent[];
   hasOlder?: boolean;
   loadingOlder?: boolean;
-  onCancelQueue?: (sessionId: string, queueId: string) => void;
   onLoadOlder?: () => void;
 };
 
@@ -82,13 +78,10 @@ export function Transcript({
   events,
   hasOlder = false,
   loadingOlder = false,
-  onCancelQueue,
   onLoadOlder,
 }: TranscriptProps): React.JSX.Element {
   const renderedEvents = useMemo(() => compactStreamingEvents(events.filter(shouldRenderEvent)), [events]);
   const groups = useMemo(() => groupTranscriptEvents(renderedEvents), [renderedEvents]);
-  const pendingQueueIDs = useMemo(() => collectPendingQueueIDs(renderedEvents), [renderedEvents]);
-  const resolvedInteractionIDs = useMemo(() => collectResolvedInteractionIDs(renderedEvents), [renderedEvents]);
   const items = useMemo<TranscriptItem[]>(
     () => [...(hasOlder ? [{ type: "loader" as const, id: "loader" }] : []), ...groups.map((group) => ({ type: "turn" as const, id: group.id, group }))],
     [groups, hasOlder],
@@ -165,7 +158,7 @@ export function Transcript({
                     {item?.type === "loader" ? (
                       <LoadOlderRow loading={loadingOlder} onLoadOlder={onLoadOlder} />
                     ) : item?.type === "turn" ? (
-                      <TurnBlock group={item.group} pendingQueueIDs={pendingQueueIDs} resolvedInteractionIDs={resolvedInteractionIDs} onCancelQueue={onCancelQueue} />
+                      <TurnBlock group={item.group} />
                     ) : null}
                   </div>
                 );
@@ -227,14 +220,8 @@ function LoadOlderRow({ loading, onLoadOlder }: { loading: boolean; onLoadOlder?
 
 const TurnBlock = React.memo(function TurnBlock({
   group,
-  onCancelQueue,
-  pendingQueueIDs,
-  resolvedInteractionIDs,
 }: {
   group: TurnGroup;
-  onCancelQueue?: (sessionId: string, queueId: string) => void;
-  pendingQueueIDs: Set<string>;
-  resolvedInteractionIDs: Set<string>;
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(group.status === "running");
   const isDone = group.status !== "running";
@@ -242,7 +229,6 @@ const TurnBlock = React.memo(function TurnBlock({
   const endTime = group.end?.ts ?? group.start?.ts ?? "";
   const commandEvents = collectCommandEvents(group.details);
   const commandSeqs = new Set(commandEvents.map((event) => event.seq));
-  const waitingForAction = groupHasPendingInteraction(group, resolvedInteractionIDs);
 
   useEffect(() => {
     setExpanded(group.status === "running");
@@ -268,7 +254,7 @@ const TurnBlock = React.memo(function TurnBlock({
       continue;
     }
     if (expanded) {
-      timeline.push(<DetailEvent event={event} key={event.seq} pendingQueueIDs={pendingQueueIDs} resolvedIDs={resolvedInteractionIDs} onCancelQueue={onCancelQueue} />);
+      timeline.push(<DetailEvent event={event} key={event.seq} />);
     }
   }
 
@@ -282,7 +268,7 @@ const TurnBlock = React.memo(function TurnBlock({
           type="button"
           onClick={() => setExpanded((current) => !current)}
         >
-          <span>{waitingForAction ? "等待确认" : isDone ? (group.status === "failed" ? "处理失败" : group.status === "cancelled" ? "已取消" : "已处理") : "正在处理"}</span>
+          <span>{isDone ? (group.status === "failed" ? "处理失败" : group.status === "cancelled" ? "已取消" : "已处理") : "正在处理"}</span>
           {endTime ? <span>{formatTime(endTime)}</span> : null}
           {detailSummary ? <span className="ml-2 truncate text-[14px] text-[#a0a3a7]">{detailSummary}</span> : null}
           <ChevronRight className={`ml-1 transition-transform duration-150 ease-out ${expanded ? "rotate-90" : ""}`} size={18} strokeWidth={2} />
@@ -295,20 +281,6 @@ const TurnBlock = React.memo(function TurnBlock({
     </motion.article>
   );
 });
-
-function groupHasPendingInteraction(group: TurnGroup, resolvedIDs: Set<string>): boolean {
-  for (const event of [...group.timeline, ...group.details]) {
-    if (event.kind !== "approval.requested" && event.kind !== "ask.requested") continue;
-    const value = event.normalized as Record<string, unknown>;
-    const ids = interactionEventIDs(value);
-    if (ids.length > 0 && ids.every((id) => !resolvedIDs.has(id))) return true;
-  }
-  return false;
-}
-
-function interactionEventIDs(value: Record<string, unknown>): string[] {
-  return [textValue(value, "approval_id"), textValue(value, "ask_id"), textValue(value, "request_id")].filter(Boolean);
-}
 
 function UserMessage({ event }: { event: AstralEvent }): React.JSX.Element {
   const value = event.normalized as Record<string, unknown>;
@@ -323,14 +295,8 @@ function UserMessage({ event }: { event: AstralEvent }): React.JSX.Element {
 
 function DetailEvent({
   event,
-  onCancelQueue,
-  pendingQueueIDs,
-  resolvedIDs,
 }: {
   event: AstralEvent;
-  onCancelQueue?: (sessionId: string, queueId: string) => void;
-  pendingQueueIDs: Set<string>;
-  resolvedIDs: Set<string>;
 }): React.ReactNode {
   const value = event.normalized as Record<string, unknown>;
   const text = textValue(value, "text");
@@ -342,7 +308,7 @@ function DetailEvent({
   if (event.kind.startsWith("control.warning")) return <Notice tone="muted" text={textValue(value, "message") || "运行警告"} />;
   if (event.kind === "control.interrupt") return <MetaLine icon={<CheckCircle2 size={16} strokeWidth={1.8} />} text="已请求中断" time={event.ts} />;
   if (event.kind.startsWith("control.model")) return <MetaLine icon={<Bot size={16} strokeWidth={1.8} />} text="模型状态已更新" time={event.ts} />;
-  if (event.kind.startsWith("queue.")) return <QueueEventBlock event={event} pending={pendingQueueIDs.has(textValue(value, "queue_id"))} onCancelQueue={onCancelQueue} />;
+  if (event.kind.startsWith("queue.")) return <QueueEventBlock event={event} />;
   if (event.kind.startsWith("memory.compacted")) return <MetaLine icon={<Check size={16} />} text="上下文已压缩" time={event.ts} />;
   if (isHookEvent(event)) return <HookEventBlock event={event} />;
   if (event.kind.startsWith("subagent.")) return <ToolEventBlock event={event} />;
@@ -356,15 +322,13 @@ function DetailEvent({
   }
 
   if (event.kind === "approval.requested") {
-    const resolved = isInteractionResolved(value, resolvedIDs);
     const kind = textValue(value, "kind");
     const label = kind === "plan" ? "计划确认" : kind === "command" ? "命令确认" : kind === "file_change" ? "文件确认" : "权限确认";
-    return <MetaLine icon={<ShieldCheck size={16} strokeWidth={1.8} />} text={resolved ? `${label}已处理` : `等待${label}`} time={event.ts} />;
+    return <MetaLine icon={<ShieldCheck size={16} strokeWidth={1.8} />} text={`${label}请求`} time={event.ts} />;
   }
   if (event.kind === "approval.resolved" || event.kind === "approval.responded") return <MetaLine icon={<CheckCircle2 size={16} strokeWidth={1.8} />} text="确认已处理" time={event.ts} />;
   if (event.kind === "ask.requested") {
-    const resolved = isInteractionResolved(value, resolvedIDs);
-    return <MetaLine icon={<HelpCircle size={16} strokeWidth={1.8} />} text={resolved ? "已询问 问题" : "正在询问 问题"} time={event.ts} />;
+    return <MetaLine icon={<HelpCircle size={16} strokeWidth={1.8} />} text="问题请求" time={event.ts} />;
   }
   if (event.kind === "ask.resolved") return <MetaLine icon={<CheckCircle2 size={16} strokeWidth={1.8} />} text="问题已处理" time={event.ts} />;
 
@@ -530,11 +494,10 @@ function PlanBlock({ event }: { event: AstralEvent }): React.JSX.Element {
 }
 
 function planTitle(event: AstralEvent, value: Record<string, unknown>): string {
-  const source = textValue(value, "source");
-  const toolName = textValue(value, "name");
+  const explicitTitle = textValue(value, "title");
+  if (explicitTitle) return explicitTitle;
   if (event.kind === "plan.delta") return "正在生成计划";
-  if (source === "codex" && Array.isArray(value.plan)) return "计划进度";
-  if (source === "claude" && toolName === "ExitPlanMode") return "计划草案";
+  if (Array.isArray(value.plan)) return "计划进度";
   return "计划";
 }
 
@@ -752,19 +715,9 @@ function MetaLine({ icon, text, time }: { icon: React.ReactNode; text: string; t
   );
 }
 
-function QueueEventBlock({
-  event,
-  onCancelQueue,
-  pending,
-}: {
-  event: AstralEvent;
-  onCancelQueue?: (sessionId: string, queueId: string) => void;
-  pending: boolean;
-}): React.JSX.Element {
+function QueueEventBlock({ event }: { event: AstralEvent }): React.JSX.Element {
   const value = event.normalized as Record<string, unknown>;
-  const queueID = textValue(value, "queue_id");
   const text = textValue(value, "text");
-  const canCancel = Boolean(event.kind === "queue.queued" && pending && queueID && event.session_id && onCancelQueue);
 
   return (
     <div className="grid gap-2 rounded-[14px] bg-[#f7f6f3] px-4 py-3">
@@ -772,17 +725,6 @@ function QueueEventBlock({
         <CircleDot size={16} strokeWidth={1.8} />
         <span className="shrink-0">{queueLabel(event.kind)}</span>
         <span className="shrink-0">{formatTime(event.ts)}</span>
-        {canCancel ? (
-          <button
-            className="ml-auto shrink-0 rounded-full px-2.5 py-1 text-[12px] font-semibold text-[#8d9095] transition-colors duration-150 ease-out hover:bg-[#eeece8] hover:text-[#343438]"
-            type="button"
-            onClick={() => {
-              if (onCancelQueue && event.session_id && queueID) onCancelQueue(event.session_id, queueID);
-            }}
-          >
-            取消
-          </button>
-        ) : null}
       </div>
       {text ? <div className="max-h-24 min-w-0 overflow-auto select-text whitespace-pre-wrap break-words text-[14px] font-medium leading-6 text-[#5f6368] [overflow-wrap:anywhere]">{text}</div> : null}
     </div>

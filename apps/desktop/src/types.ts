@@ -1,4 +1,4 @@
-import type { AgentKind, AstralEvent, HealthResponse, ModelInfo, Session, Workspace, WorkspaceConnection } from "@astralops/protocol";
+import type { AgentKind, AstralEvent, HealthResponse, ModelInfo, PendingInteractionView, QueuedInputView, Session, SessionView, Workspace, WorkspaceConnection } from "@astralops/protocol";
 
 export type DaemonInfo = {
   host: string;
@@ -25,11 +25,7 @@ export type RunMode = "normal" | "plan" | "goal";
 export type PanelTabKind = "terminal" | "files";
 export type PendingInteractionKind = "ask" | "approval" | "plan";
 
-export type PendingInteraction = {
-  id: string;
-  kind: PendingInteractionKind;
-  event: AstralEvent;
-};
+export type PendingInteraction = PendingInteractionView;
 
 export type FileEntry = {
   name: string;
@@ -54,4 +50,4 @@ export type WorkspaceCommandResponse = {
   duration_ms: number;
 };
 
-export type { AgentKind, AstralEvent, HealthResponse, ModelInfo, Session, Workspace, WorkspaceConnection };
+export type { AgentKind, AstralEvent, HealthResponse, ModelInfo, QueuedInputView, Session, SessionView, Workspace, WorkspaceConnection };
