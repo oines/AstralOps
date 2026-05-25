@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -658,7 +659,7 @@ func (m *sshManager) localHelperBinary(ctx context.Context, probe sshProbe) (str
 	if _, err := os.Stat(filepath.Join(root, "proxy-agent", "main.go")); err == nil {
 		return m.buildLocalHelperBinary(ctx, probe, out, root)
 	}
-	if st, err := os.Stat(out); err == nil && st.Mode()&0o111 != 0 {
+	if st, err := os.Stat(out); err == nil && helperBinaryUsable(st) {
 		return out, nil
 	}
 	return m.buildLocalHelperBinary(ctx, probe, out, root)
@@ -695,11 +696,21 @@ func findBundledProxyAgent(probe sshProbe) string {
 		filepath.Join(root, "astral-proxy-agent"),
 	)
 	for _, candidate := range candidates {
-		if st, err := os.Stat(candidate); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+		if st, err := os.Stat(candidate); err == nil && helperBinaryUsable(st) {
 			return candidate
 		}
 	}
 	return ""
+}
+
+func helperBinaryUsable(st os.FileInfo) bool {
+	if st == nil || st.IsDir() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return st.Mode()&0o111 != 0
 }
 
 func initialSSHConnection(ws Workspace, status string) WorkspaceConnection {

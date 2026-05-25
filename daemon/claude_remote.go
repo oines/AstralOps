@@ -25,13 +25,7 @@ func (a *app) writeClaudeRemoteSettings(ws Workspace) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	command := strings.Join([]string{
-		"ASTRALOPS_DAEMON=" + shellQuote("http://"+a.addr),
-		"ASTRALOPS_TOKEN=" + shellQuote(a.token),
-		"ASTRALOPS_WORKSPACE_ID=" + shellQuote(ws.ID),
-		shellQuote(helper),
-		"claude-remote-hook",
-	}, " ")
+	command := claudeRemoteHookCommand(helper, "http://"+a.addr, a.token, ws.ID)
 	settings := map[string]any{
 		"hooks": map[string]any{
 			"PreToolUse": []map[string]any{{
@@ -226,15 +220,7 @@ func (a *app) preClaudeRemoteTool(ctx context.Context, ws Workspace, tool string
 			return nil, "", err
 		}
 		encoded := base64.StdEncoding.EncodeToString([]byte(command))
-		updated["command"] = strings.Join([]string{
-			"ASTRALOPS_DAEMON=" + shellQuote("http://"+a.addr),
-			"ASTRALOPS_TOKEN=" + shellQuote(a.token),
-			"ASTRALOPS_WORKSPACE_ID=" + shellQuote(ws.ID),
-			shellQuote(helper),
-			"claude-remote-hook",
-			"exec",
-			shellQuote(encoded),
-		}, " ")
+		updated["command"] = claudeRemoteHookCommand(helper, "http://"+a.addr, a.token, ws.ID, "exec", encoded)
 		return updated, "", nil
 	case "Read":
 		local, _, err := a.hydrateClaudePath(ctx, ws, stringValue(input["file_path"]), false)
@@ -294,7 +280,7 @@ func remapClaudeRemoteBashCommand(ws Workspace, command string) string {
 	if ws.SSH == nil || strings.TrimSpace(ws.LocalProjectionRoot) == "" || strings.TrimSpace(ws.SSH.RemoteCWD) == "" {
 		return command
 	}
-	remoteRoot := filepath.Clean(ws.SSH.RemoteCWD)
+	remoteRoot := remotePathClean(ws.SSH.RemoteCWD)
 	for _, localRoot := range claudeProjectionRootAliases(ws.LocalProjectionRoot) {
 		command = strings.ReplaceAll(command, localRoot, remoteRoot)
 	}
@@ -494,23 +480,23 @@ func matchContext(title string, lines []string, extra []string) string {
 }
 
 func (a *app) projectedLocalPath(ws Workspace, requested string) (string, string, error) {
-	remoteRoot := filepath.Clean(ws.SSH.RemoteCWD)
+	remoteRoot := remotePathClean(ws.SSH.RemoteCWD)
 	remote := strings.TrimSpace(requested)
 	if remote == "" {
 		remote = remoteRoot
 	}
-	if !filepath.IsAbs(remote) {
-		remote = filepath.Join(remoteRoot, remote)
+	if !remotePathIsAbs(remote) {
+		remote = remotePathJoin(remoteRoot, remote)
 	}
-	remote = filepath.Clean(remote)
-	rel, err := filepath.Rel(remoteRoot, remote)
+	remote = remotePathClean(remote)
+	rel, err := remotePathRel(remoteRoot, remote)
 	if err != nil {
 		return "", "", err
 	}
 	if rel == "." {
 		rel = ""
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+	if pathEscapesRoot(rel) {
 		return "", "", fmt.Errorf("path %q escapes remote cwd %q", remote, remoteRoot)
 	}
 	return filepath.Join(ws.LocalProjectionRoot, rel), remote, nil
@@ -525,10 +511,10 @@ func (a *app) remotePathFromProjected(ws Workspace, local string) (string, error
 	if rel == "." {
 		rel = ""
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+	if pathEscapesRoot(rel) {
 		return "", fmt.Errorf("local path %q escapes workspace cache", local)
 	}
-	return filepath.Clean(filepath.Join(ws.SSH.RemoteCWD, rel)), nil
+	return remotePathClean(remotePathJoin(ws.SSH.RemoteCWD, filepath.ToSlash(rel))), nil
 }
 
 func copyStringAny(input map[string]any) map[string]any {

@@ -11,7 +11,7 @@ import "@xterm/xterm/css/xterm.css";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AstralApi } from "../api";
-import type { FileListResponse, PanelTabKind, Workspace } from "../types";
+import type { FileListResponse, HealthResponse, PanelTabKind, Workspace } from "../types";
 
 type PanelTab = {
   id: string;
@@ -21,17 +21,19 @@ type PanelTab = {
 
 type RightPanelProps = {
   api: AstralApi | null;
+  health: HealthResponse | null;
   open: boolean;
   width: number;
   workspace: Workspace | null;
   onResize: (width: number) => void;
 };
 
-export function RightPanel({ api, open, width, workspace, onResize }: RightPanelProps): React.JSX.Element | null {
+export function RightPanel({ api, health, open, width, workspace, onResize }: RightPanelProps): React.JSX.Element | null {
   const [tabs, setTabs] = useState<PanelTab[]>([]);
   const [activeTabId, setActiveTabId] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const terminalAvailable = health?.features?.terminal?.available !== false;
   const tabDragSensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 6 },
@@ -158,7 +160,7 @@ export function RightPanel({ api, open, width, workspace, onResize }: RightPanel
           </button>
           {menuOpen ? (
             <div className="absolute right-0 top-10 z-30 w-44 rounded-[16px] border border-[#dedbd3] bg-[#fffefa] p-1.5 shadow-[0_18px_45px_rgba(37,34,29,0.16),0_2px_8px_rgba(37,34,29,0.08)]">
-              <PanelMenuButton icon={<TerminalSquare size={16} strokeWidth={1.8} />} label="终端" onClick={() => addTab("terminal")} />
+              {terminalAvailable ? <PanelMenuButton icon={<TerminalSquare size={16} strokeWidth={1.8} />} label="终端" onClick={() => addTab("terminal")} /> : null}
               <PanelMenuButton icon={<Folder size={16} strokeWidth={1.8} />} label="文件浏览" onClick={() => addTab("files")} />
             </div>
           ) : null}
@@ -171,7 +173,9 @@ export function RightPanel({ api, open, width, workspace, onResize }: RightPanel
         ) : null}
         {tabs.map((tab) => (
           <div className={tab.id === activeTab?.id ? "h-full" : "hidden h-full"} key={tab.id}>
-            {tab.kind === "terminal" ? (
+            {tab.kind === "terminal" && !terminalAvailable ? (
+              <PanelMessage title="终端不可用" body="Windows 当前禁用内置终端。文件浏览和 agent 任务仍可使用。" />
+            ) : tab.kind === "terminal" ? (
               <TerminalTab api={api} workspace={workspace} onTitleChange={(title) => updateTabTitle(tab.id, title)} />
             ) : (
               <FilesTab api={api} workspace={workspace} />

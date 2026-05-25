@@ -17,8 +17,8 @@ import (
 	"time"
 )
 
-var claudeBridgeExecPattern = regexp.MustCompile(`\b(?:hook_bridge\.py|claude-remote-hook)['"]?\s+exec\s+['"]?([A-Za-z0-9+/=]+)['"]?`)
-var claudeBridgeFullExecPattern = regexp.MustCompile(`(?:ASTRALOPS_[A-Z_]+=(?:'[^']*'|"[^"]*"|\S+)\s+)*(?:'[^']*(?:daemon|astralops-daemon)'|"[^"]*(?:daemon|astralops-daemon)"|\S*(?:daemon|astralops-daemon))\s+claude-remote-hook\s+exec\s+['"]?([A-Za-z0-9+/=]+)['"]?`)
+var claudeBridgeExecPattern = regexp.MustCompile(`\b(?:hook_bridge\.py|claude-remote-hook)['"]?\s+['"]?exec['"]?\s+['"]?([A-Za-z0-9+/=]+)['"]?`)
+var claudeBridgeFullExecPattern = regexp.MustCompile(`(?:ASTRALOPS_[A-Z_]+=(?:'[^']*'|"[^"]*"|\S+)\s+)*(?:'[^']*(?:daemon|astralops-daemon)'|"[^"]*(?:daemon|astralops-daemon)"|\S*(?:daemon|astralops-daemon))\s+claude-remote-hook\s+['"]?exec['"]?\s+['"]?([A-Za-z0-9+/=]+)['"]?`)
 
 type claudeLocalRuntime struct {
 	app     *app
@@ -61,7 +61,7 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 			return callErr
 		}
 		cwd = workspace.LocalProjectionRoot
-		remoteCWD = filepath.Clean(workspace.SSH.RemoteCWD)
+		remoteCWD = remotePathClean(workspace.SSH.RemoteCWD)
 		var err error
 		settingsPath, err = r.app.writeClaudeRemoteSettings(workspace)
 		if err != nil {
@@ -420,8 +420,8 @@ func (r *claudeLocalRuntime) remapProjectionEventPaths(ev AstralEvent) AstralEve
 	if !ok || ws.Target != "ssh" || ws.SSH == nil {
 		return ev
 	}
-	ev.Normalized = remapProjectionValue(ev.Normalized, filepath.Clean(ws.LocalProjectionRoot), filepath.Clean(ws.SSH.RemoteCWD))
-	ev.Normalized = scrubClaudeRemoteBridgeEvent(ev.Normalized, filepath.Clean(ws.SSH.RemoteCWD))
+	ev.Normalized = remapProjectionValue(ev.Normalized, filepath.Clean(ws.LocalProjectionRoot), remotePathClean(ws.SSH.RemoteCWD))
+	ev.Normalized = scrubClaudeRemoteBridgeEvent(ev.Normalized, remotePathClean(ws.SSH.RemoteCWD))
 	return ev
 }
 

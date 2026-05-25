@@ -555,6 +555,7 @@ export function App(): React.JSX.Element {
       </main>
       <RightPanel
         api={api}
+        health={health}
         open={rightPanelOpen}
         width={rightPanelWidth}
         workspace={activeWorkspace}

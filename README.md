@@ -41,6 +41,30 @@ npm run dev
 
 启动桌面端后，点击“新建工作区”，选择 **SSH**，输入你的目标服务器地址（支持读取你的 `~/.ssh/config`）和目标目录即可开始！
 
+## 打包桌面客户端
+
+```bash
+# 确保本地已安装 Node.js 和 Go
+npm install
+npm run package:desktop
+```
+
+打包脚本会自动识别当前系统和 CPU 架构：
+
+- macOS 会生成当前架构的 `.dmg` 和 `.zip`。
+- Linux 会生成当前架构的 `AppImage` 和 `.deb`。
+- Windows 会生成当前架构的 portable 和 NSIS 安装包。
+
+产物会输出到：
+
+```text
+release/desktop/out/<platform>-<arch>/
+```
+
+打包时会自动构建并内置本机 daemon，以及用于 SSH 远端的 Linux/macOS `proxy-agent` helper。Windows 客户端支持 Claude/Codex 的本地和 SSH 工作区任务流，但右侧内置终端当前会被禁用；Linux/macOS 客户端保留内置终端。
+
+建议在目标系统上打对应平台的包：在 macOS 上打 macOS 包，在 Linux 上打 Linux 包，在 Windows 上打 Windows 包。跨平台打包可能受 Electron、系统签名、安装器依赖限制。
+
 ## 技术栈与目录结构
 
 ```text

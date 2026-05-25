@@ -24,33 +24,57 @@ function appIconPath() {
   return path.join(repoRoot(), "apps", "desktop", "assets", "AstralOps-AppIcon.png");
 }
 
+function rendererIndexPath() {
+  return path.join(__dirname, "..", "dist", "index.html");
+}
+
 function desktopEnv() {
   const env = { ...process.env };
-  const pathParts = [
-    env.PATH,
-    "/opt/homebrew/bin",
-    "/opt/homebrew/sbin",
-    "/usr/local/bin",
-    "/usr/local/sbin",
-    "/usr/bin",
-    "/bin",
-    "/usr/sbin",
-    "/sbin",
-  ]
-    .filter(Boolean)
-    .join(":")
-    .split(":");
-  env.PATH = [...new Set(pathParts)].join(":");
+  const pathKey = process.platform === "win32" ? "Path" : "PATH";
+  const existingPath = env[pathKey] || env.PATH || "";
+  const extraPathParts =
+    process.platform === "win32"
+      ? []
+      : ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/local/sbin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+  const pathParts = [existingPath, ...extraPathParts].filter(Boolean).join(path.delimiter).split(path.delimiter);
+  env[pathKey] = [...new Set(pathParts)].join(path.delimiter);
+  if (pathKey !== "PATH") {
+    delete env.PATH;
+  }
   return env;
+}
+
+function daemonBinaryName() {
+  return process.platform === "win32" ? "daemon.exe" : "daemon";
+}
+
+function bundledDaemonPath() {
+  if (process.env.ASTRALOPS_DAEMON) return process.env.ASTRALOPS_DAEMON;
+  const name = daemonBinaryName();
+  const candidates = [
+    path.join(process.resourcesPath || "", "bin", name),
+    path.join(process.resourcesPath || "", name),
+    path.join(path.dirname(process.execPath || ""), "bin", name),
+    path.join(path.dirname(process.execPath || ""), name),
+    path.join(repoRoot(), name),
+  ];
+  return candidates.find((candidate) => candidate && fs.existsSync(candidate));
 }
 
 function startDaemon() {
   if (daemonProcess) return;
-  const root = repoRoot();
-  daemonProcess = spawn("go", ["run", "./daemon"], {
-    cwd: root,
+  const bundled = bundledDaemonPath();
+  const useBundled = app.isPackaged || Boolean(process.env.ASTRALOPS_DAEMON);
+  if (useBundled && !bundled) {
+    throw new Error(`Bundled daemon not found (${daemonBinaryName()})`);
+  }
+  const command = useBundled && bundled ? bundled : "go";
+  const args = useBundled && bundled ? [] : ["run", "./daemon"];
+  daemonProcess = spawn(command, args, {
+    cwd: useBundled && bundled ? path.dirname(bundled) : repoRoot(),
     env: desktopEnv(),
     stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
   });
   daemonProcess.stdout.on("data", (chunk) => console.log(`[astralopsd] ${chunk}`));
   daemonProcess.stderr.on("data", (chunk) => console.error(`[astralopsd] ${chunk}`));
@@ -105,7 +129,9 @@ function createWindow() {
     }
   });
 
-  if (process.env.VITE_DEV_SERVER_URL) {
+  if (app.isPackaged) {
+    mainWindow.loadFile(rendererIndexPath());
+  } else if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
     mainWindow.loadURL("http://127.0.0.1:5173");
@@ -152,4 +178,7 @@ app.on("activate", () => {
 
 app.on("before-quit", () => {
   app.isQuitting = true;
+  if (daemonProcess) {
+    daemonProcess.kill();
+  }
 });
