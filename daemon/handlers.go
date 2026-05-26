@@ -159,15 +159,6 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.ssh.disconnect(ws))
 		return
 	}
-	if len(parts) == 2 && parts[1] == "claude-hook" && r.Method == http.MethodPost {
-		ws, ok := a.store.getWorkspace(parts[0])
-		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
-			return
-		}
-		a.handleClaudeRemoteHook(w, r, ws)
-		return
-	}
 	if len(parts) == 2 && parts[1] == "claude-remote-tool" && r.Method == http.MethodPost {
 		ws, ok := a.store.getWorkspace(parts[0])
 		if !ok {
@@ -175,10 +166,6 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.handleClaudeRemoteTool(w, r, ws)
-		return
-	}
-	if len(parts) >= 2 && parts[1] == "projection" {
-		a.handleProjectionAction(w, r, parts)
 		return
 	}
 	w.WriteHeader(http.StatusNotFound)

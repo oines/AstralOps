@@ -30,7 +30,7 @@ func claudeRemoteMCPAllowedTools() []string {
 }
 
 func (a *app) writeClaudeRemoteMCPConfig(ws Workspace) (string, error) {
-	helper, err := claudeRemoteHookExecutable()
+	helper, err := claudeRemoteHelperExecutable()
 	if err != nil {
 		return "", err
 	}

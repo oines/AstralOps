@@ -39,13 +39,6 @@ func (a *app) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if hasOrigin && origin.Agent == AgentClaude {
-		if isDeclineResponse(req) {
-			if ws, ok := a.store.getWorkspace(origin.WorkspaceID); ok {
-				a.rollbackDirtyProjection(r.Context(), ws)
-			}
-		} else {
-			a.allowClaudeRemoteApprovedCommand(origin)
-		}
 		a.startClaudeInteractionFollowup(origin, req)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return

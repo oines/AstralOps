@@ -84,6 +84,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 	execServerURL := ""
 	remoteShell := ""
 	codexHome := ""
+	remoteCodexHome := ""
 	if workspace.Target == "ssh" {
 		if workspace.SSH == nil || strings.TrimSpace(workspace.SSH.RemoteCWD) == "" {
 			return fmt.Errorf("ssh workspace remote cwd is empty")
@@ -94,10 +95,21 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 		if err == nil {
 			codexHome, err = r.app.prepareCodexRemoteHome(ctx, workspace)
 		}
+		if err == nil {
+			var skillErr error
+			remoteCodexHome, skillErr = r.app.prepareCodexRemoteBundledSkills(ctx, workspace, info.Path)
+			if skillErr != nil {
+				r.app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.warning", Normalized: map[string]any{
+					"source":  "codex",
+					"message": "failed to prepare Codex bundled skills on SSH remote: " + skillErr.Error(),
+				}})
+			}
+		}
 		cancel()
 		if err != nil {
 			return err
 		}
+		r.app.setCodexRemoteHome(workspace.ID, remoteCodexHome)
 		cwd = remotePathClean(workspace.SSH.RemoteCWD)
 		processCWD = workspace.LocalProjectionRoot
 		execServerURL = r.app.codexExecServerURL(workspace.ID)
@@ -136,15 +148,12 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 	return nil
 }
 
-func (a *app) prepareCodexRemoteHome(ctx context.Context, ws Workspace) (string, error) {
+func (a *app) prepareCodexRemoteHome(_ context.Context, ws Workspace) (string, error) {
 	home := filepath.Join(a.store.dataDir, "runtime", "codex-remote", ws.ID, "home")
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return "", err
 	}
 	if err := copyCodexAuthIntoRemoteHome(home); err != nil {
-		return "", err
-	}
-	if err := a.syncRemoteSkillTree(ctx, ws, ".codex/skills", filepath.Join(home, "skills")); err != nil {
 		return "", err
 	}
 	return home, nil
@@ -159,17 +168,26 @@ func copyCodexAuthIntoRemoteHome(remoteHome string) error {
 		}
 		sourceHome = filepath.Join(userHome, ".codex")
 	}
-	body, err := os.ReadFile(filepath.Join(sourceHome, "auth.json"))
+	if err := os.MkdirAll(remoteHome, 0o700); err != nil {
+		return err
+	}
+	for _, name := range []string{"auth.json", "models_cache.json"} {
+		if err := copyOptionalCodexRuntimeFile(sourceHome, remoteHome, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyOptionalCodexRuntimeFile(sourceHome, remoteHome, name string) error {
+	body, err := os.ReadFile(filepath.Join(sourceHome, name))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	if err := os.MkdirAll(remoteHome, 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(remoteHome, "auth.json"), body, 0o600)
+	return os.WriteFile(filepath.Join(remoteHome, name), body, 0o600)
 }
 
 func (r *codexLocalRuntime) Interrupt(sessionID string) error {
@@ -351,9 +369,32 @@ func (c *codexClient) ensureStarted() error {
 func codexAppServerArgs(disableLocalNodeREPL bool) []string {
 	args := []string{"app-server"}
 	if disableLocalNodeREPL {
-		args = append(args, "-c", "mcp_servers={}")
+		args = append(args,
+			"-c", "mcp_servers={}",
+			"-c", "skills.bundled.enabled=false",
+			"--disable", "apps",
+		)
 	}
 	return append(args, "--listen", "stdio://")
+}
+
+func (a *app) setCodexRemoteHome(workspaceID string, remoteHome string) {
+	a.codexRemoteHomeMu.Lock()
+	defer a.codexRemoteHomeMu.Unlock()
+	if a.codexRemoteHome == nil {
+		a.codexRemoteHome = map[string]string{}
+	}
+	if strings.TrimSpace(remoteHome) == "" {
+		delete(a.codexRemoteHome, workspaceID)
+		return
+	}
+	a.codexRemoteHome[workspaceID] = remoteHome
+}
+
+func (a *app) getCodexRemoteHome(workspaceID string) string {
+	a.codexRemoteHomeMu.Lock()
+	defer a.codexRemoteHomeMu.Unlock()
+	return strings.TrimSpace(a.codexRemoteHome[workspaceID])
 }
 
 func withEnvValue(env []string, key, value string) []string {

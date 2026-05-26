@@ -23,28 +23,23 @@ import (
 const version = "0.1.0"
 
 type app struct {
-	store               *store
-	token               string
-	addr                string
-	hub                 *eventHub
-	upgrader            websocket.Upgrader
-	agents              map[AgentKind]agentInfo
-	runtimes            map[AgentKind]AgentRuntime
-	ssh                 *sshManager
-	queueMu             sync.Mutex
-	queues              map[string][]queuedTurn
-	claudeRemoteAllowMu sync.Mutex
-	claudeRemoteAllow   map[string]map[string]bool
-	claudeRemoteToolMu  sync.Mutex
-	claudeRemoteTool    map[string]claudeRemoteToolResult
-	codexExecMu         sync.Mutex
-	codexExec           map[string]codexExecCommand
+	store             *store
+	token             string
+	addr              string
+	hub               *eventHub
+	upgrader          websocket.Upgrader
+	agents            map[AgentKind]agentInfo
+	runtimes          map[AgentKind]AgentRuntime
+	ssh               *sshManager
+	queueMu           sync.Mutex
+	queues            map[string][]queuedTurn
+	codexExecMu       sync.Mutex
+	codexExec         map[string]codexExecCommand
+	codexRemoteHomeMu sync.Mutex
+	codexRemoteHome   map[string]string
 }
 
 func main() {
-	if runClaudeRemoteHookHelper(os.Args[1:]) {
-		return
-	}
 	if runClaudeRemoteMCPHelper(os.Args[1:]) {
 		return
 	}

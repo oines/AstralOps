@@ -23,12 +23,13 @@ type execServerRequest struct {
 }
 
 type execServerConn struct {
-	app         *app
-	ws          Workspace
-	proxy       *proxyClient
-	socket      *websocket.Conn
-	sessionID   string
-	remoteShell string
+	app             *app
+	ws              Workspace
+	proxy           *proxyClient
+	socket          *websocket.Conn
+	sessionID       string
+	remoteShell     string
+	remoteCodexHome string
 
 	mu        sync.Mutex
 	writeMu   sync.Mutex
@@ -98,13 +99,14 @@ func (a *app) handleCodexExecServerWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn := &execServerConn{
-		app:         a,
-		ws:          ws,
-		proxy:       proxy,
-		socket:      socket,
-		sessionID:   "exec_" + randomID(12),
-		remoteShell: strings.TrimSpace(state.RemoteShell),
-		processes:   map[string]*execServerProcess{},
+		app:             a,
+		ws:              ws,
+		proxy:           proxy,
+		socket:          socket,
+		sessionID:       "exec_" + randomID(12),
+		remoteShell:     strings.TrimSpace(state.RemoteShell),
+		remoteCodexHome: a.getCodexRemoteHome(workspaceID),
+		processes:       map[string]*execServerProcess{},
 	}
 	conn.serve()
 }
@@ -375,6 +377,7 @@ func (c *execServerConn) processStart(raw json.RawMessage) (any, error) {
 	if len(p.Argv) == 0 {
 		return nil, errors.New("argv must not be empty")
 	}
+	p.Env = envWithRemoteCodexHome(p.Env, c.remoteCodexHome)
 	nativeArgv := append([]string(nil), p.Argv...)
 	p.Argv = normalizeCodexArgvForRemote(p.Argv, c.remoteShell)
 	if p.Arg0 != "" && len(p.Argv) > 0 {
@@ -428,6 +431,19 @@ func (c *execServerConn) processStart(raw json.RawMessage) (any, error) {
 		proc.finish(exitCode, "")
 	}()
 	return map[string]any{"processId": p.ProcessID}, nil
+}
+
+func envWithRemoteCodexHome(env map[string]string, remoteCodexHome string) map[string]string {
+	remoteCodexHome = strings.TrimSpace(remoteCodexHome)
+	if remoteCodexHome == "" {
+		return env
+	}
+	next := make(map[string]string, len(env)+1)
+	for key, value := range env {
+		next[key] = value
+	}
+	next["CODEX_HOME"] = remoteCodexHome
+	return next
 }
 
 func (c *execServerConn) startRemoteExecProcess(p struct {

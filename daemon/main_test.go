@@ -97,71 +97,6 @@ func TestStoreSSHWorkspaceRequiresAbsoluteRemoteCWD(t *testing.T) {
 	}
 }
 
-func TestScrubClaudeRemoteBridgeEventHidesHooksAndDecodesCommand(t *testing.T) {
-	bridgeCommand := "ASTRALOPS_DAEMON='http://127.0.0.1:1234' ASTRALOPS_TOKEN='secret' ASTRALOPS_WORKSPACE_ID='ws_1' '/Applications/AstralOps.app/Contents/MacOS/astralops-daemon' claude-remote-hook exec 'bHMgLWxhIC9yb290'"
-	hook := map[string]any{
-		"hook_event_name": "PreToolUse",
-		"name":            "PreToolUse:Bash",
-		"stdout":          `{"hookSpecificOutput":{"updatedInput":{"command":"` + bridgeCommand + `"}}}`,
-		"output":          `{"hookSpecificOutput":{"updatedInput":{"command":"` + bridgeCommand + `"}}}`,
-	}
-	hidden := scrubClaudeRemoteBridgeEvent(hook, "/root").(map[string]any)
-	if hidden["hidden"] != true || hidden["visibility"] != "debug" {
-		t.Fatalf("hook visibility = %#v", hidden)
-	}
-	hiddenPreview, _ := json.Marshal(hidden)
-	if strings.Contains(string(hiddenPreview), "secret") || strings.Contains(string(hiddenPreview), "claude-remote-hook") || strings.Contains(string(hiddenPreview), "AstralOps.app") {
-		t.Fatalf("hidden hook leaked bridge internals: %s", hiddenPreview)
-	}
-	if !strings.Contains(string(hiddenPreview), "ls -la /root") {
-		t.Fatalf("hidden hook did not preserve decoded command: %s", hiddenPreview)
-	}
-
-	value := map[string]any{
-		"params": map[string]any{
-			"command": bridgeCommand,
-		},
-	}
-	scrubbed := scrubClaudeRemoteBridgeEvent(value, "/root").(map[string]any)
-	params := scrubbed["params"].(map[string]any)
-	if got := stringValue(params["command"]); got != "ls -la /root" {
-		t.Fatalf("command = %q", got)
-	}
-	preview, _ := json.Marshal(scrubbed)
-	if strings.Contains(string(preview), "secret") || strings.Contains(string(preview), "claude-remote-hook") || strings.Contains(string(preview), "AstralOps.app") {
-		t.Fatalf("scrubbed value leaked bridge internals: %s", preview)
-	}
-}
-
-func TestProjectionDirtyRecordDoesNotMarkPushed(t *testing.T) {
-	dir := t.TempDir()
-	st, err := loadStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	app := &app{store: st}
-	ws := Workspace{
-		ID:                  "ws_projection",
-		Target:              "ssh",
-		LocalProjectionRoot: filepath.Join(dir, "projection"),
-		SSH:                 &SSHConfig{Endpoint: "root@example.com", RemoteCWD: "/root"},
-	}
-	local := filepath.Join(ws.LocalProjectionRoot, "a.txt")
-	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(local, []byte("dirty"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	file := app.recordProjectionFile(ws, "/root/a.txt", local, true, false)
-	if !file.Dirty {
-		t.Fatalf("dirty = false")
-	}
-	if file.LastPushed != "" {
-		t.Fatalf("LastPushed = %q, want empty for dirty record", file.LastPushed)
-	}
-}
-
 func TestProjectionRemoteIOUsesBase64ForBinary(t *testing.T) {
 	body := []byte{0, 1, 2, 0xff, '\n'}
 	params := remoteWriteParams("/root/blob.bin", body)
@@ -1308,29 +1243,6 @@ func TestHostTerminalFeatureForOS(t *testing.T) {
 	}
 	if feature := hostFeaturesForOS("linux").Terminal; !feature.Available || feature.Reason != "" {
 		t.Fatalf("linux terminal feature = %#v", feature)
-	}
-}
-
-func TestClaudeRemoteHookCommandForOS(t *testing.T) {
-	posix := claudeRemoteHookCommandForOS("linux", "/opt/AstralOps/daemon", "http://127.0.0.1:1234", "tok", "ws_1", "exec", "YWJj")
-	if !strings.Contains(posix, "ASTRALOPS_DAEMON='http://127.0.0.1:1234'") ||
-		!strings.Contains(posix, "ASTRALOPS_TOKEN='tok'") ||
-		!strings.Contains(posix, "ASTRALOPS_WORKSPACE_ID='ws_1'") ||
-		!strings.Contains(posix, "'/opt/AstralOps/daemon' claude-remote-hook exec 'YWJj'") {
-		t.Fatalf("posix hook command = %q", posix)
-	}
-
-	windows := claudeRemoteHookCommandForOS("windows", `C:\Program Files\AstralOps\daemon.exe`, "http://127.0.0.1:1234", "tok", "ws_1", "exec", "YWJj")
-	for _, want := range []string{
-		"cmd.exe /d /s /c ",
-		`set "ASTRALOPS_DAEMON=http://127.0.0.1:1234"`,
-		`set "ASTRALOPS_TOKEN=tok"`,
-		`set "ASTRALOPS_WORKSPACE_ID=ws_1"`,
-		`"C:\Program Files\AstralOps\daemon.exe" claude-remote-hook "exec" "YWJj"`,
-	} {
-		if !strings.Contains(windows, want) {
-			t.Fatalf("windows hook command = %q, missing %q", windows, want)
-		}
 	}
 }
 
@@ -2702,229 +2614,6 @@ func TestClaudeRemoteMCPConfigContainsWorkspaceScopedServer(t *testing.T) {
 	}
 }
 
-func TestClaudeRemoteReadOnlyBashHookAllowsSafeCommandViaRemoteBridge(t *testing.T) {
-	dir := t.TempDir()
-	st, err := loadStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ws, err := st.createWorkspace(createWorkspaceRequest{
-		Name:   "Remote",
-		Target: "ssh",
-		Agent:  AgentClaude,
-		SSH:    &SSHConfig{Endpoint: "root@example.com", RemoteCWD: "/root"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	app := &app{store: st, token: "secret", addr: "127.0.0.1:1"}
-	result, err := app.processClaudeRemoteHook(context.Background(), ws, map[string]any{
-		"hook_event_name": "PreToolUse",
-		"tool_name":       "Bash",
-		"tool_input":      map[string]any{"command": "ls -la " + ws.LocalProjectionRoot},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := mapValue(result["hookSpecificOutput"])
-	if stringValue(out["permissionDecision"]) != "allow" {
-		t.Fatalf("hook output = %#v, want permissionDecision allow", out)
-	}
-	updated := mapValue(out["updatedInput"])
-	if !strings.Contains(stringValue(updated["command"]), "claude-remote-hook") {
-		t.Fatalf("updated command = %#v, want bridge command", updated["command"])
-	}
-	if got := decodeClaudeBridgeCommand(stringValue(updated["command"])); got != "ls -la /root" {
-		t.Fatalf("decoded bridge command = %q, want remote path", got)
-	}
-}
-
-func TestClaudeRemoteBashCommandRemapsResolvedProjectionRoot(t *testing.T) {
-	dir := t.TempDir()
-	realRoot := filepath.Join(dir, "real", "projection")
-	if err := os.MkdirAll(realRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	linkParent := filepath.Join(dir, "link")
-	if err := os.MkdirAll(linkParent, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	linkRoot := filepath.Join(linkParent, "projection")
-	if err := os.Symlink(realRoot, linkRoot); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-	ws := Workspace{
-		ID:                  "ws_symlink_projection",
-		LocalProjectionRoot: linkRoot,
-		SSH:                 &SSHConfig{Endpoint: "root@example.com", RemoteCWD: "/root"},
-	}
-
-	resolvedRoot, err := filepath.EvalSymlinks(linkRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := remapClaudeRemoteBashCommand(ws, "ls -la "+resolvedRoot)
-	if command != "ls -la /root" {
-		t.Fatalf("remapped command = %q, want remote root", command)
-	}
-}
-
-func TestClaudeRemoteReadOnlyBashHookRejectsCompoundCommands(t *testing.T) {
-	if !isClaudeRemoteReadOnlyBash("ls -la /root") {
-		t.Fatal("ls should be treated as read-only")
-	}
-	for _, command := range []string{"ls -la && whoami", "cat /etc/os-release > out", "rm -rf /tmp/x", "python3 script.py"} {
-		if isClaudeRemoteReadOnlyBash(command) {
-			t.Fatalf("command %q was treated as read-only", command)
-		}
-	}
-}
-
-func TestClaudeRemoteApprovedCommandAllowsOnce(t *testing.T) {
-	dir := t.TempDir()
-	st, err := loadStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ws, err := st.createWorkspace(createWorkspaceRequest{
-		Name:   "Remote",
-		Target: "ssh",
-		Agent:  AgentClaude,
-		SSH:    &SSHConfig{Endpoint: "root@example.com", RemoteCWD: "/root"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	app := &app{store: st, token: "secret", addr: "127.0.0.1:1"}
-	app.allowClaudeRemoteApprovedCommand(AstralEvent{
-		WorkspaceID: ws.ID,
-		SessionID:   "sess_remote",
-		Agent:       AgentClaude,
-		Kind:        "approval.requested",
-		Normalized:  map[string]any{"kind": "permission", "tool_name": "Bash", "command": "brew --version"},
-	})
-
-	payload := map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": map[string]any{"command": "brew --version"}}
-	first, err := app.processClaudeRemoteHook(context.Background(), ws, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := stringValue(mapValue(first["hookSpecificOutput"])["permissionDecision"]); got != "allow" {
-		t.Fatalf("first permissionDecision = %q, want allow", got)
-	}
-	second, err := app.processClaudeRemoteHook(context.Background(), ws, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := stringValue(mapValue(second["hookSpecificOutput"])["permissionDecision"]); got != "" {
-		t.Fatalf("second permissionDecision = %q, want empty", got)
-	}
-}
-
-func TestClaudeRemoteReadHydratesRelativeToolPath(t *testing.T) {
-	app, ws, cleanup := newClaudeRemoteHookProxyTestApp(t)
-	defer cleanup()
-
-	pre, err := app.processClaudeRemoteHook(context.Background(), ws, map[string]any{
-		"hook_event_name": "PreToolUse",
-		"tool_name":       "Read",
-		"tool_use_id":     "tool_read",
-		"tool_input":      map[string]any{"file_path": "/remote/project/file.txt"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	preOut := mapValue(pre["hookSpecificOutput"])
-	if _, ok := preOut["additionalContext"]; ok {
-		t.Fatalf("pre hook included additionalContext: %#v", preOut)
-	}
-	toolPath := stringValue(mapValue(preOut["updatedInput"])["file_path"])
-	if toolPath != "file.txt" {
-		t.Fatalf("updated file_path = %q, want relative projection path", toolPath)
-	}
-	body, err := os.ReadFile(filepath.Join(ws.LocalProjectionRoot, toolPath))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(body) != "remote read\n" {
-		t.Fatalf("hydrated read body = %q", body)
-	}
-	post, err := app.processClaudeRemoteHook(context.Background(), ws, map[string]any{
-		"hook_event_name": "PostToolUse",
-		"tool_name":       "Read",
-		"tool_use_id":     "tool_read",
-		"tool_input":      map[string]any{"file_path": toolPath},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	postOut := mapValue(post["hookSpecificOutput"])
-	if _, ok := postOut["updatedToolOutput"]; ok {
-		t.Fatalf("read post hook replaced native tool output: %#v", postOut)
-	}
-	if _, ok := postOut["additionalContext"]; ok {
-		t.Fatalf("post hook included additionalContext: %#v", postOut)
-	}
-}
-
-func TestClaudeRemoteGlobAndGrepUseUpdatedToolOutput(t *testing.T) {
-	app, ws, cleanup := newClaudeRemoteHookProxyTestApp(t)
-	defer cleanup()
-
-	globPre, err := app.processClaudeRemoteHook(context.Background(), ws, map[string]any{
-		"hook_event_name": "PreToolUse",
-		"tool_name":       "Glob",
-		"tool_use_id":     "tool_glob",
-		"tool_input":      map[string]any{"pattern": "**/*.go"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := mapValue(globPre["hookSpecificOutput"])["additionalContext"]; ok {
-		t.Fatalf("glob pre included additionalContext: %#v", globPre)
-	}
-	globPost, err := app.processClaudeRemoteHook(context.Background(), ws, map[string]any{
-		"hook_event_name": "PostToolUse",
-		"tool_name":       "Glob",
-		"tool_use_id":     "tool_glob",
-		"tool_input":      map[string]any{"path": ws.LocalProjectionRoot},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	globOutput := mapValue(mapValue(globPost["hookSpecificOutput"])["updatedToolOutput"])
-	files, ok := stringSliceValue(globOutput["filenames"])
-	if !ok || !reflect.DeepEqual(files, []string{"src/main.go"}) || int(numberValue(globOutput["numFiles"])) != 1 || boolValue(globOutput["truncated"]) {
-		t.Fatalf("glob updatedToolOutput = %#v", globOutput)
-	}
-
-	grepPre, err := app.processClaudeRemoteHook(context.Background(), ws, map[string]any{
-		"hook_event_name": "PreToolUse",
-		"tool_name":       "Grep",
-		"tool_use_id":     "tool_grep",
-		"tool_input":      map[string]any{"pattern": "needle", "path": "/remote/project/src", "output_mode": "content", "-n": true},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := mapValue(grepPre["hookSpecificOutput"])["additionalContext"]; ok {
-		t.Fatalf("grep pre included additionalContext: %#v", grepPre)
-	}
-	grepPost, err := app.processClaudeRemoteHook(context.Background(), ws, map[string]any{
-		"hook_event_name": "PostToolUse",
-		"tool_name":       "Grep",
-		"tool_use_id":     "tool_grep",
-		"tool_input":      map[string]any{"path": ws.LocalProjectionRoot},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	grepOutput := mapValue(mapValue(grepPost["hookSpecificOutput"])["updatedToolOutput"])
-	if stringValue(grepOutput["mode"]) != "content" || stringValue(grepOutput["content"]) != "src/search.txt:2:needle here" || int(numberValue(grepOutput["numLines"])) != 1 {
-		t.Fatalf("grep updatedToolOutput = %#v", grepOutput)
-	}
-}
-
 func TestClaudeRemoteMCPToolOutputsUseRemoteNativeShapes(t *testing.T) {
 	app, ws, cleanup := newClaudeRemoteHookProxyTestApp(t)
 	defer cleanup()
@@ -3027,59 +2716,6 @@ func TestClaudeRemoteMCPServerListsAndCallsTools(t *testing.T) {
 	}
 }
 
-func TestClaudeRemotePreToolErrorDeniesPermission(t *testing.T) {
-	result := claudeRemoteHookErrorOutput(map[string]any{
-		"hook_event_name": "PreToolUse",
-		"tool_name":       "Write",
-	}, errors.New(`path "/tmp/out.txt" escapes remote cwd "/root"`))
-	out := mapValue(result["hookSpecificOutput"])
-	if stringValue(out["permissionDecision"]) != "deny" {
-		t.Fatalf("permissionDecision = %q, want deny: %#v", stringValue(out["permissionDecision"]), out)
-	}
-	if stringValue(out["permissionDecisionReason"]) == "" {
-		t.Fatalf("missing permissionDecisionReason: %#v", out)
-	}
-	if _, ok := out["decision"]; ok {
-		t.Fatalf("PreToolUse error used decision instead of permissionDecision: %#v", out)
-	}
-}
-
-func TestClaudeRemoteProjectsAbsolutePathsOutsideWorkspace(t *testing.T) {
-	dir := t.TempDir()
-	ws := Workspace{
-		ID:                  "ws_remote_abs",
-		LocalProjectionRoot: filepath.Join(dir, "projection"),
-		SSH:                 &SSHConfig{Endpoint: "root@example.test", RemoteCWD: "/root"},
-	}
-	app := &app{}
-
-	local, remote, err := app.projectedLocalPath(ws, "/tmp/test.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantLocal := filepath.Join(ws.LocalProjectionRoot, ".astralops", "remote-abs", "tmp", "test.txt")
-	if local != wantLocal || remote != "/tmp/test.txt" {
-		t.Fatalf("projectedLocalPath = %q/%q, want %q/%q", local, remote, wantLocal, "/tmp/test.txt")
-	}
-	roundTrip, err := app.remotePathFromProjected(ws, local)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if roundTrip != "/tmp/test.txt" {
-		t.Fatalf("remotePathFromProjected = %q, want /tmp/test.txt", roundTrip)
-	}
-}
-
-func TestClaudeRemoteRemapsAbsoluteProjectionPathsForDisplay(t *testing.T) {
-	localRoot := filepath.Join(t.TempDir(), "projection")
-	localPath := filepath.Join(localRoot, ".astralops", "remote-abs", "tmp", "test.txt")
-	text := "created " + localPath
-	got := remapProjectionValue(text, localRoot, "/root")
-	if got != "created /tmp/test.txt" {
-		t.Fatalf("remapped text = %q, want remote absolute path", got)
-	}
-}
-
 func TestClaudeRemoteVisibleTextStreamSanitizesSplitInternalHandles(t *testing.T) {
 	localRoot := filepath.Join(t.TempDir(), "projection")
 	stream := &claudeVisibleTextStream{localRoot: localRoot, remoteRoot: "/root"}
@@ -3106,75 +2742,9 @@ func TestClaudeRemoteVisibleTextSanitizesMisleadingPathDiagnosis(t *testing.T) {
 	}
 }
 
-func TestClaudeRemoteWritePostRemapsToolResponse(t *testing.T) {
-	app, ws, cleanup := newClaudeRemoteHookProxyTestApp(t)
-	defer cleanup()
-
-	pre, err := app.processClaudeRemoteHook(context.Background(), ws, map[string]any{
-		"hook_event_name": "PreToolUse",
-		"tool_name":       "Write",
-		"tool_use_id":     "tool_write_tmp",
-		"tool_input":      map[string]any{"file_path": "/tmp/out.txt", "content": "new remote content\n"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	local := stringValue(mapValue(mapValue(pre["hookSpecificOutput"])["updatedInput"])["file_path"])
-	localAbs := filepath.Join(ws.LocalProjectionRoot, filepath.FromSlash(local))
-	if err := os.WriteFile(localAbs, []byte("new remote content\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	post, err := app.processClaudeRemoteHook(context.Background(), ws, map[string]any{
-		"hook_event_name": "PostToolUse",
-		"tool_name":       "Write",
-		"tool_use_id":     "tool_write_tmp",
-		"tool_input":      map[string]any{"file_path": local, "content": "new remote content\n"},
-		"tool_response": map[string]any{
-			"type":            "create",
-			"filePath":        local,
-			"content":         "new remote content\n",
-			"structuredPatch": []any{},
-			"originalFile":    nil,
-			"userModified":    false,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := mapValue(post["hookSpecificOutput"])["updatedToolOutput"]; ok {
-		t.Fatalf("write post hook replaced native tool output: %#v", post)
-	}
-}
-
-func TestClaudeRemoteDirectorySkeletonCreatesDirectoriesOnly(t *testing.T) {
-	app, ws, cleanup := newClaudeRemoteHookProxyTestApp(t)
-	defer cleanup()
-
-	if err := app.syncClaudeRemoteDirectorySkeleton(context.Background(), ws); err != nil {
-		t.Fatal(err)
-	}
-	for _, rel := range []string{"src", "src/nested"} {
-		info, err := os.Stat(filepath.Join(ws.LocalProjectionRoot, rel))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !info.IsDir() {
-			t.Fatalf("%s is not a directory", rel)
-		}
-	}
-	info, err := os.Stat(filepath.Join(ws.LocalProjectionRoot, "src", "search.txt"))
-	if err != nil {
-		t.Fatalf("directory skeleton did not create empty file placeholder: %v", err)
-	}
-	if info.IsDir() || info.Size() != 0 {
-		t.Fatalf("placeholder info = %#v, want empty file", info)
-	}
-}
-
 func TestClaudeRemoteRealClaudeE2E(t *testing.T) {
 	if os.Getenv("ASTRALOPS_REAL_CLAUDE_E2E") != "1" {
-		t.Skip("set ASTRALOPS_REAL_CLAUDE_E2E=1 to run the real Claude SSH projection E2E")
+		t.Skip("set ASTRALOPS_REAL_CLAUDE_E2E=1 to run the real Claude SSH MCP E2E")
 	}
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
@@ -3225,10 +2795,10 @@ func TestClaudeRemoteRealClaudeE2E(t *testing.T) {
 	server := startTestAppServer(t, app)
 	defer server.Close()
 
-	hookHelper := testClaudeRemoteHookExecutable(t)
-	oldHookExecutable := claudeRemoteHookExecutable
-	claudeRemoteHookExecutable = func() (string, error) { return hookHelper, nil }
-	defer func() { claudeRemoteHookExecutable = oldHookExecutable }()
+	helper := testClaudeRemoteMCPExecutable(t)
+	oldHelperExecutable := claudeRemoteHelperExecutable
+	claudeRemoteHelperExecutable = func() (string, error) { return helper, nil }
+	defer func() { claudeRemoteHelperExecutable = oldHelperExecutable }()
 
 	prompt := `This is an AstralOps SSH remote workspace validation. Use AstralOps remote MCP tools for file, search, edit, and shell work.
 
@@ -3308,10 +2878,10 @@ func TestClaudeRemoteRealSSHRegressionPrompt(t *testing.T) {
 	defer server.Close()
 	defer app.ssh.disconnect(ws)
 
-	hookHelper := testClaudeRemoteHookExecutable(t)
-	oldHookExecutable := claudeRemoteHookExecutable
-	claudeRemoteHookExecutable = func() (string, error) { return hookHelper, nil }
-	defer func() { claudeRemoteHookExecutable = oldHookExecutable }()
+	helper := testClaudeRemoteMCPExecutable(t)
+	oldHelperExecutable := claudeRemoteHelperExecutable
+	claudeRemoteHelperExecutable = func() (string, error) { return helper, nil }
+	defer func() { claudeRemoteHelperExecutable = oldHelperExecutable }()
 
 	prompt := "只是测试你工具调用，随便创建/写入/读取无意义文件，试试/root目录，也试试root以外的其他目录。使用 AstralOps remote MCP tools，把 remote read/write/edit/glob/grep/bash 这些工具都试试。"
 	if err := app.runtimes[AgentClaude].StartTurn(session, ws, prompt, TurnOptions{PermissionMode: "bypassPermissions"}); err != nil {
@@ -4269,7 +3839,7 @@ func TestCodexSSHRuntimeUsesRemoteShellEnvironment(t *testing.T) {
 	}
 }
 
-func TestCodexSSHRuntimeUsesRemoteWorkspaceSkillsHome(t *testing.T) {
+func TestCodexSSHRuntimePreparesRemoteBundledSkills(t *testing.T) {
 	dir := t.TempDir()
 	st, err := loadStore(dir)
 	if err != nil {
@@ -4298,6 +3868,11 @@ func TestCodexSSHRuntimeUsesRemoteWorkspaceSkillsHome(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sourceHome, "auth.json"), []byte(`{"token":"fake"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(sourceHome, "models_cache.json"), []byte(`{"models":[{"slug":"gpt-test"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeLocalFixtureFile(t, sourceHome, "skills/.system/openai-docs/SKILL.md", "---\nname: openai-docs\ndescription: docs\n---\n")
+	writeLocalFixtureFile(t, sourceHome, "skills/.system/openai-docs/references/latest.md", "latest\n")
 	t.Setenv("CODEX_HOME", sourceHome)
 	app := &app{store: st, hub: newEventHub()}
 	app.ssh = &sshManager{
@@ -4316,12 +3891,8 @@ func TestCodexSSHRuntimeUsesRemoteWorkspaceSkillsHome(t *testing.T) {
 	if !strings.Contains(home, filepath.Join("runtime", "codex-remote", workspace.ID, "home")) {
 		t.Fatalf("remote codex home = %q", home)
 	}
-	body, err := os.ReadFile(filepath.Join(home, "skills", "remote-only", "SKILL.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(body) != "# Remote Codex Skill\n" {
-		t.Fatalf("synced codex skill body = %q", body)
+	if _, err := os.Stat(filepath.Join(home, "skills", "remote-only", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatalf("local runtime home mirrored remote .codex skill, stat err = %v", err)
 	}
 	auth, err := os.ReadFile(filepath.Join(home, "auth.json"))
 	if err != nil {
@@ -4329,6 +3900,42 @@ func TestCodexSSHRuntimeUsesRemoteWorkspaceSkillsHome(t *testing.T) {
 	}
 	if string(auth) != `{"token":"fake"}` {
 		t.Fatalf("remote codex auth = %q", auth)
+	}
+	modelsCache, err := os.ReadFile(filepath.Join(home, "models_cache.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(modelsCache) != `{"models":[{"slug":"gpt-test"}]}` {
+		t.Fatalf("remote codex models cache = %q", modelsCache)
+	}
+	remoteHome, err := app.prepareCodexRemoteBundledSkills(ctx, workspace, fakeCodexScript(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(remoteHome, "/tmp/.astralops/"+workspace.ID+"/codex-skills/") {
+		t.Fatalf("remote codex home = %q", remoteHome)
+	}
+	if got := readRemoteFixtureFile(t, remoteStore, remotePathJoin(remoteHome, "skills/.system/openai-docs/SKILL.md")); !strings.Contains(got, "openai-docs") {
+		t.Fatalf("remote system skill = %q", got)
+	}
+	if got := readRemoteFixtureFile(t, remoteStore, "/remote/project/.agents/skills/_astralops_codex_bundled/openai-docs/references/latest.md"); got != "latest\n" {
+		t.Fatalf("remote agents skill reference = %q", got)
+	}
+	marker := readRemoteFixtureFile(t, remoteStore, remotePathJoin(remoteHome, "..", codexBundledSkillsMarker))
+	if !strings.Contains(marker, "astralops-codex-bundled-skills") {
+		t.Fatalf("remote bundled skills marker = %q", marker)
+	}
+	sentinel := remotePathJoin(remoteHome, "..", "sentinel.txt")
+	writeRemoteFixtureFile(t, remoteStore, sentinel, "keep\n")
+	remoteHomeAgain, err := app.prepareCodexRemoteBundledSkills(ctx, workspace, fakeCodexScript(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remoteHomeAgain != remoteHome {
+		t.Fatalf("remote home changed from %q to %q", remoteHome, remoteHomeAgain)
+	}
+	if got := readRemoteFixtureFile(t, remoteStore, sentinel); got != "keep\n" {
+		t.Fatalf("versioned cache was rebuilt instead of reused, sentinel = %q", got)
 	}
 }
 
@@ -4452,16 +4059,61 @@ func TestCodexSSHRuntimeDisablesLocalNodeREPLMCPServer(t *testing.T) {
 	if !strings.Contains(joined, "mcp_servers={}") {
 		t.Fatalf("codex args = %#v, want local MCP servers cleared for ssh sessions", args)
 	}
+	if !strings.Contains(joined, "skills.bundled.enabled=false") {
+		t.Fatalf("codex args = %#v, want local bundled skills disabled for ssh sessions", args)
+	}
+	if !strings.Contains(joined, "--disable\x00apps") {
+		t.Fatalf("codex args = %#v, want Codex Apps disabled for ssh sessions", args)
+	}
 }
 
 func TestCodexAppServerArgsKeepLocalNodeREPLMCPServer(t *testing.T) {
 	local := codexAppServerArgs(false)
-	if strings.Contains(strings.Join(local, "\x00"), "mcp_servers") {
-		t.Fatalf("local codex args = %#v, should not disable node_repl", local)
+	localJoined := strings.Join(local, "\x00")
+	if strings.Contains(localJoined, "mcp_servers") || strings.Contains(localJoined, "skills.bundled.enabled") || strings.Contains(localJoined, "apps") {
+		t.Fatalf("local codex args = %#v, should not disable local-only features", local)
 	}
 	remote := codexAppServerArgs(true)
-	if !reflect.DeepEqual(remote, []string{"app-server", "-c", "mcp_servers={}", "--listen", "stdio://"}) {
+	if !reflect.DeepEqual(remote, []string{"app-server", "-c", "mcp_servers={}", "-c", "skills.bundled.enabled=false", "--disable", "apps", "--listen", "stdio://"}) {
 		t.Fatalf("remote codex args = %#v", remote)
+	}
+}
+
+func TestCodexExecServerProcessStartSetsRemoteCodexHome(t *testing.T) {
+	paramsCh := make(chan map[string]any, 1)
+	conn := &execServerConn{
+		ws:              Workspace{SSH: &SSHConfig{RemoteCWD: "/remote/project"}},
+		remoteCodexHome: "/tmp/.astralops/ws/codex-skills/v1/codex-home",
+		processes:       map[string]*execServerProcess{},
+		remote: func(ctx context.Context, method string, params any, out any) error {
+			if method != "exec" {
+				return errors.New("unexpected method " + method)
+			}
+			callParams := params.(map[string]any)
+			paramsCh <- callParams
+			if target, ok := out.(*map[string]any); ok {
+				*target = map[string]any{"exit_code": 0}
+			}
+			return nil
+		},
+	}
+	body, _ := json.Marshal(map[string]any{
+		"processId": "proc_env",
+		"argv":      []string{"sh", "-lc", "true"},
+		"cwd":       "/remote/project",
+		"env":       map[string]string{"CODEX_HOME": "/local/home", "KEEP": "1"},
+	})
+	if _, err := conn.processStart(body); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case params := <-paramsCh:
+		env := params["env"].(map[string]string)
+		if env["CODEX_HOME"] != "/tmp/.astralops/ws/codex-skills/v1/codex-home" || env["KEEP"] != "1" {
+			t.Fatalf("remote env = %#v", env)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for remote exec params")
 	}
 }
 
@@ -4683,7 +4335,7 @@ for line in sys.stdin:
     error = None
     try:
         if method == "hello":
-            result = {"version":"fake","capabilities":{"methods":["hello","read","dirs","write","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
+            result = {"version":"fake","capabilities":{"methods":["hello","read","dirs","write","mkdir","remove","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
         elif method == "read":
             body = read_file(params.get("path"))
             result = {"path": clean_remote(params.get("path")), "content": body.decode("utf-8", "replace"), "dataBase64": base64.b64encode(body).decode()}
@@ -4693,6 +4345,19 @@ for line in sys.stdin:
             else:
                 body = str(params.get("content") or "").encode()
             write_file(params.get("path"), body)
+            result = {"path": clean_remote(params.get("path"))}
+        elif method == "mkdir":
+            os.makedirs(local_path(params.get("path")), exist_ok=True)
+            result = {"path": clean_remote(params.get("path"))}
+        elif method == "remove":
+            target = local_path(params.get("path"))
+            if os.path.isdir(target):
+                import shutil
+                shutil.rmtree(target)
+            elif os.path.exists(target):
+                os.remove(target)
+            elif not params.get("force", True):
+                raise FileNotFoundError(clean_remote(params.get("path")))
             result = {"path": clean_remote(params.get("path"))}
         elif method == "dirs":
             dirs, files, truncated = list_dirs(params.get("path") or remote_cwd, int(params.get("limit") or 5000))
@@ -4804,18 +4469,18 @@ func startTestAppServer(t *testing.T, app *app) *httptest.Server {
 	return server
 }
 
-func testClaudeRemoteHookExecutable(t *testing.T) string {
+func testClaudeRemoteMCPExecutable(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "astralops-test-hook")
-	body := "#!/bin/sh\nASTRALOPS_TEST_CLAUDE_REMOTE_HOOK_HELPER=1 exec " + shellQuote(os.Args[0]) + " -test.run '^TestClaudeRemoteHookHelperProcess$' -- \"$@\"\n"
+	path := filepath.Join(t.TempDir(), "astralops-test-mcp")
+	body := "#!/bin/sh\nASTRALOPS_TEST_CLAUDE_REMOTE_MCP_HELPER=1 exec " + shellQuote(os.Args[0]) + " -test.run '^TestClaudeRemoteMCPHelperProcess$' -- \"$@\"\n"
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path
 }
 
-func TestClaudeRemoteHookHelperProcess(t *testing.T) {
-	if os.Getenv("ASTRALOPS_TEST_CLAUDE_REMOTE_HOOK_HELPER") != "1" {
+func TestClaudeRemoteMCPHelperProcess(t *testing.T) {
+	if os.Getenv("ASTRALOPS_TEST_CLAUDE_REMOTE_MCP_HELPER") != "1" {
 		return
 	}
 	index := -1
@@ -4828,7 +4493,7 @@ func TestClaudeRemoteHookHelperProcess(t *testing.T) {
 	if index == -1 {
 		os.Exit(2)
 	}
-	if !runClaudeRemoteHookHelper(os.Args[index+1:]) && !runClaudeRemoteMCPHelper(os.Args[index+1:]) {
+	if !runClaudeRemoteMCPHelper(os.Args[index+1:]) {
 		os.Exit(2)
 	}
 	os.Exit(0)
@@ -4837,6 +4502,17 @@ func TestClaudeRemoteHookHelperProcess(t *testing.T) {
 func writeRemoteFixtureFile(t *testing.T, root, remote, content string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(remotePathClean(remote), "/")))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeLocalFixtureFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}

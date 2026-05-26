@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,14 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
-
-var claudeBridgeExecPattern = regexp.MustCompile(`\b(?:hook_bridge\.py|claude-remote-hook)['"]?\s+['"]?exec['"]?\s+['"]?([A-Za-z0-9+/=]+)['"]?`)
-var claudeBridgeFullExecPattern = regexp.MustCompile(`(?:ASTRALOPS_[A-Z_]+=(?:'[^']*'|"[^"]*"|\S+)\s+)*(?:'[^']*(?:daemon|astralops-daemon)'|"[^"]*(?:daemon|astralops-daemon)"|\S*(?:daemon|astralops-daemon))\s+claude-remote-hook\s+['"]?exec['"]?\s+['"]?([A-Za-z0-9+/=]+)['"]?`)
 
 type claudeLocalRuntime struct {
 	app     *app
@@ -47,7 +42,6 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 	}
 	cwd := strings.TrimSpace(workspace.LocalCWD)
 	remoteCWD := ""
-	settingsPath := ""
 	mcpConfigPath := ""
 	appendPrompt := ""
 	settingSources := ""
@@ -108,7 +102,6 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"status": "running"}})
 
 	go r.runClaude(ctx, session, cwd, info.Path, input, options, run, claudeRemoteOptions{
-		SettingsPath:   settingsPath,
 		MCPConfigPath:  mcpConfigPath,
 		RemoteCWD:      remoteCWD,
 		AppendPrompt:   appendPrompt,
@@ -185,7 +178,6 @@ func (run *claudeRun) pauseForApproval() {
 }
 
 type claudeRemoteOptions struct {
-	SettingsPath   string
 	MCPConfigPath  string
 	RemoteCWD      string
 	AppendPrompt   string
@@ -230,9 +222,6 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 		args = append(args, "--allowedTools", strings.Join(allowed, ","))
 	} else if remote.RemoteCWD != "" {
 		args = append(args, "--allowedTools", strings.Join(claudeRemoteMCPAllowedTools(), ","))
-	}
-	if remote.SettingsPath != "" {
-		args = append(args, "--settings", remote.SettingsPath)
 	}
 	if remote.SettingSources != "" {
 		args = append(args, "--setting-sources", remote.SettingSources)
@@ -585,89 +574,11 @@ func (r *claudeLocalRuntime) remapProjectionEventPaths(ev AstralEvent) AstralEve
 		return ev
 	}
 	ev.Normalized = remapProjectionValue(ev.Normalized, filepath.Clean(ws.LocalProjectionRoot), remotePathClean(ws.SSH.RemoteCWD))
-	ev.Normalized = scrubClaudeRemoteBridgeEvent(ev.Normalized, remotePathClean(ws.SSH.RemoteCWD))
 	return ev
 }
 
-func scrubClaudeRemoteBridgeEvent(value any, remoteCWD string) any {
-	normalized, ok := value.(map[string]any)
-	if !ok {
-		return value
-	}
-	normalized = scrubClaudeBridgeValue(normalized, remoteCWD).(map[string]any)
-	if hook := stringValue(normalized["hook_event_name"]); hook == "PreToolUse" || hook == "PostToolUse" {
-		normalized["hidden"] = true
-		normalized["visibility"] = "debug"
-		return normalized
-	}
-	return normalized
-}
-
-func scrubClaudeBridgeValue(value any, remoteCWD string) any {
-	switch typed := value.(type) {
-	case string:
-		return scrubClaudeBridgeText(typed)
-	case []any:
-		out := make([]any, len(typed))
-		for i, item := range typed {
-			out[i] = scrubClaudeBridgeValue(item, remoteCWD)
-		}
-		return out
-	case map[string]any:
-		out := map[string]any{}
-		for key, item := range typed {
-			out[key] = scrubClaudeBridgeValue(item, remoteCWD)
-		}
-		replaceBridgeCommand(out, remoteCWD)
-		return out
-	default:
-		return value
-	}
-}
-
-func replaceBridgeCommand(value map[string]any, remoteCWD string) {
-	command := stringValue(value["command"])
-	if command == "" {
-		return
-	}
-	decoded := decodeClaudeBridgeCommand(command)
-	if decoded == "" {
-		return
-	}
-	value["command"] = decoded
-	if _, ok := value["cwd"]; !ok {
-		value["cwd"] = remoteCWD
-	}
-	value["remote"] = true
-}
-
-func scrubClaudeBridgeText(text string) string {
-	return claudeBridgeFullExecPattern.ReplaceAllStringFunc(text, func(match string) string {
-		decoded := decodeClaudeBridgeCommand(match)
-		if decoded == "" {
-			return "[remote command]"
-		}
-		return decoded
-	})
-}
-
-func decodeClaudeBridgeCommand(command string) string {
-	match := claudeBridgeFullExecPattern.FindStringSubmatch(command)
-	if len(match) < 2 {
-		match = claudeBridgeExecPattern.FindStringSubmatch(command)
-	}
-	if len(match) < 2 {
-		return ""
-	}
-	body, err := base64.StdEncoding.DecodeString(match[1])
-	if err != nil {
-		return ""
-	}
-	return string(body)
-}
-
 func claudeRemoteAppendPrompt(remoteCWD string) string {
-	return "This is an SSH workspace on the remote machine. The remote current working directory is " + remoteCWD + ". Use the AstralOps remote MCP tools for all file, search, edit, and shell work: read, write, edit, multiedit, glob, grep, and bash. Native Claude Code file and shell tools are intentionally unavailable in this SSH workspace. Treat AstralOps remote tool results as the source of truth. In final user-facing text, describe files by their remote paths only and do not mention local projection paths, hidden handles, hook implementation, or path mapping internals unless the user explicitly asks."
+	return "This is an SSH workspace on the remote machine. The remote current working directory is " + remoteCWD + ". Use the AstralOps remote MCP tools for all file, search, edit, and shell work: read, write, edit, multiedit, glob, grep, and bash. Native Claude Code file and shell tools are intentionally unavailable in this SSH workspace. Treat AstralOps remote tool results as the source of truth. In final user-facing text, describe files by their remote paths only and do not mention local projection paths, hidden handles, or path mapping internals unless the user explicitly asks."
 }
 
 func remapProjectionValue(value any, localRoot string, remoteRoot string) any {
@@ -692,11 +603,6 @@ func remapProjectionValue(value any, localRoot string, remoteRoot string) any {
 }
 
 func remapProjectionString(value, localRoot, remoteRoot string) string {
-	absRoot := filepath.Join(localRoot, filepath.FromSlash(claudeRemoteAbsProjectionDir))
-	for _, alias := range claudeProjectionRootAliases(absRoot) {
-		value = strings.ReplaceAll(value, alias, "")
-	}
-	value = strings.ReplaceAll(value, filepath.ToSlash(claudeRemoteAbsProjectionDir)+"/", "/")
 	for _, alias := range claudeProjectionRootAliases(localRoot) {
 		value = strings.ReplaceAll(value, alias, remoteRoot)
 	}
