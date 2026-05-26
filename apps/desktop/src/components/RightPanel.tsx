@@ -1,4 +1,4 @@
-import { ChevronLeft, File, Folder, Palette, Plus, TerminalSquare, Type, X } from "lucide-react";
+import { ChevronLeft, File, Folder, Plus, TerminalSquare, X } from "lucide-react";
 import { closestCenter, DndContext, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import type { DragEndEvent } from "@dnd-kit/core";
 import { arrayMove, horizontalListSortingStrategy, SortableContext, useSortable } from "@dnd-kit/sortable";
@@ -139,7 +139,7 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
       <div className="flex h-[52px] shrink-0 items-center gap-2 border-b border-black/5 pl-4 pr-[68px]">
         <DndContext sensors={tabDragSensors} collisionDetection={closestCenter} autoScroll={false} onDragEnd={handleTabDragEnd}>
           <SortableContext items={tabs.map((tab) => tab.id)} strategy={horizontalListSortingStrategy}>
-            <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto overflow-y-hidden py-2">
+            <div className="flex min-w-0 max-w-[calc(100%-40px)] items-center gap-1.5 overflow-x-auto overflow-y-hidden py-2">
               {tabs.map((tab) => (
                 <SortablePanelTab
                   active={tab.id === activeTabId}
@@ -164,7 +164,7 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
             <Plus size={17} strokeWidth={2} />
           </button>
           {menuOpen ? (
-            <div className="absolute right-0 top-10 z-30 w-44 rounded-[16px] border border-black/10 bg-white/80 p-1.5 shadow-[0_18px_45px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)] backdrop-blur-xl">
+            <div className="absolute left-0 top-9 z-30 w-36 rounded-[14px] border border-black/10 bg-white/80 p-1 shadow-[0_18px_45px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)] backdrop-blur-xl">
               {terminalAvailable ? <PanelMenuButton icon={<TerminalSquare size={16} strokeWidth={1.8} />} label="终端" onClick={() => addTab("terminal")} /> : null}
               <PanelMenuButton icon={<Folder size={16} strokeWidth={1.8} />} label="文件浏览" onClick={() => addTab("files")} />
             </div>
@@ -195,7 +195,7 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
 
 function PanelMenuButton({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }): React.JSX.Element {
   return (
-    <button className="flex h-10 w-full items-center gap-2 rounded-xl px-3 text-left text-[14px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5" type="button" onClick={onClick}>
+    <button className="flex h-9 w-full items-center gap-2 rounded-[10px] px-2.5 text-left text-[13px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5" type="button" onClick={onClick}>
       {icon}
       {label}
     </button>
@@ -350,8 +350,8 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
   const onTitleChangeRef = useRef(onTitleChange);
   const workspaceId = workspace?.id ?? "";
   const workspaceRoot = workspace?.local_cwd ?? "";
-  const [themeId, setThemeId] = useState(() => storedTerminalPreference("astralops-terminal-theme", "studio-light"));
-  const [fontId, setFontId] = useState(() => storedTerminalPreference("astralops-terminal-font", "sf-mono"));
+  const [themeId] = useState(() => storedTerminalPreference("astralops-terminal-theme", "studio-light"));
+  const [fontId] = useState(() => storedTerminalPreference("astralops-terminal-font", "sf-mono"));
   const theme = terminalThemes.find((item) => item.id === themeId) ?? terminalThemes[0];
   const font = terminalFonts.find((item) => item.id === fontId) ?? terminalFonts[0];
 
@@ -466,60 +466,10 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
 
   return (
     <div className="flex h-full flex-col" style={{ backgroundColor: theme.theme.background }}>
-      <div className="flex h-[52px] shrink-0 items-center justify-end gap-1.5 border-b border-black/5 px-3">
-        <TerminalSelect
-          icon={<Palette size={14} strokeWidth={1.9} />}
-          label="终端配色"
-          value={themeId}
-          options={terminalThemes}
-          onChange={setThemeId}
-        />
-        <TerminalSelect
-          icon={<Type size={14} strokeWidth={1.9} />}
-          label="终端字体"
-          value={fontId}
-          options={terminalFonts}
-          onChange={setFontId}
-        />
-      </div>
       <div className="min-h-0 flex-1 p-3">
         <div ref={hostRef} className="h-full overflow-hidden select-text" style={{ backgroundColor: theme.theme.background }} />
       </div>
     </div>
-  );
-}
-
-function TerminalSelect({
-  icon,
-  label,
-  onChange,
-  options,
-  value,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  onChange: (value: string) => void;
-  options: Array<{ id: string; label: string }>;
-  value: string;
-}): React.JSX.Element {
-  return (
-    <label className="relative flex h-7 items-center gap-1.5 rounded-md border border-black/5 bg-transparent pl-2 pr-1.5 text-[12px] font-semibold text-[#4f5358] transition-colors duration-150 ease-out hover:bg-black/5">
-      <span className="shrink-0 text-[#7d8187]">{icon}</span>
-      <span className="sr-only">{label}</span>
-      <select
-        className="h-full max-w-[132px] appearance-none bg-transparent pr-4 text-[12px] font-semibold outline-none"
-        aria-label={label}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        {options.map((option) => (
-          <option key={option.id} value={option.id}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-      <ChevronLeft className="pointer-events-none absolute right-1.5 rotate-[-90deg] text-[#9a9da1]" size={13} strokeWidth={2} />
-    </label>
   );
 }
 

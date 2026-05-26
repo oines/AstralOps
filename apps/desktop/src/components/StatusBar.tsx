@@ -4,11 +4,6 @@ type StatusBarProps = {
   activeWorkspace: Workspace | null;
   activeWorkspaceConnection?: WorkspaceConnection | null;
   connectionState: ConnectionState;
-  contextUsage?: {
-    totalTokens?: number;
-    modelContextWindow?: number;
-    usedPercent?: number;
-  };
   queuedCount?: number;
   sidebarCollapsed: boolean;
   sessionAgent?: AgentKind;
@@ -20,7 +15,6 @@ export function StatusBar({
   activeWorkspace,
   activeWorkspaceConnection,
   connectionState,
-  contextUsage,
   queuedCount = 0,
   sidebarCollapsed,
   sessionAgent,
@@ -31,7 +25,6 @@ export function StatusBar({
   const title = sessionTitle || activeWorkspace?.name || "AstralOps";
   const path = activeWorkspace?.target === "ssh" ? sshDisplayPath(activeWorkspace, activeWorkspaceConnection) : activeWorkspace?.local_cwd;
   const effectiveState = statusBarState(activeWorkspace, activeWorkspaceConnection, connectionState, sessionState);
-  const contextLabel = contextUsageLabel(contextUsage);
 
   return (
     <header className={`[-webkit-app-region:drag] relative flex h-[52px] shrink-0 items-center justify-between border-b border-black/5 bg-white pr-[172px] transition-[padding] duration-180 ease-out ${sidebarCollapsed ? "pl-[144px]" : "pl-8"}`}>
@@ -51,40 +44,8 @@ export function StatusBar({
           ) : null}
         </div>
       </div>
-      {agent ? (
-        <div className="ml-4 shrink-0 rounded-full border border-black/10 bg-[#f7f7f5] px-2.5 py-1 text-[12px] font-semibold text-[#5f6368]">
-          {contextLabel}
-        </div>
-      ) : null}
     </header>
   );
-}
-
-function contextUsageLabel(usage?: StatusBarProps["contextUsage"]): string {
-  if (!usage) return "上下文 --";
-  if (typeof usage.totalTokens === "number" && typeof usage.modelContextWindow === "number") {
-    const percent = typeof usage.usedPercent === "number" && Number.isFinite(usage.usedPercent)
-      ? usage.usedPercent
-      : (usage.totalTokens / usage.modelContextWindow) * 100;
-    return `上下文 ${formatTokenCount(usage.totalTokens)} / ${formatTokenCount(usage.modelContextWindow)} (${Math.round(percent)}%)`;
-  }
-  if (typeof usage.modelContextWindow === "number") {
-    return `上下文 -- / ${formatTokenCount(usage.modelContextWindow)}`;
-  }
-  if (typeof usage.totalTokens === "number") {
-    return `上下文 ${formatTokenCount(usage.totalTokens)}`;
-  }
-  return "上下文已更新";
-}
-
-function formatTokenCount(value: number): string {
-  if (value >= 1000000) return `${formatCompactNumber(value / 1000000)}m`;
-  if (value >= 1000) return `${formatCompactNumber(value / 1000)}k`;
-  return String(Math.round(value));
-}
-
-function formatCompactNumber(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, "");
 }
 
 function statusBarState(

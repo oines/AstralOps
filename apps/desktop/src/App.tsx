@@ -577,7 +577,6 @@ export function App(): React.JSX.Element {
           sessionAgent={activeSession?.agent}
           sessionState={sessionState}
           sessionTitle={activeSession ? sessionTitles[activeSession.id] : undefined}
-          contextUsage={contextUsage}
         />
         <Transcript
           activeSession={activeSession}
@@ -594,6 +593,7 @@ export function App(): React.JSX.Element {
           commandLoadError={activeCommandError}
           currentModel={currentModel}
           currentEffort={currentEffort}
+          contextUsage={contextUsage}
           disabled={!canUseDaemon || !activeWorkspace || !activeSession || !workspaceInteractive}
           effortOverride={reasoningEffort}
           modelOptions={modelOptions}
@@ -640,7 +640,11 @@ export function App(): React.JSX.Element {
         onCreate={handleCreateWorkspace}
       />
 
-      <WorkspaceOpenerMenu workspace={activeWorkspace} onError={setError} />
+      <WorkspaceOpenerMenu
+        rightOffset={rightPanelOpen ? rightPanelWidth + 10 : 64}
+        workspace={activeWorkspace}
+        onError={setError}
+      />
 
       <button
         className="[-webkit-app-region:no-drag] absolute left-[95px] top-[10px] z-[200] grid size-8 place-items-center rounded-lg text-[#8f9296] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95"

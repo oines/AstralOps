@@ -3,6 +3,7 @@ import { ChevronDown, Code2, Folder, TerminalSquare } from "lucide-react";
 import type { Workspace } from "../types";
 
 type WorkspaceOpenerMenuProps = {
+  rightOffset: number;
   workspace: Workspace | null;
   onError: (message: string) => void;
 };
@@ -13,7 +14,7 @@ const DEFAULT_OPENERS: WorkspaceOpenerInfo[] = [
   { id: "terminal", label: "Terminal", available: true },
 ];
 
-export function WorkspaceOpenerMenu({ workspace, onError }: WorkspaceOpenerMenuProps): React.JSX.Element {
+export function WorkspaceOpenerMenu({ rightOffset, workspace, onError }: WorkspaceOpenerMenuProps): React.JSX.Element {
   const [openers, setOpeners] = useState<WorkspaceOpenerInfo[]>(DEFAULT_OPENERS);
   const [selectedId, setSelectedId] = useState<WorkspaceOpenerId>("vscode");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -84,7 +85,11 @@ export function WorkspaceOpenerMenu({ workspace, onError }: WorkspaceOpenerMenuP
   );
 
   return (
-    <div ref={rootRef} className="[-webkit-app-region:no-drag] absolute right-[64px] top-[10px] z-[220]">
+    <div
+      ref={rootRef}
+      className="[-webkit-app-region:no-drag] absolute top-[10px] z-[220] transition-[right] duration-180 ease-out"
+      style={{ right: rightOffset }}
+    >
       <div className={`flex h-8 overflow-hidden rounded-xl border border-black/10 bg-white/90 shadow-[0_1px_2px_rgba(0,0,0,0.06)] backdrop-blur ${disabled ? "opacity-45" : ""}`}>
         <button
           aria-label={`Open workspace in ${selected.label}`}

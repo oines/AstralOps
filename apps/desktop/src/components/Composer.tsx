@@ -7,6 +7,7 @@ import { PendingInteractionPanel } from "./PendingInteractionPanel";
 type ComposerProps = {
   disabled: boolean;
   commandLoadError?: string;
+  contextUsage?: ContextUsage;
   currentEffort?: string;
   currentModel?: string;
   commands: SessionCommand[];
@@ -38,6 +39,12 @@ type ComposerProps = {
   onSteerQueuedInput: (sessionId: string, queueId: string) => Promise<void>;
 };
 
+type ContextUsage = {
+  totalTokens?: number;
+  modelContextWindow?: number;
+  usedPercent?: number;
+};
+
 export type QueuedComposerInput = {
   id: string;
   sessionId: string;
@@ -46,6 +53,7 @@ export type QueuedComposerInput = {
 
 export function Composer({
   commandLoadError = "",
+  contextUsage,
   currentEffort,
   currentModel,
   commands,
@@ -343,6 +351,7 @@ export function Composer({
             </div>
           </div>
           <div className="flex min-w-0 shrink-0 items-center gap-1.5">
+            <ContextUsageRing usage={contextUsage} />
             <div className="relative" data-composer-menu>
               <button
                 className={`flex h-8 max-w-[180px] items-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors duration-150 ease-out ${
@@ -400,6 +409,59 @@ export function Composer({
       </div>
     </footer>
   );
+}
+
+function ContextUsageRing({ usage }: { usage?: ContextUsage }): React.JSX.Element | null {
+  if (!usage) return null;
+  const percent = contextUsagePercent(usage);
+  const label = contextUsageLabel(usage, percent);
+  const degrees = Math.round(clamp(percent, 0, 100) * 3.6);
+  return (
+    <div className="group relative grid size-8 place-items-center">
+      <div
+        className="grid size-4 place-items-center rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
+        style={{ "--context-progress": `${degrees}deg`, background: "conic-gradient(var(--ao-context-ring) var(--context-progress), var(--ao-context-track) 0deg)" } as React.CSSProperties}
+        aria-label={`上下文 ${label}`}
+      >
+        <span className="size-2 rounded-full" style={{ backgroundColor: "var(--ao-context-center)" }} />
+      </div>
+      <div className="pointer-events-none absolute bottom-8 right-0 z-40 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-semibold opacity-0 shadow-[0_8px_24px_rgba(0,0,0,0.18)] transition-opacity duration-150 ease-out group-hover:opacity-100" style={{ backgroundColor: "var(--ao-context-tooltip)", color: "var(--ao-context-tooltip-text)" }}>
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function contextUsagePercent(usage: ContextUsage): number {
+  if (typeof usage.usedPercent === "number" && Number.isFinite(usage.usedPercent)) return usage.usedPercent;
+  if (typeof usage.totalTokens === "number" && typeof usage.modelContextWindow === "number" && usage.modelContextWindow > 0) {
+    return (usage.totalTokens / usage.modelContextWindow) * 100;
+  }
+  return 0;
+}
+
+function contextUsageLabel(usage: ContextUsage, percent: number): string {
+  const roundedPercent = Math.round(clamp(percent, 0, 100));
+  if (typeof usage.totalTokens === "number" && typeof usage.modelContextWindow === "number") {
+    return `${formatTokenCount(usage.totalTokens)} / ${formatTokenCount(usage.modelContextWindow)} (${roundedPercent}%)`;
+  }
+  if (typeof usage.modelContextWindow === "number") return `-- / ${formatTokenCount(usage.modelContextWindow)} (${roundedPercent}%)`;
+  if (typeof usage.totalTokens === "number") return `${formatTokenCount(usage.totalTokens)} (${roundedPercent}%)`;
+  return `-- (${roundedPercent}%)`;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function formatTokenCount(value: number): string {
+  if (value >= 1000000) return `${formatCompactNumber(value / 1000000)}m`;
+  if (value >= 1000) return `${formatCompactNumber(value / 1000)}k`;
+  return String(Math.round(value));
+}
+
+function formatCompactNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, "");
 }
 
 function QueuedInputShelf({
