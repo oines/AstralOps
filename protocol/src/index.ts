@@ -157,6 +157,17 @@ export type ControlNormalized = AstralNormalizedBase & {
   subtype?: string;
   active_flags?: string[];
   limits?: unknown;
+  token_usage?: unknown;
+  usage?: unknown;
+  model_usage?: unknown;
+  total_tokens?: number;
+  input_tokens?: number;
+  cached_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  output_tokens?: number;
+  reasoning_tokens?: number;
+  model_context_window?: number;
+  used_percent?: number;
 };
 
 export type MemoryNormalized = AstralNormalizedBase & {
@@ -324,6 +335,33 @@ export type SessionInputRequest = {
   permission_mode?: "default" | "auto" | "plan" | "bypassPermissions";
 };
 
+export type SessionCommand = {
+  id: string;
+  title: string;
+  description?: string;
+  icon?: string;
+  kind: "action" | "client" | "prompt" | string;
+  enabled: boolean;
+  disabled_reason?: string;
+  agent?: AgentKind;
+  client_action?: string;
+  payload?: Record<string, unknown>;
+};
+
+export type SessionCommandListResponse = {
+  commands: SessionCommand[];
+};
+
+export type SessionCommandRequest = {
+  args?: Record<string, unknown>;
+};
+
+export type SessionCommandResponse = {
+  ok: boolean;
+  queued?: boolean;
+  queue_id?: string;
+};
+
 export type HealthResponse = {
   ok: boolean;
   version: string;
@@ -357,6 +395,10 @@ export type ModelInfo = {
   slot?: string;
   default_reasoning_effort?: string;
   supported_reasoning_efforts?: string[];
+  context_window?: number;
+  max_context_window?: number;
+  effective_context_window?: number;
+  effective_context_window_percent?: number;
 };
 
 export type FileEntry = {

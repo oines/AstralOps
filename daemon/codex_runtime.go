@@ -38,16 +38,17 @@ type codexClient struct {
 	stdin  io.WriteCloser
 	closed chan struct{}
 
-	mu          sync.Mutex
-	nextID      int64
-	pending     map[int64]chan codexRPCResponse
-	approvals   map[string]codexPendingApproval
-	items       map[string]map[string]any
-	threadID    string
-	activeTurn  string
-	running     bool
-	initialized bool
-	stopping    bool
+	mu           sync.Mutex
+	nextID       int64
+	pending      map[int64]chan codexRPCResponse
+	approvals    map[string]codexPendingApproval
+	items        map[string]map[string]any
+	threadID     string
+	activeTurn   string
+	nextInternal bool
+	running      bool
+	initialized  bool
+	stopping     bool
 }
 
 type codexPendingApproval struct {
@@ -75,9 +76,64 @@ func newCodexLocalRuntime(a *app) *codexLocalRuntime {
 }
 
 func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, input string, options TurnOptions) error {
+	client, err := r.clientForSession(session, workspace)
+	if err != nil {
+		return err
+	}
+	if !client.trySetRunning() {
+		return ErrSessionRunning
+	}
+
+	r.app.store.updateSessionStatus(session.ID, "running")
+	if !options.Internal {
+		displayInput := input
+		if strings.TrimSpace(options.DisplayInput) != "" {
+			displayInput = options.DisplayInput
+		}
+		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": displayInput}})
+	}
+
+	go client.startTurn(input, options)
+	return nil
+}
+
+func (r *codexLocalRuntime) RunCommand(session Session, workspace Workspace, commandID string, _ map[string]any) error {
+	if commandID != "compact" {
+		return fmt.Errorf("codex command %s is not implemented", commandID)
+	}
+	client, err := r.clientForSession(session, workspace)
+	if err != nil {
+		return err
+	}
+	if !client.trySetRunning() {
+		return ErrSessionRunning
+	}
+	r.app.store.updateSessionStatus(session.ID, "running")
+	if commandID == "compact" {
+		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "memory.compacting", Normalized: map[string]any{
+			"source":  "astralops",
+			"command": "compact",
+			"status":  "running",
+		}})
+	}
+
+	go func() {
+		if err := client.runCommand(commandID); err != nil {
+			if client.isStopping() {
+				return
+			}
+			client.finishFailed(err.Error())
+			return
+		}
+		client.markIdle("idle")
+	}()
+	return nil
+}
+
+func (r *codexLocalRuntime) clientForSession(session Session, workspace Workspace) (*codexClient, error) {
 	info := r.app.agents[AgentCodex]
 	if !info.Available || info.Path == "" {
-		return fmt.Errorf("codex executable was not found on PATH")
+		return nil, fmt.Errorf("codex executable was not found on PATH")
 	}
 	cwd := strings.TrimSpace(workspace.LocalCWD)
 	processCWD := cwd
@@ -87,7 +143,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 	remoteCodexHome := ""
 	if workspace.Target == "ssh" {
 		if workspace.SSH == nil || strings.TrimSpace(workspace.SSH.RemoteCWD) == "" {
-			return fmt.Errorf("ssh workspace remote cwd is empty")
+			return nil, fmt.Errorf("ssh workspace remote cwd is empty")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		var hello map[string]any
@@ -107,7 +163,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 		}
 		cancel()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		r.app.setCodexRemoteHome(workspace.ID, remoteCodexHome)
 		cwd = remotePathClean(workspace.SSH.RemoteCWD)
@@ -116,10 +172,11 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 		remoteShell = stringValue(hello["shell"])
 	}
 	if cwd == "" {
-		return fmt.Errorf("workspace cwd is empty")
+		return nil, fmt.Errorf("workspace cwd is empty")
 	}
 
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	client := r.clients[session.ID]
 	if client == nil {
 		client = newCodexClient(r, session, cwd, processCWD, execServerURL, remoteShell, codexHome, info.Path)
@@ -128,24 +185,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 		client.updateSession(session)
 		client.updateWorkspace(cwd, processCWD, execServerURL, remoteShell, codexHome)
 	}
-	if client.isRunning() {
-		r.mu.Unlock()
-		return ErrSessionRunning
-	}
-	client.setRunning(true)
-	r.mu.Unlock()
-
-	r.app.store.updateSessionStatus(session.ID, "running")
-	if !options.Internal {
-		displayInput := input
-		if strings.TrimSpace(options.DisplayInput) != "" {
-			displayInput = options.DisplayInput
-		}
-		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": displayInput}})
-	}
-
-	go client.startTurn(input, options)
-	return nil
+	return client, nil
 }
 
 func (a *app) prepareCodexRemoteHome(_ context.Context, ws Workspace) (string, error) {
@@ -285,8 +325,14 @@ func (c *codexClient) startTurn(input string, options TurnOptions) {
 		}},
 	}
 	applyCodexTurnOptions(params, options, c.cwd, c.defaultModel(), c.defaultReasoningEffort())
+	c.mu.Lock()
+	c.nextInternal = options.Internal
+	c.mu.Unlock()
 	result, err := c.request("turn/start", params, codexRequestTimeout)
 	if err != nil {
+		c.mu.Lock()
+		c.nextInternal = false
+		c.mu.Unlock()
 		if c.isStopping() {
 			return
 		}
@@ -298,6 +344,24 @@ func (c *codexClient) startTurn(input string, options TurnOptions) {
 		c.mu.Lock()
 		c.activeTurn = turnID
 		c.mu.Unlock()
+	}
+}
+
+func (c *codexClient) runCommand(commandID string) error {
+	if err := c.ensureStarted(); err != nil {
+		return err
+	}
+	if err := c.ensureThread(); err != nil {
+		return err
+	}
+	switch commandID {
+	case "compact":
+		_, err := c.request("thread/compact/start", map[string]any{
+			"threadId": c.getThreadID(),
+		}, codexRequestTimeout)
+		return err
+	default:
+		return fmt.Errorf("codex command %s is not implemented", commandID)
 	}
 }
 
@@ -354,9 +418,11 @@ func (c *codexClient) ensureStarted() error {
 			"experimentalApi":   true,
 		},
 	}, codexRequestTimeout); err != nil {
+		c.cleanupStartedProcess("initialize failed")
 		return err
 	}
 	if err := c.notify("initialized", nil); err != nil {
+		c.cleanupStartedProcess("initialized notify failed")
 		return err
 	}
 
@@ -364,6 +430,34 @@ func (c *codexClient) ensureStarted() error {
 	c.initialized = true
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *codexClient) cleanupStartedProcess(reason string) {
+	c.mu.Lock()
+	stdin := c.stdin
+	cmd := c.cmd
+	closed := c.closed
+	c.stopping = true
+	c.running = false
+	c.activeTurn = ""
+	c.initialized = false
+	for id, ch := range c.pending {
+		ch <- codexRPCResponse{ID: id, Error: &codexRPCError{Code: -32000, Message: reason}}
+		delete(c.pending, id)
+	}
+	c.mu.Unlock()
+	if stdin != nil {
+		_ = stdin.Close()
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	if closed != nil {
+		select {
+		case <-closed:
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 func codexAppServerArgs(disableLocalNodeREPL bool) []string {
@@ -631,6 +725,7 @@ func (c *codexClient) handleLine(line []byte) {
 	c.rememberNotificationItem(raw)
 	for _, ev := range normalizeCodexMessage(c.session, raw) {
 		c.enrichRemoteCommandEvent(&ev)
+		c.enrichInternalTurnEvent(&ev)
 		c.runtime.app.emit(ev)
 		if ev.Kind == "turn.started" {
 			if value := mapValue(ev.Normalized); stringValue(value["turn_id"]) != "" {
@@ -640,9 +735,28 @@ func (c *codexClient) handleLine(line []byte) {
 			}
 		}
 		if ev.Kind == "turn.completed" || ev.Kind == "turn.failed" || ev.Kind == "turn.cancelled" {
+			c.mu.Lock()
+			c.nextInternal = false
+			c.mu.Unlock()
 			c.markIdle(stringValue(mapValue(ev.Normalized)["status"]))
 		}
 	}
+}
+
+func (c *codexClient) enrichInternalTurnEvent(ev *AstralEvent) {
+	if ev.Kind != "turn.started" {
+		return
+	}
+	c.mu.Lock()
+	internal := c.nextInternal
+	c.nextInternal = false
+	c.mu.Unlock()
+	if !internal {
+		return
+	}
+	normalized := mapValue(ev.Normalized)
+	normalized["internal"] = true
+	ev.Normalized = normalized
 }
 
 func (c *codexClient) enrichRemoteCommandEvent(ev *AstralEvent) {
@@ -723,6 +837,16 @@ func (c *codexClient) setRunning(running bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.running = running
+}
+
+func (c *codexClient) trySetRunning() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.running {
+		return false
+	}
+	c.running = true
+	return true
 }
 
 func (c *codexClient) isRunning() bool {

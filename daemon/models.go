@@ -50,6 +50,33 @@ type Session struct {
 	UpdatedAt       string    `json:"updated_at"`
 }
 
+type SessionCommand struct {
+	ID             string         `json:"id"`
+	Title          string         `json:"title"`
+	Description    string         `json:"description,omitempty"`
+	Icon           string         `json:"icon,omitempty"`
+	Kind           string         `json:"kind"`
+	Enabled        bool           `json:"enabled"`
+	DisabledReason string         `json:"disabled_reason,omitempty"`
+	Agent          AgentKind      `json:"agent,omitempty"`
+	ClientAction   string         `json:"client_action,omitempty"`
+	Payload        map[string]any `json:"payload,omitempty"`
+}
+
+type SessionCommandListResponse struct {
+	Commands []SessionCommand `json:"commands"`
+}
+
+type SessionCommandRequest struct {
+	Args map[string]any `json:"args,omitempty"`
+}
+
+type SessionCommandResponse struct {
+	OK      bool   `json:"ok"`
+	Queued  bool   `json:"queued,omitempty"`
+	QueueID string `json:"queue_id,omitempty"`
+}
+
 type agentInfo struct {
 	Path          string      `json:"path,omitempty"`
 	Version       string      `json:"version,omitempty"`
@@ -60,10 +87,14 @@ type agentInfo struct {
 }
 
 type modelInfo struct {
-	ID                        string   `json:"id"`
-	Label                     string   `json:"label,omitempty"`
-	Source                    string   `json:"source,omitempty"`
-	Slot                      string   `json:"slot,omitempty"`
-	DefaultReasoningEffort    string   `json:"default_reasoning_effort,omitempty"`
-	SupportedReasoningEfforts []string `json:"supported_reasoning_efforts,omitempty"`
+	ID                            string   `json:"id"`
+	Label                         string   `json:"label,omitempty"`
+	Source                        string   `json:"source,omitempty"`
+	Slot                          string   `json:"slot,omitempty"`
+	DefaultReasoningEffort        string   `json:"default_reasoning_effort,omitempty"`
+	SupportedReasoningEfforts     []string `json:"supported_reasoning_efforts,omitempty"`
+	ContextWindow                 int      `json:"context_window,omitempty"`
+	MaxContextWindow              int      `json:"max_context_window,omitempty"`
+	EffectiveContextWindow        int      `json:"effective_context_window,omitempty"`
+	EffectiveContextWindowPercent int      `json:"effective_context_window_percent,omitempty"`
 }

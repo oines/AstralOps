@@ -46,6 +46,9 @@ func normalizeClaudeStreamJSON(session Session, line []byte) []AstralEvent {
 			"type":    rawType,
 			"subtype": stringValue(raw["subtype"]),
 		}, raw)}
+		if contextEvent, ok := claudeResultContextUsageEvent(session, raw); ok {
+			events = append(events, contextEvent)
+		}
 		events = append(events, normalizeClaudeResultPermissionDenials(session, raw)...)
 		return events
 	default:
@@ -130,6 +133,74 @@ func normalizeClaudeSystem(session Session, raw map[string]any) []AstralEvent {
 	}
 }
 
+func claudeResultContextUsageEvent(session Session, raw map[string]any) (AstralEvent, bool) {
+	usage := claudeUsageMap(raw["usage"])
+	modelUsage := claudeUsageMap(raw["modelUsage"])
+	if len(usage) == 0 && len(modelUsage) == 0 {
+		return AstralEvent{}, false
+	}
+	model := ""
+	modelTotals := map[string]any{}
+	for key, value := range modelUsage {
+		model = key
+		modelTotals = mapValue(value)
+		break
+	}
+	inputTokens := firstNonZeroNumber(modelTotals["inputTokens"], usage["input_tokens"])
+	outputTokens := firstNonZeroNumber(modelTotals["outputTokens"], usage["output_tokens"])
+	cacheReadTokens := firstNonZeroNumber(modelTotals["cacheReadInputTokens"], usage["cache_read_input_tokens"])
+	cacheCreationTokens := firstNonZeroNumber(modelTotals["cacheCreationInputTokens"], usage["cache_creation_input_tokens"])
+	totalTokens := inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens
+	contextWindow := numberValue(modelTotals["contextWindow"])
+	normalized := map[string]any{
+		"source":                      "claude",
+		"native_session_id":           firstString(raw["session_id"], session.NativeSessionID),
+		"model":                       model,
+		"usage":                       usage,
+		"model_usage":                 modelUsage,
+		"total_tokens":                totalTokens,
+		"input_tokens":                inputTokens,
+		"output_tokens":               outputTokens,
+		"cached_input_tokens":         cacheReadTokens,
+		"cache_creation_input_tokens": cacheCreationTokens,
+		"model_context_window":        contextWindow,
+	}
+	if percent := contextUsedPercent(normalized); percent > 0 {
+		normalized["used_percent"] = percent
+	}
+	return baseClaudeEvent(session, "control.context", normalized, raw), true
+}
+
+func claudeUsageMap(value any) map[string]any {
+	if mapped, ok := value.(map[string]any); ok {
+		return mapped
+	}
+	return map[string]any{}
+}
+
+func claudeSlashCommandNames(raw map[string]any) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, item := range arrayValue(raw["slash_commands"]) {
+		name := strings.Trim(strings.TrimSpace(stringValue(item)), "/")
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
+func firstNonZeroNumber(values ...any) float64 {
+	for _, value := range values {
+		if number := numberValue(value); number > 0 {
+			return number
+		}
+	}
+	return 0
+}
+
 func claudeHookPayload(raw map[string]any, status string) map[string]any {
 	return map[string]any{
 		"source":          "claude",
@@ -150,8 +221,9 @@ func normalizeClaudeResultPermissionDenials(session Session, raw map[string]any)
 	if !ok || len(denials) == 0 {
 		return nil
 	}
+	latestPermissionDenial := latestClaudePermissionDenialIndexes(denials)
 	events := make([]AstralEvent, 0, len(denials))
-	for _, denial := range denials {
+	for index, denial := range denials {
 		item := mapValue(denial)
 		toolName := stringValue(item["tool_name"])
 		toolUseID := stringValue(item["tool_use_id"])
@@ -174,7 +246,10 @@ func normalizeClaudeResultPermissionDenials(session Session, raw map[string]any)
 			continue
 		}
 		if isObservedClaudePermissionDenialTool(toolName) {
-			events = append(events, baseClaudeEvent(session, "approval.requested", map[string]any{
+			if latest := latestPermissionDenial[claudePermissionDenialKey(toolName, toolInput)]; latest != index {
+				continue
+			}
+			normalized := map[string]any{
 				"source":      "claude",
 				"approval_id": toolUseID,
 				"request_id":  toolUseID,
@@ -182,15 +257,43 @@ func normalizeClaudeResultPermissionDenials(session Session, raw map[string]any)
 				"tool_name":   toolName,
 				"params":      toolInput,
 				"reason":      claudePermissionDenialReason(toolName),
-			}, raw))
+			}
+			if path := stringValue(toolInput["file_path"]); path != "" {
+				normalized["path"] = path
+			}
+			if changes := claudePermissionDenialChanges(toolName, toolInput); len(changes) > 0 {
+				normalized["changes"] = changes
+			}
+			events = append(events, baseClaudeEvent(session, "approval.requested", normalized, raw))
 		}
 	}
 	return events
 }
 
+func latestClaudePermissionDenialIndexes(denials []any) map[string]int {
+	latest := map[string]int{}
+	for index, denial := range denials {
+		item := mapValue(denial)
+		toolName := stringValue(item["tool_name"])
+		if !isObservedClaudePermissionDenialTool(toolName) {
+			continue
+		}
+		latest[claudePermissionDenialKey(toolName, mapValue(item["tool_input"]))] = index
+	}
+	return latest
+}
+
+func claudePermissionDenialKey(toolName string, toolInput map[string]any) string {
+	body, err := json.Marshal(toolInput)
+	if err != nil {
+		return toolName
+	}
+	return toolName + ":" + string(body)
+}
+
 func isObservedClaudePermissionDenialTool(toolName string) bool {
 	switch toolName {
-	case "WebSearch":
+	case "WebSearch", "Edit":
 		return true
 	default:
 		return false
@@ -198,7 +301,23 @@ func isObservedClaudePermissionDenialTool(toolName string) bool {
 }
 
 func claudePermissionDenialReason(toolName string) string {
+	if toolName == "Edit" {
+		return "Claude Code requested permission to edit a file."
+	}
 	return "Claude Code requested permission to use " + toolName + "."
+}
+
+func claudePermissionDenialChanges(toolName string, input map[string]any) map[string]any {
+	if toolName != "Edit" {
+		return nil
+	}
+	changes := map[string]any{}
+	for _, key := range []string{"old_string", "new_string", "replace_all"} {
+		if input[key] != nil {
+			changes[key] = input[key]
+		}
+	}
+	return changes
 }
 
 func normalizeClaudeAssistant(session Session, raw map[string]any) []AstralEvent {

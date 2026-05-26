@@ -31,6 +31,7 @@ type app struct {
 	agents            map[AgentKind]agentInfo
 	runtimes          map[AgentKind]AgentRuntime
 	ssh               *sshManager
+	projections       *sessionProjectionCache
 	queueMu           sync.Mutex
 	queues            map[string][]queuedTurn
 	codexExecMu       sync.Mutex
@@ -65,16 +66,24 @@ func main() {
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	a := &app{
-		store:     st,
-		token:     token,
-		addr:      localTCPHostPort(ln.Addr().String()),
-		hub:       newEventHub(),
-		agents:    discoverAgents(),
-		queues:    map[string][]queuedTurn{},
-		codexExec: map[string]codexExecCommand{},
+		store:       st,
+		token:       token,
+		addr:        localTCPHostPort(ln.Addr().String()),
+		hub:         newEventHub(),
+		agents:      discoverAgents(),
+		projections: newSessionProjectionCache(),
+		queues:      map[string][]queuedTurn{},
+		codexExec:   map[string]codexExecCommand{},
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
+	}
+	a.rebuildSessionProjections()
+	if err := a.backfillHistoricalContextEvents(); err != nil {
+		log.Fatal(err)
+	}
+	if err := a.backfillHistoricalApprovalEvents(); err != nil {
+		log.Fatal(err)
 	}
 	a.ssh = newSSHManager(a)
 	a.runtimes = newRuntimeRegistry(a)
@@ -272,10 +281,13 @@ func enrichCodexAgent(info *agentInfo) {
 	cachePath := filepath.Join(home, ".codex", "models_cache.json")
 	var cache struct {
 		Models []struct {
-			Slug                     string `json:"slug"`
-			DisplayName              string `json:"display_name"`
-			DefaultReasoningLevel    string `json:"default_reasoning_level"`
-			SupportedReasoningLevels []struct {
+			Slug                          string `json:"slug"`
+			DisplayName                   string `json:"display_name"`
+			DefaultReasoningLevel         string `json:"default_reasoning_level"`
+			ContextWindow                 int    `json:"context_window"`
+			MaxContextWindow              int    `json:"max_context_window"`
+			EffectiveContextWindowPercent int    `json:"effective_context_window_percent"`
+			SupportedReasoningLevels      []struct {
 				Effort string `json:"effort"`
 			} `json:"supported_reasoning_levels"`
 		} `json:"models"`
@@ -296,7 +308,18 @@ func enrichCodexAgent(info *agentInfo) {
 					efforts = append(efforts, effort)
 				}
 			}
-			add.withLabel(id, label, "Codex models", model.DefaultReasoningLevel, efforts)
+			info := modelInfo{
+				ID:                            id,
+				Label:                         label,
+				Source:                        "Codex models",
+				DefaultReasoningEffort:        model.DefaultReasoningLevel,
+				SupportedReasoningEfforts:     efforts,
+				ContextWindow:                 model.ContextWindow,
+				MaxContextWindow:              model.MaxContextWindow,
+				EffectiveContextWindowPercent: model.EffectiveContextWindowPercent,
+				EffectiveContextWindow:        effectiveContextWindow(model.ContextWindow, model.EffectiveContextWindowPercent),
+			}
+			add.addModel(info)
 		}
 	}
 	if info.CurrentModel != "" {
@@ -386,7 +409,11 @@ func newModelCollector() *modelCollector {
 }
 
 func (c *modelCollector) withLabel(id, label, source, defaultEffort string, supportedEfforts []string) {
-	id = strings.TrimSpace(id)
+	c.addModel(modelInfo{ID: id, Label: label, Source: source, DefaultReasoningEffort: defaultEffort, SupportedReasoningEfforts: supportedEfforts})
+}
+
+func (c *modelCollector) addModel(next modelInfo) {
+	id := strings.TrimSpace(next.ID)
 	if id == "" {
 		return
 	}
@@ -394,19 +421,45 @@ func (c *modelCollector) withLabel(id, label, source, defaultEffort string, supp
 		c.order = append(c.order, id)
 	}
 	existing := c.seen[id]
-	if label == "" {
-		label = existing.Label
+	if next.Label == "" {
+		next.Label = existing.Label
 	}
-	if source == "" {
-		source = existing.Source
+	if next.Source == "" {
+		next.Source = existing.Source
 	}
-	if defaultEffort == "" {
-		defaultEffort = existing.DefaultReasoningEffort
+	if next.DefaultReasoningEffort == "" {
+		next.DefaultReasoningEffort = existing.DefaultReasoningEffort
 	}
-	if len(supportedEfforts) == 0 {
-		supportedEfforts = existing.SupportedReasoningEfforts
+	if len(next.SupportedReasoningEfforts) == 0 {
+		next.SupportedReasoningEfforts = existing.SupportedReasoningEfforts
 	}
-	c.seen[id] = modelInfo{ID: id, Label: label, Source: source, Slot: existing.Slot, DefaultReasoningEffort: defaultEffort, SupportedReasoningEfforts: dedupeStrings(supportedEfforts)}
+	if next.Slot == "" {
+		next.Slot = existing.Slot
+	}
+	if next.ContextWindow == 0 {
+		next.ContextWindow = existing.ContextWindow
+	}
+	if next.MaxContextWindow == 0 {
+		next.MaxContextWindow = existing.MaxContextWindow
+	}
+	if next.EffectiveContextWindowPercent == 0 {
+		next.EffectiveContextWindowPercent = existing.EffectiveContextWindowPercent
+	}
+	if next.EffectiveContextWindow == 0 {
+		next.EffectiveContextWindow = existing.EffectiveContextWindow
+	}
+	c.seen[id] = modelInfo{
+		ID:                            id,
+		Label:                         next.Label,
+		Source:                        next.Source,
+		Slot:                          next.Slot,
+		DefaultReasoningEffort:        next.DefaultReasoningEffort,
+		SupportedReasoningEfforts:     dedupeStrings(next.SupportedReasoningEfforts),
+		ContextWindow:                 next.ContextWindow,
+		MaxContextWindow:              next.MaxContextWindow,
+		EffectiveContextWindow:        next.EffectiveContextWindow,
+		EffectiveContextWindowPercent: next.EffectiveContextWindowPercent,
+	}
 }
 
 func (c *modelCollector) models() []modelInfo {
@@ -419,6 +472,16 @@ func (c *modelCollector) models() []modelInfo {
 
 func (c *modelCollector) add(id, source, defaultEffort string, supportedEfforts []string) {
 	c.withLabel(id, id, source, defaultEffort, supportedEfforts)
+}
+
+func effectiveContextWindow(contextWindow int, percent int) int {
+	if contextWindow <= 0 {
+		return 0
+	}
+	if percent <= 0 {
+		return contextWindow
+	}
+	return int(float64(contextWindow) * float64(percent) / 100)
 }
 
 func dedupeStrings(values []string) []string {

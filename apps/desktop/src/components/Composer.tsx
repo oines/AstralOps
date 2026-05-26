@@ -1,13 +1,16 @@
-import { ArrowUp, Check, ChevronDown, ChevronLeft, CornerDownRight, ListTodo, Paperclip, Plus, Shield, Square, Target, X } from "lucide-react";
+import { ArrowUp, Brain, Box, Check, ChevronDown, ChevronLeft, CornerDownRight, Eraser, FilePlus, GitFork, ListChecks, ListTodo, Paperclip, Plus, Radio, RotateCcw, Shield, ShieldCheck, Square, Target, Terminal, Undo2, X } from "lucide-react";
 import type React from "react";
-import { useEffect, useRef, useState } from "react";
-import type { ModelInfo, PendingInteraction, PermissionMode, ReasoningEffort, RunMode } from "../types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ModelInfo, PendingInteraction, PermissionMode, ReasoningEffort, RunMode, SessionCommand } from "../types";
 import { PendingInteractionPanel } from "./PendingInteractionPanel";
 
 type ComposerProps = {
   disabled: boolean;
+  commandLoadError?: string;
   currentEffort?: string;
   currentModel?: string;
+  commands: SessionCommand[];
+  commandsLoaded: boolean;
   effortOverride: ReasoningEffort | "";
   modelOptions: ModelInfo[];
   modelOverride: string;
@@ -21,10 +24,12 @@ type ComposerProps = {
   running: boolean;
   onChooseAttachments: () => Promise<string[]>;
   onEffortOverrideChange: (effort: ReasoningEffort | "") => void;
+  onExecuteCommand: (command: SessionCommand) => Promise<void>;
   onHeightChange?: (height: number) => void;
   onModelOverrideChange: (model: string) => void;
   onModelSlotOverrideChange: (slot: string) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
+  onRefreshCommands: () => void;
   onRespond: (requestId: string, response: Record<string, unknown>) => Promise<void>;
   onRunModeChange: (mode: RunMode) => void;
   onInterrupt: () => Promise<void>;
@@ -40,8 +45,11 @@ export type QueuedComposerInput = {
 };
 
 export function Composer({
+  commandLoadError = "",
   currentEffort,
   currentModel,
+  commands,
+  commandsLoaded,
   disabled,
   effortOverride,
   modelOptions,
@@ -56,10 +64,12 @@ export function Composer({
   running,
   onChooseAttachments,
   onEffortOverrideChange,
+  onExecuteCommand,
   onHeightChange,
   onModelOverrideChange,
   onModelSlotOverrideChange,
   onPermissionModeChange,
+  onRefreshCommands,
   onRespond,
   onRunModeChange,
   onInterrupt,
@@ -71,12 +81,20 @@ export function Composer({
   const [attachments, setAttachments] = useState<string[]>([]);
   const [openMenu, setOpenMenu] = useState<"actions" | "model" | "permission" | null>(null);
   const [sending, setSending] = useState(false);
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const footerRef = useRef<HTMLElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedModel = selectedModelInfo(modelOptions, modelOverride, modelSlotOverride);
   const effectiveModel = selectedModel?.label || selectedModel?.id || "默认";
   const effectiveEffort = effortOverride || normalizeEffort(currentEffort);
   const effectivePermissionMode: PermissionMode = permissionLocked ? "bypassPermissions" : permissionMode;
+  const slashQuery = input.startsWith("/") && !input.includes("\n") ? input.slice(1).trim().toLowerCase() : "";
+  const slashPaletteOpen = input.startsWith("/") && !disabled && !sending && !input.includes("\n");
+  const filteredCommands = useMemo(
+    () => filterCommands(commands, slashQuery),
+    [commands, slashQuery],
+  );
+  const selectedCommand = filteredCommands[Math.min(selectedCommandIndex, Math.max(0, filteredCommands.length - 1))];
 
   useEffect(() => {
     if (!openMenu) return;
@@ -98,6 +116,15 @@ export function Composer({
     textarea.style.height = "0px";
     textarea.style.height = `${Math.min(144, Math.max(32, textarea.scrollHeight))}px`;
   }, [input]);
+
+  useEffect(() => {
+    setSelectedCommandIndex(0);
+  }, [slashQuery, commands]);
+
+  useEffect(() => {
+    if (!slashPaletteOpen) return;
+    onRefreshCommands();
+  }, [slashPaletteOpen, onRefreshCommands]);
 
   useEffect(() => {
     const footer = footerRef.current;
@@ -130,6 +157,44 @@ export function Composer({
     setOpenMenu(null);
   }
 
+  async function executeCommand(command: SessionCommand | undefined): Promise<void> {
+    if (!command || !command.enabled || sending) return;
+    if (command.kind === "client") {
+      runClientCommand(command);
+      setInput("");
+      return;
+    }
+    setSending(true);
+    try {
+      await onExecuteCommand(command);
+      setInput("");
+      setAttachments([]);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function runClientCommand(command: SessionCommand): void {
+    const action = command.client_action;
+    const payload = command.payload ?? {};
+    if (action === "open_model_menu") {
+      setOpenMenu("model");
+      return;
+    }
+    if (action === "open_permission_menu") {
+      setOpenMenu("permission");
+      return;
+    }
+    if (action === "run_mode") {
+      const mode = typeof payload.run_mode === "string" && isRunMode(payload.run_mode) ? payload.run_mode : "normal";
+      onRunModeChange(mode);
+      return;
+    }
+    if (action === "goal_mode") {
+      onRunModeChange("goal");
+    }
+  }
+
   if (pendingInteraction && !disabled) {
     return (
       <footer className="pointer-events-none absolute inset-x-0 bottom-0 pb-5" ref={footerRef}>
@@ -140,6 +205,17 @@ export function Composer({
 
   return (
     <footer className="pointer-events-none absolute inset-x-0 bottom-0 pb-5" ref={footerRef}>
+      {slashPaletteOpen ? (
+        <CommandPalette
+          commands={filteredCommands}
+          error={commandLoadError}
+          loaded={commandsLoaded}
+          query={slashQuery}
+          selectedIndex={selectedCommandIndex}
+          onHover={setSelectedCommandIndex}
+          onSelect={(command) => void executeCommand(command)}
+        />
+      ) : null}
       <div className={`pointer-events-auto mx-auto grid w-[760px] max-w-[calc(100%-72px)] gap-1.5 rounded-[22px] border px-3.5 py-2.5 shadow-[0_12px_36px_rgba(0,0,0,0.075),0_1px_3px_rgba(0,0,0,0.04)] backdrop-blur-xl transition-all duration-150 ease-out ${
         disabled ? "border-black/5 bg-white/55 opacity-80" : "border-black/10 bg-white/92"
       }`}>
@@ -173,6 +249,28 @@ export function Composer({
           value={input}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => {
+            if (slashPaletteOpen) {
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setSelectedCommandIndex((current) => Math.min(current + 1, Math.max(0, filteredCommands.length - 1)));
+                return;
+              }
+              if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setSelectedCommandIndex((current) => Math.max(0, current - 1));
+                return;
+              }
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void executeCommand(selectedCommand);
+                return;
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setInput("");
+                return;
+              }
+            }
             if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
               event.preventDefault();
               void submit();
@@ -344,6 +442,96 @@ function QueuedInputShelf({
       ))}
     </div>
   );
+}
+
+function CommandPalette({
+  commands,
+  error,
+  loaded,
+  onHover,
+  onSelect,
+  query,
+  selectedIndex,
+}: {
+  commands: SessionCommand[];
+  error?: string;
+  loaded: boolean;
+  onHover: (index: number) => void;
+  onSelect: (command: SessionCommand) => void;
+  query: string;
+  selectedIndex: number;
+}): React.JSX.Element {
+  return (
+    <div className="pointer-events-auto mx-auto max-h-[360px] w-[760px] max-w-[calc(100%-72px)] overflow-y-auto rounded-[22px] border border-black/10 bg-white/96 p-2 shadow-[0_16px_48px_rgba(0,0,0,0.10),0_2px_8px_rgba(0,0,0,0.06)] backdrop-blur-xl">
+      {error ? (
+        <div className="grid min-h-12 gap-1 px-3 py-2 text-[13px] font-semibold text-[#b45309]">
+          <span>命令加载失败</span>
+          <span className="truncate text-[12px] font-medium text-[#a0a3a7]">{error}</span>
+        </div>
+      ) : !loaded ? (
+        <div className="flex h-12 items-center px-3 text-[14px] font-semibold text-[#a0a3a7]">正在加载命令</div>
+      ) : commands.length === 0 ? (
+        <div className="flex h-12 items-center px-3 text-[14px] font-semibold text-[#a0a3a7]">{query ? "没有匹配的命令" : "暂无可用命令"}</div>
+      ) : (
+        commands.map((command, index) => {
+          const selected = index === selectedIndex;
+          return (
+            <button
+              className={`flex min-h-11 w-full items-center gap-3 rounded-[14px] px-3 text-left transition-colors duration-120 ease-out ${
+                command.enabled
+                  ? selected
+                    ? "bg-black/[0.055] text-[#202124]"
+                    : "text-[#4e5257] hover:bg-black/[0.04]"
+                  : "cursor-not-allowed text-[#b6b8bb]"
+              }`}
+              disabled={!command.enabled}
+              key={command.id}
+              type="button"
+              onMouseEnter={() => onHover(index)}
+              onClick={() => onSelect(command)}
+            >
+              <span className={`grid size-6 shrink-0 place-items-center ${command.enabled ? "text-[#5f6368]" : "text-[#b6b8bb]"}`}>
+                <CommandIcon icon={command.icon} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[15px] font-semibold">{command.title}</span>
+                <span className="block truncate text-[13px] font-medium text-[#a0a3a7]">{command.enabled ? command.description : command.disabled_reason || command.description}</span>
+              </span>
+            </button>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+function CommandIcon({ icon }: { icon?: string }): React.JSX.Element {
+  switch (icon) {
+    case "rotate-ccw":
+      return <RotateCcw size={18} strokeWidth={1.9} />;
+    case "radio":
+      return <Radio size={18} strokeWidth={1.9} />;
+    case "box":
+      return <Box size={18} strokeWidth={1.9} />;
+    case "brain":
+      return <Brain size={18} strokeWidth={1.9} />;
+    case "list-checks":
+      return <ListChecks size={18} strokeWidth={1.9} />;
+    case "target":
+      return <Target size={18} strokeWidth={1.9} />;
+    case "git-fork":
+      return <GitFork size={18} strokeWidth={1.9} />;
+    case "undo-2":
+      return <Undo2 size={18} strokeWidth={1.9} />;
+    case "eraser":
+      return <Eraser size={18} strokeWidth={1.9} />;
+    case "shield":
+      return <ShieldCheck size={18} strokeWidth={1.9} />;
+    case "file-plus":
+      return <FilePlus size={18} strokeWidth={1.9} />;
+    default:
+      return <Terminal size={18} strokeWidth={1.9} />;
+  }
 }
 
 function ActionMenu({
@@ -608,6 +796,24 @@ function runModeLabel(mode: RunMode): string {
   if (mode === "plan") return "计划";
   if (mode === "goal") return "Goal";
   return "";
+}
+
+function isRunMode(value: string): value is RunMode {
+  return value === "normal" || value === "plan" || value === "goal";
+}
+
+function filterCommands(commands: SessionCommand[], query: string): SessionCommand[] {
+  if (!query) return commands;
+  return commands.filter((command) => {
+    const haystack = [
+      command.id,
+      command.title,
+      command.description ?? "",
+      command.disabled_reason ?? "",
+      command.client_action ?? "",
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
 }
 
 function textValue(value: Record<string, unknown>, key: string): string {

@@ -185,6 +185,304 @@ func TestStoreEventAppendAndQuery(t *testing.T) {
 	}
 }
 
+func TestHistoricalContextBackfillIsExplicitAndIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local Project", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, workspace.Agent)
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "control.raw",
+		Raw: map[string]any{
+			"type":       "result",
+			"session_id": "native_claude",
+			"modelUsage": map[string]any{
+				"claude-test": map[string]any{
+					"inputTokens":              12000,
+					"outputTokens":             3000,
+					"cacheReadInputTokens":     4000,
+					"cacheCreationInputTokens": 1000,
+					"contextWindow":            200000,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countKind(reloaded.queryEvents(workspace.ID, session.ID, 0), "control.context") != 0 {
+		t.Fatal("loadStore backfilled context; migration must be explicit")
+	}
+	app := &app{store: reloaded, hub: newEventHub(), projections: newSessionProjectionCache()}
+	app.rebuildSessionProjections()
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if got := countKind(events, "control.context"); got != 1 {
+		t.Fatalf("control.context count = %d, want 1", got)
+	}
+	context := app.sessionProjections().latestContext(session.ID)
+	if got := numberValue(context["total_tokens"]); got != 20000 {
+		t.Fatalf("projected total_tokens = %v, want 20000", got)
+	}
+}
+
+func TestHistoricalContextBackfillSkipsExistingContext(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local Project", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, workspace.Agent)
+	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "control.context", Normalized: map[string]any{"total_tokens": 10}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentCodex,
+		Kind:        "control.raw",
+		Raw: map[string]any{
+			"method": "thread/tokenUsage/updated",
+			"params": map[string]any{
+				"threadId": "thread_1",
+				"tokenUsage": map[string]any{
+					"modelContextWindow": 258000,
+					"total": map[string]any{
+						"totalTokens": 20000,
+					},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), projections: newSessionProjectionCache()}
+	app.rebuildSessionProjections()
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	if got := countKind(app.store.queryEvents(workspace.ID, session.ID, 0), "control.context"); got != 1 {
+		t.Fatalf("control.context count = %d, want existing event only", got)
+	}
+}
+
+func TestHistoricalContextBackfillCorrectsPersistedCodexCumulativeUsage(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local Project", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, workspace.Agent)
+	raw := map[string]any{
+		"method": "thread/tokenUsage/updated",
+		"params": map[string]any{
+			"threadId": "thread_1",
+			"turnId":   "turn_1",
+			"tokenUsage": map[string]any{
+				"modelContextWindow": 258400,
+				"last": map[string]any{
+					"totalTokens": 30206,
+					"inputTokens": 30169,
+				},
+				"total": map[string]any{
+					"totalTokens": 117481,
+					"inputTokens": 117089,
+				},
+			},
+		},
+	}
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentCodex,
+		Kind:        "control.context",
+		Normalized: map[string]any{
+			"source":               "codex",
+			"total_tokens":         117481,
+			"input_tokens":         117089,
+			"model_context_window": 258400,
+			"used_percent":         45,
+		},
+		Raw: raw,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), projections: newSessionProjectionCache()}
+	app.rebuildSessionProjections()
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if got := countKind(events, "control.context"); got != 2 {
+		t.Fatalf("control.context count = %d, want original plus one correction", got)
+	}
+	context := app.sessionProjections().latestContext(session.ID)
+	if got := numberValue(context["total_tokens"]); got != 30206 {
+		t.Fatalf("projected total_tokens = %v, want current last.totalTokens", got)
+	}
+	if got := numberValue(context["cumulative_total_tokens"]); got != 117481 {
+		t.Fatalf("projected cumulative_total_tokens = %v, want cumulative total.totalTokens", got)
+	}
+	if got := numberValue(context["used_percent"]); got != 11 {
+		t.Fatalf("projected used_percent = %v, want current-window percent", got)
+	}
+}
+
+func TestHistoricalApprovalBackfillRestoresClaudeEditPermission(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local Project", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, workspace.Agent)
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "control.raw",
+		Raw: map[string]any{
+			"type": "result",
+			"permission_denials": []any{
+				map[string]any{
+					"tool_name":   "Edit",
+					"tool_use_id": "call_edit",
+					"tool_input": map[string]any{
+						"file_path":  "/Users/oines/tmp/codex_edit_test.txt",
+						"old_string": "one\n",
+						"new_string": "one\ntwo\n",
+					},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), projections: newSessionProjectionCache()}
+	app.rebuildSessionProjections()
+	if err := app.backfillHistoricalApprovalEvents(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.backfillHistoricalApprovalEvents(); err != nil {
+		t.Fatal(err)
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if got := countKind(events, "approval.requested"); got != 1 {
+		t.Fatalf("approval.requested count = %d, want 1", got)
+	}
+	pending := projectPendingInteraction(events)
+	if pending == nil || pending.ID != "call_edit" {
+		t.Fatalf("pending = %#v, want restored edit approval", pending)
+	}
+}
+
+func TestSessionCommandsUseProjectedContextAndClaudeSlashCommands(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local Project", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, workspace.Agent)
+	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentClaude, Kind: "control.context", Normalized: map[string]any{"total_tokens": 72000, "model_context_window": 100000}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "session.native",
+		Raw:         map[string]any{"slash_commands": []any{"/doctor", "compact", "memory", "doctor"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{
+		store:       st,
+		hub:         newEventHub(),
+		projections: newSessionProjectionCache(),
+		agents:      map[AgentKind]agentInfo{AgentClaude: {CurrentModel: "claude-test", CurrentEffort: "high"}},
+	}
+	app.rebuildSessionProjections()
+
+	commands, ok := app.listSessionCommands(session.ID)
+	if !ok {
+		t.Fatal("session commands not found")
+	}
+	if !hasCommand(commands, "compact") || !hasCommand(commands, "status") || !hasCommand(commands, "claude:doctor") || !hasCommand(commands, "claude:memory") {
+		t.Fatalf("commands missing expected entries: %#v", commands)
+	}
+	if hasCommand(commands, "claude:compact") {
+		t.Fatalf("duplicate compact command was added: %#v", commands)
+	}
+	compact := commandByID(commands, "compact")
+	if !strings.Contains(compact.Description, "72%") {
+		t.Fatalf("compact description = %q, want projected percent", compact.Description)
+	}
+}
+
+func TestCodexSessionCommandsIncludeGoal(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local Project", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, workspace.Agent)
+	app := &app{
+		store:       st,
+		hub:         newEventHub(),
+		projections: newSessionProjectionCache(),
+		agents:      map[AgentKind]agentInfo{AgentCodex: {CurrentModel: "gpt-test", CurrentEffort: "high"}},
+	}
+
+	commands, ok := app.listSessionCommands(session.ID)
+	if !ok {
+		t.Fatal("session commands not found")
+	}
+	for _, id := range []string{"compact", "status", "model", "reasoning", "plan-mode", "goal"} {
+		if !hasCommand(commands, id) {
+			t.Fatalf("commands missing %s: %#v", id, commands)
+		}
+	}
+}
+
 func TestListSessionsIncludesTitleFromFullEventHistory(t *testing.T) {
 	dir := t.TempDir()
 	st, err := loadStore(dir)
@@ -864,6 +1162,40 @@ func TestSessionViewProjectsAskQuestionFields(t *testing.T) {
 	}
 }
 
+func TestSessionViewProjectsClaudeEditPermissionFromResult(t *testing.T) {
+	pending := projectPendingInteraction([]AstralEvent{{
+		Seq:         1,
+		WorkspaceID: "ws_view",
+		SessionID:   "sess_view",
+		Agent:       AgentClaude,
+		Kind:        "approval.requested",
+		Normalized: map[string]any{
+			"source":      "claude",
+			"approval_id": "call_edit",
+			"request_id":  "call_edit",
+			"kind":        "permission",
+			"tool_name":   "Edit",
+			"path":        "/Users/oines/tmp/codex_edit_test.txt",
+			"params": map[string]any{
+				"file_path": "/Users/oines/tmp/codex_edit_test.txt",
+			},
+		},
+		Raw: map[string]any{"type": "result"},
+	}})
+	if pending == nil {
+		t.Fatal("pending interaction = nil")
+	}
+	if pending.Title != "允许编辑这个文件？" {
+		t.Fatalf("title = %q", pending.Title)
+	}
+	if len(pending.Actions) == 0 || pending.Actions[0].ID != "accept" {
+		t.Fatalf("actions = %#v, want accept action", pending.Actions)
+	}
+	if len(pending.DetailRows) == 0 {
+		t.Fatal("detail rows missing")
+	}
+}
+
 func TestLocalWorkspacePTYCloseTerminatesProcessGroup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("PTY process group test is POSIX-only")
@@ -1418,6 +1750,49 @@ func TestNormalizeClaudeRealLocalFixtures(t *testing.T) {
 	if stringValue(webSearchNormalized["kind"]) != "permission" || stringValue(webSearchNormalized["tool_name"]) != "WebSearch" {
 		t.Fatalf("web search approval normalized = %#v, want permission for WebSearch", webSearchNormalized)
 	}
+
+	editEvents := normalizeClaudeFixtureEvents(t, session, "../fixtures/claude-stream-json/real-local-edit-permission.jsonl")
+	editApprovals := []AstralEvent{}
+	for i := range editEvents {
+		if editEvents[i].Kind == "approval.requested" {
+			editApprovals = append(editApprovals, editEvents[i])
+		}
+	}
+	if len(editApprovals) != 1 {
+		t.Fatalf("real-local-edit-permission approvals = %#v, want one deduped approval", editApprovals)
+	}
+	editNormalized := mapValue(editApprovals[0].Normalized)
+	if stringValue(editNormalized["kind"]) != "permission" || stringValue(editNormalized["tool_name"]) != "Edit" {
+		t.Fatalf("edit approval normalized = %#v, want permission for Edit", editNormalized)
+	}
+	if stringValue(editNormalized["approval_id"]) != "call_07a62570f3f84c4f8ed7b954" {
+		t.Fatalf("edit approval id = %#v, want latest duplicate denial", editNormalized)
+	}
+	if stringValue(editNormalized["path"]) != "/Users/oines/tmp/codex_edit_test.txt" || len(mapValue(editNormalized["changes"])) == 0 {
+		t.Fatalf("edit approval details = %#v, want path and changes", editNormalized)
+	}
+
+	remoteEvents := normalizeClaudeFixtureEvents(t, session, "../fixtures/claude-stream-json/real-ssh-remote-file-tools.jsonl")
+	remoteStarted := map[string]map[string]any{}
+	var remoteEditCompleted map[string]any
+	for _, event := range remoteEvents {
+		value := mapValue(event.Normalized)
+		if event.Kind == "tool.started" {
+			remoteStarted[stringValue(value["name"])] = value
+		}
+		if event.Kind == "tool.completed" && stringValue(value["id"]) == "call_1d8c8deb905a440386c73fd3" {
+			remoteEditCompleted = value
+		}
+	}
+	if stringValue(remoteStarted["mcp__astralops_remote__read"]["category"]) != "read" {
+		t.Fatalf("remote read normalized = %#v, want read category", remoteStarted["mcp__astralops_remote__read"])
+	}
+	if stringValue(remoteStarted["mcp__astralops_remote__edit"]["category"]) != "file" {
+		t.Fatalf("remote edit normalized = %#v, want file category", remoteStarted["mcp__astralops_remote__edit"])
+	}
+	if structured := mapValue(mapValue(remoteEditCompleted["result"])["structuredContent"]); stringValue(structured["filePath"]) != "/root/subdir/test_c.txt" {
+		t.Fatalf("remote edit completed normalized = %#v, want structured file result", remoteEditCompleted)
+	}
 }
 
 func TestNormalizeCodexMessage(t *testing.T) {
@@ -1523,6 +1898,50 @@ func TestNormalizeCodexMessage(t *testing.T) {
 	mcpFailedValue := mcpFailedEvents[0].Normalized.(map[string]any)
 	if stringValue(mcpFailedValue["kind"]) != "mcp_server" || !strings.Contains(stringValue(mcpFailedValue["message"]), "codex_apps") {
 		t.Fatalf("mcp failed normalized = %#v, want mcp server warning details", mcpFailedValue)
+	}
+}
+
+func TestCodexTokenUsageContextUsesCurrentWindow(t *testing.T) {
+	session := Session{ID: "sess_codex", WorkspaceID: "ws_codex", Agent: AgentCodex}
+	events := normalizeCodexMessage(session, map[string]any{
+		"method": "thread/tokenUsage/updated",
+		"params": map[string]any{
+			"threadId": "thread_1",
+			"turnId":   "turn_1",
+			"tokenUsage": map[string]any{
+				"modelContextWindow": 258400,
+				"last": map[string]any{
+					"totalTokens":           30206,
+					"inputTokens":           30169,
+					"cachedInputTokens":     29568,
+					"outputTokens":          37,
+					"reasoningOutputTokens": 0,
+				},
+				"total": map[string]any{
+					"totalTokens":           117481,
+					"inputTokens":           117089,
+					"cachedInputTokens":     112128,
+					"outputTokens":          392,
+					"reasoningOutputTokens": 140,
+				},
+			},
+		},
+	})
+	if len(events) != 1 || events[0].Kind != "control.context" {
+		t.Fatalf("events = %#v, want one control.context", events)
+	}
+	value := mapValue(events[0].Normalized)
+	if got := numberValue(value["total_tokens"]); got != 30206 {
+		t.Fatalf("total_tokens = %v, want current last.totalTokens", got)
+	}
+	if got := numberValue(value["cumulative_total_tokens"]); got != 117481 {
+		t.Fatalf("cumulative_total_tokens = %v, want cumulative total.totalTokens", got)
+	}
+	if got := numberValue(value["model_context_window"]); got != 258400 {
+		t.Fatalf("model_context_window = %v, want 258400", got)
+	}
+	if got := numberValue(value["used_percent"]); got != 11 {
+		t.Fatalf("used_percent = %v, want current-window percent", got)
 	}
 }
 
@@ -1741,6 +2160,23 @@ func TestAskResponseEmitsAskResolved(t *testing.T) {
 	events := st.queryEvents("ws_ask", "sess_ask", 0)
 	if !containsEventKind(events, "ask.resolved") {
 		t.Fatalf("events = %#v, want attributed ask.resolved", events)
+	}
+}
+
+func TestClaudeEditPermissionApprovalAllowsEditForFollowup(t *testing.T) {
+	origin := AstralEvent{
+		Agent: AgentClaude,
+		Kind:  "approval.requested",
+		Normalized: map[string]any{
+			"source":    "claude",
+			"kind":      "permission",
+			"tool_name": "Edit",
+			"params":    map[string]any{"file_path": "/tmp/file.txt"},
+		},
+	}
+	tools := claudeAllowedToolsForInteraction(origin, map[string]any{"decision": "accept"}, Workspace{Target: "local"})
+	if !reflect.DeepEqual(tools, []string{"Edit"}) {
+		t.Fatalf("allowed tools = %#v, want Edit", tools)
 	}
 }
 
@@ -3694,6 +4130,36 @@ func TestCodexLocalRuntimeStreamsFakeAppServer(t *testing.T) {
 	assertCodexConfigUnchanged(t, beforeConfig)
 }
 
+func TestCodexLocalRuntimeCleansUpAfterInitializeFailure(t *testing.T) {
+	app, session, workspace := newTestCodexApp(t, fakeCodexInitializeErrorScript(t))
+
+	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "startup fails", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.failed")
+
+	runtime := app.runtimes[AgentCodex].(*codexLocalRuntime)
+	runtime.mu.Lock()
+	client := runtime.clients[session.ID]
+	runtime.mu.Unlock()
+	if client == nil {
+		t.Fatal("codex client was not created")
+	}
+	client.mu.Lock()
+	running := client.running
+	initialized := client.initialized
+	stdinOpen := client.stdin != nil
+	pending := len(client.pending)
+	client.mu.Unlock()
+	if running || initialized || stdinOpen || pending != 0 {
+		t.Fatalf("client not cleaned up after initialize failure: running=%v initialized=%v stdinOpen=%v pending=%d", running, initialized, stdinOpen, pending)
+	}
+	updated, ok := app.store.getSession(session.ID)
+	if !ok || updated.Status != "failed" {
+		t.Fatalf("session status = %#v, want failed", updated)
+	}
+}
+
 func TestCodexLocalRuntimeResumesPersistedThreadAfterReload(t *testing.T) {
 	codexPath := fakeCodexScript(t)
 	firstApp, session, workspace := newTestCodexApp(t, codexPath)
@@ -4632,6 +5098,27 @@ rl.on("line", (line) => {
 	return path
 }
 
+func fakeCodexInitializeErrorScript(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "codex")
+	body := `#!/usr/bin/env node
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function write(payload) { process.stdout.write(JSON.stringify(payload) + "\n"); }
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    write({ id: msg.id, error: { code: -32000, message: "initialize refused" } });
+    setInterval(() => {}, 1000);
+  }
+});
+`
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func waitForKind(t *testing.T, st *store, sessionID, kind string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -4775,6 +5262,29 @@ func eventKinds(events []AstralEvent) []string {
 		kinds = append(kinds, event.Kind)
 	}
 	return kinds
+}
+
+func countKind(events []AstralEvent, kind string) int {
+	count := 0
+	for _, event := range events {
+		if event.Kind == kind {
+			count++
+		}
+	}
+	return count
+}
+
+func hasCommand(commands []SessionCommand, id string) bool {
+	return commandByID(commands, id).ID != ""
+}
+
+func commandByID(commands []SessionCommand, id string) SessionCommand {
+	for _, command := range commands {
+		if command.ID == id {
+			return command
+		}
+	}
+	return SessionCommand{}
 }
 
 func eventSeqs(events []AstralEvent) []int64 {

@@ -44,6 +44,7 @@ export function Sidebar({
   const [confirmDelete, setConfirmDelete] = useState<{ type: "workspace" | "session"; id: string } | null>(null);
   const [collapsedWorkspaceIds, setCollapsedWorkspaceIds] = useState<Set<string>>(new Set());
   const [dragging, setDragging] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     if (!menuWorkspaceId) return;
@@ -81,6 +82,11 @@ export function Sidebar({
       window.removeEventListener("mouseup", stop);
     };
   }, [dragging, onResize]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   function sessionsFor(workspaceId: string): Session[] {
     return sessions.filter((session) => session.workspace_id === workspaceId);
@@ -141,6 +147,7 @@ export function Sidebar({
               sessions={sessionsFor(workspace.id)}
               sessionStates={sessionStates}
               sessionTitles={sessionTitles}
+              now={now}
               workspace={workspace}
               workspaceConnection={workspaceConnections[workspace.id]}
               onCreateSession={async (agent) => {
@@ -210,6 +217,7 @@ type WorkspaceBlockProps = {
   sessions: Session[];
   sessionStates: Record<string, string>;
   sessionTitles: Record<string, string>;
+  now: number;
   workspace: Workspace;
   workspaceConnection?: WorkspaceConnection;
   onCreateSession: (agent: AgentKind) => Promise<void>;
@@ -238,6 +246,7 @@ function WorkspaceBlock({
   sessions,
   sessionStates,
   sessionTitles,
+  now,
   workspace,
   workspaceConnection,
 }: WorkspaceBlockProps): React.JSX.Element {
@@ -270,6 +279,7 @@ function WorkspaceBlock({
               active={session.id === activeSessionId}
               confirmDelete={confirmDelete?.type === "session" && confirmDelete.id === session.id}
               key={session.id}
+              now={now}
               session={session}
               status={sessionStates[session.id] ?? session.status}
               title={sessionTitles[session.id] || agentLabel(session.agent)}
@@ -421,6 +431,7 @@ function SessionRow({
   confirmDelete,
   onClick,
   onDelete,
+  now,
   session,
   status,
   title,
@@ -429,11 +440,13 @@ function SessionRow({
   confirmDelete: boolean;
   onClick: () => void;
   onDelete: () => void;
+  now: number;
   session: Session;
   status: string;
   title: string;
 }): React.JSX.Element {
   const running = status === "running";
+  const timeLabel = relativeSessionTime(session.updated_at || session.created_at, now);
   function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>): void {
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
@@ -441,7 +454,7 @@ function SessionRow({
   }
   return (
     <div
-      className={`group relative grid h-8 cursor-default grid-cols-[minmax(0,1fr)_42px] items-center gap-1 rounded-[9px] pl-2.5 pr-2 transition-all duration-150 ease-out ${
+      className={`group relative grid h-8 cursor-default grid-cols-[minmax(0,1fr)_50px] items-center gap-1 rounded-[9px] pl-2.5 pr-2 transition-all duration-150 ease-out ${
         active ? "bg-black/[0.06] text-[#202124]" : "text-[#5f6368] hover:bg-black/[0.035] hover:text-[#202124]"
       }`}
       role="button"
@@ -459,8 +472,8 @@ function SessionRow({
       </span>
       <div className="relative flex h-7 min-w-0 items-center justify-end">
         {confirmDelete ? null : (
-          <span className="truncate text-[11px] font-medium text-[#c4c6cb] transition-opacity duration-150 ease-out group-hover:opacity-0">
-            {shortAgentLabel(session.agent)}
+          <span className="truncate text-[11px] font-medium text-[#aeb1b7] transition-opacity duration-150 ease-out group-hover:opacity-0" title={session.updated_at || session.created_at}>
+            {timeLabel}
           </span>
         )}
         <button
@@ -490,8 +503,18 @@ function agentLabel(agent: AgentKind): string {
   return agent === "claude" ? "Claude Code" : "Codex";
 }
 
-function shortAgentLabel(agent: AgentKind): string {
-  return agent === "claude" ? "Claude" : "Codex";
+function relativeSessionTime(timestamp: string | undefined, now: number): string {
+  if (!timestamp) return "";
+  const time = Date.parse(timestamp);
+  if (!Number.isFinite(time)) return "";
+  const diff = Math.max(0, now - time);
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diff < minute) return "刚刚";
+  if (diff < hour) return `${Math.max(1, Math.floor(diff / minute))}分钟`;
+  if (diff < day) return `${Math.max(1, Math.floor(diff / hour))}小时`;
+  return `${Math.max(1, Math.floor(diff / day))}天`;
 }
 
 function workspaceConnectionLabel(connection?: WorkspaceConnection): string {

@@ -4,6 +4,8 @@ import type {
   FileListResponse,
   HealthResponse,
   Session,
+  SessionCommandListResponse,
+  SessionCommandResponse,
   SessionView,
   WorkspaceCommandResponse,
   WorkspaceConnection,
@@ -75,6 +77,18 @@ export class AstralApi {
 
   async sessionView(sessionId: string): Promise<SessionView> {
     return this.get(`/v1/sessions/${sessionId}/view`);
+  }
+
+  async sessionCommands(sessionId: string): Promise<SessionCommandListResponse> {
+    return this.get(`/v1/sessions/${sessionId}/commands`);
+  }
+
+  async runSessionCommand(
+    sessionId: string,
+    commandId: string,
+    args: Record<string, unknown> = {},
+  ): Promise<SessionCommandResponse> {
+    return this.post(`/v1/sessions/${sessionId}/commands/${encodeURIComponent(commandId)}`, { args });
   }
 
   async deleteSession(sessionId: string): Promise<{ ok: boolean }> {

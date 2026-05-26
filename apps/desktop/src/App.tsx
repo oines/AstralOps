@@ -12,14 +12,13 @@ import {
   mergeEventIndex,
   removeSessionEvents,
   removeWorkspaceEvents,
-  selectSessionEvents,
   selectWorkspaceEvents,
-  setWindowLoading,
   updateWindowAfterLatest,
-  updateWindowAfterOlder,
   type EventIndex,
-  type SessionWindows,
 } from "./eventStore";
+import { useContextUsage } from "./hooks/useContextUsage";
+import { useSessionCommands } from "./hooks/useSessionCommands";
+import { useSessionEventWindow } from "./hooks/useSessionEventWindow";
 import type {
   AgentKind,
   AstralEvent,
@@ -36,6 +35,15 @@ import type {
 
 const EVENT_WINDOW_SIZE = 1000;
 
+function sortSessionsByUpdated(sessions: Session[]): Session[] {
+  return [...sessions].sort((a, b) => sessionTimestamp(b) - sessionTimestamp(a));
+}
+
+function sessionTimestamp(session: Session): number {
+  const timestamp = Date.parse(session.updated_at || session.created_at);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
 export function App(): React.JSX.Element {
   const [connection, setConnection] = useState<ConnectionState>("booting");
   const [api, setApi] = useState<AstralApi | null>(null);
@@ -48,7 +56,6 @@ export function App(): React.JSX.Element {
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [pendingOpenSessionId, setPendingOpenSessionId] = useState("");
   const [eventIndex, setEventIndex] = useState<EventIndex>(EMPTY_EVENT_INDEX);
-  const [sessionWindows, setSessionWindows] = useState<SessionWindows>({});
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [error, setError] = useState<string>("");
   const [modelOverride, setModelOverride] = useState("");
@@ -110,11 +117,21 @@ export function App(): React.JSX.Element {
   );
   const claudeSSHRemote = activeWorkspace?.target === "ssh" && activeAgent === "claude";
   const workspaceInteractive = activeWorkspace?.target !== "ssh" || activeWorkspaceConnection?.status === "connected";
-  const activeSessionEvents = useMemo(
-    () => (activeSessionId ? selectSessionEvents(eventIndex, activeSessionId) : []),
-    [activeSessionId, eventIndex],
-  );
   const activeSessionView = activeSessionId ? sessionViews[activeSessionId] : undefined;
+  const {
+    activeSessionEvents,
+    activeSessionWindow,
+    setSessionWindows,
+    visibleEvents,
+    loadOlderEvents,
+  } = useSessionEventWindow({
+    api,
+    activeSessionId,
+    activeWorkspaceId,
+    eventIndex,
+    mergeEvents,
+    setError,
+  });
   const sessionRunning = activeSessionView?.status === "running";
   const queuedInputs = useMemo<QueuedComposerInput[]>(
     () => (activeSessionView?.queued_inputs ?? []).map((item) => ({ id: item.id, sessionId: item.session_id, text: item.text })),
@@ -138,12 +155,29 @@ export function App(): React.JSX.Element {
   const currentEffort = activeAgentInfo?.current_effort;
   const selectedModel = modelOverride.trim() || undefined;
   const selectedReasoningEffort = reasoningEffort || undefined;
+  const contextUsage = useContextUsage(activeSessionEvents, modelOptions, modelOverride, modelSlotOverride, currentModel);
 
   const storeSessionView = useCallback((view: SessionView) => {
     setSessionViews((current) => ({ ...current, [view.session.id]: view }));
-    setSessions((current) => current.map((session) => (session.id === view.session.id ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session)));
+    setSessions((current) => sortSessionsByUpdated(current.map((session) => (session.id === view.session.id ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session))));
     setActiveSession((current) => (current?.id === view.session.id ? { ...current, ...view.session, title: view.title || view.session.title, status: view.status } : current));
   }, []);
+
+  const {
+    activeCommands,
+    activeCommandsLoaded,
+    activeCommandError,
+    executeCommand: handleExecuteCommand,
+    refreshCommands: handleRefreshCommands,
+  } = useSessionCommands({
+    api,
+    activeSession,
+    activeWorkspace,
+    workspaceInteractive,
+    sessionStatus: activeSessionView?.status,
+    setError,
+    storeSessionView,
+  });
 
   const loadInitialState = useCallback(async (client: AstralApi) => {
     const [healthResponse, workspaceResponse, sessionResponse, recentEvents] = await Promise.all([
@@ -172,10 +206,10 @@ export function App(): React.JSX.Element {
     setHealth(healthResponse);
     setWorkspaces(workspaceResponse);
     setWorkspaceConnections(connectionMap);
-    setSessions(sessionResponse.map((session) => {
+    setSessions(sortSessionsByUpdated(sessionResponse.map((session) => {
       const view = viewMap[session.id];
       return view ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session;
-    }));
+    })));
     setSessionViews(viewMap);
     setEventIndex(mergeEventIndex(EMPTY_EVENT_INDEX, eventResponse));
     if (initialSession) {
@@ -246,29 +280,6 @@ export function App(): React.JSX.Element {
       setModelSlotOverride("");
     }
   }, [modelOptions, modelOverride, modelSlotOverride]);
-
-  const latestWindowLoadsRef = useRef(new Set<string>());
-  const loadLatestSessionEvents = useCallback(
-    async (sessionId: string) => {
-      if (!api || latestWindowLoadsRef.current.has(sessionId)) return;
-      latestWindowLoadsRef.current.add(sessionId);
-      try {
-        const sessionEvents = await api.events({ session_id: sessionId, limit: EVENT_WINDOW_SIZE });
-        mergeEvents(sessionEvents);
-        setSessionWindows((current) => updateWindowAfterLatest(current, sessionId, sessionEvents, EVENT_WINDOW_SIZE));
-      } catch (loadError) {
-        setError(loadError instanceof Error ? loadError.message : String(loadError));
-      } finally {
-        latestWindowLoadsRef.current.delete(sessionId);
-      }
-    },
-    [api, mergeEvents],
-  );
-
-  useEffect(() => {
-    if (!activeSessionId || !api || sessionWindows[activeSessionId]) return;
-    void loadLatestSessionEvents(activeSessionId);
-  }, [activeSessionId, api, loadLatestSessionEvents, sessionWindows]);
 
   useEffect(() => {
     if (activeWorkspaceId && !workspaces.some((workspace) => workspace.id === activeWorkspaceId)) {
@@ -497,25 +508,6 @@ export function App(): React.JSX.Element {
     [activeSessionId, api, storeSessionView, workspaceInteractive],
   );
 
-  const handleLoadOlderEvents = useCallback(async () => {
-    if (!api || !activeSessionId) return;
-    const sessionWindow = sessionWindows[activeSessionId];
-    if (!sessionWindow?.hasOlder || sessionWindow.loadingOlder || !sessionWindow.oldestSeq) return;
-    setSessionWindows((current) => setWindowLoading(current, activeSessionId, true));
-    try {
-      const olderEvents = await api.events({
-        session_id: activeSessionId,
-        before_seq: sessionWindow.oldestSeq,
-        limit: EVENT_WINDOW_SIZE,
-      });
-      mergeEvents(olderEvents);
-      setSessionWindows((current) => updateWindowAfterOlder(current, activeSessionId, olderEvents, EVENT_WINDOW_SIZE));
-    } catch (loadError) {
-      setSessionWindows((current) => setWindowLoading(current, activeSessionId, false));
-      setError(loadError instanceof Error ? loadError.message : String(loadError));
-    }
-  }, [activeSessionId, api, mergeEvents, sessionWindows]);
-
   useEffect(() => {
     return window.astral.onOpenSession((sessionId) => {
       setPendingOpenSessionId(sessionId);
@@ -532,11 +524,6 @@ export function App(): React.JSX.Element {
     setPendingOpenSessionId("");
   }, [pendingOpenSessionId, sessions]);
 
-  const visibleEvents = useMemo(() => {
-    if (activeSessionId) return activeSessionEvents;
-    if (!activeWorkspaceId) return [];
-    return selectWorkspaceEvents(eventIndex, activeWorkspaceId);
-  }, [activeSessionEvents, activeSessionId, activeWorkspaceId, eventIndex]);
   const pendingInteraction = activeSessionView?.pending_interaction ?? null;
   const sessionState = activeSession ? activeSessionView?.status ?? activeSession.status ?? "idle" : "idle";
   const sessionTitles = useMemo(
@@ -547,8 +534,6 @@ export function App(): React.JSX.Element {
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.status || session.status || "idle"])),
     [sessionViews, sessions],
   );
-  const activeSessionWindow = activeSessionId ? sessionWindows[activeSessionId] : undefined;
-
   return (
     <div className="relative flex h-screen min-h-0 select-none overflow-hidden bg-transparent text-[#1d1d1f]">
 
@@ -583,6 +568,7 @@ export function App(): React.JSX.Element {
           sessionAgent={activeSession?.agent}
           sessionState={sessionState}
           sessionTitle={activeSession ? sessionTitles[activeSession.id] : undefined}
+          contextUsage={contextUsage}
         />
         <Transcript
           activeSession={activeSession}
@@ -591,9 +577,12 @@ export function App(): React.JSX.Element {
           events={visibleEvents}
           hasOlder={activeSessionWindow?.hasOlder ?? false}
           loadingOlder={activeSessionWindow?.loadingOlder ?? false}
-          onLoadOlder={() => void handleLoadOlderEvents()}
+          onLoadOlder={() => void loadOlderEvents()}
         />
         <Composer
+          commands={activeCommands}
+          commandsLoaded={activeCommandsLoaded}
+          commandLoadError={activeCommandError}
           currentModel={currentModel}
           currentEffort={currentEffort}
           disabled={!canUseDaemon || !activeWorkspace || !activeSession || !workspaceInteractive}
@@ -609,6 +598,8 @@ export function App(): React.JSX.Element {
           runMode={runMode}
           running={workspaceInteractive ? sessionRunning : false}
           onChooseAttachments={handleChooseFiles}
+          onExecuteCommand={handleExecuteCommand}
+          onRefreshCommands={handleRefreshCommands}
           onModelOverrideChange={setModelOverride}
           onModelSlotOverrideChange={setModelSlotOverride}
           onEffortOverrideChange={setReasoningEffort}

@@ -90,7 +90,7 @@ func projectPendingInteraction(events []AstralEvent) *pendingInteractionView {
 			continue
 		}
 		value := mapValue(event.Normalized)
-		if isAskPermissionEchoEvent(event.Kind, value) || isNonInteractiveClaudeResultPermissionApprovalEvent(event) {
+		if isAskPermissionEchoEvent(event.Kind, value) {
 			continue
 		}
 		ids := interactionIDsFromNormalized(value)
@@ -159,6 +159,9 @@ func interactionTitle(kind string, value map[string]any, params map[string]any) 
 	case "permissions":
 		return "允许这次权限请求？"
 	case "permission":
+		if toolName == "Edit" {
+			return "允许编辑这个文件？"
+		}
 		if toolName != "" {
 			return "允许 " + toolName + " 执行？"
 		}
@@ -476,17 +479,6 @@ func anyResolved(ids []string, resolved map[string]bool) bool {
 
 func isAskPermissionEchoEvent(kind string, value map[string]any) bool {
 	return kind == "approval.requested" && stringValue(value["kind"]) == "permission" && stringValue(value["tool_name"]) == "AskUserQuestion"
-}
-
-func isNonInteractiveClaudeResultPermissionApprovalEvent(event AstralEvent) bool {
-	if event.Kind != "approval.requested" {
-		return false
-	}
-	value := mapValue(event.Normalized)
-	if stringValue(value["source"]) != "claude" || stringValue(value["kind"]) != "permission" {
-		return false
-	}
-	return stringValue(mapValue(event.Raw)["type"]) == "result"
 }
 
 func firstStringFromSlice(values []string) string {

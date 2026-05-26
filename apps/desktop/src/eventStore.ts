@@ -27,6 +27,7 @@ export function mergeEventIndex(current: EventIndex, incoming: AstralEvent[]): E
   const bySeq = new Map(current.bySeq);
   const allSeqs = [...current.allSeqs];
   const sessionSeqs: Record<string, number[]> = { ...current.sessionSeqs };
+  const touchedSessionSeqs = new Set<string>();
 
   for (const event of incoming) {
     if (bySeq.has(event.seq)) continue;
@@ -34,9 +35,17 @@ export function mergeEventIndex(current: EventIndex, incoming: AstralEvent[]): E
     bySeq.set(event.seq, event);
     insertSorted(allSeqs, event.seq);
     if (event.session_id) {
-      const seqs = sessionSeqs[event.session_id] ? [...sessionSeqs[event.session_id]] : [];
+      let seqs = sessionSeqs[event.session_id];
+      if (!touchedSessionSeqs.has(event.session_id)) {
+        seqs = seqs ? [...seqs] : [];
+        sessionSeqs[event.session_id] = seqs;
+        touchedSessionSeqs.add(event.session_id);
+      }
+      if (!seqs) {
+        seqs = [];
+        sessionSeqs[event.session_id] = seqs;
+      }
       insertSorted(seqs, event.seq);
-      sessionSeqs[event.session_id] = seqs;
     }
   }
 

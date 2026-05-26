@@ -23,6 +23,7 @@ func (a *app) emit(ev AstralEvent) {
 		log.Printf("append event: %v", err)
 		return
 	}
+	a.sessionProjections().apply(saved)
 	a.hub.broadcast(saved)
 	notificationTitle, targetSessionID := a.notificationTarget(saved)
 	if notification, ok := notificationEventForSource(saved, notificationTitle, targetSessionID, a.store.allEvents()); ok {
@@ -31,6 +32,7 @@ func (a *app) emit(ev AstralEvent) {
 			log.Printf("append notification event: %v", err)
 			return
 		}
+		a.sessionProjections().apply(savedNotification)
 		a.hub.broadcast(savedNotification)
 	}
 }

@@ -16,6 +16,7 @@ import {
   FileCode2,
   FileText,
   HelpCircle,
+  Archive,
   ListChecks,
   Pencil,
   Search,
@@ -27,15 +28,17 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { AstralEvent, Session, Workspace } from "../types";
 import {
-  buildCommandItems,
-  collectCommandEvents,
+  buildOperationGroups,
   compactStreamingEvents,
   detailPayload,
   diffSummary,
   displayKey,
+  fileReadFromEvent,
   firstText,
+  groupMemoryCompactions,
   groupTranscriptEvents,
   hookEventName,
+  isAssistantContentEvent,
   isHookEvent,
   isScalar,
   isTodoToolEvent,
@@ -55,9 +58,11 @@ import {
   todoStatusLabel,
   toolName,
   transcriptPlanText,
-  type CommandItem,
   type TurnGroup,
+  type MemoryCompactGroup,
+  visibleCollapsedAssistantSeqs,
 } from "../transcriptModel";
+import { OperationGroup } from "./transcript/OperationGroup";
 
 type TranscriptProps = {
   activeSession: Session | null;
@@ -69,7 +74,7 @@ type TranscriptProps = {
   onLoadOlder?: () => void;
 };
 
-type TranscriptItem = { type: "loader"; id: string } | { type: "turn"; group: TurnGroup; id: string };
+type TranscriptItem = { type: "loader"; id: string } | { type: "turn"; group: TurnGroup; id: string } | { type: "compact"; group: MemoryCompactGroup; id: string };
 
 export function Transcript({
   activeSession,
@@ -82,9 +87,16 @@ export function Transcript({
 }: TranscriptProps): React.JSX.Element {
   const renderedEvents = useMemo(() => compactStreamingEvents(events.filter(shouldRenderEvent)), [events]);
   const groups = useMemo(() => groupTranscriptEvents(renderedEvents), [renderedEvents]);
+  const compactGroups = useMemo(() => groupMemoryCompactions(renderedEvents), [renderedEvents]);
   const items = useMemo<TranscriptItem[]>(
-    () => [...(hasOlder ? [{ type: "loader" as const, id: "loader" }] : []), ...groups.map((group) => ({ type: "turn" as const, id: group.id, group }))],
-    [groups, hasOlder],
+    () => [
+      ...(hasOlder ? [{ type: "loader" as const, id: "loader" }] : []),
+      ...[
+        ...groups.map((group) => ({ type: "turn" as const, id: group.id, group })),
+        ...compactGroups.map((group) => ({ type: "compact" as const, id: group.id, group })),
+      ].sort((a, b) => transcriptItemSeq(a) - transcriptItemSeq(b)),
+    ],
+    [compactGroups, groups, hasOlder],
   );
   const scrollRef = useRef<HTMLElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -159,6 +171,8 @@ export function Transcript({
                       <LoadOlderRow loading={loadingOlder} onLoadOlder={onLoadOlder} />
                     ) : item?.type === "turn" ? (
                       <TurnBlock group={item.group} />
+                    ) : item?.type === "compact" ? (
+                      <MemoryCompactRow group={item.group} />
                     ) : null}
                   </div>
                 );
@@ -181,6 +195,12 @@ export function Transcript({
       ) : null}
     </div>
   );
+}
+
+function transcriptItemSeq(item: TranscriptItem): number {
+  if (item.type === "loader") return -1;
+  if (item.type === "compact") return item.group.start?.seq ?? item.group.end?.seq ?? Number.MAX_SAFE_INTEGER;
+  return item.group.user?.seq ?? item.group.start?.seq ?? item.group.timeline[0]?.seq ?? item.group.end?.seq ?? Number.MAX_SAFE_INTEGER;
 }
 
 function EmptyState({
@@ -218,6 +238,23 @@ function LoadOlderRow({ loading, onLoadOlder }: { loading: boolean; onLoadOlder?
   );
 }
 
+function MemoryCompactRow({ group }: { group: MemoryCompactGroup }): React.JSX.Element {
+  const completed = group.status === "completed";
+  const event = group.end ?? group.start;
+  const text = completed ? "上下文已自动压缩" : "正在压缩上下文";
+  return (
+    <div className="my-7 flex min-w-0 items-center gap-4 text-[#73777c]">
+      <div className="h-px min-w-0 flex-1 bg-black/10" />
+      <div className="flex shrink-0 items-center gap-2 text-[15px] font-semibold leading-6">
+        <Archive size={16} strokeWidth={1.8} />
+        <span>{text}</span>
+        {event?.ts ? <span className="text-[13px] font-medium text-[#a0a3a7]">{formatTime(event.ts)}</span> : null}
+      </div>
+      <div className="h-px min-w-0 flex-1 bg-black/10" />
+    </div>
+  );
+}
+
 const TurnBlock = React.memo(function TurnBlock({
   group,
 }: {
@@ -227,36 +264,38 @@ const TurnBlock = React.memo(function TurnBlock({
   const isDone = group.status !== "running";
   const detailSummary = summarizeDetails(group.details);
   const endTime = group.end?.ts ?? group.start?.ts ?? "";
-  const commandEvents = collectCommandEvents(group.details);
-  const commandSeqs = new Set(commandEvents.map((event) => event.seq));
+  const collapsedAssistantSeqs = !expanded && isDone ? visibleCollapsedAssistantSeqs(group.timeline) : null;
+  const operationGroups = expanded ? buildOperationGroups(group.timeline) : [];
 
   useEffect(() => {
     setExpanded(group.status === "running");
   }, [group.status]);
 
   const timeline: React.ReactNode[] = [];
+  let operationIndex = 0;
+  let hasPendingOperations = false;
+  function flushOperations(): void {
+    if (!expanded || !hasPendingOperations) return;
+    const operation = operationGroups[operationIndex];
+    operationIndex += 1;
+    hasPendingOperations = false;
+    if (operation) {
+      timeline.push(<OperationGroup group={operation} key={operation.id} renderDetail={(event) => <DetailEvent event={event} />} turnStatus={group.status} />);
+    }
+  }
+
   for (let index = 0; index < group.timeline.length; index += 1) {
     const event = group.timeline[index];
-    if (commandSeqs.has(event.seq)) {
-      if (expanded) {
-        const run: AstralEvent[] = [];
-        while (index < group.timeline.length && commandSeqs.has(group.timeline[index].seq)) {
-          run.push(group.timeline[index]);
-          index += 1;
-        }
-        index -= 1;
-        timeline.push(<CommandGroup events={run} key={`commands-${run[0]?.seq ?? event.seq}`} turnStatus={group.status} />);
+    if (isAssistantContentEvent(event)) {
+      flushOperations();
+      if (!collapsedAssistantSeqs || collapsedAssistantSeqs.has(event.seq)) {
+        timeline.push(isTranscriptPlanEvent(event) ? <TranscriptPlanBubble event={event} key={event.seq} /> : <AssistantEvent event={event} key={event.seq} />);
       }
       continue;
     }
-    if (event.kind === "message.delta" || event.kind === "message.assistant" || isTranscriptPlanEvent(event)) {
-      timeline.push(isTranscriptPlanEvent(event) ? <TranscriptPlanBubble event={event} key={event.seq} /> : <AssistantEvent event={event} key={event.seq} />);
-      continue;
-    }
-    if (expanded) {
-      timeline.push(<DetailEvent event={event} key={event.seq} />);
-    }
+    hasPendingOperations = true;
   }
+  flushOperations();
 
   return (
     <motion.article animate={{ opacity: 1, y: 0 }} className="mb-6 min-w-0" initial={{ opacity: 0, y: 4 }} transition={{ duration: 0.14 }}>
@@ -334,6 +373,9 @@ function DetailEvent({
 
   if (event.kind === "tool.todo" || isTodoToolEvent(event)) return <TodoBlock event={event} />;
 
+  const fileRead = fileReadFromEvent(event);
+  if (fileRead) return <FileReadBlock file={fileRead} />;
+
   if (event.kind === "tool.diff") {
     return (
       <FoldableDetail
@@ -369,64 +411,26 @@ function DetailEvent({
   return null;
 }
 
-function CommandGroup({ events, turnStatus }: { events: AstralEvent[]; turnStatus: TurnGroup["status"] }): React.JSX.Element | null {
-  const [open, setOpen] = useState(turnStatus === "running");
-  const items = useMemo(() => buildCommandItems(events), [events]);
-  const anyRunning = items.some((item) => item.status === "running");
-
-  useEffect(() => {
-    setOpen(turnStatus === "running");
-  }, [turnStatus]);
-
-  if (items.length === 0) return null;
-
+function FileReadBlock({ file }: { file: NonNullable<ReturnType<typeof fileReadFromEvent>> }): React.JSX.Element {
+  const lines = file.content.split("\n");
+  const lineNumberWidth = Math.max(2, String(file.startLine + Math.max(0, lines.length - 1)).length);
   return (
-    <div className="min-w-0">
-      <button
-        className="flex min-w-0 items-center gap-2 text-left text-[13px] font-medium leading-6 text-[#a0a3a7] transition-colors duration-150 ease-out hover:text-[#777b80]"
-        type="button"
-        onClick={() => setOpen((current) => !current)}
-      >
-        <TerminalSquare className="shrink-0" size={15} strokeWidth={1.8} />
-        <span>{anyRunning ? "正在运行" : "已运行"} {items.length} 条命令</span>
-        <ChevronRight className={`shrink-0 transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`} size={15} strokeWidth={2} />
-      </button>
-      {open ? (
-        <div className="mt-1.5 grid min-w-0 gap-1">
-          {items.map((item) => (
-            <CommandRow item={item} key={item.key} />
-          ))}
+    <FoldableDetail defaultOpen={false} icon={<FileText size={16} strokeWidth={1.8} />} title="已读取文件" summary={file.path}>
+      <div className="overflow-hidden rounded-[12px] border border-black/5 bg-black/[0.035]">
+        <div className="truncate border-b border-black/5 px-3 py-2 font-mono text-[13px] text-[#6f7378]">{file.name}</div>
+        <div className="max-h-72 min-w-0 overflow-auto py-2 font-mono text-[12px] leading-5 text-[#5f6368]">
+          {lines.map((line, index) => {
+            const lineNumber = String(file.startLine + index).padStart(lineNumberWidth, " ");
+            return (
+              <div className="grid min-w-max grid-cols-[auto_minmax(0,1fr)] gap-3 px-3" key={`${index}-${line}`}>
+                <span className="select-none text-right text-[#b0b2b6]">{lineNumber}</span>
+                <span className="whitespace-pre">{line || " "}</span>
+              </div>
+            );
+          })}
         </div>
-      ) : null}
-    </div>
-  );
-}
-
-function CommandRow({ item }: { item: CommandItem }): React.JSX.Element {
-  const [open, setOpen] = useState(false);
-  const hasOutput = item.output.trim() !== "";
-  const outputPreview = item.output.length > 12000 ? item.output.slice(-12000) : item.output;
-  const outputClipped = outputPreview.length !== item.output.length;
-  return (
-    <div className="grid min-w-0 gap-2">
-      <button
-        className="flex min-w-0 items-center gap-2 text-left text-[13px] font-medium leading-6 text-[#6f7378] transition-colors duration-150 ease-out hover:text-[#343438]"
-        type="button"
-        onClick={() => hasOutput && setOpen((current) => !current)}
-      >
-        <span className="shrink-0">{item.status === "running" ? "正在运行" : "已运行"}</span>
-        <span className="min-w-0 truncate font-mono text-[13px]">{item.command}</span>
-        {hasOutput ? <ChevronRight className={`ml-auto shrink-0 transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`} size={15} strokeWidth={2} /> : null}
-      </button>
-      {open && hasOutput ? (
-        <div className="min-w-0 rounded-[12px] bg-black/5 px-3 py-2 text-[#5f6368]">
-          <div className="mb-1.5 text-[13px] font-medium">Shell</div>
-          {outputClipped ? <div className="mb-2 text-[12px] font-semibold text-[#a0a3a7]">已显示最新 12000 个字符</div> : null}
-          <pre className="max-h-72 min-w-0 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 [overflow-wrap:anywhere]">{outputPreview}</pre>
-          {item.status === "completed" ? <div className="mt-2 text-right text-[13px] font-semibold text-[#8a8d91]">成功</div> : null}
-        </div>
-      ) : null}
-    </div>
+      </div>
+    </FoldableDetail>
   );
 }
 

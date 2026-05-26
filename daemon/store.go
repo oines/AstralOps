@@ -141,7 +141,22 @@ func (s *store) hydrateSessionsFromEvents() {
 		case "session.deleted":
 			delete(s.sessions, ev.SessionID)
 		}
+		if ev.Kind != "session.deleted" {
+			s.touchSessionForEvent(ev)
+		}
 	}
+}
+
+func (s *store) touchSessionForEvent(ev AstralEvent) {
+	if ev.SessionID == "" || ev.TS == "" {
+		return
+	}
+	ss, ok := s.sessions[ev.SessionID]
+	if !ok {
+		return
+	}
+	ss.UpdatedAt = ev.TS
+	s.sessions[ev.SessionID] = ss
 }
 
 func (s *store) listWorkspaces() []Workspace {
@@ -486,6 +501,7 @@ func (s *store) appendEvent(ev AstralEvent) (AstralEvent, error) {
 	ev.Seq = s.nextSeq
 	ev.TS = time.Now().UTC().Format(time.RFC3339Nano)
 	s.events = append(s.events, ev)
+	s.touchSessionForEvent(ev)
 	s.mu.Unlock()
 
 	path := filepath.Join(s.dataDir, "events", ev.SessionID+".jsonl")

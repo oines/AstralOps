@@ -268,7 +268,7 @@ func claudeAllowedToolsForInteraction(origin AstralEvent, response map[string]an
 	}
 	toolName := firstString(value["tool_name"], "Bash")
 	if toolName != "Bash" {
-		if toolName == "WebSearch" {
+		if toolName == "WebSearch" || toolName == "Edit" {
 			return []string{toolName}
 		}
 		return nil

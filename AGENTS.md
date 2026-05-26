@@ -79,6 +79,7 @@ Every behavior mapping, permission response, state transition, and UI surface mu
 If a real issue points to an architectural mismatch, stop and identify the architectural fix or refactor boundary for user confirmation instead of layering another patch on top of the mismatch.
 Prefer deleting or narrowing unsupported branches over preserving "just in case" behavior.
 Temporary compatibility code is allowed only when tied to a specific observed version/shape and documented with the fixture or source evidence that requires it.
+When implementing a requested feature, if you notice clearly problematic code quality elsewhere that is outside the feature scope, do not silently fix or refactor it unless required for the task. Finish the requested feature, then report the observed issue to the user with the relevant file/path and why it matters.
 ```
 
 Core/UI boundary rule:
@@ -128,6 +129,7 @@ user tool_result -> tool.completed
 result.permission_denials ExitPlanMode -> approval.requested(kind=plan)
 result.permission_denials AskUserQuestion -> ignored as duplicate ask denial from non-interactive Claude Code output
 result.permission_denials WebSearch -> approval.requested(kind=permission)
+result.usage/modelUsage -> control.context
 system compact_boundary -> memory.compacted
 system status -> control.status
 system api_retry -> control.warning
@@ -171,6 +173,7 @@ item/started/completed: AgentMessage, Plan, Reasoning, CommandExecution, FileCha
 command/exec/outputDelta, item/commandExecution/outputDelta, item/fileChange/outputDelta -> tool.output_delta
 serverRequest/resolved -> approval.resolved
 thread/compacted -> memory.compacted
+thread/tokenUsage/updated -> control.context
 account/rateLimits/updated -> control.rate_limit
 mcpServer/startupStatus/updated starting/ready -> control.status
 mcpServer/startupStatus/updated failed -> control.warning
@@ -193,7 +196,7 @@ The secondary button label must name the actual response: refuse, cancel, skip, 
 Codex not yet covered:
 
 ```text
-thread/archived, thread/unarchived, thread/closed, skills/changed, thread/name/updated, thread/tokenUsage/updated, hook/started, hook/completed, item/autoApprovalReview/started, item/autoApprovalReview/completed, rawResponseItem/completed, item/commandExecution/terminalInteraction, item/mcpToolCall/progress, mcpServer/oauthLogin/completed, account/updated, app/list/updated, fs/changed, fuzzyFileSearch/sessionUpdated, fuzzyFileSearch/sessionCompleted, realtime events, Windows sandbox/login notifications.
+thread/archived, thread/unarchived, thread/closed, skills/changed, thread/name/updated, hook/started, hook/completed, item/autoApprovalReview/started, item/autoApprovalReview/completed, rawResponseItem/completed, item/commandExecution/terminalInteraction, item/mcpToolCall/progress, mcpServer/oauthLogin/completed, account/updated, app/list/updated, fs/changed, fuzzyFileSearch/sessionUpdated, fuzzyFileSearch/sessionCompleted, realtime events, Windows sandbox/login notifications.
 ServerRequest account/chatgptAuthTokens/refresh is not handled.
 ThreadItem UserMessage, HookPrompt, ImageView, ImageGeneration, EnteredReviewMode, ExitedReviewMode need real local fixtures before semantic UI mapping.
 ```

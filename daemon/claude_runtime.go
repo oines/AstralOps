@@ -99,7 +99,11 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 		}
 		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": displayInput}})
 	}
-	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"status": "running"}})
+	started := map[string]any{"status": "running"}
+	if options.Internal {
+		started["internal"] = true
+	}
+	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: started})
 
 	go r.runClaude(ctx, session, cwd, info.Path, input, options, run, claudeRemoteOptions{
 		MCPConfigPath:  mcpConfigPath,

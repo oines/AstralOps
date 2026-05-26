@@ -655,6 +655,15 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, view)
+	case action == "commands" && len(parts) == 2 && r.Method == http.MethodGet:
+		a.handleListSessionCommands(w, sessionID)
+	case action == "commands" && len(parts) == 3 && r.Method == http.MethodPost:
+		var req SessionCommandRequest
+		if err := decodeJSON(r.Body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		a.handleRunSessionCommand(w, sessionID, parts[2], req)
 	case action == "input" && r.Method == http.MethodPost:
 		var req struct {
 			Input           string `json:"input"`

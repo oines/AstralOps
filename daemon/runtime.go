@@ -23,13 +23,17 @@ type TurnSteerer interface {
 	Steer(sessionID string, input string, options TurnOptions) error
 }
 
+type CommandRunner interface {
+	RunCommand(session Session, workspace Workspace, commandID string, args map[string]any) error
+}
+
 type TurnOptions struct {
-	Model           string `json:"model,omitempty"`
-	ReasoningEffort string `json:"reasoning_effort,omitempty"`
-	PermissionMode  string `json:"permission_mode,omitempty"`
+	Model           string   `json:"model,omitempty"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
+	PermissionMode  string   `json:"permission_mode,omitempty"`
 	AllowedTools    []string `json:"-"`
-	Internal        bool   `json:"-"`
-	DisplayInput    string `json:"-"`
+	Internal        bool     `json:"-"`
+	DisplayInput    string   `json:"-"`
 }
 
 type ApprovalResponder interface {

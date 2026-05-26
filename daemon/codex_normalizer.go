@@ -34,6 +34,10 @@ func normalizeCodexMessage(session Session, raw map[string]any) []AstralEvent {
 			"status":           threadStatus(params["status"]),
 			"active_flags":     stringSlice(status["activeFlags"]),
 		}, raw)}
+	case "thread/tokenUsage/updated":
+		if event, ok := codexTokenUsageContextEvent(session, raw); ok {
+			return []AstralEvent{event}
+		}
 	case "turn/started":
 		turn := mapValue(params["turn"])
 		return []AstralEvent{baseCodexEvent(session, "turn.started", map[string]any{
@@ -452,6 +456,40 @@ func firstNonNil(values ...any) any {
 		}
 	}
 	return nil
+}
+
+func codexTokenUsageContextEvent(session Session, raw map[string]any) (AstralEvent, bool) {
+	params := mapValue(raw["params"])
+	usage := mapValue(params["tokenUsage"])
+	total := mapValue(usage["total"])
+	last := mapValue(usage["last"])
+	if len(usage) == 0 || len(total) == 0 {
+		return AstralEvent{}, false
+	}
+	current := last
+	if len(current) == 0 {
+		current = total
+	}
+	normalized := map[string]any{
+		"source":                  "codex",
+		"native_thread_id":        stringValue(params["threadId"]),
+		"turn_id":                 stringValue(params["turnId"]),
+		"token_usage":             usage,
+		"total":                   total,
+		"last":                    last,
+		"total_tokens":            current["totalTokens"],
+		"input_tokens":            current["inputTokens"],
+		"cached_input_tokens":     current["cachedInputTokens"],
+		"output_tokens":           current["outputTokens"],
+		"reasoning_tokens":        current["reasoningOutputTokens"],
+		"cumulative_total_tokens": total["totalTokens"],
+		"cumulative_input_tokens": total["inputTokens"],
+		"model_context_window":    usage["modelContextWindow"],
+	}
+	if percent := contextUsedPercent(normalized); percent > 0 {
+		normalized["used_percent"] = percent
+	}
+	return baseCodexEvent(session, "control.context", normalized, raw), true
 }
 
 func stringSlice(v any) []string {
