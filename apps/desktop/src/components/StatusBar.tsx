@@ -34,7 +34,7 @@ export function StatusBar({
   const contextLabel = contextUsageLabel(contextUsage);
 
   return (
-    <header className={`[-webkit-app-region:drag] relative flex h-[52px] shrink-0 items-center justify-between border-b border-black/5 bg-white pr-[68px] transition-[padding] duration-180 ease-out ${sidebarCollapsed ? "pl-[144px]" : "pl-8"}`}>
+    <header className={`[-webkit-app-region:drag] relative flex h-[52px] shrink-0 items-center justify-between border-b border-black/5 bg-white pr-[172px] transition-[padding] duration-180 ease-out ${sidebarCollapsed ? "pl-[144px]" : "pl-8"}`}>
       <div className="min-w-0 flex flex-1 items-center gap-3">
         <div className="shrink-0 truncate text-[14px] font-semibold text-[#202124] max-w-[45%]">{title}</div>
         <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-[12px] font-medium text-[#939196]">

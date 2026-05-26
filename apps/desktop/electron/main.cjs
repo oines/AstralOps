@@ -1,5 +1,6 @@
-const { app, BrowserWindow, Notification, dialog, ipcMain } = require("electron");
-const { spawn } = require("child_process");
+const { app, BrowserWindow, Notification, dialog, ipcMain, nativeImage, shell } = require("electron");
+const { execFile, spawn } = require("child_process");
+const { promisify } = require("util");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -9,6 +10,7 @@ let daemonProcess;
 let daemonInfo;
 const recentNotificationIDs = [];
 const recentNotificationIDSet = new Set();
+const execFileAsync = promisify(execFile);
 
 function repoRoot() {
   return path.resolve(__dirname, "../../..");
@@ -44,6 +46,231 @@ function desktopEnv() {
     delete env.PATH;
   }
   return env;
+}
+
+function commandExists(command) {
+  const pathKey = process.platform === "win32" ? "Path" : "PATH";
+  const parts = (desktopEnv()[pathKey] || "").split(path.delimiter).filter(Boolean);
+  return parts.some((part) => fs.existsSync(path.join(part, command)));
+}
+
+async function appIconDataURL(appPath) {
+  if (!appPath || !fs.existsSync(appPath)) return "";
+  const bundleIconPath = appBundleIconPath(appPath);
+  if (bundleIconPath) {
+    const convertedIcon = await convertedICNSPath(bundleIconPath);
+    const bundleImage = convertedIcon ? nativeImage.createFromPath(convertedIcon) : nativeImage.createFromPath(bundleIconPath);
+    if (!bundleImage.isEmpty()) return bundleImage.resize({ width: 32, height: 32 }).toDataURL();
+  }
+  try {
+    const image = await app.getFileIcon(appPath, { size: "normal" });
+    if (image.isEmpty()) return "";
+    return image.resize({ width: 32, height: 32 }).toDataURL();
+  } catch {
+    return "";
+  }
+}
+
+async function convertedICNSPath(iconPath) {
+  if (process.platform !== "darwin" || !iconPath.endsWith(".icns")) return "";
+  const iconDir = path.join(dataDir(), "runtime", "app-icons");
+  const outPath = path.join(iconDir, `${path.basename(iconPath, ".icns")}.png`);
+  try {
+    const sourceStat = fs.statSync(iconPath);
+    const outStat = fs.existsSync(outPath) ? fs.statSync(outPath) : null;
+    if (outStat && outStat.mtimeMs >= sourceStat.mtimeMs && outStat.size > 0) return outPath;
+    fs.mkdirSync(iconDir, { recursive: true });
+    await execFileAsync("sips", ["-s", "format", "png", "--resampleHeightWidth", "64", "64", iconPath, "--out", outPath], { env: desktopEnv() });
+    return fs.existsSync(outPath) ? outPath : "";
+  } catch {
+    return "";
+  }
+}
+
+function appBundleIconPath(appPath) {
+  const infoPath = path.join(appPath, "Contents", "Info.plist");
+  const resourcesPath = path.join(appPath, "Contents", "Resources");
+  const iconName = plistValue(infoPath, "CFBundleIconFile");
+  const candidates = [];
+  if (iconName) {
+    candidates.push(iconName.endsWith(".icns") ? iconName : `${iconName}.icns`);
+    candidates.push(iconName);
+  }
+  candidates.push(`${path.basename(appPath, ".app")}.icns`);
+  for (const candidate of candidates) {
+    const iconPath = path.join(resourcesPath, candidate);
+    if (fs.existsSync(iconPath)) return iconPath;
+  }
+  return "";
+}
+
+function plistValue(plistPath, key) {
+  if (!fs.existsSync(plistPath)) return "";
+  try {
+    const text = fs.readFileSync(plistPath, "utf8");
+    const match = text.match(new RegExp(`<key>${escapeRegExp(key)}</key>\\s*<string>([^<]+)</string>`));
+    return match ? match[1].trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function findVSCodeAppPath() {
+  const candidates = [
+    "/Applications/Visual Studio Code.app",
+    path.join(os.homedir(), "Applications", "Visual Studio Code.app"),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  const codePath = findCommandPath("code");
+  if (!codePath) return "";
+  const realCodePath = fs.realpathSync(codePath);
+  const marker = `${path.sep}Contents${path.sep}Resources${path.sep}app${path.sep}bin${path.sep}code`;
+  if (!realCodePath.endsWith(marker)) return "";
+  return realCodePath.slice(0, -marker.length) + ".app";
+}
+
+function findCommandPath(command) {
+  const pathKey = process.platform === "win32" ? "Path" : "PATH";
+  const parts = (desktopEnv()[pathKey] || "").split(path.delimiter).filter(Boolean);
+  for (const part of parts) {
+    const candidate = path.join(part, command);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return "";
+}
+
+async function workspaceOpeners() {
+  const vscodeApp = findVSCodeAppPath();
+  const finderApp = "/System/Library/CoreServices/Finder.app";
+  const terminalApp = "/System/Applications/Utilities/Terminal.app";
+  return [
+    {
+      id: "vscode",
+      label: "VS Code",
+      icon_data_url: await appIconDataURL(vscodeApp),
+      available: Boolean(vscodeApp || commandExists("code")),
+      disabled_reason: vscodeApp || commandExists("code") ? "" : "VS Code is not installed or code CLI is unavailable",
+    },
+    {
+      id: "finder",
+      label: "Finder",
+      icon_data_url: await appIconDataURL(finderApp),
+      available: process.platform === "darwin",
+      disabled_reason: process.platform === "darwin" ? "" : "Finder is only available on macOS",
+    },
+    {
+      id: "terminal",
+      label: "Terminal",
+      icon_data_url: await appIconDataURL(terminalApp),
+      available: process.platform === "darwin",
+      disabled_reason: process.platform === "darwin" ? "" : "External Terminal opening is only supported on macOS",
+    },
+  ];
+}
+
+function normalizeWorkspacePayload(workspace) {
+  if (!workspace || typeof workspace !== "object") {
+    throw new Error("workspace is required");
+  }
+  const target = workspace.target === "ssh" ? "ssh" : "local";
+  const localCWD = typeof workspace.local_cwd === "string" ? workspace.local_cwd : "";
+  const ssh = workspace.ssh && typeof workspace.ssh === "object" ? workspace.ssh : {};
+  const endpoint = typeof ssh.endpoint === "string" ? ssh.endpoint : "";
+  const port = Number.isFinite(Number(ssh.port)) ? Number(ssh.port) : 22;
+  const remoteCWD = typeof ssh.remote_cwd === "string" ? ssh.remote_cwd : "";
+  return { target, localCWD, ssh: { endpoint, port, remoteCWD } };
+}
+
+async function openWorkspaceWith(opener, workspace) {
+  const normalized = normalizeWorkspacePayload(workspace);
+  switch (opener) {
+    case "vscode":
+      return openWorkspaceInVSCode(normalized);
+    case "finder":
+      return openWorkspaceInFinder(normalized);
+    case "terminal":
+      return openWorkspaceInTerminal(normalized);
+    default:
+      throw new Error("unknown workspace opener");
+  }
+}
+
+async function openWorkspaceInVSCode(workspace) {
+  if (workspace.target === "ssh") {
+    const uri = vscodeRemoteSSHURI(workspace.ssh);
+    if (!uri) throw new Error("SSH workspace is missing endpoint or cwd");
+    await shell.openExternal(uri);
+    return;
+  }
+  if (!workspace.localCWD) throw new Error("workspace cwd is missing");
+  if (process.platform === "darwin") {
+    try {
+      await execFileAsync("open", ["-a", "Visual Studio Code", workspace.localCWD], { env: desktopEnv() });
+      return;
+    } catch {
+      // Fall through to the code CLI when the app bundle name is unavailable.
+    }
+  }
+  await execFileAsync("code", ["--reuse-window", workspace.localCWD], { env: desktopEnv() });
+}
+
+async function openWorkspaceInFinder(workspace) {
+  if (workspace.target === "ssh") throw new Error("Finder cannot open SSH workspaces");
+  if (!workspace.localCWD) throw new Error("workspace cwd is missing");
+  const error = await shell.openPath(workspace.localCWD);
+  if (error) throw new Error(error);
+}
+
+async function openWorkspaceInTerminal(workspace) {
+  if (process.platform !== "darwin") {
+    throw new Error("External Terminal opening is only supported on macOS");
+  }
+  if (workspace.target === "ssh") {
+    const { endpoint, port, remoteCWD } = workspace.ssh;
+    if (!endpoint || !remoteCWD) throw new Error("SSH workspace is missing endpoint or cwd");
+    const remoteCommand = `cd ${shellQuote(remoteCWD)}; exec \${SHELL:-sh} -l`;
+    const command = ["ssh", "-p", String(port || 22), endpoint, "-t", remoteCommand].map(shellQuote).join(" ");
+    await runTerminalScript(command);
+    return;
+  }
+  if (!workspace.localCWD) throw new Error("workspace cwd is missing");
+  await runTerminalScript(`cd ${shellQuote(workspace.localCWD)}`);
+}
+
+async function runTerminalScript(command) {
+  await execFileAsync("osascript", [
+    "-e",
+    'tell application "Terminal"',
+    "-e",
+    "activate",
+    "-e",
+    `do script ${appleScriptString(command)}`,
+    "-e",
+    "end tell",
+  ], { env: desktopEnv() });
+}
+
+function vscodeRemoteSSHURI(ssh) {
+  const endpoint = String(ssh.endpoint || "").trim();
+  const remoteCWD = String(ssh.remoteCWD || "").trim();
+  if (!endpoint || !remoteCWD) return "";
+  const host = ssh.port && ssh.port !== 22 ? `${endpoint}:${ssh.port}` : endpoint;
+  const encodedPath = remoteCWD.split("/").map(encodeURIComponent).join("/");
+  return `vscode://vscode-remote/ssh-remote+${host}${encodedPath}`;
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function appleScriptString(value) {
+  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 function daemonBinaryName() {
@@ -183,9 +410,22 @@ ipcMain.handle("astral:choose-files", async () => {
   return result.filePaths;
 });
 
+ipcMain.handle("astral:get-workspace-openers", async () => {
+  return workspaceOpeners();
+});
+
+ipcMain.handle("astral:open-workspace", async (_event, opener, workspace) => {
+  try {
+    await openWorkspaceWith(opener, workspace);
+    return { ok: true };
+  } catch (openError) {
+    return { ok: false, error: openError instanceof Error ? openError.message : String(openError) };
+  }
+});
+
 ipcMain.handle("astral:show-notification", async (_event, payload) => {
   if (!payload || typeof payload !== "object") return { shown: false };
-  if (!mainWindow || mainWindow.isFocused()) return { shown: false };
+  if (!mainWindow || (mainWindow.isFocused() && payload.deliver_when_focused !== true)) return { shown: false };
   if (!Notification.isSupported()) return { shown: false };
 
   const id = typeof payload.notification_id === "string" ? payload.notification_id : "";

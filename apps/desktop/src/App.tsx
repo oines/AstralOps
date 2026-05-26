@@ -7,6 +7,7 @@ import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { Transcript } from "./components/Transcript";
 import { WorkspaceModal } from "./components/WorkspaceModal";
+import { WorkspaceOpenerMenu } from "./components/WorkspaceOpenerMenu";
 import {
   EMPTY_EVENT_INDEX,
   mergeEventIndex,
@@ -72,6 +73,7 @@ export function App(): React.JSX.Element {
   const sseQueueRef = useRef<AstralEvent[]>([]);
   const sseFrameRef = useRef<number | null>(null);
   const notifiedIntentIDsRef = useRef<Set<string>>(new Set());
+  const activeSessionIdRef = useRef("");
 
   const mergeEvents = useCallback((incoming: AstralEvent[]) => {
     setEventIndex((current) => mergeEventIndex(current, incoming));
@@ -87,7 +89,10 @@ export function App(): React.JSX.Element {
       notifiedIntentIDsRef.current.clear();
       notifiedIntentIDsRef.current.add(notificationID);
     }
-    void window.astral.showNotification(payload);
+    const target = payload.target && typeof payload.target === "object" ? payload.target as Record<string, unknown> : {};
+    const targetSessionID = typeof target.session_id === "string" ? target.session_id : "";
+    const deliverWhenFocused = Boolean(targetSessionID && targetSessionID !== activeSessionIdRef.current);
+    void window.astral.showNotification(deliverWhenFocused ? { ...payload, deliver_when_focused: true } : payload);
   }, []);
 
   const queueLiveEvent = useCallback(
@@ -156,6 +161,10 @@ export function App(): React.JSX.Element {
   const selectedModel = modelOverride.trim() || undefined;
   const selectedReasoningEffort = reasoningEffort || undefined;
   const contextUsage = useContextUsage(activeSessionEvents, modelOptions, modelOverride, modelSlotOverride, currentModel);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
 
   const storeSessionView = useCallback((view: SessionView) => {
     setSessionViews((current) => ({ ...current, [view.session.id]: view }));
@@ -630,6 +639,8 @@ export function App(): React.JSX.Element {
         onClose={() => setWorkspaceOpen(false)}
         onCreate={handleCreateWorkspace}
       />
+
+      <WorkspaceOpenerMenu workspace={activeWorkspace} onError={setError} />
 
       <button
         className="[-webkit-app-region:no-drag] absolute left-[95px] top-[10px] z-[200] grid size-8 place-items-center rounded-lg text-[#8f9296] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95"
