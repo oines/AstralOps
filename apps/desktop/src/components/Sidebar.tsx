@@ -108,7 +108,7 @@ export function Sidebar({
       <div className={`flex h-full flex-col transition-[opacity,transform] duration-180 ease-out ${collapsed ? "pointer-events-none -translate-x-2 opacity-0" : "translate-x-0 opacity-100"}`} style={{ width }}>
       <div className="h-[52px] shrink-0" />
 
-      <nav className="grid gap-1 px-4 pb-6">
+      <nav className="grid gap-1 px-3 pb-6">
         <button
           className="flex h-9 w-full items-center gap-3 rounded-lg px-2 text-left text-[15px] font-semibold text-[#242426] transition-colors duration-150 ease-out hover:bg-black/5"
           type="button"
@@ -260,11 +260,11 @@ function WorkspaceBlock({
       />
       {sessions.length > 0 ? (
         <div
-          className={`grid overflow-hidden pl-5 transition-[grid-template-rows,opacity,transform] duration-180 ease-out ${
+          className={`grid overflow-hidden transition-[grid-template-rows,opacity,transform] duration-180 ease-out ${
             collapsed ? "grid-rows-[0fr] opacity-0 -translate-y-1" : "grid-rows-[1fr] opacity-100 translate-y-0"
           }`}
         >
-          <div className="grid min-h-0 gap-0.5 overflow-hidden">
+          <div className="grid min-h-0 gap-[3px] overflow-hidden pt-0.5 ml-[15px] border-l border-black/[0.07] pl-[7px]">
           {sessions.map((session) => (
             <SessionRow
               active={session.id === activeSessionId}
@@ -308,9 +308,7 @@ function WorkspaceRow({
     : "grid-cols-[14px_17px_minmax(0,1fr)_26px_26px]";
   return (
     <div
-      className={`group relative grid min-h-[32px] w-full cursor-default ${rowGridClass} items-center gap-1.5 rounded-[9px] py-0.5 pl-1.5 pr-1.5 transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.045] ${
-        collapsed && sessionCount > 0 ? "bg-black/[0.045] text-[#4f5358]" : "text-[#6f7378]"
-      }`}
+      className={`group relative grid min-h-[32px] w-full cursor-default ${rowGridClass} items-center gap-1.5 rounded-[9px] py-0.5 pl-1.5 pr-1.5 text-[#6f7378] transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.045]`}
       data-sidebar-menu
       onClick={onClick}
     >
@@ -319,11 +317,6 @@ function WorkspaceRow({
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="min-w-0 truncate text-left text-[14px] font-semibold">{name}</span>
-          {collapsed && sessionCount > 0 && !confirmDelete ? (
-            <span className="shrink-0 rounded-full bg-black/[0.04] px-1.5 py-0.5 text-[11px] font-semibold text-[#8d8f94]">
-              {sessionCount}
-            </span>
-          ) : null}
         </div>
         {status && !confirmDelete ? (
           <div className={`mt-0.5 flex min-w-0 items-center gap-1 truncate text-[11px] font-medium leading-3 ${workspaceConnectionClass(connection?.status)}`} title={status}>
@@ -466,7 +459,7 @@ function SessionRow({
       </span>
       <div className="relative flex h-7 min-w-0 items-center justify-end">
         {confirmDelete ? null : (
-          <span className="truncate text-[11px] font-medium text-[#b0b3b8] transition-opacity duration-150 ease-out group-hover:opacity-0">
+          <span className="truncate text-[11px] font-medium text-[#c4c6cb] transition-opacity duration-150 ease-out group-hover:opacity-0">
             {shortAgentLabel(session.agent)}
           </span>
         )}
