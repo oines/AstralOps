@@ -350,9 +350,8 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
   const onTitleChangeRef = useRef(onTitleChange);
   const workspaceId = workspace?.id ?? "";
   const workspaceRoot = workspace?.local_cwd ?? "";
-  const [themeId] = useState(() => storedTerminalPreference("astralops-terminal-theme", "studio-light"));
+  const theme = useSystemTerminalTheme();
   const [fontId] = useState(() => storedTerminalPreference("astralops-terminal-font", "sf-mono"));
-  const theme = terminalThemes.find((item) => item.id === themeId) ?? terminalThemes[0];
   const font = terminalFonts.find((item) => item.id === fontId) ?? terminalFonts[0];
 
   useEffect(() => {
@@ -360,11 +359,10 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
   }, [onTitleChange]);
 
   useEffect(() => {
-    localStorage.setItem("astralops-terminal-theme", themeId);
     const term = termRef.current;
     if (!term) return;
-    term.options.theme = theme.theme;
-  }, [theme.theme, themeId]);
+    term.options.theme = theme;
+  }, [theme]);
 
   useEffect(() => {
     localStorage.setItem("astralops-terminal-font", fontId);
@@ -389,7 +387,7 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
       fontSize: font.size,
       lineHeight: font.lineHeight,
       scrollback: 12000,
-      theme: theme.theme,
+      theme,
     });
     const fit = new FitAddon();
     termRef.current = term;
@@ -465,9 +463,9 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
   }
 
   return (
-    <div className="flex h-full flex-col" style={{ backgroundColor: theme.theme.background }}>
+    <div className="flex h-full flex-col" style={{ backgroundColor: theme.background }}>
       <div className="min-h-0 flex-1 p-3">
-        <div ref={hostRef} className="h-full overflow-hidden select-text" style={{ backgroundColor: theme.theme.background }} />
+        <div ref={hostRef} className="h-full overflow-hidden select-text" style={{ backgroundColor: theme.background }} />
       </div>
     </div>
   );
@@ -512,134 +510,90 @@ function basename(path: string): string {
   return path.split("/").filter(Boolean).at(-1) || path || "/";
 }
 
-const terminalScrollbarTheme = {
+function useSystemTerminalTheme(): ITheme {
+  const [dark, setDark] = useState(() => prefersDarkColorScheme());
+
+  useEffect(() => {
+    if (!("matchMedia" in window)) return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const updateTheme = (): void => setDark(media.matches);
+    updateTheme();
+    media.addEventListener("change", updateTheme);
+    return () => media.removeEventListener("change", updateTheme);
+  }, []);
+
+  return dark ? terminalSystemDarkTheme : terminalSystemLightTheme;
+}
+
+function prefersDarkColorScheme(): boolean {
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  } catch {
+    return false;
+  }
+}
+
+const terminalLightScrollbarTheme = {
   scrollbarSliderBackground: "rgba(216, 213, 205, 0.7)",
   scrollbarSliderHoverBackground: "rgba(190, 186, 176, 0.85)",
   scrollbarSliderActiveBackground: "rgba(176, 171, 161, 0.95)",
 };
 
-const terminalThemes: Array<{ id: string; label: string; border: string; chrome: string; theme: ITheme }> = [
-  {
-    id: "studio-light",
-    label: "Studio Light",
-    border: "#e5e7eb",
-    chrome: "#f8fafc",
-    theme: {
-      background: "#ffffff",
-      foreground: "#24292f",
-      cursor: "#24292f",
-      cursorAccent: "#ffffff",
-      selectionBackground: "#c8ddff",
-      ...terminalScrollbarTheme,
-      black: "#24292f",
-      red: "#cf222e",
-      green: "#00a33f",
-      yellow: "#f0b400",
-      blue: "#2f81f7",
-      magenta: "#8250df",
-      cyan: "#1f9bab",
-      white: "#d0d7de",
-      brightBlack: "#8c959f",
-      brightRed: "#ff5a5f",
-      brightGreen: "#00b84a",
-      brightYellow: "#f5c542",
-      brightBlue: "#4090ff",
-      brightMagenta: "#a371f7",
-      brightCyan: "#39c5cf",
-      brightWhite: "#ffffff",
-    },
-  },
-  {
-    id: "paper",
-    label: "Paper",
-    border: "#e5e5e5",
-    chrome: "#fafafa",
-    theme: {
-      background: "#ffffff",
-      foreground: "#202124",
-      cursor: "#202124",
-      cursorAccent: "#ffffff",
-      selectionBackground: "#d8d5cd",
-      ...terminalScrollbarTheme,
-      black: "#202124",
-      red: "#c43e1c",
-      green: "#0a9f4a",
-      yellow: "#b78600",
-      blue: "#2563eb",
-      magenta: "#9a4fd3",
-      cyan: "#008c99",
-      white: "#d8d5cd",
-      brightBlack: "#8f9296",
-      brightRed: "#ef5f45",
-      brightGreen: "#12b85d",
-      brightYellow: "#e2aa14",
-      brightBlue: "#4388ff",
-      brightMagenta: "#b56af0",
-      brightCyan: "#20b7c4",
-      brightWhite: "#ffffff",
-    },
-  },
-  {
-    id: "contrast-light",
-    label: "Contrast",
-    border: "#d6dbe3",
-    chrome: "#f5f7fb",
-    theme: {
-      background: "#fdfdfd",
-      foreground: "#111827",
-      cursor: "#111827",
-      cursorAccent: "#ffffff",
-      selectionBackground: "#b7d2ff",
-      ...terminalScrollbarTheme,
-      black: "#111827",
-      red: "#b91c1c",
-      green: "#008c3a",
-      yellow: "#d99a00",
-      blue: "#006cff",
-      magenta: "#7c3aed",
-      cyan: "#008ea1",
-      white: "#d1d5db",
-      brightBlack: "#6b7280",
-      brightRed: "#dc2626",
-      brightGreen: "#00a846",
-      brightYellow: "#f0b429",
-      brightBlue: "#2388ff",
-      brightMagenta: "#9f67ff",
-      brightCyan: "#20b8c7",
-      brightWhite: "#ffffff",
-    },
-  },
-  {
-    id: "night",
-    label: "Night",
-    border: "#232832",
-    chrome: "#111827",
-    theme: {
-      background: "#0d1117",
-      foreground: "#d6deeb",
-      cursor: "#d6deeb",
-      cursorAccent: "#0d1117",
-      selectionBackground: "#264f78",
-      ...terminalScrollbarTheme,
-      black: "#0d1117",
-      red: "#ff6b6b",
-      green: "#42d392",
-      yellow: "#f6c177",
-      blue: "#7aa2f7",
-      magenta: "#bb9af7",
-      cyan: "#7dcfff",
-      white: "#c9d1d9",
-      brightBlack: "#6e7681",
-      brightRed: "#ff7b72",
-      brightGreen: "#56d364",
-      brightYellow: "#e3b341",
-      brightBlue: "#79c0ff",
-      brightMagenta: "#d2a8ff",
-      brightCyan: "#a5d6ff",
-      brightWhite: "#f0f6fc",
-    },
-  },
-];
+const terminalDarkScrollbarTheme = {
+  scrollbarSliderBackground: "rgba(255, 255, 255, 0.18)",
+  scrollbarSliderHoverBackground: "rgba(255, 255, 255, 0.28)",
+  scrollbarSliderActiveBackground: "rgba(255, 255, 255, 0.36)",
+};
+
+const terminalSystemLightTheme = {
+  background: "#ffffff",
+  foreground: "#24292f",
+  cursor: "#24292f",
+  cursorAccent: "#ffffff",
+  selectionBackground: "#c8ddff",
+  ...terminalLightScrollbarTheme,
+  black: "#24292f",
+  red: "#cf222e",
+  green: "#00a33f",
+  yellow: "#f0b400",
+  blue: "#2f81f7",
+  magenta: "#8250df",
+  cyan: "#1f9bab",
+  white: "#d0d7de",
+  brightBlack: "#8c959f",
+  brightRed: "#ff5a5f",
+  brightGreen: "#00b84a",
+  brightYellow: "#f5c542",
+  brightBlue: "#4090ff",
+  brightMagenta: "#a371f7",
+  brightCyan: "#39c5cf",
+  brightWhite: "#ffffff",
+} satisfies ITheme;
+
+const terminalSystemDarkTheme = {
+  background: "#18191a",
+  foreground: "#e8e8e6",
+  cursor: "#e8e8e6",
+  cursorAccent: "#18191a",
+  selectionBackground: "#33455f",
+  ...terminalDarkScrollbarTheme,
+  black: "#18191a",
+  red: "#ff7a66",
+  green: "#5fce8f",
+  yellow: "#f0a75d",
+  blue: "#61a9ff",
+  magenta: "#c79cff",
+  cyan: "#5fcad6",
+  white: "#c7c8ca",
+  brightBlack: "#999b9f",
+  brightRed: "#ff9a88",
+  brightGreen: "#7ee3a8",
+  brightYellow: "#ffc777",
+  brightBlue: "#8cc2ff",
+  brightMagenta: "#d9b8ff",
+  brightCyan: "#80e0ea",
+  brightWhite: "#f4f4f2",
+} satisfies ITheme;
 
 const terminalFonts = [
   {
