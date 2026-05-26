@@ -15,6 +15,7 @@ import {
   Copy,
   FileCode2,
   FileText,
+  GitBranch,
   HelpCircle,
   Archive,
   ListChecks,
@@ -71,10 +72,20 @@ type TranscriptProps = {
   events: AstralEvent[];
   hasOlder?: boolean;
   loadingOlder?: boolean;
+  forkingSeq?: number | null;
+  scrollToEventSeq?: number | null;
+  sourceSessionExists?: boolean;
   onLoadOlder?: () => void;
+  onForkFromEvent?: (event: AstralEvent) => void;
+  onOpenSourceSession?: (sessionId: string, eventSeq?: number) => void;
+  onScrollTargetHandled?: () => void;
 };
 
-type TranscriptItem = { type: "loader"; id: string } | { type: "turn"; group: TurnGroup; id: string } | { type: "compact"; group: MemoryCompactGroup; id: string };
+type TranscriptItem =
+  | { type: "loader"; id: string }
+  | { type: "turn"; group: TurnGroup; id: string }
+  | { type: "compact"; group: MemoryCompactGroup; id: string }
+  | { type: "fork-origin"; id: string; seq: number };
 
 export function Transcript({
   activeSession,
@@ -83,20 +94,39 @@ export function Transcript({
   events,
   hasOlder = false,
   loadingOlder = false,
+  forkingSeq = null,
+  scrollToEventSeq = null,
+  sourceSessionExists = false,
   onLoadOlder,
+  onForkFromEvent,
+  onOpenSourceSession,
+  onScrollTargetHandled,
 }: TranscriptProps): React.JSX.Element {
   const renderedEvents = useMemo(() => compactStreamingEvents(events.filter(shouldRenderEvent)), [events]);
   const groups = useMemo(() => groupTranscriptEvents(renderedEvents), [renderedEvents]);
   const compactGroups = useMemo(() => groupMemoryCompactions(renderedEvents), [renderedEvents]);
+  const forkProjectionBoundarySeq = useMemo(() => {
+    if (!activeSession?.forked_from_session_id) return 0;
+    return events.reduce((latest, event) => {
+      const value = event.normalized as Record<string, unknown>;
+      return value.fork_projection === true ? Math.max(latest, event.seq) : latest;
+    }, 0);
+  }, [activeSession?.forked_from_session_id, events]);
   const items = useMemo<TranscriptItem[]>(
-    () => [
-      ...(hasOlder ? [{ type: "loader" as const, id: "loader" }] : []),
-      ...[
+    () => {
+      const transcriptItems: TranscriptItem[] = [
         ...groups.map((group) => ({ type: "turn" as const, id: group.id, group })),
         ...compactGroups.map((group) => ({ type: "compact" as const, id: group.id, group })),
-      ].sort((a, b) => transcriptItemSeq(a) - transcriptItemSeq(b)),
-    ],
-    [compactGroups, groups, hasOlder],
+      ].sort((a, b) => transcriptItemSeq(a) - transcriptItemSeq(b));
+      if (forkProjectionBoundarySeq > 0) {
+        const insertIndex = transcriptItems.findIndex((item) => transcriptItemSeq(item) > forkProjectionBoundarySeq);
+        const marker: TranscriptItem = { type: "fork-origin", id: "fork-origin", seq: forkProjectionBoundarySeq + 0.5 };
+        if (insertIndex === -1) transcriptItems.push(marker);
+        else transcriptItems.splice(insertIndex, 0, marker);
+      }
+      return [...(hasOlder ? [{ type: "loader" as const, id: "loader" }] : []), ...transcriptItems];
+    },
+    [compactGroups, forkProjectionBoundarySeq, groups, hasOlder],
   );
   const scrollRef = useRef<HTMLElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -138,6 +168,18 @@ export function Transcript({
   }, [composerHeight, lastSeq, groups.length]);
 
   useEffect(() => {
+    if (!scrollToEventSeq) return;
+    const index = items.findIndex((item) => transcriptItemContainsSeq(item, scrollToEventSeq));
+    if (index < 0) return;
+    requestAnimationFrame(() => {
+      rowVirtualizer.scrollToIndex(index, { align: "center" });
+      stickToBottomRef.current = false;
+      setShowBackToBottom(true);
+      onScrollTargetHandled?.();
+    });
+  }, [items, onScrollTargetHandled, rowVirtualizer, scrollToEventSeq]);
+
+  useEffect(() => {
     const first = rowVirtualizer.getVirtualItems()[0];
     if (stickToBottomRef.current) return;
     if (!first || first.index !== 0 || !hasOlder || loadingOlder) return;
@@ -170,9 +212,16 @@ export function Transcript({
                     {item?.type === "loader" ? (
                       <LoadOlderRow loading={loadingOlder} onLoadOlder={onLoadOlder} />
                     ) : item?.type === "turn" ? (
-                      <TurnBlock group={item.group} />
+                      <TurnBlock forkingSeq={forkingSeq} group={item.group} onForkFromEvent={onForkFromEvent} />
                     ) : item?.type === "compact" ? (
                       <MemoryCompactRow group={item.group} />
+                    ) : item?.type === "fork-origin" ? (
+                      <ForkOriginRow
+                        eventSeq={activeSession?.forked_from_event_seq}
+                        sourceSessionExists={sourceSessionExists}
+                        sourceSessionId={activeSession?.forked_from_session_id ?? ""}
+                        onOpenSourceSession={onOpenSourceSession}
+                      />
                     ) : null}
                   </div>
                 );
@@ -199,8 +248,16 @@ export function Transcript({
 
 function transcriptItemSeq(item: TranscriptItem): number {
   if (item.type === "loader") return -1;
+  if (item.type === "fork-origin") return item.seq;
   if (item.type === "compact") return item.group.start?.seq ?? item.group.end?.seq ?? Number.MAX_SAFE_INTEGER;
   return item.group.user?.seq ?? item.group.start?.seq ?? item.group.timeline[0]?.seq ?? item.group.end?.seq ?? Number.MAX_SAFE_INTEGER;
+}
+
+function transcriptItemContainsSeq(item: TranscriptItem, seq: number): boolean {
+  if (item.type === "loader" || item.type === "fork-origin") return false;
+  if (item.type === "compact") return (item.group.start?.seq ?? -1) <= seq && seq <= (item.group.end?.seq ?? item.group.start?.seq ?? -1);
+  const candidates = [item.group.user, item.group.start, item.group.end, ...item.group.timeline].filter((event): event is AstralEvent => Boolean(event));
+  return candidates.some((event) => event.seq === seq);
 }
 
 function EmptyState({
@@ -238,6 +295,35 @@ function LoadOlderRow({ loading, onLoadOlder }: { loading: boolean; onLoadOlder?
   );
 }
 
+function ForkOriginRow({
+  eventSeq,
+  sourceSessionExists,
+  sourceSessionId,
+  onOpenSourceSession,
+}: {
+  eventSeq?: number;
+  sourceSessionExists: boolean;
+  sourceSessionId: string;
+  onOpenSourceSession?: (sessionId: string, eventSeq?: number) => void;
+}): React.JSX.Element {
+  const disabled = !sourceSessionExists || !onOpenSourceSession;
+  return (
+    <div className="my-8 flex min-w-0 items-center gap-4 text-[#8a8d91]">
+      <div className="h-px min-w-0 flex-1 bg-black/10" />
+      <button
+        className="flex shrink-0 items-center gap-2 rounded-full px-3 py-1.5 text-[14px] font-semibold leading-5 text-[#2f8cff] transition-colors duration-150 ease-out hover:bg-[#2f8cff]/10 disabled:cursor-default disabled:text-[#a0a3a7] disabled:hover:bg-transparent"
+        disabled={disabled}
+        type="button"
+        onClick={() => onOpenSourceSession?.(sourceSessionId, eventSeq)}
+      >
+        <GitBranch size={16} strokeWidth={1.9} />
+        <span>{sourceSessionExists ? "从对话中派生" : "源对话已删除"}</span>
+      </button>
+      <div className="h-px min-w-0 flex-1 bg-black/10" />
+    </div>
+  );
+}
+
 function MemoryCompactRow({ group }: { group: MemoryCompactGroup }): React.JSX.Element {
   const completed = group.status === "completed";
   const event = group.end ?? group.start;
@@ -256,9 +342,13 @@ function MemoryCompactRow({ group }: { group: MemoryCompactGroup }): React.JSX.E
 }
 
 const TurnBlock = React.memo(function TurnBlock({
+  forkingSeq,
   group,
+  onForkFromEvent,
 }: {
+  forkingSeq?: number | null;
   group: TurnGroup;
+  onForkFromEvent?: (event: AstralEvent) => void;
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(group.status === "running");
   const isDone = group.status !== "running";
@@ -266,6 +356,7 @@ const TurnBlock = React.memo(function TurnBlock({
   const endTime = group.end?.ts ?? group.start?.ts ?? "";
   const collapsedAssistantSeqs = !expanded && isDone ? visibleCollapsedAssistantSeqs(group.timeline) : null;
   const operationGroups = expanded ? buildOperationGroups(group.timeline) : [];
+  const forkableSeq = group.status === "completed" ? finalForkableAssistantSeq(group.timeline) : null;
 
   useEffect(() => {
     setExpanded(group.status === "running");
@@ -289,7 +380,19 @@ const TurnBlock = React.memo(function TurnBlock({
     if (isAssistantContentEvent(event)) {
       flushOperations();
       if (!collapsedAssistantSeqs || collapsedAssistantSeqs.has(event.seq)) {
-        timeline.push(isTranscriptPlanEvent(event) ? <TranscriptPlanBubble event={event} key={event.seq} /> : <AssistantEvent event={event} key={event.seq} />);
+        timeline.push(
+          isTranscriptPlanEvent(event) ? (
+            <TranscriptPlanBubble event={event} key={event.seq} />
+          ) : (
+            <AssistantEvent
+              canFork={event.seq === forkableSeq && Boolean(onForkFromEvent)}
+              event={event}
+              forking={forkingSeq === event.seq}
+              key={event.seq}
+              onFork={onForkFromEvent}
+            />
+          ),
+        );
       }
       continue;
     }
@@ -320,6 +423,13 @@ const TurnBlock = React.memo(function TurnBlock({
     </motion.article>
   );
 });
+
+function finalForkableAssistantSeq(events: AstralEvent[]): number | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index].kind === "message.assistant") return events[index].seq;
+  }
+  return null;
+}
 
 function UserMessage({ event }: { event: AstralEvent }): React.JSX.Element {
   const value = event.normalized as Record<string, unknown>;
@@ -575,7 +685,17 @@ function HookEventBlock({ event }: { event: AstralEvent }): React.JSX.Element {
   );
 }
 
-function AssistantEvent({ event }: { event: AstralEvent }): React.ReactNode {
+function AssistantEvent({
+  canFork = false,
+  event,
+  forking = false,
+  onFork,
+}: {
+  canFork?: boolean;
+  event: AstralEvent;
+  forking?: boolean;
+  onFork?: (event: AstralEvent) => void;
+}): React.ReactNode {
   const value = event.normalized as Record<string, unknown>;
   const text = textValue(value, "text");
   if (!text) return null;
@@ -591,6 +711,18 @@ function AssistantEvent({ event }: { event: AstralEvent }): React.ReactNode {
         >
           <Copy size={16} strokeWidth={1.8} />
         </button>
+        {canFork ? (
+          <button
+            className="grid size-7 place-items-center rounded-md hover:bg-black/[0.04] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+            type="button"
+            aria-label="分叉"
+            title="分叉"
+            disabled={forking}
+            onClick={() => onFork?.(event)}
+          >
+            <GitBranch size={16} strokeWidth={1.8} />
+          </button>
+        ) : null}
       </div>
     </div>
   );

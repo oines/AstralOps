@@ -196,47 +196,10 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 		go r.app.startNextQueuedTurn(session.ID)
 	}()
 
-	args := []string{
-		"-p",
-		"--input-format", "stream-json",
-		"--output-format", "stream-json",
-		"--verbose",
-		"--include-partial-messages",
-		"--include-hook-events",
-	}
-	if r.app.store.hasEventKind(session.ID, "session.native") {
-		args = append(args, "--resume", session.NativeSessionID)
-	} else {
-		args = append(args, "--session-id", session.NativeSessionID)
-	}
-	if model := strings.TrimSpace(options.Model); model != "" {
-		args = append(args, "--model", model)
-	}
-	if effort := strings.TrimSpace(options.ReasoningEffort); effort != "" {
-		args = append(args, "--effort", effort)
-	}
-	if mode := strings.TrimSpace(options.PermissionMode); mode != "" && mode != "default" {
-		args = append(args, "--permission-mode", mode)
-	}
-	if len(options.AllowedTools) > 0 {
-		allowed := append([]string{}, options.AllowedTools...)
-		if remote.RemoteCWD != "" {
-			allowed = append(allowed, claudeRemoteMCPAllowedTools()...)
-		}
-		args = append(args, "--allowedTools", strings.Join(allowed, ","))
-	} else if remote.RemoteCWD != "" {
-		args = append(args, "--allowedTools", strings.Join(claudeRemoteMCPAllowedTools(), ","))
-	}
-	if remote.SettingSources != "" {
-		args = append(args, "--setting-sources", remote.SettingSources)
-	}
-	if remote.MCPConfigPath != "" {
-		args = append(args, "--disallowedTools", strings.Join(claudeRemoteNativeDisallowedTools(), ","))
-		args = append(args, "--mcp-config", remote.MCPConfigPath, "--strict-mcp-config")
-	}
-	if remote.AppendPrompt != "" {
-		args = append(args, "--append-system-prompt", remote.AppendPrompt)
-		args = append(args, "--exclude-dynamic-system-prompt-sections")
+	args, argErr := r.claudeArgs(session, options, remote)
+	if argErr != nil {
+		r.finishFailed(session, argErr.Error(), nil)
+		return
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Dir = cwd
@@ -322,6 +285,66 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 		return
 	}
 	completeTurn()
+}
+
+func (r *claudeLocalRuntime) claudeArgs(session Session, options TurnOptions, remote claudeRemoteOptions) ([]string, error) {
+	args := []string{
+		"-p",
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--include-partial-messages",
+		"--include-hook-events",
+	}
+	if r.app.store.hasEventKind(session.ID, "session.native") {
+		args = append(args, "--resume", session.NativeSessionID)
+	} else if session.ForkedFromSessionID != "" {
+		source, ok := r.app.store.getSession(session.ForkedFromSessionID)
+		if !ok || source.NativeSessionID == "" {
+			return nil, fmt.Errorf("source Claude session is not available for fork")
+		}
+		if session.ForkedFromNativeAnchor == "" {
+			return nil, fmt.Errorf("Claude fork is missing native message anchor")
+		}
+		args = append(args,
+			"--resume", source.NativeSessionID,
+			"--resume-session-at", session.ForkedFromNativeAnchor,
+			"--fork-session",
+			"--session-id", session.NativeSessionID,
+		)
+	} else {
+		args = append(args, "--session-id", session.NativeSessionID)
+	}
+	if model := strings.TrimSpace(options.Model); model != "" {
+		args = append(args, "--model", model)
+	}
+	if effort := strings.TrimSpace(options.ReasoningEffort); effort != "" {
+		args = append(args, "--effort", effort)
+	}
+	if mode := strings.TrimSpace(options.PermissionMode); mode != "" && mode != "default" {
+		args = append(args, "--permission-mode", mode)
+	}
+	if len(options.AllowedTools) > 0 {
+		allowed := append([]string{}, options.AllowedTools...)
+		if remote.RemoteCWD != "" {
+			allowed = append(allowed, claudeRemoteMCPAllowedTools()...)
+		}
+		args = append(args, "--allowedTools", strings.Join(allowed, ","))
+	} else if remote.RemoteCWD != "" {
+		args = append(args, "--allowedTools", strings.Join(claudeRemoteMCPAllowedTools(), ","))
+	}
+	if remote.SettingSources != "" {
+		args = append(args, "--setting-sources", remote.SettingSources)
+	}
+	if remote.MCPConfigPath != "" {
+		args = append(args, "--disallowedTools", strings.Join(claudeRemoteNativeDisallowedTools(), ","))
+		args = append(args, "--mcp-config", remote.MCPConfigPath, "--strict-mcp-config")
+	}
+	if remote.AppendPrompt != "" {
+		args = append(args, "--append-system-prompt", remote.AppendPrompt)
+		args = append(args, "--exclude-dynamic-system-prompt-sections")
+	}
+	return args, nil
 }
 
 func writeClaudeUserInput(writer io.Writer, input string) error {

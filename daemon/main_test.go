@@ -3424,6 +3424,284 @@ func (r *recordingSteerRuntime) Steer(sessionID string, input string, options Tu
 	return nil
 }
 
+type recordingForkRuntime struct {
+	recordingRuntime
+	source        Session
+	fork          Session
+	workspace     Workspace
+	rollbackTurns int
+}
+
+func (r *recordingForkRuntime) ForkSession(source Session, fork Session, workspace Workspace, rollbackTurns int) error {
+	r.source = source
+	r.fork = fork
+	r.workspace = workspace
+	r.rollbackTurns = rollbackTurns
+	return nil
+}
+
+func TestResolveForkAnchorRequiresCompletedFinalAssistantReply(t *testing.T) {
+	app, session := newForkResolverTestApp(t, AgentClaude)
+	cases := []struct {
+		name    string
+		events  []AstralEvent
+		target  int64
+		wantErr string
+	}{
+		{
+			name: "completed final assistant",
+			events: []AstralEvent{
+				testEvent(session, 1, "message.user", map[string]any{"text": "one"}),
+				testEvent(session, 2, "turn.started", map[string]any{"status": "running"}),
+				testEvent(session, 3, "message.delta", map[string]any{"text": "draft"}),
+				testEvent(session, 4, "message.assistant", map[string]any{"text": "done", "native_message_uuid": "msg-1"}),
+				testEvent(session, 5, "turn.completed", map[string]any{"status": "idle"}),
+			},
+			target: 4,
+		},
+		{
+			name: "running turn",
+			events: []AstralEvent{
+				testEvent(session, 1, "message.user", map[string]any{"text": "one"}),
+				testEvent(session, 2, "turn.started", map[string]any{"status": "running"}),
+				testEvent(session, 3, "message.assistant", map[string]any{"text": "done", "native_message_uuid": "msg-1"}),
+			},
+			target:  3,
+			wantErr: "running",
+		},
+		{
+			name: "middle assistant",
+			events: []AstralEvent{
+				testEvent(session, 1, "message.user", map[string]any{"text": "one"}),
+				testEvent(session, 2, "turn.started", map[string]any{"status": "running"}),
+				testEvent(session, 3, "message.assistant", map[string]any{"text": "first", "native_message_uuid": "msg-1"}),
+				testEvent(session, 4, "message.assistant", map[string]any{"text": "second", "native_message_uuid": "msg-2"}),
+				testEvent(session, 5, "turn.completed", map[string]any{"status": "idle"}),
+			},
+			target:  3,
+			wantErr: "final assistant",
+		},
+		{
+			name: "failed turn",
+			events: []AstralEvent{
+				testEvent(session, 1, "message.user", map[string]any{"text": "one"}),
+				testEvent(session, 2, "turn.started", map[string]any{"status": "running"}),
+				testEvent(session, 3, "message.assistant", map[string]any{"text": "done", "native_message_uuid": "msg-1"}),
+				testEvent(session, 4, "turn.failed", map[string]any{"status": "failed"}),
+			},
+			target:  3,
+			wantErr: "completed",
+		},
+		{
+			name: "delta target",
+			events: []AstralEvent{
+				testEvent(session, 1, "message.user", map[string]any{"text": "one"}),
+				testEvent(session, 2, "turn.started", map[string]any{"status": "running"}),
+				testEvent(session, 3, "message.delta", map[string]any{"text": "stream"}),
+				testEvent(session, 4, "turn.completed", map[string]any{"status": "idle"}),
+			},
+			target:  3,
+			wantErr: "completed assistant reply",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			anchor, err := app.resolveForkAnchor(session, tc.events, tc.target)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("resolveForkAnchor returned error: %v", err)
+				}
+				if anchor.NativeAnchor != "msg-1" && tc.target == 4 {
+					t.Fatalf("native anchor = %q, want msg-1", anchor.NativeAnchor)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestForkEndpointCreatesMetadataAndSafeProjection(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Fork", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentClaude)
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{}}
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: session})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "first prompt"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"status": "running"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "approval.requested", Normalized: map[string]any{"approval_id": "approval-1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "approval.resolved", Normalized: map[string]any{"approval_id": "approval-1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "ask.requested", Normalized: map[string]any{"ask_id": "ask-1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "ask.resolved", Normalized: map[string]any{"ask_id": "ask-1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "queue.queued", Normalized: map[string]any{"queue_id": "queue-1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.context", Normalized: map[string]any{"total_tokens": 123}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "answer", "native_message_uuid": "msg-1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"status": "idle"}})
+	sourceEvents := st.queryEvents("", session.ID, 0)
+	targetSeq := int64(0)
+	for _, event := range sourceEvents {
+		if event.Kind == "message.assistant" {
+			targetSeq = event.Seq
+		}
+	}
+	if targetSeq == 0 {
+		t.Fatal("missing target assistant event")
+	}
+
+	body := fmt.Sprintf(`{"event_seq":%d}`, targetSeq)
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+session.ID+"/fork", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	app.handleSessionAction(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var response forkSessionResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Session.ForkedFromSessionID != session.ID || response.Session.ForkedFromEventSeq != targetSeq || response.Session.ForkedFromNativeAnchor != "msg-1" {
+		t.Fatalf("fork metadata = %#v", response.Session)
+	}
+	forkEvents := st.queryEvents("", response.Session.ID, 0)
+	projectedKinds := []string{}
+	for _, event := range forkEvents {
+		if event.Kind == "session.started" {
+			continue
+		}
+		projectedKinds = append(projectedKinds, event.Kind)
+		if strings.HasPrefix(event.Kind, "approval.") || strings.HasPrefix(event.Kind, "ask.") || strings.HasPrefix(event.Kind, "queue.") || strings.HasPrefix(event.Kind, "control.") || strings.HasPrefix(event.Kind, "session.") {
+			t.Fatalf("unsafe event projected: %#v", event)
+		}
+	}
+	if !reflect.DeepEqual(projectedKinds, []string{"message.user", "turn.started", "message.assistant", "turn.completed"}) {
+		t.Fatalf("projected kinds = %#v", projectedKinds)
+	}
+}
+
+func TestClaudeForkArgsUseResumeSessionAtAndForkSession(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := Workspace{ID: "ws_fork_args", Agent: AgentClaude, Target: "local", LocalCWD: dir}
+	source := st.createSession(workspace, AgentClaude)
+	source.NativeSessionID = "source-native"
+	st.mu.Lock()
+	st.sessions[source.ID] = source
+	st.mu.Unlock()
+	fork := Session{
+		ID:                     "sess_fork_args",
+		WorkspaceID:            workspace.ID,
+		Agent:                  AgentClaude,
+		Status:                 "idle",
+		NativeSessionID:        "new-native",
+		ForkedFromSessionID:    source.ID,
+		ForkedFromNativeAnchor: "msg-uuid",
+	}
+	runtime := newClaudeLocalRuntime(&app{store: st})
+	args, err := runtime.claudeArgs(fork, TurnOptions{}, claudeRemoteOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--resume source-native", "--resume-session-at msg-uuid", "--fork-session", "--session-id new-native"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args = %q, missing %q", joined, want)
+		}
+	}
+}
+
+func TestCodexForkEndpointCallsForkRuntimeWithRollbackTurns(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Codex Fork", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	session.NativeThreadID = "source-thread"
+	st.mu.Lock()
+	st.sessions[session.ID] = session
+	st.mu.Unlock()
+	runtime := &recordingForkRuntime{}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: session})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "one"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-1", "status": "running"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "answer", "item_id": "item-1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn-1", "status": "idle"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "two"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-2", "status": "running"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "later", "item_id": "item-2"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn-2", "status": "idle"}})
+	targetSeq := int64(0)
+	for _, event := range st.queryEvents("", session.ID, 0) {
+		if event.Kind != "message.assistant" {
+			continue
+		}
+		if stringValue(mapValue(event.Normalized)["text"]) == "answer" {
+			targetSeq = event.Seq
+			break
+		}
+	}
+	if targetSeq == 0 {
+		t.Fatal("missing first assistant target")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+session.ID+"/fork", strings.NewReader(fmt.Sprintf(`{"event_seq":%d}`, targetSeq)))
+	rr := httptest.NewRecorder()
+	app.handleSessionAction(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if runtime.source.ID != session.ID || runtime.fork.ID == "" || runtime.workspace.ID != workspace.ID {
+		t.Fatalf("fork runtime call = source %#v fork %#v workspace %#v", runtime.source, runtime.fork, runtime.workspace)
+	}
+	if runtime.rollbackTurns != 1 {
+		t.Fatalf("rollbackTurns = %d, want 1", runtime.rollbackTurns)
+	}
+}
+
+func newForkResolverTestApp(t *testing.T, agent AgentKind) (*app, Session) {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := Workspace{ID: "ws_fork_resolver", Agent: agent, Target: "local", LocalCWD: dir}
+	session := Session{ID: "sess_fork_resolver", WorkspaceID: workspace.ID, Agent: agent, Status: "idle", NativeSessionID: "native"}
+	st.mu.Lock()
+	st.workspaces[workspace.ID] = workspace
+	st.sessions[session.ID] = session
+	st.mu.Unlock()
+	return &app{store: st, hub: newEventHub()}, session
+}
+
+func testEvent(session Session, seq int64, kind string, normalized map[string]any) AstralEvent {
+	return AstralEvent{
+		Seq:         seq,
+		WorkspaceID: session.WorkspaceID,
+		SessionID:   session.ID,
+		Agent:       session.Agent,
+		Kind:        kind,
+		Normalized:  normalized,
+	}
+}
+
 func TestSuppressCodexInternalStderrWarnings(t *testing.T) {
 	lines := []string{
 		`{"timestamp":"2026-05-23T09:05:36.950527Z","level":"WARN","fields":{"message":"ignoring interface.icon_large: icon path must not contain '..'"},"target":"codex_core_skills::loader"}`,

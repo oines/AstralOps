@@ -69,6 +69,8 @@ export function App(): React.JSX.Element {
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightPanelWidth, setRightPanelWidth] = useState(420);
   const [composerHeight, setComposerHeight] = useState(96);
+  const [forkingSeq, setForkingSeq] = useState<number | null>(null);
+  const [scrollTarget, setScrollTarget] = useState<{ sessionId: string; eventSeq: number } | null>(null);
 
   const sseQueueRef = useRef<AstralEvent[]>([]);
   const sseFrameRef = useRef<number | null>(null);
@@ -161,6 +163,7 @@ export function App(): React.JSX.Element {
   const selectedModel = modelOverride.trim() || undefined;
   const selectedReasoningEffort = reasoningEffort || undefined;
   const contextUsage = useContextUsage(activeSessionEvents, modelOptions, modelOverride, modelSlotOverride, currentModel);
+  const forkSourceSessionExists = Boolean(activeSession?.forked_from_session_id && sessions.some((session) => session.id === activeSession.forked_from_session_id));
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -387,6 +390,48 @@ export function App(): React.JSX.Element {
     [sessions],
   );
 
+  const handleOpenSourceSession = useCallback(
+    (sessionId: string, eventSeq?: number) => {
+      const session = sessions.find((item) => item.id === sessionId);
+      if (!session) return;
+      setError("");
+      setActiveWorkspaceId(session.workspace_id);
+      setActiveSession(session);
+      if (eventSeq) {
+        setScrollTarget({ sessionId, eventSeq });
+      }
+    },
+    [sessions],
+  );
+
+  const handleForkFromEvent = useCallback(
+    async (event: AstralEvent) => {
+      if (!api || !activeSession) return;
+      setError("");
+      setForkingSeq(event.seq);
+      try {
+        const response = await api.forkSession(activeSession.id, event.seq);
+        const forked = response.session;
+        const [view, sessionEvents] = await Promise.all([
+          api.sessionView(forked.id).catch(() => null),
+          api.events({ session_id: forked.id, limit: EVENT_WINDOW_SIZE }),
+        ]);
+        const displaySession = view ? { ...forked, ...view.session, title: view.title || view.session.title, status: view.status } : forked;
+        if (view) storeSessionView(view);
+        setSessions((current) => sortSessionsByUpdated([displaySession, ...current.filter((item) => item.id !== forked.id)]));
+        setActiveWorkspaceId(displaySession.workspace_id);
+        setActiveSession(displaySession);
+        mergeEvents(sessionEvents);
+        setSessionWindows((current) => updateWindowAfterLatest(current, forked.id, sessionEvents, EVENT_WINDOW_SIZE));
+      } catch (forkError) {
+        setError(forkError instanceof Error ? forkError.message : String(forkError));
+      } finally {
+        setForkingSeq(null);
+      }
+    },
+    [activeSession, api, mergeEvents, setSessionWindows, storeSessionView],
+  );
+
   const deleteWorkspace = useCallback(
     async (workspaceId: string) => {
       if (!api) return;
@@ -583,9 +628,15 @@ export function App(): React.JSX.Element {
           activeWorkspace={activeWorkspace}
           composerHeight={composerHeight}
           events={visibleEvents}
+          forkingSeq={forkingSeq}
           hasOlder={activeSessionWindow?.hasOlder ?? false}
           loadingOlder={activeSessionWindow?.loadingOlder ?? false}
+          scrollToEventSeq={scrollTarget?.sessionId === activeSessionId ? scrollTarget.eventSeq : null}
+          sourceSessionExists={forkSourceSessionExists}
+          onForkFromEvent={(event) => void handleForkFromEvent(event)}
           onLoadOlder={() => void loadOlderEvents()}
+          onOpenSourceSession={handleOpenSourceSession}
+          onScrollTargetHandled={() => setScrollTarget(null)}
         />
         <Composer
           commands={activeCommands}

@@ -655,6 +655,8 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, view)
+	case action == "fork" && r.Method == http.MethodPost:
+		a.handleForkSession(w, sessionID, r)
 	case action == "commands" && len(parts) == 2 && r.Method == http.MethodGet:
 		a.handleListSessionCommands(w, sessionID)
 	case action == "commands" && len(parts) == 3 && r.Method == http.MethodPost:

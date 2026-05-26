@@ -130,6 +130,17 @@ func (r *codexLocalRuntime) RunCommand(session Session, workspace Workspace, com
 	return nil
 }
 
+func (r *codexLocalRuntime) ForkSession(source Session, fork Session, workspace Workspace, rollbackTurns int) error {
+	if strings.TrimSpace(source.NativeThreadID) == "" {
+		return fmt.Errorf("source codex session is missing native thread id")
+	}
+	client, err := r.clientForSession(fork, workspace)
+	if err != nil {
+		return err
+	}
+	return client.forkThread(source.NativeThreadID, rollbackTurns)
+}
+
 func (r *codexLocalRuntime) clientForSession(session Session, workspace Workspace) (*codexClient, error) {
 	info := r.app.agents[AgentCodex]
 	if !info.Available || info.Path == "" {
@@ -363,6 +374,48 @@ func (c *codexClient) runCommand(commandID string) error {
 	default:
 		return fmt.Errorf("codex command %s is not implemented", commandID)
 	}
+}
+
+func (c *codexClient) forkThread(sourceThreadID string, rollbackTurns int) error {
+	if err := c.ensureStarted(); err != nil {
+		return err
+	}
+	if c.getThreadID() != "" {
+		return nil
+	}
+	params := c.threadParams()
+	params["threadId"] = sourceThreadID
+	result, err := c.request("thread/fork", params, codexRequestTimeout)
+	if err != nil {
+		return err
+	}
+	threadID := codexResultThreadID(result)
+	if threadID == "" {
+		return errors.New("codex thread/fork did not return a thread id")
+	}
+	c.mu.Lock()
+	c.threadID = threadID
+	c.session.NativeThreadID = threadID
+	c.mu.Unlock()
+	c.runtime.app.store.updateSessionNativeThreadID(c.session.ID, threadID)
+
+	if rollbackTurns > 0 {
+		result, err = c.request("thread/rollback", map[string]any{
+			"threadId": threadID,
+			"numTurns": rollbackTurns,
+		}, codexRequestTimeout)
+		if err != nil {
+			return err
+		}
+		if rolledThreadID := codexResultThreadID(result); rolledThreadID != "" && rolledThreadID != threadID {
+			c.mu.Lock()
+			c.threadID = rolledThreadID
+			c.session.NativeThreadID = rolledThreadID
+			c.mu.Unlock()
+			c.runtime.app.store.updateSessionNativeThreadID(c.session.ID, rolledThreadID)
+		}
+	}
+	return nil
 }
 
 func (c *codexClient) ensureStarted() error {

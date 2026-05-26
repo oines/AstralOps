@@ -19,6 +19,10 @@ type SessionStopper interface {
 	StopSession(sessionID string, reason string)
 }
 
+type SessionForker interface {
+	ForkSession(source Session, fork Session, workspace Workspace, rollbackTurns int) error
+}
+
 type TurnSteerer interface {
 	Steer(sessionID string, input string, options TurnOptions) error
 }

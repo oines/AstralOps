@@ -6,6 +6,7 @@ import type {
   Session,
   SessionCommandListResponse,
   SessionCommandResponse,
+  SessionForkResponse,
   SessionView,
   WorkspaceCommandResponse,
   WorkspaceConnection,
@@ -93,6 +94,10 @@ export class AstralApi {
 
   async deleteSession(sessionId: string): Promise<{ ok: boolean }> {
     return this.delete(`/v1/sessions/${sessionId}`);
+  }
+
+  async forkSession(sessionId: string, eventSeq: number): Promise<SessionForkResponse> {
+    return this.post(`/v1/sessions/${sessionId}/fork`, { event_seq: eventSeq });
   }
 
   async sendInput(

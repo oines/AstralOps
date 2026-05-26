@@ -331,16 +331,21 @@ func normalizeClaudeAssistant(session Session, raw map[string]any) []AstralEvent
 
 	events := []AstralEvent{}
 	realStreamAggregate := stringValue(raw["uuid"]) != ""
+	aggregateText := strings.Builder{}
 	for _, block := range content {
 		blockType, _ := block["type"].(string)
 		switch blockType {
 		case "text":
-			if text := stringValue(block["text"]); text != "" && !realStreamAggregate {
-				events = append(events, baseClaudeEvent(session, "message.delta", map[string]any{"text": text}, raw))
+			if text := stringValue(block["text"]); text != "" {
+				if realStreamAggregate {
+					aggregateText.WriteString(text)
+				} else {
+					events = append(events, baseClaudeEvent(session, "message.delta", map[string]any{"source": "claude", "text": text}, raw))
+				}
 			}
 		case "thinking":
 			if text := firstString(block["thinking"], block["text"]); text != "" && !realStreamAggregate {
-				events = append(events, baseClaudeEvent(session, "reasoning.delta", map[string]any{"text": text}, raw))
+				events = append(events, baseClaudeEvent(session, "reasoning.delta", map[string]any{"source": "claude", "text": text}, raw))
 			}
 		case "tool_use", "server_tool_use":
 			events = append(events, normalizeClaudeToolUse(session, block, raw))
@@ -357,6 +362,13 @@ func normalizeClaudeAssistant(session Session, raw map[string]any) []AstralEvent
 				"content_type": blockType,
 			}, raw))
 		}
+	}
+	if realStreamAggregate && aggregateText.Len() > 0 {
+		events = append(events, baseClaudeEvent(session, "message.assistant", map[string]any{
+			"source":              "claude",
+			"text":                aggregateText.String(),
+			"native_message_uuid": stringValue(raw["uuid"]),
+		}, raw))
 	}
 	return events
 }

@@ -39,15 +39,19 @@ type AstralEvent struct {
 }
 
 type Session struct {
-	ID              string    `json:"id"`
-	WorkspaceID     string    `json:"workspace_id"`
-	Agent           AgentKind `json:"agent"`
-	Title           string    `json:"title,omitempty"`
-	Status          string    `json:"status"`
-	NativeSessionID string    `json:"native_session_id,omitempty"`
-	NativeThreadID  string    `json:"native_thread_id,omitempty"`
-	CreatedAt       string    `json:"created_at"`
-	UpdatedAt       string    `json:"updated_at"`
+	ID                     string    `json:"id"`
+	WorkspaceID            string    `json:"workspace_id"`
+	Agent                  AgentKind `json:"agent"`
+	Title                  string    `json:"title,omitempty"`
+	Status                 string    `json:"status"`
+	NativeSessionID        string    `json:"native_session_id,omitempty"`
+	NativeThreadID         string    `json:"native_thread_id,omitempty"`
+	ForkedFromSessionID    string    `json:"forked_from_session_id,omitempty"`
+	ForkedFromEventSeq     int64     `json:"forked_from_event_seq,omitempty"`
+	ForkedFromNativeAnchor string    `json:"forked_from_native_anchor,omitempty"`
+	ForkedFromTitle        string    `json:"forked_from_title,omitempty"`
+	CreatedAt              string    `json:"created_at"`
+	UpdatedAt              string    `json:"updated_at"`
 }
 
 type SessionCommand struct {

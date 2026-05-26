@@ -408,6 +408,27 @@ func (s *store) createSession(workspace Workspace, agent AgentKind) Session {
 	return ss
 }
 
+func (s *store) createForkSession(workspace Workspace, source Session, anchor forkAnchor) Session {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	ss := Session{
+		ID:                     "sess_" + randomID(12),
+		WorkspaceID:            workspace.ID,
+		Agent:                  source.Agent,
+		Status:                 "idle",
+		NativeSessionID:        randomUUID(),
+		ForkedFromSessionID:    source.ID,
+		ForkedFromEventSeq:     anchor.EventSeq,
+		ForkedFromNativeAnchor: anchor.NativeAnchor,
+		ForkedFromTitle:        anchor.SourceTitle,
+		CreatedAt:              now,
+		UpdatedAt:              now,
+	}
+	s.mu.Lock()
+	s.sessions[ss.ID] = ss
+	s.mu.Unlock()
+	return ss
+}
+
 func (s *store) getSession(id string) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

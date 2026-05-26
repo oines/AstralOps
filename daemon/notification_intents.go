@@ -14,6 +14,9 @@ func notificationEventForSource(source AstralEvent, title string, targetSessionI
 	if value["hidden"] == true || stringValue(value["visibility"]) == "debug" {
 		return AstralEvent{}, false
 	}
+	if value["suppress_notification"] == true {
+		return AstralEvent{}, false
+	}
 
 	reason, summary, ok := notificationIntentText(source, value, events)
 	if !ok {

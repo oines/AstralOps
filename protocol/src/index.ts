@@ -86,6 +86,7 @@ export type AstralNormalizedBase = {
 export type MessageNormalized = AstralNormalizedBase & {
   text?: string;
   item_id?: string;
+  native_message_uuid?: string;
 };
 
 export type ReasoningNormalized = AstralNormalizedBase & {
@@ -243,6 +244,10 @@ export type Session = {
   status: "idle" | "running" | "requires_action" | "reconnecting" | "failed";
   native_session_id?: string;
   native_thread_id?: string;
+  forked_from_session_id?: string;
+  forked_from_event_seq?: number;
+  forked_from_native_anchor?: string;
+  forked_from_title?: string;
   created_at: string;
   updated_at: string;
 };
@@ -333,6 +338,14 @@ export type SessionInputRequest = {
   model?: string;
   reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
   permission_mode?: "default" | "auto" | "plan" | "bypassPermissions";
+};
+
+export type SessionForkRequest = {
+  event_seq: number;
+};
+
+export type SessionForkResponse = {
+  session: Session;
 };
 
 export type SessionCommand = {
