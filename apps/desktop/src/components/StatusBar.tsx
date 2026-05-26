@@ -27,10 +27,10 @@ export function StatusBar({
   const effectiveState = statusBarState(activeWorkspace, activeWorkspaceConnection, connectionState, sessionState);
 
   return (
-    <header className={`[-webkit-app-region:drag] relative flex h-[64px] shrink-0 items-center justify-between border-b border-[#ebe8e1] bg-[#fffefa] pr-[68px] transition-[padding] duration-180 ease-out ${sidebarCollapsed ? "pl-[144px]" : "pl-8"}`}>
-      <div className="min-w-0 pt-0.5">
-        <div className="truncate text-[18px] font-semibold leading-6 text-[#202124]">{title}</div>
-        <div className="mt-0.5 flex min-w-0 items-center gap-2 overflow-hidden text-[13px] font-semibold leading-5 text-[#939196]">
+    <header className={`[-webkit-app-region:drag] relative flex h-[52px] shrink-0 items-center justify-between border-b border-black/5 bg-white pr-[68px] transition-[padding] duration-180 ease-out ${sidebarCollapsed ? "pl-[144px]" : "pl-8"}`}>
+      <div className="min-w-0 flex flex-1 items-center gap-3">
+        <div className="shrink-0 truncate text-[14px] font-semibold text-[#202124] max-w-[45%]">{title}</div>
+        <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-[12px] font-medium text-[#939196]">
           {agent ? <span className="shrink-0">{agentLabel(agent)}</span> : null}
           {agent && path ? <span className="shrink-0 text-[#c2bfb8]">·</span> : null}
           {path ? <span className="truncate">{path}</span> : null}

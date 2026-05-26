@@ -31,6 +31,7 @@ var supportedMethods = []string{
 	"stat",
 	"list",
 	"read",
+	"dirs",
 	"write",
 	"mkdir",
 	"remove",
@@ -89,7 +90,7 @@ type ptySession struct {
 }
 
 func main() {
-	flag.StringVar(&rootCWD, "cwd", "", "remote cwd and default access boundary")
+	flag.StringVar(&rootCWD, "cwd", "", "remote cwd for relative paths")
 	flag.Parse()
 	if rootCWD == "" {
 		rootCWD, _ = os.Getwd()
@@ -244,6 +245,12 @@ func dispatch(req request) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"path": path, "content": string(body), "dataBase64": base64.StdEncoding.EncodeToString(body)}, nil
+	case "dirs":
+		var p dirsParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return listDirs(p)
 	case "write":
 		var p writeParams
 		if err := parse(req.Params, &p); err != nil {
@@ -388,6 +395,11 @@ type pathParams struct {
 	Path string `json:"path"`
 }
 
+type dirsParams struct {
+	Path  string `json:"path"`
+	Limit int    `json:"limit"`
+}
+
 type mkdirParams struct {
 	Path      string `json:"path"`
 	Recursive *bool  `json:"recursive"`
@@ -495,15 +507,7 @@ func resolveRemotePath(path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(rootCWD, path)
 	}
-	path = filepath.Clean(path)
-	rel, err := filepath.Rel(rootCWD, path)
-	if err != nil {
-		return "", err
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("path %q escapes remote cwd %q", path, rootCWD)
-	}
-	return path, nil
+	return filepath.Clean(path), nil
 }
 
 func fileInfo(path string, info fs.FileInfo) map[string]any {
@@ -515,6 +519,44 @@ func fileInfo(path string, info fs.FileInfo) map[string]any {
 		"is_dir":   info.IsDir(),
 		"modified": info.ModTime().UTC().Format(time.RFC3339Nano),
 	}
+}
+
+func listDirs(p dirsParams) (any, error) {
+	root, err := resolveRemotePath(p.Path)
+	if err != nil {
+		return nil, err
+	}
+	if p.Limit <= 0 {
+		p.Limit = 5000
+	}
+	dirs := []string{}
+	files := []string{}
+	truncated := false
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		resolved, err := resolveRemotePath(path)
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			dirs = append(dirs, resolved)
+		} else {
+			files = append(files, resolved)
+		}
+		if len(dirs)+len(files) >= p.Limit {
+			truncated = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(dirs)
+	sort.Strings(files)
+	return map[string]any{"dirs": dirs, "files": files, "truncated": truncated}, nil
 }
 
 func rgCapability() map[string]any {
@@ -540,12 +582,33 @@ func glob(p globParams) (any, error) {
 	if matches, err := globRG(cwd, p.Pattern); err == nil {
 		return map[string]any{"matches": matches, "backend": "rg"}, nil
 	}
-	matches, err := filepath.Glob(filepath.Join(cwd, p.Pattern))
+	matches, err := globGo(cwd, p.Pattern)
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(matches)
 	return map[string]any{"matches": matches, "backend": "go"}, nil
+}
+
+func globGo(cwd, pattern string) ([]string, error) {
+	if strings.TrimSpace(pattern) == "" {
+		pattern = "*"
+	}
+	seen := map[string]bool{}
+	matches := []string{}
+	for _, expanded := range expandSimpleBraceGlob(pattern) {
+		items, err := filepath.Glob(filepath.Join(cwd, expanded))
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			if !seen[item] {
+				seen[item] = true
+				matches = append(matches, item)
+			}
+		}
+	}
+	sort.Strings(matches)
+	return matches, nil
 }
 
 func globRG(cwd, pattern string) ([]string, error) {
@@ -644,14 +707,14 @@ func grepGo(cwd string, p grepParams) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	globs := expandSimpleBraceGlob(p.Glob)
 	out := []map[string]any{}
 	err = filepath.WalkDir(cwd, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if p.Glob != "" {
-			ok, _ := filepath.Match(p.Glob, filepath.Base(path))
-			if !ok {
+		if strings.TrimSpace(p.Glob) != "" {
+			if !matchesAnyGrepGlob(cwd, path, globs) {
 				return nil
 			}
 		}
@@ -670,6 +733,69 @@ func grepGo(cwd string, p grepParams) (any, error) {
 		return nil
 	})
 	return map[string]any{"matches": out, "backend": "go"}, err
+}
+
+func expandSimpleBraceGlob(pattern string) []string {
+	if !strings.Contains(pattern, "{") {
+		return []string{pattern}
+	}
+	open := strings.IndexByte(pattern, '{')
+	close := -1
+	depth := 0
+	for i := open; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				close = i
+				break
+			}
+		}
+	}
+	if open < 0 || close <= open {
+		return []string{pattern}
+	}
+	body := pattern[open+1 : close]
+	if body == "" || strings.ContainsAny(body, "{}") {
+		return []string{pattern}
+	}
+	parts := strings.Split(body, ",")
+	out := make([]string, 0, len(parts))
+	prefix := pattern[:open]
+	suffix := pattern[close+1:]
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return []string{pattern}
+		}
+		out = append(out, prefix+part+suffix)
+	}
+	return out
+}
+
+func matchesAnyGrepGlob(cwd, path string, globs []string) bool {
+	base := filepath.Base(path)
+	rel, err := filepath.Rel(cwd, path)
+	if err != nil {
+		rel = base
+	}
+	rel = filepath.ToSlash(rel)
+	for _, pattern := range globs {
+		pattern = filepath.ToSlash(pattern)
+		ok, _ := filepath.Match(pattern, base)
+		if ok {
+			return true
+		}
+		if strings.Contains(pattern, "/") {
+			ok, _ = filepath.Match(pattern, rel)
+			if ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func runExec(p execParams) (any, error) {

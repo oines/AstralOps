@@ -101,16 +101,16 @@ export function Sidebar({
 
   return (
     <aside
-      className={`relative flex shrink-0 flex-col overflow-hidden bg-[#f7f6f3] transition-[width,border-color] duration-180 ease-out ${collapsed ? "border-r border-transparent" : "border-r border-[#e4e1da]"} ${dragging ? "cursor-col-resize" : ""}`}
+      className={`relative flex shrink-0 flex-col overflow-hidden bg-transparent transition-[width,border-color] duration-180 ease-out ${collapsed ? "border-r border-transparent" : "border-r border-black/5"} ${dragging ? "cursor-col-resize" : ""}`}
       style={{ width: collapsed ? 0 : width }}
       aria-hidden={collapsed}
     >
       <div className={`flex h-full flex-col transition-[opacity,transform] duration-180 ease-out ${collapsed ? "pointer-events-none -translate-x-2 opacity-0" : "translate-x-0 opacity-100"}`} style={{ width }}>
-      <div className="h-[72px] shrink-0" />
+      <div className="h-[52px] shrink-0" />
 
       <nav className="grid gap-1 px-4 pb-6">
         <button
-          className="flex h-9 w-full items-center gap-3 rounded-lg px-2 text-left text-[15px] font-semibold text-[#242426] transition-colors duration-150 ease-out hover:bg-black/[0.04]"
+          className="flex h-9 w-full items-center gap-3 rounded-lg px-2 text-left text-[15px] font-semibold text-[#242426] transition-colors duration-150 ease-out hover:bg-black/5"
           type="button"
           onClick={onCreateWorkspace}
         >
@@ -122,7 +122,7 @@ export function Sidebar({
       <nav className="min-h-0 flex-1 overflow-auto px-3 pb-4">
         {workspaces.length === 0 ? (
           <button
-            className="mx-2 mt-1 w-[calc(100%-16px)] rounded-lg border border-dashed border-[#d8d5cd] px-3 py-3 text-center text-[14px] font-semibold text-[#6b6b70] hover:bg-black/[0.035] hover:text-[#1d1d1f]"
+            className="mx-2 mt-1 w-[calc(100%-16px)] rounded-lg border border-dashed border-black/15 px-3 py-3 text-center text-[14px] font-semibold text-[#6b6b70] hover:bg-black/5 hover:text-[#1d1d1f]"
             type="button"
             onClick={onCreateWorkspace}
           >
@@ -130,7 +130,7 @@ export function Sidebar({
           </button>
         ) : null}
 
-        <div className="grid gap-5">
+        <div className="grid gap-4">
           {workspaces.map((workspace) => (
             <WorkspaceBlock
               activeSessionId={activeSessionId}
@@ -176,7 +176,7 @@ export function Sidebar({
       <div className="h-5 shrink-0" />
       </div>
       <div
-        className={`absolute inset-y-0 right-[-3px] z-20 w-1.5 cursor-col-resize transition-colors duration-150 ease-out hover:bg-[#d8d5cd] ${collapsed ? "hidden" : ""}`}
+        className={`absolute inset-y-0 right-[-3px] z-20 w-1.5 cursor-col-resize transition-colors duration-150 ease-out hover:bg-black/10 ${collapsed ? "hidden" : ""}`}
         onMouseDown={(event) => {
           event.preventDefault();
           setDragging(true);
@@ -242,7 +242,7 @@ function WorkspaceBlock({
   workspaceConnection,
 }: WorkspaceBlockProps): React.JSX.Element {
   return (
-    <div className="grid gap-1.5">
+    <div className="grid gap-1">
       <WorkspaceRow
         collapsed={collapsed}
         confirmDelete={confirmDelete?.type === "workspace" && confirmDelete.id === workspace.id}
@@ -304,29 +304,29 @@ function WorkspaceRow({
   const connected = connection?.status === "connected";
   const canCreateSession = target !== "ssh" || connected;
   const rowGridClass = target === "ssh"
-    ? "grid-cols-[14px_17px_minmax(0,1fr)_28px_28px_28px]"
-    : "grid-cols-[14px_17px_minmax(0,1fr)_28px_28px]";
+    ? "grid-cols-[14px_17px_minmax(0,1fr)_26px_26px_26px]"
+    : "grid-cols-[14px_17px_minmax(0,1fr)_26px_26px]";
   return (
     <div
-      className={`group relative grid min-h-11 w-full cursor-default ${rowGridClass} items-center gap-1.5 rounded-xl py-1 pl-2 pr-2 transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.035] ${
-        collapsed && sessionCount > 0 ? "bg-[#eeece7] text-[#4f5358]" : "text-[#6f7378]"
+      className={`group relative grid min-h-[32px] w-full cursor-default ${rowGridClass} items-center gap-1.5 rounded-[9px] py-0.5 pl-1.5 pr-1.5 transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.045] ${
+        collapsed && sessionCount > 0 ? "bg-black/[0.045] text-[#4f5358]" : "text-[#6f7378]"
       }`}
       data-sidebar-menu
       onClick={onClick}
     >
       <ChevronRight className={`shrink-0 text-[#9a9da1] transition-transform duration-150 ease-out ${collapsed ? "" : "rotate-90"}`} size={14} strokeWidth={2.1} />
-      <Folder className="shrink-0 text-[#74777b]" size={17} strokeWidth={1.8} />
+      <Folder className="shrink-0 text-[#74777b]" size={15} strokeWidth={1.8} />
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-1.5">
-          <span className="min-w-0 truncate text-left text-[16px] font-semibold">{name}</span>
+          <span className="min-w-0 truncate text-left text-[14px] font-semibold">{name}</span>
           {collapsed && sessionCount > 0 && !confirmDelete ? (
-            <span className="shrink-0 rounded-full bg-black/[0.045] px-2 py-0.5 text-[11px] font-semibold text-[#8d8f94]">
+            <span className="shrink-0 rounded-full bg-black/[0.04] px-1.5 py-0.5 text-[11px] font-semibold text-[#8d8f94]">
               {sessionCount}
             </span>
           ) : null}
         </div>
         {status && !confirmDelete ? (
-          <div className={`mt-0.5 flex min-w-0 items-center gap-1 truncate text-[11px] font-semibold leading-3 ${workspaceConnectionClass(connection?.status)}`} title={status}>
+          <div className={`mt-0.5 flex min-w-0 items-center gap-1 truncate text-[11px] font-medium leading-3 ${workspaceConnectionClass(connection?.status)}`} title={status}>
             {connecting ? <LoaderCircle className="shrink-0 animate-spin" size={11} strokeWidth={2} aria-hidden="true" /> : null}
             <span className="truncate">{status}</span>
           </div>
@@ -334,7 +334,7 @@ function WorkspaceRow({
       </div>
       {target === "ssh" ? (
         <button
-          className={`grid size-7 shrink-0 place-items-center rounded-md transition-colors duration-150 ease-out ${
+          className={`grid size-6 shrink-0 place-items-center rounded-md transition-colors duration-150 ease-out ${
             connecting
               ? "cursor-default text-[#2f8cff]"
               : connected
@@ -362,7 +362,7 @@ function WorkspaceRow({
         </button>
       ) : null}
       <button
-        className={`grid size-7 shrink-0 place-items-center rounded-md transition-colors duration-150 ease-out ${
+          className={`grid size-6 shrink-0 place-items-center rounded-md transition-colors duration-150 ease-out ${
           canCreateSession ? "text-[#9a9da1] hover:bg-black/[0.06] hover:text-[#202124]" : "cursor-not-allowed text-[#c1bfb8]"
         }`}
         type="button"
@@ -378,7 +378,7 @@ function WorkspaceRow({
         <Plus size={15} strokeWidth={2.1} />
       </button>
       <button
-        className={`grid size-7 shrink-0 place-items-center rounded-md transition-all duration-150 ease-out ${
+        className={`grid size-6 shrink-0 place-items-center rounded-md transition-all duration-150 ease-out ${
           confirmDelete
             ? "bg-[#fde8e4] text-[#e5483f] opacity-100 hover:bg-[#fbd6d0]"
             : "pointer-events-none text-[#9a9da1] opacity-0 hover:bg-black/[0.06] hover:text-[#b45309] group-hover:pointer-events-auto group-hover:opacity-100"
@@ -397,12 +397,12 @@ function WorkspaceRow({
       </button>
       {menuOpen ? (
         <div
-          className="absolute left-9 top-10 z-20 w-44 rounded-[18px] border border-[#dedbd3] bg-[#fffefa] p-1.5 shadow-[0_18px_45px_rgba(37,34,29,0.16),0_2px_8px_rgba(37,34,29,0.08)]"
+          className="absolute left-9 top-10 z-20 w-40 rounded-[16px] border border-black/10 bg-white p-1.5 shadow-[0_18px_45px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]"
           data-sidebar-menu
           onClick={(event) => event.stopPropagation()}
         >
           <button
-            className="flex h-10 w-full items-center gap-2 rounded-xl px-3 text-left text-[14px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
+            className="flex h-8 w-full items-center gap-2 rounded-[10px] px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5"
             type="button"
             onClick={() => void onCreateSession("claude")}
           >
@@ -410,7 +410,7 @@ function WorkspaceRow({
             Claude Code
           </button>
           <button
-            className="flex h-10 w-full items-center gap-2 rounded-xl px-3 text-left text-[14px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
+            className="flex h-8 w-full items-center gap-2 rounded-[10px] px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5"
             type="button"
             onClick={() => void onCreateSession("codex")}
           >
@@ -448,8 +448,8 @@ function SessionRow({
   }
   return (
     <div
-      className={`group relative grid h-9 cursor-default grid-cols-[minmax(0,1fr)_42px] items-center gap-1 rounded-xl pl-3 pr-2 transition-colors duration-150 ease-out ${
-        active ? "bg-[#e9e7e1] text-[#202124]" : "text-[#343438] hover:bg-black/[0.035]"
+      className={`group relative grid h-8 cursor-default grid-cols-[minmax(0,1fr)_42px] items-center gap-1 rounded-[9px] pl-2.5 pr-2 transition-all duration-150 ease-out ${
+        active ? "bg-black/[0.06] text-[#202124]" : "text-[#5f6368] hover:bg-black/[0.035] hover:text-[#202124]"
       }`}
       role="button"
       tabIndex={0}
@@ -458,15 +458,15 @@ function SessionRow({
     >
       <div className="pointer-events-none absolute left-1 top-1/2 grid size-6 -translate-y-1/2 place-items-center">
         {running && !confirmDelete ? (
-          <LoaderCircle className="animate-spin text-[#2f8cff] opacity-100 transition-opacity duration-150 ease-out" size={15} strokeWidth={2} aria-hidden="true" />
+          <LoaderCircle className="animate-spin text-[#2f8cff] opacity-100 transition-opacity duration-150 ease-out" size={13} strokeWidth={2} aria-hidden="true" />
         ) : null}
       </div>
-      <span className={`min-w-0 flex-1 truncate text-left text-[15px] font-semibold ${running && !confirmDelete ? "pl-5" : ""}`}>
+      <span className={`min-w-0 flex-1 truncate text-left text-[14px] ${active ? "font-semibold" : "font-medium"} ${running && !confirmDelete ? "pl-5" : ""}`}>
         {title}
       </span>
       <div className="relative flex h-7 min-w-0 items-center justify-end">
         {confirmDelete ? null : (
-          <span className="truncate text-[11px] font-semibold text-[#a0a3a7] transition-opacity duration-150 ease-out group-hover:opacity-0">
+          <span className="truncate text-[11px] font-medium text-[#b0b3b8] transition-opacity duration-150 ease-out group-hover:opacity-0">
             {shortAgentLabel(session.agent)}
           </span>
         )}

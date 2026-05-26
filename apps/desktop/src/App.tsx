@@ -108,6 +108,7 @@ export function App(): React.JSX.Element {
     () => workspaceConnections[activeWorkspaceId] ?? latestWorkspaceConnection(selectWorkspaceEvents(eventIndex, activeWorkspaceId)),
     [activeWorkspaceId, eventIndex, workspaceConnections],
   );
+  const claudeSSHRemote = activeWorkspace?.target === "ssh" && activeAgent === "claude";
   const workspaceInteractive = activeWorkspace?.target !== "ssh" || activeWorkspaceConnection?.status === "connected";
   const activeSessionEvents = useMemo(
     () => (activeSessionId ? selectSessionEvents(eventIndex, activeSessionId) : []),
@@ -425,7 +426,7 @@ export function App(): React.JSX.Element {
         await api.sendInput(activeSession.id, input, {
           model: selectedModel,
           reasoning_effort: selectedReasoningEffort,
-          permission_mode: runMode === "plan" ? "plan" : permissionMode,
+          permission_mode: runMode === "plan" ? "plan" : claudeSSHRemote ? "bypassPermissions" : permissionMode,
         });
         const view = await api.sessionView(activeSession.id).catch(() => null);
         if (view) storeSessionView(view);
@@ -434,7 +435,7 @@ export function App(): React.JSX.Element {
         throw sendError;
       }
     },
-    [activeSession, activeWorkspace, api, permissionMode, runMode, selectedModel, selectedReasoningEffort, storeSessionView, workspaceInteractive],
+    [activeSession, activeWorkspace, api, claudeSSHRemote, permissionMode, runMode, selectedModel, selectedReasoningEffort, storeSessionView, workspaceInteractive],
   );
 
   const handleInterrupt = useCallback(async () => {
@@ -549,7 +550,7 @@ export function App(): React.JSX.Element {
   const activeSessionWindow = activeSessionId ? sessionWindows[activeSessionId] : undefined;
 
   return (
-    <div className="relative flex h-screen min-h-0 select-none overflow-hidden bg-[#fffefa] text-[#1d1d1f]">
+    <div className="relative flex h-screen min-h-0 select-none overflow-hidden bg-transparent text-[#1d1d1f]">
 
 
       <Sidebar
@@ -572,7 +573,7 @@ export function App(): React.JSX.Element {
         onSelectWorkspace={handleSelectWorkspace}
       />
 
-      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[#fffefa]">
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-white shadow-[-1px_0_0_rgba(0,0,0,0.05)]">
         <StatusBar
           activeWorkspace={activeWorkspace}
           activeWorkspaceConnection={activeWorkspaceConnection}
@@ -602,6 +603,7 @@ export function App(): React.JSX.Element {
           modelSlotOverride={modelSlotOverride}
           pendingInteraction={workspaceInteractive ? pendingInteraction : null}
           permissionMode={permissionMode}
+          permissionLocked={claudeSSHRemote}
           placeholder={composerPlaceholder}
           queuedInputs={workspaceInteractive ? queuedInputs : []}
           runMode={runMode}
@@ -639,7 +641,7 @@ export function App(): React.JSX.Element {
       />
 
       <button
-        className="[-webkit-app-region:no-drag] absolute left-[95px] top-[16px] z-[200] grid size-8 place-items-center rounded-lg text-[#8f9296] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95"
+        className="[-webkit-app-region:no-drag] absolute left-[95px] top-[10px] z-[200] grid size-8 place-items-center rounded-lg text-[#8f9296] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95"
         type="button"
         aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
         title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
@@ -656,7 +658,7 @@ export function App(): React.JSX.Element {
         <PanelLeft size={19} strokeWidth={1.8} />
       </button>
       <button
-        className={`[-webkit-app-region:no-drag] absolute right-[20px] top-[16px] z-[200] grid size-8 place-items-center rounded-lg transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 ${
+        className={`[-webkit-app-region:no-drag] absolute right-[20px] top-[10px] z-[200] grid size-8 place-items-center rounded-lg transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 ${
           rightPanelOpen ? "bg-black/[0.055] text-[#343438]" : "text-[#8f9296]"
         }`}
         type="button"

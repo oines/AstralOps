@@ -347,6 +347,18 @@ func normalizeClaudeToolUse(session Session, block map[string]any, raw map[strin
 }
 
 func claudeToolCategory(name string) string {
+	if strings.HasPrefix(name, "mcp__astralops_remote__") {
+		switch strings.TrimPrefix(name, "mcp__astralops_remote__") {
+		case "read":
+			return "read"
+		case "glob", "grep":
+			return "search"
+		case "write", "edit", "multiedit":
+			return "file"
+		case "bash":
+			return "command"
+		}
+	}
 	switch name {
 	case "Read", "LS":
 		return "read"

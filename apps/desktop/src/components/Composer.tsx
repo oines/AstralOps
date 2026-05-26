@@ -14,6 +14,7 @@ type ComposerProps = {
   modelSlotOverride: string;
   pendingInteraction: PendingInteraction | null;
   permissionMode: PermissionMode;
+  permissionLocked: boolean;
   placeholder: string;
   queuedInputs: QueuedComposerInput[];
   runMode: RunMode;
@@ -48,6 +49,7 @@ export function Composer({
   modelSlotOverride,
   pendingInteraction,
   permissionMode,
+  permissionLocked,
   placeholder,
   queuedInputs,
   runMode,
@@ -74,6 +76,7 @@ export function Composer({
   const selectedModel = selectedModelInfo(modelOptions, modelOverride, modelSlotOverride);
   const effectiveModel = selectedModel?.label || selectedModel?.id || "默认";
   const effectiveEffort = effortOverride || normalizeEffort(currentEffort);
+  const effectivePermissionMode: PermissionMode = permissionLocked ? "bypassPermissions" : permissionMode;
 
   useEffect(() => {
     if (!openMenu) return;
@@ -129,16 +132,16 @@ export function Composer({
 
   if (pendingInteraction && !disabled) {
     return (
-      <footer className="pointer-events-none absolute inset-x-0 bottom-0 px-6 pb-5" ref={footerRef}>
+      <footer className="pointer-events-none absolute inset-x-0 bottom-0 pb-5" ref={footerRef}>
         <PendingInteractionPanel interaction={pendingInteraction} onRespond={onRespond} />
       </footer>
     );
   }
 
   return (
-    <footer className="pointer-events-none absolute inset-x-0 bottom-0 px-6 pb-5" ref={footerRef}>
-      <div className={`pointer-events-auto mx-auto grid w-[min(760px,calc(100%-72px))] gap-2 rounded-[18px] border px-3 py-2.5 shadow-[0_10px_30px_rgba(37,34,29,0.10),0_1px_4px_rgba(37,34,29,0.08)] backdrop-blur transition-all duration-150 ease-out ${
-        disabled ? "border-[#e1ded7] bg-[#f3f2ee]/94 opacity-80" : "border-[#d8d5cd] bg-[#fffefa]/96"
+    <footer className="pointer-events-none absolute inset-x-0 bottom-0 pb-5" ref={footerRef}>
+      <div className={`pointer-events-auto mx-auto grid w-[760px] max-w-[calc(100%-72px)] gap-1.5 rounded-[22px] border px-3.5 py-2.5 shadow-[0_12px_36px_rgba(0,0,0,0.075),0_1px_3px_rgba(0,0,0,0.04)] backdrop-blur-xl transition-all duration-150 ease-out ${
+        disabled ? "border-black/5 bg-white/55 opacity-80" : "border-black/10 bg-white/92"
       }`}>
         {queuedInputs.length > 0 ? (
           <QueuedInputShelf inputs={queuedInputs} running={running} onCancel={onCancelQueuedInput} onSteer={onSteerQueuedInput} />
@@ -146,7 +149,7 @@ export function Composer({
         {attachments.length > 0 ? (
           <div className="flex flex-wrap gap-1.5 px-0.5">
             {attachments.map((path) => (
-              <span className="flex h-7 max-w-[230px] items-center gap-1.5 rounded-full bg-[#f3f2ee] pl-2.5 pr-1 text-[12px] font-semibold text-[#6f7378]" key={path}>
+              <span className="flex h-7 max-w-[230px] items-center gap-1.5 rounded-full bg-black/5 pl-2.5 pr-1 text-[12px] font-semibold text-[#6f7378]" key={path}>
                 <Paperclip size={13} strokeWidth={1.9} />
                 <span className="truncate">{fileName(path)}</span>
                 <button
@@ -162,7 +165,7 @@ export function Composer({
           </div>
         ) : null}
         <textarea
-          className="block max-h-36 min-h-8 w-full resize-none overflow-y-auto border-0 bg-transparent px-2 py-1 text-[15px] font-medium leading-6 text-[#202124] outline-none placeholder:text-[#b8b5af] select-text"
+          className="block max-h-36 min-h-10 w-full resize-none overflow-y-auto border-0 bg-transparent px-2 py-1.5 text-[15px] font-semibold leading-6 text-[#202124] outline-none placeholder:font-medium placeholder:text-[#b8b5af] select-text"
           disabled={disabled || sending}
           placeholder={sending ? "正在发送..." : placeholder}
           ref={textareaRef}
@@ -184,8 +187,8 @@ export function Composer({
                   disabled
                     ? "cursor-not-allowed bg-[#e7e5df] text-[#aaa7a0]"
                     : openMenu === "actions" || runMode !== "normal" || attachments.length > 0
-                    ? "bg-[#eceae5] text-[#202124]"
-                    : "bg-[#f3f2ee] text-[#6f7378] hover:bg-[#eceae5] hover:text-[#202124]"
+                    ? "bg-black/5 text-[#202124]"
+                    : "bg-transparent text-black/40 hover:bg-black/5 hover:text-[#202124]"
                 }`}
                 type="button"
                 disabled={disabled}
@@ -220,15 +223,19 @@ export function Composer({
             <div className="relative" data-composer-menu>
               <MenuButton
                 icon={<Shield size={14} strokeWidth={1.9} />}
-                label={permissionLabel(permissionMode)}
+                label={permissionLabel(effectivePermissionMode)}
                 open={openMenu === "permission"}
-                tone={permissionMode === "bypassPermissions" ? "danger" : "normal"}
+                tone={effectivePermissionMode === "bypassPermissions" ? "danger" : "normal"}
                 disabled={disabled}
-                onClick={() => setOpenMenu((current) => (current === "permission" ? null : "permission"))}
+                locked={permissionLocked}
+                onClick={() => {
+                  if (permissionLocked) return;
+                  setOpenMenu((current) => (current === "permission" ? null : "permission"));
+                }}
               />
-              {openMenu === "permission" ? (
+              {openMenu === "permission" && !permissionLocked ? (
                 <PermissionMenu
-                  value={permissionMode}
+                  value={effectivePermissionMode}
                   onChange={(mode) => {
                     onPermissionModeChange(mode);
                     setOpenMenu(null);
@@ -241,7 +248,7 @@ export function Composer({
             <div className="relative" data-composer-menu>
               <button
                 className={`flex h-8 max-w-[180px] items-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors duration-150 ease-out ${
-                  disabled ? "cursor-not-allowed bg-[#e7e5df] text-[#aaa7a0]" : "bg-[#f3f2ee] text-[#202124] hover:bg-[#eceae5]"
+                  disabled ? "cursor-not-allowed bg-black/5 text-black/30" : "bg-transparent text-black/60 hover:bg-black/5 hover:text-[#202124]"
                 }`}
                 type="button"
                 disabled={disabled}
@@ -281,7 +288,7 @@ export function Composer({
               </button>
             ) : null}
             <button
-              className="grid size-8 place-items-center rounded-full bg-[#6f8df6] text-white shadow-[0_5px_14px_rgba(111,141,246,0.24)] transition-all duration-150 ease-out hover:scale-[1.03] hover:bg-[#5f7ff0] disabled:bg-[#c4c2bc] disabled:shadow-none disabled:hover:scale-100"
+              className="grid size-9 place-items-center rounded-full bg-[#8f9296] text-white shadow-[0_3px_10px_rgba(0,0,0,0.12)] transition-all duration-150 ease-out hover:scale-[1.03] hover:bg-[#7f8388] disabled:bg-black/10 disabled:text-black/30 disabled:shadow-none disabled:hover:scale-100"
               type="button"
               disabled={disabled || sending || (!input.trim() && attachments.length === 0)}
               onClick={() => void submit()}
@@ -349,7 +356,7 @@ function ActionMenu({
   runMode: RunMode;
 }): React.JSX.Element {
   return (
-    <div className="absolute bottom-11 left-0 z-30 w-52 origin-bottom-left rounded-[18px] border border-[#dedbd3] bg-[#fffefa] p-1.5 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
+    <div className="absolute bottom-11 left-0 z-30 w-52 origin-bottom-left rounded-[18px] border border-[#dedbd3] bg-white p-1.5 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
       <div className="px-3 pb-1.5 pt-2 text-[13px] font-semibold text-[#96949a]">输入</div>
       <ActionMenuButton icon={<Paperclip size={16} strokeWidth={1.9} />} label="添加附件" onClick={onAttach} />
       <div className="my-1 h-px bg-[#ebe8e1]" />
@@ -400,10 +407,12 @@ function MenuButton({
   onClick,
   open = false,
   tone = "normal",
+  locked = false,
 }: {
   disabled?: boolean;
   icon?: React.ReactNode;
   label: string;
+  locked?: boolean;
   onClick: () => void;
   open?: boolean;
   tone?: "normal" | "danger";
@@ -417,13 +426,13 @@ function MenuButton({
         disabled
           ? "cursor-not-allowed bg-[#e7e5df] text-[#aaa7a0]"
           : tone === "danger"
-            ? "bg-[#fff1ed] text-[#f04b23] hover:bg-[#ffe8df]"
-            : "bg-[#f3f2ee] text-[#6f7378] hover:bg-[#eceae5]"
+            ? "bg-transparent text-[#f26522] hover:bg-[#fff1ed]"
+            : "bg-transparent text-black/40 hover:bg-black/5 hover:text-black/60"
       }`}
     >
       {icon}
       <span className="max-w-[150px] truncate">{label}</span>
-      <ChevronDown className={`transition-transform duration-150 ease-out ${open ? "rotate-180" : ""}`} size={13} strokeWidth={2} />
+      {locked ? null : <ChevronDown className={`transition-transform duration-150 ease-out ${open ? "rotate-180" : ""}`} size={13} strokeWidth={2} />}
     </button>
   );
 }
@@ -453,11 +462,11 @@ function ModelEffortMenu({
   const activeModel = modelRows.find((model) => model.id === (modelValue || currentModel)) ?? modelRows[0];
   const effortRows = effortOptionsForModel(activeModel);
   return (
-    <div className="absolute bottom-11 right-0 z-30 w-56 origin-bottom-right rounded-[18px] border border-[#dedbd3] bg-[#fffefa] p-1.5 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
+    <div className="absolute bottom-11 right-0 z-30 w-56 origin-bottom-right rounded-[18px] border border-[#dedbd3] bg-white p-1.5 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
       <div className="px-3 pb-1.5 pt-2 text-[13px] font-semibold text-[#96949a]">智能</div>
       {effortRows.map((option) => (
         <button
-          className="flex h-9 w-full items-center rounded-xl px-3 text-left text-[15px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
+          className="flex h-8 w-full items-center rounded-xl px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
           type="button"
           key={option.value}
           onClick={() => onEffortChange(option.value === currentEffort ? "" : option.value)}
@@ -468,18 +477,18 @@ function ModelEffortMenu({
       ))}
       <div className="my-1 h-px bg-[#ebe8e1]" />
       <div className="relative">
-        <button className="flex h-9 w-full items-center gap-2 rounded-xl px-3 text-left text-[15px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]" type="button" onClick={() => setModelsOpen((current) => !current)}>
+        <button className="flex h-8 w-full items-center gap-2 rounded-xl px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]" type="button" onClick={() => setModelsOpen((current) => !current)}>
           <span className="min-w-0 flex-1 truncate">{compactModelLabel(selectedModelInfo(modelRows, modelValue, modelSlotValue)?.label || selectedModelInfo(modelRows, modelValue, modelSlotValue)?.id || "默认")}</span>
           <ChevronLeft className="shrink-0" size={17} strokeWidth={2} />
         </button>
         {modelsOpen ? (
-          <div className="absolute bottom-[-6px] right-[calc(100%+6px)] w-64 origin-bottom-right rounded-[18px] border border-[#dedbd3] bg-[#fffefa] p-1.5 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
+          <div className="absolute bottom-[-6px] right-[calc(100%+6px)] w-64 origin-bottom-right rounded-[18px] border border-[#dedbd3] bg-white p-1.5 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
             <div className="px-3 pb-1.5 pt-2 text-[13px] font-semibold text-[#96949a]">模型</div>
             {modelRows.map((model, index) => {
               const selected = modelSlotValue ? model.slot === modelSlotValue : modelValue ? model.id === modelValue && !model.slot : false;
               return (
                 <button
-                  className="flex h-9 w-full items-center gap-2 rounded-xl px-3 text-left text-[15px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
+                  className="flex h-8 w-full items-center gap-2 rounded-xl px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
                   type="button"
                   key={`${model.source ?? "model"}-${model.id}-${index}`}
                   onClick={() => onModelChange(model)}
@@ -504,11 +513,11 @@ function PermissionMenu({
   value: PermissionMode;
 }): React.JSX.Element {
   return (
-    <div className="absolute bottom-11 left-0 z-30 w-48 origin-bottom-left rounded-[18px] border border-[#dedbd3] bg-[#fffefa] p-1.5 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
+    <div className="absolute bottom-11 left-0 z-30 w-48 origin-bottom-left rounded-[18px] border border-[#dedbd3] bg-white p-1.5 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
       <div className="px-3 pb-1.5 pt-2 text-[13px] font-semibold text-[#96949a]">权限</div>
       {permissionOptions.map((option) => (
         <button
-          className="flex h-9 w-full items-center gap-2 rounded-xl px-3 text-left text-[15px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
+          className="flex h-8 w-full items-center gap-2 rounded-xl px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
           type="button"
           key={option.value}
           onClick={() => onChange(option.value)}

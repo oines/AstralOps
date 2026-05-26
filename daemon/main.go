@@ -35,12 +35,17 @@ type app struct {
 	queues              map[string][]queuedTurn
 	claudeRemoteAllowMu sync.Mutex
 	claudeRemoteAllow   map[string]map[string]bool
+	claudeRemoteToolMu  sync.Mutex
+	claudeRemoteTool    map[string]claudeRemoteToolResult
 	codexExecMu         sync.Mutex
 	codexExec           map[string]codexExecCommand
 }
 
 func main() {
 	if runClaudeRemoteHookHelper(os.Args[1:]) {
+		return
+	}
+	if runClaudeRemoteMCPHelper(os.Args[1:]) {
 		return
 	}
 

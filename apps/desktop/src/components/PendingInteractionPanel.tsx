@@ -138,7 +138,7 @@ export function PendingInteractionPanel({
     <AnimatePresence mode="wait">
       <motion.div
         animate={{ opacity: 1, y: 0, scale: 1 }}
-        className="pointer-events-auto mx-auto w-[min(760px,calc(100%-72px))] rounded-[22px] border border-[#dedbd3] bg-[#fffefa]/98 p-3 shadow-[0_16px_44px_rgba(37,34,29,0.13),0_1px_4px_rgba(37,34,29,0.08)] backdrop-blur"
+        className="pointer-events-auto mx-auto w-[760px] max-w-[calc(100%-72px)] rounded-[22px] border border-[#dedbd3] bg-white/98 p-3 shadow-[0_16px_44px_rgba(37,34,29,0.13),0_1px_4px_rgba(37,34,29,0.08)] backdrop-blur"
         exit={{ opacity: 0, y: 8, scale: 0.985 }}
         initial={{ opacity: 0, y: 8, scale: 0.985 }}
         key={interaction.id}
@@ -146,7 +146,7 @@ export function PendingInteractionPanel({
       >
         <div className="px-2 pb-3 text-[15px] font-semibold leading-7 text-[#202124]">{title}</div>
         {detailRows.length > 0 ? (
-          <div className="mb-2 grid max-h-48 gap-2 overflow-auto rounded-[16px] bg-[#f3f2ee] px-4 py-3 text-[13px] leading-6 select-text">
+          <div className="mb-2 grid max-h-48 gap-2 overflow-auto rounded-[16px] bg-black/5 px-4 py-3 text-[13px] leading-6 select-text">
             {detailRows.map((row) => (
               <div className="grid grid-cols-[68px_minmax(0,1fr)] gap-3" key={row.label}>
                 <span className="font-semibold text-[#9a9da1]">{row.label}</span>
@@ -173,7 +173,7 @@ export function PendingInteractionPanel({
           />
         ) : needsText ? (
           <textarea
-            className="block max-h-32 min-h-20 w-full resize-none rounded-[16px] bg-[#f3f2ee] px-4 py-3 text-[15px] font-medium leading-6 text-[#202124] outline-none placeholder:text-[#aeb0b4] focus:bg-[#efeeeb] select-text"
+            className="block max-h-32 min-h-20 w-full resize-none rounded-[16px] bg-black/5 px-4 py-3 text-[15px] font-medium leading-6 text-[#202124] outline-none placeholder:text-[#aeb0b4] focus:bg-[#efeeeb] select-text"
             autoFocus
             disabled={submitting}
             placeholder="输入答案"
@@ -205,7 +205,7 @@ export function PendingInteractionPanel({
         )}
         {selectedOption?.requires_feedback ? (
           <textarea
-            className="mt-2 block max-h-32 min-h-20 w-full resize-none rounded-[16px] bg-[#f3f2ee] px-4 py-3 text-[14px] font-medium leading-6 text-[#202124] outline-none placeholder:text-[#aeb0b4] focus:bg-[#efeeeb] select-text"
+            className="mt-2 block max-h-32 min-h-20 w-full resize-none rounded-[16px] bg-black/5 px-4 py-3 text-[14px] font-medium leading-6 text-[#202124] outline-none placeholder:text-[#aeb0b4] focus:bg-[#efeeeb] select-text"
             disabled={submitting}
             placeholder="写下希望调整的地方"
             value={planFeedback}
@@ -222,7 +222,7 @@ export function PendingInteractionPanel({
             {cancelAction?.label ?? "取消"} <span className="ml-1 rounded-full bg-[#f3dfdb] px-1.5 py-0.5 text-[11px]">ESC</span>
           </button>
           <button
-            className="rounded-full px-3 py-1.5 text-[13px] font-semibold text-[#8d9095] transition-colors duration-150 ease-out hover:bg-[#f3f2ee] hover:text-[#5f6368] disabled:opacity-45"
+            className="rounded-full px-3 py-1.5 text-[13px] font-semibold text-[#8d9095] transition-colors duration-150 ease-out hover:bg-black/5 hover:text-[#5f6368] disabled:opacity-45"
             disabled={submitting || !secondaryAction}
             type="button"
             onClick={() => void respondAction(secondaryAction?.id)}
@@ -280,7 +280,7 @@ function AskQuestionFields({
         {fields.length > 1 ? (
           <div className="flex items-center gap-2">
             <button
-              className="grid size-7 place-items-center rounded-md text-[#a0a3a7] transition-colors hover:bg-[#f3f2ee] hover:text-[#343438] disabled:opacity-35"
+              className="grid size-7 place-items-center rounded-md text-[#a0a3a7] transition-colors hover:bg-black/5 hover:text-[#343438] disabled:opacity-35"
               disabled={submitting || index === 0}
               type="button"
               aria-label="上一个问题"
@@ -290,7 +290,7 @@ function AskQuestionFields({
             </button>
             <span className="min-w-12 text-center text-[14px] text-[#8a8d91]">{index + 1} of {fields.length}</span>
             <button
-              className="grid size-7 place-items-center rounded-md text-[#a0a3a7] transition-colors hover:bg-[#f3f2ee] hover:text-[#343438] disabled:opacity-35"
+              className="grid size-7 place-items-center rounded-md text-[#a0a3a7] transition-colors hover:bg-black/5 hover:text-[#343438] disabled:opacity-35"
               disabled={submitting || index === fields.length - 1}
               type="button"
               aria-label="下一个问题"
@@ -302,7 +302,7 @@ function AskQuestionFields({
         ) : null}
       </div>
       {field.description ? <div className="px-1 text-[12px] font-medium leading-5 text-[#9a9da1]">{field.description}</div> : null}
-      <div className="grid gap-1.5 rounded-[16px] bg-[#f3f2ee] px-3 py-3">
+      <div className="grid gap-1.5 rounded-[16px] bg-black/5 px-3 py-3">
         {options.length > 0 ? (
           options.map((option, optionIndex) => {
             const label = option.label || option.value;
@@ -311,7 +311,7 @@ function AskQuestionFields({
             return (
               <button
                 className={`flex min-w-0 items-center gap-3 rounded-[12px] px-3 py-2.5 text-left transition-colors duration-150 ease-out ${
-                  checked ? "bg-[#fffefa] text-[#202124]" : "text-[#5f6368] hover:bg-[#fffefa]/72"
+                  checked ? "bg-white text-[#202124]" : "text-[#5f6368] hover:bg-white/72"
                 }`}
                 disabled={submitting}
                 key={option.id || value}
@@ -338,7 +338,7 @@ function AskQuestionFields({
         ) : null}
         {custom ? (
           <input
-            className="h-10 rounded-[12px] bg-[#fffefa] px-3 text-[14px] font-medium text-[#202124] outline-none placeholder:text-[#aeb0b4]"
+            className="h-10 rounded-[12px] bg-white px-3 text-[14px] font-medium text-[#202124] outline-none placeholder:text-[#aeb0b4]"
             disabled={submitting}
             placeholder={options.length > 0 ? "其他答案" : "输入答案"}
             type={field.secret ? "password" : "text"}
@@ -371,13 +371,13 @@ function McpElicitationFields({
   const schema = form.schema;
 
   return (
-    <div className="grid gap-2 rounded-[16px] bg-[#f3f2ee] px-4 py-3 text-[13px] leading-6">
+    <div className="grid gap-2 rounded-[16px] bg-black/5 px-4 py-3 text-[13px] leading-6">
       {message ? <div className="font-medium text-[#4f5358]">{message}</div> : null}
       {textValue(form, "kind") === "mcp_url" || url ? (
         <div className="flex min-w-0 items-center gap-2">
-          <code className="min-w-0 flex-1 truncate rounded-[10px] bg-[#fffefa] px-3 py-2 font-mono text-[12px] font-semibold text-[#343438]">{url}</code>
+          <code className="min-w-0 flex-1 truncate rounded-[10px] bg-white px-3 py-2 font-mono text-[12px] font-semibold text-[#343438]">{url}</code>
           {url ? (
-            <button className="shrink-0 rounded-full bg-[#fffefa] px-3 py-2 text-[12px] font-semibold text-[#4f5358] hover:bg-[#eeece8]" type="button" onClick={() => window.open(url, "_blank")}>
+            <button className="shrink-0 rounded-full bg-white px-3 py-2 text-[12px] font-semibold text-[#4f5358] hover:bg-[#eeece8]" type="button" onClick={() => window.open(url, "_blank")}>
               打开
             </button>
           ) : null}
@@ -385,10 +385,10 @@ function McpElicitationFields({
       ) : (
         <>
           {schema ? (
-            <pre className="max-h-28 overflow-auto whitespace-pre-wrap rounded-[10px] bg-[#fffefa] px-3 py-2 font-mono text-[12px] text-[#6f7378]">{jsonPreview(schema)}</pre>
+            <pre className="max-h-28 overflow-auto whitespace-pre-wrap rounded-[10px] bg-white px-3 py-2 font-mono text-[12px] text-[#6f7378]">{jsonPreview(schema)}</pre>
           ) : null}
           <textarea
-            className="block max-h-36 min-h-24 w-full resize-none rounded-[12px] bg-[#fffefa] px-3 py-2 font-mono text-[12px] leading-5 text-[#202124] outline-none placeholder:text-[#aeb0b4]"
+            className="block max-h-36 min-h-24 w-full resize-none rounded-[12px] bg-white px-3 py-2 font-mono text-[12px] leading-5 text-[#202124] outline-none placeholder:text-[#aeb0b4]"
             placeholder="输入 JSON content"
             value={content}
             onChange={(event) => onContentChange(event.target.value)}

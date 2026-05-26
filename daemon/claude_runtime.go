@@ -48,7 +48,9 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 	cwd := strings.TrimSpace(workspace.LocalCWD)
 	remoteCWD := ""
 	settingsPath := ""
+	mcpConfigPath := ""
 	appendPrompt := ""
+	settingSources := ""
 	if workspace.Target == "ssh" {
 		if workspace.SSH == nil || strings.TrimSpace(workspace.SSH.RemoteCWD) == "" {
 			return fmt.Errorf("ssh workspace remote cwd is empty")
@@ -56,18 +58,26 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		var hello map[string]any
 		callErr := r.app.ssh.call(ctx, workspace, "hello", map[string]any{}, &hello)
-		cancel()
 		if callErr != nil {
+			cancel()
 			return callErr
 		}
 		cwd = workspace.LocalProjectionRoot
 		remoteCWD = remotePathClean(workspace.SSH.RemoteCWD)
-		var err error
-		settingsPath, err = r.app.writeClaudeRemoteSettings(workspace)
+		cancel()
+		syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := r.app.syncRemoteSkillTree(syncCtx, workspace, ".claude/skills", filepath.Join(workspace.LocalProjectionRoot, ".claude", "skills"))
+		syncCancel()
 		if err != nil {
 			return err
 		}
-		appendPrompt = "Treat the current working directory as " + remoteCWD + ". Use absolute paths from that directory when referring to files."
+		mcpConfigPath, err = r.app.writeClaudeRemoteMCPConfig(workspace)
+		if err != nil {
+			return err
+		}
+		appendPrompt = claudeRemoteAppendPrompt(remoteCWD)
+		settingSources = "project,local"
+		options.PermissionMode = claudeRemotePermissionMode(options.PermissionMode)
 	}
 	if cwd == "" {
 		return fmt.Errorf("workspace cwd is empty")
@@ -98,11 +108,20 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"status": "running"}})
 
 	go r.runClaude(ctx, session, cwd, info.Path, input, options, run, claudeRemoteOptions{
-		SettingsPath: settingsPath,
-		RemoteCWD:    remoteCWD,
-		AppendPrompt: appendPrompt,
+		SettingsPath:   settingsPath,
+		MCPConfigPath:  mcpConfigPath,
+		RemoteCWD:      remoteCWD,
+		AppendPrompt:   appendPrompt,
+		SettingSources: settingSources,
 	})
 	return nil
+}
+
+func claudeRemotePermissionMode(mode string) string {
+	if strings.TrimSpace(mode) == "plan" {
+		return "plan"
+	}
+	return "bypassPermissions"
 }
 
 func (r *claudeLocalRuntime) Interrupt(sessionID string) error {
@@ -166,9 +185,11 @@ func (run *claudeRun) pauseForApproval() {
 }
 
 type claudeRemoteOptions struct {
-	SettingsPath string
-	RemoteCWD    string
-	AppendPrompt string
+	SettingsPath   string
+	MCPConfigPath  string
+	RemoteCWD      string
+	AppendPrompt   string
+	SettingSources string
 }
 
 func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd, path, input string, options TurnOptions, run *claudeRun, remote claudeRemoteOptions) {
@@ -202,10 +223,23 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 		args = append(args, "--permission-mode", mode)
 	}
 	if len(options.AllowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(options.AllowedTools, ","))
+		allowed := append([]string{}, options.AllowedTools...)
+		if remote.RemoteCWD != "" {
+			allowed = append(allowed, claudeRemoteMCPAllowedTools()...)
+		}
+		args = append(args, "--allowedTools", strings.Join(allowed, ","))
+	} else if remote.RemoteCWD != "" {
+		args = append(args, "--allowedTools", strings.Join(claudeRemoteMCPAllowedTools(), ","))
 	}
 	if remote.SettingsPath != "" {
 		args = append(args, "--settings", remote.SettingsPath)
+	}
+	if remote.SettingSources != "" {
+		args = append(args, "--setting-sources", remote.SettingSources)
+	}
+	if remote.MCPConfigPath != "" {
+		args = append(args, "--disallowedTools", strings.Join(claudeRemoteNativeDisallowedTools(), ","))
+		args = append(args, "--mcp-config", remote.MCPConfigPath, "--strict-mcp-config")
 	}
 	if remote.AppendPrompt != "" {
 		args = append(args, "--append-system-prompt", remote.AppendPrompt)
@@ -213,8 +247,10 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Dir = cwd
+	cmd.Env = os.Environ()
 	if remote.RemoteCWD != "" {
-		cmd.Env = append(os.Environ(), "ASTRALOPS_REMOTE_CWD="+remote.RemoteCWD)
+		cmd.Env = appendClaudeSettingsEnv(cmd.Env)
+		cmd.Env = withEnvValue(cmd.Env, "ASTRALOPS_REMOTE_CWD", remote.RemoteCWD)
 	}
 
 	stdin, err := cmd.StdinPipe()
@@ -248,6 +284,16 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 	var stderrText strings.Builder
 	var completedMu sync.Mutex
 	completed := false
+	failTurn := func(message string, cause error) {
+		completedMu.Lock()
+		if completed {
+			completedMu.Unlock()
+			return
+		}
+		completed = true
+		completedMu.Unlock()
+		r.finishFailed(session, message, cause)
+	}
 	completeTurn := func() {
 		completedMu.Lock()
 		if completed {
@@ -263,7 +309,7 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		r.scanClaudeStream(ctx, session, stdout, run, completeTurn)
+		r.scanClaudeStream(ctx, session, stdout, run, completeTurn, failTurn)
 	}()
 	go func() {
 		defer wg.Done()
@@ -279,7 +325,7 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 		return
 	}
 	if err != nil {
-		r.finishFailed(session, strings.TrimSpace(stderrText.String()), err)
+		failTurn(strings.TrimSpace(stderrText.String()), err)
 		return
 	}
 	completeTurn()
@@ -305,41 +351,89 @@ func writeClaudeUserInput(writer io.Writer, input string) error {
 	return err
 }
 
-func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Session, reader io.Reader, run *claudeRun, completeTurn func()) {
+func claudeResultErrorMessage(line []byte) string {
+	var raw map[string]any
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return ""
+	}
+	if stringValue(raw["type"]) != "result" || !boolValue(raw["is_error"]) {
+		return ""
+	}
+	if message := strings.TrimSpace(stringValue(raw["result"])); message != "" {
+		return message
+	}
+	if status := stringValue(raw["api_error_status"]); status != "" {
+		return "Claude API error: " + status
+	}
+	return "Claude turn failed"
+}
+
+func appendClaudeSettingsEnv(env []string) []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return env
+	}
+	settings := mergeJSONSettings(
+		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(home, ".claude", "settings.local.json"),
+	)
+	values, ok := settings["env"].(map[string]any)
+	if !ok {
+		return env
+	}
+	for key, value := range values {
+		text := stringValue(value)
+		if strings.TrimSpace(key) == "" || text == "" {
+			continue
+		}
+		env = withEnvValue(env, key, text)
+	}
+	return env
+}
+
+func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Session, reader io.Reader, run *claudeRun, completeTurn func(), failTurn func(string, error)) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	toolStarts := map[string]AstralEvent{}
 	pendingInteraction := false
+	visibleText := r.claudeRemoteVisibleTextStream(session)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
 		resultLine := claudeLineType([]byte(line)) == "result"
+		resultError := claudeResultErrorMessage([]byte(line))
 		for _, ev := range normalizeClaudeStreamJSON(session, []byte(line)) {
 			ev = r.remapProjectionEventPaths(ev)
-			r.app.emit(ev)
-			if ev.Kind == "approval.requested" || ev.Kind == "ask.requested" {
-				pendingInteraction = true
-				r.app.store.updateSessionStatus(session.ID, "requires_action")
-				if ev.Kind == "ask.requested" && isClaudeAskUserQuestionEvent(ev) {
+			for _, visibleEvent := range r.prepareClaudeVisibleEvent(session, ev, visibleText) {
+				r.app.emit(visibleEvent)
+				if visibleEvent.Kind == "approval.requested" || visibleEvent.Kind == "ask.requested" {
+					pendingInteraction = true
+					r.app.store.updateSessionStatus(session.ID, "requires_action")
+					if visibleEvent.Kind == "ask.requested" && isClaudeAskUserQuestionEvent(visibleEvent) {
+						run.pauseForApproval()
+						return
+					}
+				}
+				if visibleEvent.Kind == "tool.started" {
+					if id := stringValue(mapValue(visibleEvent.Normalized)["id"]); id != "" {
+						toolStarts[id] = visibleEvent
+					}
+				}
+				if approval, ok := claudeApprovalFromToolResult(session, visibleEvent, toolStarts); ok {
+					r.app.emit(r.remapProjectionEventPaths(approval))
+					r.app.store.updateSessionStatus(session.ID, "requires_action")
 					run.pauseForApproval()
 					return
 				}
 			}
-			if ev.Kind == "tool.started" {
-				if id := stringValue(mapValue(ev.Normalized)["id"]); id != "" {
-					toolStarts[id] = ev
-				}
-			}
-			if approval, ok := claudeApprovalFromToolResult(session, ev, toolStarts); ok {
-				r.app.emit(r.remapProjectionEventPaths(approval))
-				r.app.store.updateSessionStatus(session.ID, "requires_action")
-				run.pauseForApproval()
-				return
-			}
 		}
 		if resultLine {
+			if resultError != "" {
+				failTurn(resultError, nil)
+				return
+			}
 			completeTurn()
 			if pendingInteraction {
 				r.app.store.updateSessionStatus(session.ID, "requires_action")
@@ -353,8 +447,78 @@ func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Sessi
 		}
 	}
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
-		r.finishFailed(session, err.Error(), nil)
+		failTurn(err.Error(), nil)
 	}
+}
+
+func (r *claudeLocalRuntime) claudeRemoteVisibleTextStream(session Session) *claudeVisibleTextStream {
+	ws, ok := r.app.store.getWorkspace(session.WorkspaceID)
+	if !ok || ws.Target != "ssh" || ws.SSH == nil {
+		return nil
+	}
+	return &claudeVisibleTextStream{
+		localRoot:  filepath.Clean(ws.LocalProjectionRoot),
+		remoteRoot: remotePathClean(ws.SSH.RemoteCWD),
+	}
+}
+
+func (r *claudeLocalRuntime) prepareClaudeVisibleEvent(session Session, ev AstralEvent, stream *claudeVisibleTextStream) []AstralEvent {
+	if stream == nil {
+		return []AstralEvent{ev}
+	}
+	if ev.Kind == "message.delta" {
+		value := mapValue(ev.Normalized)
+		text := stringValue(value["text"])
+		if text == "" {
+			return []AstralEvent{ev}
+		}
+		out := stream.Push(text)
+		if out == "" {
+			return nil
+		}
+		next := copyStringAny(value)
+		next["text"] = out
+		ev.Normalized = next
+		return []AstralEvent{ev}
+	}
+	if out := stream.Flush(); out != "" {
+		return []AstralEvent{
+			baseClaudeEvent(session, "message.delta", map[string]any{"source": "claude", "text": out}, ev.Raw),
+			ev,
+		}
+	}
+	return []AstralEvent{ev}
+}
+
+type claudeVisibleTextStream struct {
+	localRoot  string
+	remoteRoot string
+	pending    string
+}
+
+func (s *claudeVisibleTextStream) Push(text string) string {
+	s.pending += text
+	return ""
+}
+
+func (s *claudeVisibleTextStream) Flush() string {
+	if s.pending == "" {
+		return ""
+	}
+	out := sanitizeClaudeRemoteVisibleText(s.pending, s.localRoot, s.remoteRoot)
+	s.pending = ""
+	return out
+}
+
+func sanitizeClaudeRemoteVisibleText(text, localRoot, remoteRoot string) string {
+	text = remapProjectionString(text, localRoot, remoteRoot)
+	text = strings.ReplaceAll(text, ".astralops/remote-abs/", "/")
+	text = strings.ReplaceAll(text, ".astralops/remote-abs", "")
+	text = strings.ReplaceAll(text, "本地文件系统查找，不走 AstralOps 路径映射", "远端 cwd 内文件应使用相对路径")
+	text = strings.ReplaceAll(text, "因为 Edit 在本地文件系统查找，不走 AstralOps 路径映射", "因为 Edit 对远端 cwd 内文件应使用相对路径")
+	text = strings.ReplaceAll(text, "映射路径", "远端路径")
+	text = strings.ReplaceAll(text, "映射到", "对应到")
+	return text
 }
 
 func isClaudeAskUserQuestionEvent(ev AstralEvent) bool {
@@ -502,10 +666,14 @@ func decodeClaudeBridgeCommand(command string) string {
 	return string(body)
 }
 
+func claudeRemoteAppendPrompt(remoteCWD string) string {
+	return "This is an SSH workspace on the remote machine. The remote current working directory is " + remoteCWD + ". Use the AstralOps remote MCP tools for all file, search, edit, and shell work: read, write, edit, multiedit, glob, grep, and bash. Native Claude Code file and shell tools are intentionally unavailable in this SSH workspace. Treat AstralOps remote tool results as the source of truth. In final user-facing text, describe files by their remote paths only and do not mention local projection paths, hidden handles, hook implementation, or path mapping internals unless the user explicitly asks."
+}
+
 func remapProjectionValue(value any, localRoot string, remoteRoot string) any {
 	switch typed := value.(type) {
 	case string:
-		return strings.ReplaceAll(typed, localRoot, remoteRoot)
+		return remapProjectionString(typed, localRoot, remoteRoot)
 	case []any:
 		out := make([]any, len(typed))
 		for i, item := range typed {
@@ -521,6 +689,18 @@ func remapProjectionValue(value any, localRoot string, remoteRoot string) any {
 	default:
 		return value
 	}
+}
+
+func remapProjectionString(value, localRoot, remoteRoot string) string {
+	absRoot := filepath.Join(localRoot, filepath.FromSlash(claudeRemoteAbsProjectionDir))
+	for _, alias := range claudeProjectionRootAliases(absRoot) {
+		value = strings.ReplaceAll(value, alias, "")
+	}
+	value = strings.ReplaceAll(value, filepath.ToSlash(claudeRemoteAbsProjectionDir)+"/", "/")
+	for _, alias := range claudeProjectionRootAliases(localRoot) {
+		value = strings.ReplaceAll(value, alias, remoteRoot)
+	}
+	return value
 }
 
 func (r *claudeLocalRuntime) finishFailed(session Session, message string, cause error) {

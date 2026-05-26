@@ -114,8 +114,8 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
 
   return (
     <motion.aside
-      className={`relative flex h-screen shrink-0 flex-col overflow-hidden bg-[#fbfaf7] ${
-        open ? "border-l border-[#e4e1da]" : "border-l border-transparent"
+      className={`relative flex h-screen shrink-0 flex-col overflow-hidden bg-white ${
+        open ? "border-l border-black/5" : "border-l border-transparent"
       }`}
       animate={{ width: open ? width : 0 }}
       initial={false}
@@ -136,7 +136,7 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
         initial={false}
         transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
       >
-      <div className="flex h-[64px] shrink-0 items-center gap-2 border-b border-[#ebe8e1] pl-4 pr-[68px]">
+      <div className="flex h-[52px] shrink-0 items-center gap-2 border-b border-black/5 pl-4 pr-[68px]">
         <DndContext sensors={tabDragSensors} collisionDetection={closestCenter} autoScroll={false} onDragEnd={handleTabDragEnd}>
           <SortableContext items={tabs.map((tab) => tab.id)} strategy={horizontalListSortingStrategy}>
             <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto overflow-y-hidden py-2">
@@ -164,7 +164,7 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
             <Plus size={17} strokeWidth={2} />
           </button>
           {menuOpen ? (
-            <div className="absolute right-0 top-10 z-30 w-44 rounded-[16px] border border-[#dedbd3] bg-[#fffefa] p-1.5 shadow-[0_18px_45px_rgba(37,34,29,0.16),0_2px_8px_rgba(37,34,29,0.08)]">
+            <div className="absolute right-0 top-10 z-30 w-44 rounded-[16px] border border-black/10 bg-white/80 p-1.5 shadow-[0_18px_45px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)] backdrop-blur-xl">
               {terminalAvailable ? <PanelMenuButton icon={<TerminalSquare size={16} strokeWidth={1.8} />} label="终端" onClick={() => addTab("terminal")} /> : null}
               <PanelMenuButton icon={<Folder size={16} strokeWidth={1.8} />} label="文件浏览" onClick={() => addTab("files")} />
             </div>
@@ -195,7 +195,7 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
 
 function PanelMenuButton({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }): React.JSX.Element {
   return (
-    <button className="flex h-10 w-full items-center gap-2 rounded-xl px-3 text-left text-[14px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]" type="button" onClick={onClick}>
+    <button className="flex h-10 w-full items-center gap-2 rounded-xl px-3 text-left text-[14px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5" type="button" onClick={onClick}>
       {icon}
       {label}
     </button>
@@ -227,8 +227,8 @@ function SortablePanelTab({
     <div
       className={`group flex h-9 max-w-[198px] shrink-0 cursor-default items-center gap-2 rounded-xl border px-3 text-left text-[13px] font-semibold transition-[background-color,border-color,color,opacity] duration-150 ease-out ${
         active
-          ? "border-[#e3dfd7] bg-[#f3f2ee] text-[#202124]"
-          : "border-transparent bg-transparent text-[#8e8d91] hover:bg-black/[0.035] hover:text-[#4f4f53]"
+          ? "border-black/5 bg-black/5 text-[#202124]"
+          : "border-transparent bg-transparent text-[#8e8d91] hover:bg-black/5 hover:text-[#4f4f53]"
       } ${isDragging ? "opacity-75" : "opacity-100"}`}
       ref={setNodeRef}
       style={style}
@@ -306,7 +306,7 @@ function FilesTab({ api, workspace }: { api: AstralApi | null; workspace: Worksp
 
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-[#ebe8e1] px-4 py-3">
+      <div className="border-b border-black/5 px-4 py-3">
         <div className="truncate text-[13px] font-semibold text-[#96949a]">{data?.root ?? workspaceRoot}</div>
         <div className="mt-1 flex items-center gap-2">
           <button
@@ -466,7 +466,7 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
 
   return (
     <div className="flex h-full flex-col" style={{ backgroundColor: theme.theme.background }}>
-      <div className="flex h-10 shrink-0 items-center justify-end gap-1.5 border-b px-3" style={{ borderColor: theme.border, backgroundColor: theme.chrome }}>
+      <div className="flex h-[52px] shrink-0 items-center justify-end gap-1.5 border-b border-black/5 px-3">
         <TerminalSelect
           icon={<Palette size={14} strokeWidth={1.9} />}
           label="终端配色"
@@ -503,7 +503,7 @@ function TerminalSelect({
   value: string;
 }): React.JSX.Element {
   return (
-    <label className="relative flex h-7 items-center gap-1.5 rounded-md border border-black/[0.07] bg-white/70 pl-2 pr-1.5 text-[12px] font-semibold text-[#4f5358] transition-colors duration-150 ease-out hover:bg-white">
+    <label className="relative flex h-7 items-center gap-1.5 rounded-md border border-black/5 bg-transparent pl-2 pr-1.5 text-[12px] font-semibold text-[#4f5358] transition-colors duration-150 ease-out hover:bg-black/5">
       <span className="shrink-0 text-[#7d8187]">{icon}</span>
       <span className="sr-only">{label}</span>
       <select
@@ -602,13 +602,13 @@ const terminalThemes: Array<{ id: string; label: string; border: string; chrome:
   {
     id: "paper",
     label: "Paper",
-    border: "#e9e5dc",
-    chrome: "#fbfaf7",
+    border: "#e5e5e5",
+    chrome: "#fafafa",
     theme: {
-      background: "#fffefa",
+      background: "#ffffff",
       foreground: "#202124",
       cursor: "#202124",
-      cursorAccent: "#fffefa",
+      cursorAccent: "#ffffff",
       selectionBackground: "#d8d5cd",
       ...terminalScrollbarTheme,
       black: "#202124",
@@ -697,13 +697,13 @@ const terminalFonts = [
     label: "SF Mono",
     family: "SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace",
     size: 13,
-    lineHeight: 1.38,
+    lineHeight: 1.4,
   },
   {
     id: "jetbrains",
     label: "JetBrains",
     family: "\"JetBrains Mono\", SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace",
-    size: 13,
+    size: 14,
     lineHeight: 1.4,
   },
   {
@@ -711,14 +711,14 @@ const terminalFonts = [
     label: "Menlo",
     family: "Menlo, Monaco, Consolas, monospace",
     size: 13,
-    lineHeight: 1.35,
+    lineHeight: 1.4,
   },
   {
     id: "large",
     label: "Large",
     family: "SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace",
-    size: 14,
-    lineHeight: 1.42,
+    size: 15,
+    lineHeight: 1.45,
   },
 ];
 

@@ -168,6 +168,15 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 		a.handleClaudeRemoteHook(w, r, ws)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "claude-remote-tool" && r.Method == http.MethodPost {
+		ws, ok := a.store.getWorkspace(parts[0])
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+			return
+		}
+		a.handleClaudeRemoteTool(w, r, ws)
+		return
+	}
 	if len(parts) >= 2 && parts[1] == "projection" {
 		a.handleProjectionAction(w, r, parts)
 		return
@@ -346,8 +355,18 @@ func (a *app) handleRemoteWorkspaceExec(parent context.Context, w http.ResponseW
 }
 
 func (a *app) runRemoteWorkspaceExec(ctx context.Context, ws Workspace, command string) (map[string]any, error) {
+	return a.runRemoteWorkspaceExecAt(ctx, ws, command, ws.SSH.RemoteCWD, 60000)
+}
+
+func (a *app) runRemoteWorkspaceExecAt(ctx context.Context, ws Workspace, command string, cwd string, timeoutMs int) (map[string]any, error) {
+	if strings.TrimSpace(cwd) == "" {
+		cwd = ws.SSH.RemoteCWD
+	}
+	if timeoutMs <= 0 {
+		timeoutMs = 60000
+	}
 	execID := "workspace_exec_" + randomID(12)
-	proxy, events, unsubscribe, _, err := a.ssh.startExec(ctx, ws, execID, map[string]any{"cwd": ws.SSH.RemoteCWD, "command": command, "timeout_ms": 60000})
+	proxy, events, unsubscribe, _, err := a.ssh.startExec(ctx, ws, execID, map[string]any{"cwd": cwd, "command": command, "timeout_ms": timeoutMs})
 	if err != nil {
 		return nil, err
 	}

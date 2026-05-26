@@ -2,7 +2,11 @@
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(216, 213, 205, 0.7) transparent;
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
+
+html, body, #root {
+  background-color: transparent !important;
 }
 
 *::-webkit-scrollbar,
@@ -19,17 +23,17 @@
 *::-webkit-scrollbar-thumb,
 .xterm .xterm-viewport::-webkit-scrollbar-thumb {
   border-radius: 999px !important;
-  background: rgba(216, 213, 205, 0.7) !important;
+  background: rgba(0, 0, 0, 0.15) !important;
 }
 
 *::-webkit-scrollbar-thumb:hover,
 .xterm .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: rgba(190, 186, 176, 0.85) !important;
+  background: rgba(0, 0, 0, 0.25) !important;
 }
 
 .xterm .xterm-viewport {
   scrollbar-width: thin !important;
-  scrollbar-color: rgba(216, 213, 205, 0.7) transparent !important;
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent !important;
 }
 
 .xterm .xterm-scrollable-element > .scrollbar {
@@ -47,7 +51,7 @@
 
 .xterm .xterm-scrollable-element > .scrollbar > .slider {
   border-radius: 999px !important;
-  background: rgba(216, 213, 205, 0.7) !important;
+  background: rgba(0, 0, 0, 0.15) !important;
 }
 
 .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
@@ -60,7 +64,7 @@
 
 .xterm .xterm-scrollable-element > .scrollbar > .slider:hover,
 .xterm .xterm-scrollable-element > .scrollbar > .slider.active {
-  background: rgba(190, 186, 176, 0.85) !important;
+  background: rgba(0, 0, 0, 0.25) !important;
 }
 
 .xterm .xterm-scrollable-element > .shadow {

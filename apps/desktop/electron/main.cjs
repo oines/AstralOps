@@ -115,7 +115,9 @@ function createWindow() {
     title: "AstralOps",
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 20, y: 18 },
-    backgroundColor: "#f5f5f4",
+    vibrancy: "under-window",
+    visualEffectState: "active",
+    transparent: true,
     icon,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),

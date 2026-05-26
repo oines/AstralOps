@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -209,6 +210,57 @@ func TestDispatchReadWriteGrepAndExec(t *testing.T) {
 	}
 }
 
+func TestGlobGoExpandsSimpleBracePattern(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.txt", "b.js", "c.go"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	matches, err := globGo(dir, "*.{txt,js}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, match := range matches {
+		got = append(got, filepath.Base(match))
+	}
+	want := []string{"a.txt", "b.js"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("matches = %v, want %v", got, want)
+	}
+}
+
+func TestGrepGoExpandsSimpleBraceGlob(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"a.txt": "needle in txt\n",
+		"b.js":  "needle in js\n",
+		"c.go":  "needle in go\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := grepGo(dir, grepParams{CWD: dir, Pattern: "needle", Glob: "*.{txt,js}", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches := result.(map[string]any)["matches"].([]map[string]any)
+	got := []string{}
+	for _, match := range matches {
+		got = append(got, filepath.Base(stringValue(match["path"])))
+	}
+	sort.Strings(got)
+	want := []string{"a.txt", "b.js"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("matches = %v, want %v", got, want)
+	}
+}
+
 func TestHelloAdvertisesCoreExecutionMethods(t *testing.T) {
 	result, err := dispatch(request{ID: "hello", Method: "hello"})
 	if err != nil {
@@ -223,6 +275,33 @@ func TestHelloAdvertisesCoreExecutionMethods(t *testing.T) {
 		if !methods[method] {
 			t.Fatalf("hello did not advertise core method %s: %#v", method, caps["methods"])
 		}
+	}
+}
+
+func TestDirsListsDirectoriesWithoutFiles(t *testing.T) {
+	dir := t.TempDir()
+	oldRoot := rootCWD
+	rootCWD = dir
+	defer func() { rootCWD = oldRoot }()
+	if err := os.MkdirAll(filepath.Join(dir, "src", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "file.txt"), []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, _ := json.Marshal(dirsParams{Path: dir, Limit: 10})
+	result, err := dispatch(request{ID: "dirs", Method: "dirs", Params: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := result.(map[string]any)
+	dirs := out["dirs"].([]string)
+	if !containsStringForTest(dirs, filepath.Join(dir, "src")) || !containsStringForTest(dirs, filepath.Join(dir, "src", "nested")) {
+		t.Fatalf("dirs = %#v", dirs)
+	}
+	if containsStringForTest(dirs, filepath.Join(dir, "src", "file.txt")) {
+		t.Fatalf("dirs included file path: %#v", dirs)
 	}
 }
 
@@ -697,17 +776,27 @@ func TestStartExecKillTerminatesProcessGroup(t *testing.T) {
 	}
 }
 
-func TestResolveRemotePathConfinesToRootCWD(t *testing.T) {
+func TestResolveRemotePathUsesRootCWDOnlyForRelativePaths(t *testing.T) {
 	previous := rootCWD
 	root := t.TempDir()
 	rootCWD = root
 	defer func() { rootCWD = previous }()
 
-	if _, err := resolveRemotePath(filepath.Join(root, "ok.txt")); err != nil {
-		t.Fatalf("path inside root was rejected: %v", err)
+	relative, err := resolveRemotePath("ok.txt")
+	if err != nil {
+		t.Fatalf("relative path was rejected: %v", err)
 	}
-	if _, err := resolveRemotePath(filepath.Join(root, "..", "outside.txt")); err == nil {
-		t.Fatal("path outside root was allowed")
+	if relative != filepath.Join(root, "ok.txt") {
+		t.Fatalf("relative path = %q, want %q", relative, filepath.Join(root, "ok.txt"))
+	}
+
+	outside := filepath.Join(root, "..", "outside.txt")
+	absolute, err := resolveRemotePath(outside)
+	if err != nil {
+		t.Fatalf("absolute path outside root was rejected: %v", err)
+	}
+	if absolute != filepath.Clean(outside) {
+		t.Fatalf("absolute path = %q, want %q", absolute, filepath.Clean(outside))
 	}
 }
 
@@ -776,4 +865,13 @@ func TestGrepFallsBackWithoutRG(t *testing.T) {
 	if value["backend"] != "go" {
 		t.Fatalf("backend = %#v, want go", value["backend"])
 	}
+}
+
+func containsStringForTest(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

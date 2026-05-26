@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ type codexClient struct {
 	processCWD    string
 	execServerURL string
 	remoteShell   string
+	codexHome     string
 	path          string
 
 	cmd    *exec.Cmd
@@ -81,6 +83,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 	processCWD := cwd
 	execServerURL := ""
 	remoteShell := ""
+	codexHome := ""
 	if workspace.Target == "ssh" {
 		if workspace.SSH == nil || strings.TrimSpace(workspace.SSH.RemoteCWD) == "" {
 			return fmt.Errorf("ssh workspace remote cwd is empty")
@@ -88,6 +91,9 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		var hello map[string]any
 		err := r.app.ssh.call(ctx, workspace, "hello", map[string]any{}, &hello)
+		if err == nil {
+			codexHome, err = r.app.prepareCodexRemoteHome(ctx, workspace)
+		}
 		cancel()
 		if err != nil {
 			return err
@@ -104,11 +110,11 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 	r.mu.Lock()
 	client := r.clients[session.ID]
 	if client == nil {
-		client = newCodexClient(r, session, cwd, processCWD, execServerURL, remoteShell, info.Path)
+		client = newCodexClient(r, session, cwd, processCWD, execServerURL, remoteShell, codexHome, info.Path)
 		r.clients[session.ID] = client
 	} else {
 		client.updateSession(session)
-		client.updateWorkspace(cwd, processCWD, execServerURL, remoteShell)
+		client.updateWorkspace(cwd, processCWD, execServerURL, remoteShell, codexHome)
 	}
 	if client.isRunning() {
 		r.mu.Unlock()
@@ -128,6 +134,42 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 
 	go client.startTurn(input, options)
 	return nil
+}
+
+func (a *app) prepareCodexRemoteHome(ctx context.Context, ws Workspace) (string, error) {
+	home := filepath.Join(a.store.dataDir, "runtime", "codex-remote", ws.ID, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return "", err
+	}
+	if err := copyCodexAuthIntoRemoteHome(home); err != nil {
+		return "", err
+	}
+	if err := a.syncRemoteSkillTree(ctx, ws, ".codex/skills", filepath.Join(home, "skills")); err != nil {
+		return "", err
+	}
+	return home, nil
+}
+
+func copyCodexAuthIntoRemoteHome(remoteHome string) error {
+	sourceHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if sourceHome == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		sourceHome = filepath.Join(userHome, ".codex")
+	}
+	body, err := os.ReadFile(filepath.Join(sourceHome, "auth.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if err := os.MkdirAll(remoteHome, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(remoteHome, "auth.json"), body, 0o600)
 }
 
 func (r *codexLocalRuntime) Interrupt(sessionID string) error {
@@ -180,7 +222,7 @@ func (r *codexLocalRuntime) RespondApproval(approvalID string, response map[stri
 	return fmt.Errorf("approval %s is not pending in codex runtime", approvalID)
 }
 
-func newCodexClient(runtime *codexLocalRuntime, session Session, cwd, processCWD, execServerURL, remoteShell, path string) *codexClient {
+func newCodexClient(runtime *codexLocalRuntime, session Session, cwd, processCWD, execServerURL, remoteShell, codexHome, path string) *codexClient {
 	if processCWD == "" {
 		processCWD = cwd
 	}
@@ -191,6 +233,7 @@ func newCodexClient(runtime *codexLocalRuntime, session Session, cwd, processCWD
 		processCWD:    processCWD,
 		execServerURL: execServerURL,
 		remoteShell:   remoteShell,
+		codexHome:     codexHome,
 		path:          path,
 		closed:        make(chan struct{}),
 		pending:       map[int64]chan codexRPCResponse{},
@@ -254,6 +297,9 @@ func (c *codexClient) ensureStarted() error {
 	cmd.Env = os.Environ()
 	if c.execServerURL != "" {
 		cmd.Env = withEnvValue(cmd.Env, "CODEX_EXEC_SERVER_URL", c.execServerURL)
+		if strings.TrimSpace(c.codexHome) != "" {
+			cmd.Env = withEnvValue(cmd.Env, "CODEX_HOME", strings.TrimSpace(c.codexHome))
+		}
 		if strings.TrimSpace(c.remoteShell) != "" {
 			cmd.Env = withEnvValue(cmd.Env, "SHELL", strings.TrimSpace(c.remoteShell))
 		}
@@ -305,7 +351,7 @@ func (c *codexClient) ensureStarted() error {
 func codexAppServerArgs(disableLocalNodeREPL bool) []string {
 	args := []string{"app-server"}
 	if disableLocalNodeREPL {
-		args = append(args, "-c", "mcp_servers.node_repl.enabled=false")
+		args = append(args, "-c", "mcp_servers={}")
 	}
 	return append(args, "--listen", "stdio://")
 }
@@ -668,7 +714,7 @@ func (c *codexClient) updateSession(session Session) {
 	c.session = session
 }
 
-func (c *codexClient) updateWorkspace(cwd, processCWD, execServerURL, remoteShell string) {
+func (c *codexClient) updateWorkspace(cwd, processCWD, execServerURL, remoteShell, codexHome string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.cwd = cwd
@@ -678,6 +724,7 @@ func (c *codexClient) updateWorkspace(cwd, processCWD, execServerURL, remoteShel
 	c.processCWD = processCWD
 	c.execServerURL = execServerURL
 	c.remoteShell = remoteShell
+	c.codexHome = codexHome
 }
 
 func (c *codexClient) persistedThreadID() string {
