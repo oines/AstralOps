@@ -72,6 +72,10 @@ export function App(): React.JSX.Element {
   const [forkingSeq, setForkingSeq] = useState<number | null>(null);
   const [scrollTarget, setScrollTarget] = useState<{ sessionId: string; eventSeq: number } | null>(null);
 
+  const isMacDesktop = window.astral.platform === "darwin";
+  const sidebarToggleLeftClass = isMacDesktop ? "left-[95px]" : "left-[16px]";
+  const topChromeInset = isMacDesktop ? 144 : 64;
+
   const sseQueueRef = useRef<AstralEvent[]>([]);
   const sseFrameRef = useRef<number | null>(null);
   const notifiedIntentIDsRef = useRef<Set<string>>(new Set());
@@ -618,6 +622,7 @@ export function App(): React.JSX.Element {
           activeWorkspaceConnection={activeWorkspaceConnection}
           connectionState={connection}
           queuedCount={queuedCount}
+          leftChromeInset={topChromeInset}
           sidebarCollapsed={sidebarCollapsed}
           sessionAgent={activeSession?.agent}
           sessionState={sessionState}
@@ -698,7 +703,7 @@ export function App(): React.JSX.Element {
       />
 
       <button
-        className="[-webkit-app-region:no-drag] absolute left-[95px] top-[10px] z-[200] grid size-8 place-items-center rounded-lg text-[#8f9296] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95"
+        className={`[-webkit-app-region:no-drag] absolute top-[10px] z-[200] grid size-8 place-items-center rounded-lg text-[#8f9296] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 ${sidebarToggleLeftClass}`}
         type="button"
         aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
         title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}

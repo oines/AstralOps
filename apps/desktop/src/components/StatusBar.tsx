@@ -4,6 +4,7 @@ type StatusBarProps = {
   activeWorkspace: Workspace | null;
   activeWorkspaceConnection?: WorkspaceConnection | null;
   connectionState: ConnectionState;
+  leftChromeInset: number;
   queuedCount?: number;
   sidebarCollapsed: boolean;
   sessionAgent?: AgentKind;
@@ -15,6 +16,7 @@ export function StatusBar({
   activeWorkspace,
   activeWorkspaceConnection,
   connectionState,
+  leftChromeInset,
   queuedCount = 0,
   sidebarCollapsed,
   sessionAgent,
@@ -27,7 +29,10 @@ export function StatusBar({
   const effectiveState = statusBarState(activeWorkspace, activeWorkspaceConnection, connectionState, sessionState);
 
   return (
-    <header className={`[-webkit-app-region:drag] relative flex h-[52px] shrink-0 items-center justify-between border-b border-black/5 bg-white pr-[172px] transition-[padding] duration-180 ease-out ${sidebarCollapsed ? "pl-[144px]" : "pl-8"}`}>
+    <header
+      className="[-webkit-app-region:drag] relative flex h-[52px] shrink-0 items-center justify-between border-b border-black/5 bg-white pr-[172px] transition-[padding] duration-180 ease-out"
+      style={{ paddingLeft: sidebarCollapsed ? leftChromeInset : 32 }}
+    >
       <div className="min-w-0 flex flex-1 items-center gap-3">
         <div className="shrink-0 truncate text-[14px] font-semibold text-[#202124] max-w-[45%]">{title}</div>
         <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-[12px] font-medium text-[#939196]">
