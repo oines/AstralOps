@@ -394,6 +394,7 @@ func (m *sshManager) startEventProcess(ctx context.Context, ws Workspace, id, me
 			}
 			unsubscribe()
 			if ctx.Err() != nil {
+				killStartedEventProcess(proxy, method, id)
 				return nil, nil, nil, nil, ctx.Err()
 			}
 			lastErr = err
@@ -416,6 +417,22 @@ func (m *sshManager) startEventProcess(ctx context.Context, ws Workspace, id, me
 		m.app.stopWorkspaceSessions(ws.ID, message)
 	}
 	return nil, nil, nil, nil, errors.New(message)
+}
+
+func killStartedEventProcess(proxy *proxyClient, startMethod string, id string) {
+	killMethod := ""
+	switch startMethod {
+	case "exec_start":
+		killMethod = "exec_kill"
+	case "pty_start":
+		killMethod = "pty_kill"
+	}
+	if killMethod == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = proxy.call(ctx, killMethod, map[string]any{"id": id}, nil)
 }
 
 func (m *sshManager) dropProxy(ws Workspace, proxy *proxyClient) {
