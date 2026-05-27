@@ -1958,6 +1958,14 @@ func TestNormalizeCodexMessage(t *testing.T) {
 	if request.Kind != "approval.requested" {
 		t.Fatalf("request kind = %s, want approval.requested", request.Kind)
 	}
+	unsupportedRequest := normalizeCodexServerRequest(session, map[string]any{
+		"id":     float64(8),
+		"method": "item/tool/call",
+		"params": map[string]any{"tool": "unknown", "arguments": map[string]any{"x": true}},
+	})
+	if unsupportedRequest.Kind != "control.raw" {
+		t.Fatalf("unsupported request kind = %s, want hidden control.raw", unsupportedRequest.Kind)
+	}
 
 	todoEvents := normalizeCodexMessage(session, map[string]any{
 		"method": "item/started",
@@ -2194,7 +2202,8 @@ func TestApprovalRespondedKeepsSessionAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := &app{store: st, hub: newEventHub()}
+	runtime := &recordingRuntime{}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
 	app.emit(AstralEvent{
 		WorkspaceID: "ws_approval",
 		SessionID:   "sess_approval",
@@ -2212,6 +2221,92 @@ func TestApprovalRespondedKeepsSessionAttribution(t *testing.T) {
 	events := st.queryEvents("ws_approval", "sess_approval", 0)
 	if !containsEventKind(events, "approval.responded") {
 		t.Fatalf("events = %#v, want attributed approval.responded", events)
+	}
+	if len(runtime.approvalResponses) != 1 {
+		t.Fatalf("approval responses = %#v, want runtime response", runtime.approvalResponses)
+	}
+}
+
+func TestApprovalRespondRejectsBadJSONWithoutResolvedEvent(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: &recordingRuntime{}}}
+	app.emit(AstralEvent{
+		WorkspaceID: "ws_bad_json",
+		SessionID:   "sess_bad_json",
+		Agent:       AgentCodex,
+		Kind:        "approval.requested",
+		Normalized:  map[string]any{"approval_id": "approval_bad_json"},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_bad_json/respond", strings.NewReader(`{"decision":`))
+	rr := httptest.NewRecorder()
+	app.handleApprovalAction(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+	if containsEventKind(st.events, "approval.responded") {
+		t.Fatalf("events = %#v, did not want approval.responded", st.events)
+	}
+}
+
+func TestApprovalRespondRuntimeFailureDoesNotEmitResponded(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &recordingRuntime{approvalErr: errors.New("runtime unavailable")}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
+	app.emit(AstralEvent{
+		WorkspaceID: "ws_runtime_failure",
+		SessionID:   "sess_runtime_failure",
+		Agent:       AgentCodex,
+		Kind:        "approval.requested",
+		Normalized:  map[string]any{"approval_id": "approval_runtime_failure"},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_runtime_failure/respond", strings.NewReader(`{"decision":"accept"}`))
+	rr := httptest.NewRecorder()
+	app.handleApprovalAction(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rr.Code)
+	}
+	if containsEventKind(st.events, "approval.responded") {
+		t.Fatalf("events = %#v, did not want approval.responded", st.events)
+	}
+}
+
+func TestApprovalRespondRejectsStaleInteraction(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: &recordingRuntime{}}}
+	app.emit(AstralEvent{
+		WorkspaceID: "ws_stale",
+		SessionID:   "sess_stale",
+		Agent:       AgentCodex,
+		Kind:        "approval.requested",
+		Normalized:  map[string]any{"approval_id": "approval_stale"},
+	})
+	app.emit(AstralEvent{
+		WorkspaceID: "ws_stale",
+		SessionID:   "sess_stale",
+		Agent:       AgentCodex,
+		Kind:        "approval.responded",
+		Normalized:  map[string]any{"approval_id": "approval_stale", "response": map[string]any{"decision": "accept"}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_stale/respond", strings.NewReader(`{"decision":"decline"}`))
+	rr := httptest.NewRecorder()
+	app.handleApprovalAction(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rr.Code)
 	}
 }
 
@@ -2254,7 +2349,8 @@ func TestAskResponseEmitsAskResolved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := &app{store: st, hub: newEventHub()}
+	runtime := &recordingRuntime{}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
 	app.emit(AstralEvent{
 		WorkspaceID: "ws_ask",
 		SessionID:   "sess_ask",
@@ -3509,10 +3605,12 @@ func containsEventKind(events []AstralEvent, target string) bool {
 }
 
 type recordingRuntime struct {
-	inputs       []string
-	options      []TurnOptions
-	interrupts   []string
-	interruptErr error
+	inputs            []string
+	options           []TurnOptions
+	interrupts        []string
+	approvalResponses []map[string]any
+	interruptErr      error
+	approvalErr       error
 }
 
 func (r *recordingRuntime) StartTurn(session Session, workspace Workspace, input string, options TurnOptions) error {
@@ -3524,6 +3622,11 @@ func (r *recordingRuntime) StartTurn(session Session, workspace Workspace, input
 func (r *recordingRuntime) Interrupt(sessionID string) error {
 	r.interrupts = append(r.interrupts, sessionID)
 	return r.interruptErr
+}
+
+func (r *recordingRuntime) RespondApproval(approvalID string, response map[string]any) error {
+	r.approvalResponses = append(r.approvalResponses, map[string]any{"approval_id": approvalID, "response": response})
+	return r.approvalErr
 }
 
 type recordingSteerRuntime struct {
@@ -4466,6 +4569,15 @@ func TestCodexApprovalResponsePayloads(t *testing.T) {
 
 	if _, err := codexApprovalResponse("item/unknown/request", map[string]any{"decision": "accept"}, nil); err == nil {
 		t.Fatal("unsupported codex request returned nil error")
+	}
+	if _, err := codexApprovalResponse("item/commandExecution/requestApproval", map[string]any{}, nil); err == nil {
+		t.Fatal("missing command approval decision returned nil error")
+	}
+	if _, err := codexApprovalResponse("item/permissions/requestApproval", map[string]any{}, nil); err == nil {
+		t.Fatal("missing permission approval decision returned nil error")
+	}
+	if _, err := codexApprovalResponse("mcpServer/elicitation/request", map[string]any{}, nil); err == nil {
+		t.Fatal("missing mcp elicitation action returned nil error")
 	}
 }
 

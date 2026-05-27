@@ -768,6 +768,10 @@ func (c *codexClient) handleLine(line []byte) {
 		c.enrichServerRequestEvent(&ev)
 		c.runtime.app.emit(ev)
 		method := stringValue(raw["method"])
+		if !codexServerRequestSupported(method) {
+			_ = c.writeJSON(map[string]any{"id": raw["id"], "error": map[string]any{"code": -32601, "message": "unsupported codex server request " + method}})
+			return
+		}
 		approvalID := codexApprovalID(c.session.ID, raw["id"], mapValue(raw["params"]))
 		c.mu.Lock()
 		c.approvals[approvalID] = codexPendingApproval{RequestID: raw["id"], Method: method, Params: mapValue(raw["params"])}

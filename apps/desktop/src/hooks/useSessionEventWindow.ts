@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import type { AstralApi } from "../api";
+import type { CoreClient } from "../api";
 import {
   selectSessionEvents,
   selectWorkspaceEvents,
@@ -14,7 +14,7 @@ import type { AstralEvent } from "../types";
 const EVENT_WINDOW_SIZE = 1000;
 
 type UseSessionEventWindowArgs = {
-  api: AstralApi | null;
+  api: CoreClient | null;
   activeSessionId: string;
   activeWorkspaceId: string;
   eventIndex: EventIndex;

@@ -250,15 +250,6 @@ func normalizeCodexServerRequest(session Session, raw map[string]any) AstralEven
 			"kind":       method,
 			"params":     params,
 		}, raw)
-	case "item/tool/call":
-		return baseCodexEvent(session, "tool.started", map[string]any{
-			"source":     "codex",
-			"request_id": requestID,
-			"id":         params["callId"],
-			"name":       firstString(params["tool"], params["namespace"]),
-			"category":   "mcp",
-			"input":      params["arguments"],
-		}, raw)
 	default:
 		return baseCodexEvent(session, "control.raw", map[string]any{
 			"source":     "codex",

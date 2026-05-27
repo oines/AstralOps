@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanelLeft, PanelRight } from "lucide-react";
-import { AstralApi } from "./api";
+import { createLocalCoreClient, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
 import { Sidebar } from "./components/Sidebar";
@@ -24,6 +24,7 @@ import type {
   AgentKind,
   AstralEvent,
   ConnectionState,
+  CreateWorkspaceRequest,
   HealthResponse,
   PermissionMode,
   ReasoningEffort,
@@ -47,7 +48,7 @@ function sessionTimestamp(session: Session): number {
 
 export function App(): React.JSX.Element {
   const [connection, setConnection] = useState<ConnectionState>("booting");
-  const [api, setApi] = useState<AstralApi | null>(null);
+  const [api, setApi] = useState<CoreClient | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceConnections, setWorkspaceConnections] = useState<Record<string, WorkspaceConnection>>({});
@@ -195,7 +196,7 @@ export function App(): React.JSX.Element {
     storeSessionView,
   });
 
-  const loadInitialState = useCallback(async (client: AstralApi) => {
+  const loadInitialState = useCallback(async (client: CoreClient) => {
     const [healthResponse, workspaceResponse, sessionResponse, recentEvents] = await Promise.all([
       client.health(),
       client.listWorkspaces(),
@@ -237,21 +238,19 @@ export function App(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
-    let source: EventSource | null = null;
+    let subscription: EventSubscription | null = null;
     let cancelled = false;
 
     async function boot(): Promise<void> {
       try {
         const info = await window.astral.getDaemonInfo();
         if (cancelled) return;
-        const client = new AstralApi(info);
+        const client = createLocalCoreClient(info);
         const initialEvents = await loadInitialState(client);
         if (cancelled) return;
         const afterSeq = Math.max(0, ...initialEvents.map((event) => event.seq));
-        source = client.eventsSource(afterSeq);
-        source.addEventListener("astral-event", (message) => {
-          try {
-            const event = JSON.parse((message as MessageEvent).data) as AstralEvent;
+        subscription = client.subscribeEvents(afterSeq, {
+          onEvent: (event) => {
             if (event.kind === "workspace.connection") {
               const state = event.normalized as WorkspaceConnection;
               setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
@@ -263,12 +262,13 @@ export function App(): React.JSX.Element {
             }
             maybeNotifyLiveEvent(event);
             queueLiveEvent(event);
-          } catch {
-            setError("bad SSE event payload");
-          }
+          },
+          onOpen: () => setConnection("connected"),
+          onError: (event) => {
+            if (event instanceof SyntaxError) setError("bad SSE event payload");
+            setConnection("reconnecting");
+          },
         });
-        source.onopen = () => setConnection("connected");
-        source.onerror = () => setConnection("reconnecting");
         setApi(client);
         setConnection("connected");
       } catch (bootError) {
@@ -285,7 +285,7 @@ export function App(): React.JSX.Element {
         sseFrameRef.current = null;
       }
       sseQueueRef.current = [];
-      source?.close();
+      subscription?.close();
     };
   }, [loadInitialState, maybeNotifyLiveEvent, queueLiveEvent, storeSessionView]);
 
@@ -310,7 +310,7 @@ export function App(): React.JSX.Element {
   }, [activeSession, activeWorkspaceId, sessions, workspaces]);
 
   const handleCreateWorkspace = useCallback(
-    async (request: Parameters<AstralApi["createWorkspace"]>[0]) => {
+    async (request: CreateWorkspaceRequest) => {
       if (!api) return;
       setError("");
       const workspace = await api.createWorkspace(request);
