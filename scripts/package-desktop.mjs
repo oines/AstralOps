@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -10,6 +10,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const require = createRequire(import.meta.url);
 const desktopDir = path.join(repoRoot, "apps", "desktop");
 const releaseRoot = path.join(repoRoot, "release", "desktop");
+const releaseVersion = normalizeVersion(process.env.ASTRALOPS_VERSION) || packageVersion();
 
 const proxyHelperTargets = [
   { goos: "linux", goarch: "amd64" },
@@ -18,8 +19,8 @@ const proxyHelperTargets = [
   { goos: "darwin", goarch: "arm64" },
 ];
 
-const target = currentTarget();
-const arch = normalizeGoArch(process.arch);
+const target = normalizeTarget(process.env.ASTRALOPS_TARGET) || currentTarget();
+const arch = normalizeGoArch(process.env.ASTRALOPS_ARCH || process.arch);
 
 buildWebAssets();
 
@@ -37,6 +38,7 @@ const configPath = writeBuilderConfig(target, stageBin, outputDir);
 runElectronBuilder(target, arch, configPath);
 
 console.log(`\nPackaged desktop target: ${target} (${arch})`);
+console.log(`Version: ${releaseVersion}`);
 console.log(`Artifacts: ${path.join(releaseRoot, "out")}`);
 
 function currentTarget() {
@@ -76,7 +78,7 @@ function buildProxyHelpers(stageBin) {
 
 function buildGoBinary(goos, goarch, out, pkg, cgoEnabled) {
   mkdirSync(path.dirname(out), { recursive: true });
-  run("go", ["build", "-o", out, pkg], {
+  run("go", ["build", "-ldflags", `-X main.version=${releaseVersion}`, "-o", out, pkg], {
     env: {
       GOOS: goos,
       GOARCH: goarch,
@@ -95,6 +97,9 @@ function writeBuilderConfig(target, stageBin, outputDir) {
     appId: "com.astralops.desktop",
     productName: "AstralOps",
     electronVersion: require("electron/package.json").version,
+    extraMetadata: {
+      version: releaseVersion,
+    },
     asar: true,
     directories: {
       output: outputDir,
@@ -110,14 +115,23 @@ function writeBuilderConfig(target, stageBin, outputDir) {
       target: ["dmg", "zip"],
       icon: "assets/AstralOps-AppIcon.icns",
       category: "public.app-category.developer-tools",
+      artifactName: "AstralOps-${version}-macos-${arch}.${ext}",
+      ...(macSigningConfigured() ? {} : { identity: null }),
     },
     linux: {
       target: ["AppImage", "deb"],
       icon: "assets/AstralOps-AppIcon.png",
       category: "Development",
+      artifactName: "AstralOps-${version}-linux-${arch}.${ext}",
     },
     win: {
       target: ["portable", "nsis"],
+    },
+    nsis: {
+      artifactName: "AstralOps-${version}-windows-${arch}-setup.${ext}",
+    },
+    portable: {
+      artifactName: "AstralOps-${version}-windows-${arch}-portable.${ext}",
     },
   };
   const configPath = path.join(releaseRoot, "configs", `electron-builder-${target}-${arch}.json`);
@@ -128,7 +142,27 @@ function writeBuilderConfig(target, stageBin, outputDir) {
 
 function runElectronBuilder(target, goarch, configPath) {
   const platformFlag = target === "darwin" ? "--mac" : target === "windows" ? "--win" : "--linux";
-  run("npx", ["electron-builder", "--projectDir", desktopDir, "--config", configPath, platformFlag, `--${electronArch(goarch)}`]);
+  run("npx", ["electron-builder", "--projectDir", desktopDir, "--config", configPath, platformFlag, `--${electronArch(goarch)}`, "--publish", "never"]);
+}
+
+function normalizeTarget(value) {
+  switch (value) {
+    case "darwin":
+    case "macos":
+    case "mac":
+      return "darwin";
+    case "linux":
+      return "linux";
+    case "windows":
+    case "win32":
+    case "win":
+      return "windows";
+    case undefined:
+    case "":
+      return "";
+    default:
+      throw new Error(`Unsupported desktop target: ${value}`);
+  }
 }
 
 function normalizeGoArch(value) {
@@ -141,6 +175,26 @@ function normalizeGoArch(value) {
     default:
       throw new Error(`Unsupported desktop arch: ${value}`);
   }
+}
+
+function packageVersion() {
+  const desktopPackage = JSON.parse(readFileSync(path.join(desktopDir, "package.json"), "utf8"));
+  const version = normalizeVersion(desktopPackage.version);
+  if (!version) throw new Error(`Invalid desktop package version: ${desktopPackage.version}`);
+  return version;
+}
+
+function normalizeVersion(value) {
+  const version = String(value || "").trim().replace(/^v/, "");
+  if (!version) return "";
+  if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error(`Invalid release version: ${value}`);
+  }
+  return version;
+}
+
+function macSigningConfigured() {
+  return Boolean(process.env.CSC_LINK || process.env.CSC_NAME || process.env.APPLE_ID);
 }
 
 function electronArch(goarch) {

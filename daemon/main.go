@@ -20,7 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const version = "0.1.0"
+var version = "dev"
 
 type app struct {
 	store             *store
