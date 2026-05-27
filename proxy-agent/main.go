@@ -24,7 +24,7 @@ import (
 	"github.com/creack/pty"
 )
 
-const version = "0.1.0"
+var version = "dev"
 
 var supportedMethods = []string{
 	"hello",

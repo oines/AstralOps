@@ -67,6 +67,24 @@ release/desktop/out/<platform>-<arch>/
 
 建议在目标系统上打对应平台的包：在 macOS 上打 macOS 包，在 Linux 上打 Linux 包，在 Windows 上打 Windows 包。跨平台打包可能受 Electron、系统签名、安装器依赖限制。
 
+## CI 发布流程
+
+日常开发提交进入 `dev` 分支。`main` 作为发布分支，只通过 `dev -> main` 的 PR 合并更新。
+
+合并到 `main` 后，GitHub Actions 会执行 release 计划：
+
+- 如果从上一个 `v*` tag 到当前提交之间只有 README、Markdown、`docs/`、`.github/`、LICENSE、`.gitignore` 等非产品代码变更，则跳过发版。
+- 如果包含产品代码变更，则自动生成下一个版本号、打包 macOS/Linux/Windows 桌面客户端，并创建 GitHub Release。
+- 第一次发版在没有历史 tag 时使用根 `package.json` 里的版本号；之后基于最新 `vX.Y.Z` tag 自动递增。
+
+版本递增规则：
+
+- 提交信息包含 `BREAKING CHANGE:` 或 Conventional Commit 的 `!` 标记时递增 major。
+- 提交信息包含 `feat:` 时递增 minor。
+- 其它产品代码变更默认递增 patch。
+
+发布产物会附带 `SHA256SUMS.txt`。当前 CI 产物默认未做 macOS notarization 或 Windows Authenticode 签名；公开分发前需要补充对应签名密钥和 workflow 配置。
+
 ## 技术栈与目录结构
 
 ```text
