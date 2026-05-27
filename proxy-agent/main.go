@@ -90,8 +90,12 @@ type ptySession struct {
 }
 
 func main() {
+	selfTest := flag.Bool("self-test", false, "exit after verifying the helper can execute")
 	flag.StringVar(&rootCWD, "cwd", "", "remote cwd for relative paths")
 	flag.Parse()
+	if *selfTest {
+		return
+	}
 	if rootCWD == "" {
 		rootCWD, _ = os.Getwd()
 	}

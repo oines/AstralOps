@@ -441,8 +441,8 @@ function createWindow() {
   });
 
   mainWindow.on("close", (event) => {
-    if (!app.isQuitting) {
-      if (process.platform === "darwin" || tray) {
+    if (!app.isQuitting && process.platform !== "darwin") {
+      if (tray) {
         event.preventDefault();
         mainWindow.hide();
         updateTrayMenu();
@@ -450,6 +450,10 @@ function createWindow() {
         app.isQuitting = true;
       }
     }
+  });
+  mainWindow.on("closed", () => {
+    mainWindow = undefined;
+    updateTrayMenu();
   });
   mainWindow.on("show", updateTrayMenu);
   mainWindow.on("hide", updateTrayMenu);
@@ -579,7 +583,7 @@ app.whenReady().then(async () => {
 });
 
 app.on("activate", () => {
-  if (mainWindow) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show();
   } else {
     createWindow();

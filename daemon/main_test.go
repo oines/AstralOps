@@ -97,6 +97,74 @@ func TestStoreSSHWorkspaceRequiresAbsoluteRemoteCWD(t *testing.T) {
 	}
 }
 
+func TestSSHArgsPreserveDefaultConfigPort(t *testing.T) {
+	defaultPort := Workspace{SSH: &SSHConfig{Port: 22}}
+	if got := strings.Join(sshArgs(defaultPort), " "); strings.Contains(got, "-p 22") {
+		t.Fatalf("sshArgs default port = %q, want no explicit -p 22", got)
+	}
+
+	customPort := Workspace{SSH: &SSHConfig{Port: 2202}}
+	if got := strings.Join(sshArgs(customPort), " "); !strings.Contains(got, "-p 2202") {
+		t.Fatalf("sshArgs custom port = %q, want -p 2202", got)
+	}
+}
+
+func TestRemoteProbeScriptDoesNotRequireHostnameCommand(t *testing.T) {
+	remoteCWD := t.TempDir()
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	uname := filepath.Join(binDir, "uname")
+	if err := os.WriteFile(uname, []byte("#!/bin/sh\ncase \"$1\" in\n  -s) printf 'Linux\\n' ;;\n  -m) printf 'x86_64\\n' ;;\n  -n) printf 'fallback-host\\n' ;;\n  *) exit 1 ;;\nesac\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	whoami := filepath.Join(binDir, "whoami")
+	if err := os.WriteFile(whoami, []byte("#!/bin/sh\nprintf 'remote-user\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("/bin/sh", "-c", remoteProbeScript(remoteCWD))
+	cmd.Env = []string{"PATH=" + binDir, "SHELL=/bin/zsh"}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("remote probe failed without hostname command: %v: %s", err, string(out))
+	}
+	lines := strings.Split(string(out), "\n")
+	if len(lines) < 6 {
+		t.Fatalf("remote probe output too short: %q", string(out))
+	}
+	want := []string{"Linux", "x86_64", "/bin/zsh", "remote-user", "fallback-host"}
+	got := []string{lines[0], lines[1], lines[2], lines[4], lines[5]}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("remote probe identity = %#v, want %#v; output %q", got, want, string(out))
+	}
+}
+
+func TestRemoteHelperCandidatesUseRuntimeFallbackOrder(t *testing.T) {
+	ws := Workspace{ID: "ws_test", Target: "ssh", SSH: &SSHConfig{RemoteCWD: "/srv/project"}}
+	probe := sshProbe{
+		UID:           "1000",
+		XDGRuntimeDir: "/run/user/1000",
+		TMPDir:        "/var/tmp",
+		Home:          "/home/alice",
+	}
+	candidates := remoteHelperCandidates(ws, probe)
+	got := []string{}
+	for _, candidate := range candidates {
+		got = append(got, candidate.Label+"="+candidate.RemoteDir)
+	}
+	want := []string{
+		"xdg-runtime=/run/user/1000/astralops/ws_test",
+		"tmp=/var/tmp/.astralops-1000/ws_test",
+		"home-cache=/home/alice/.cache/astralops/ws_test",
+		"workspace=/srv/project/.astralops/ws_test",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("candidates = %#v, want %#v", got, want)
+	}
+}
+
 func TestProjectionRemoteIOUsesBase64ForBinary(t *testing.T) {
 	body := []byte{0, 1, 2, 0xff, '\n'}
 	params := remoteWriteParams("/root/blob.bin", body)
@@ -1488,6 +1556,50 @@ func TestSSHConnectUpgradesIncompatibleRemoteHelper(t *testing.T) {
 	events := st.queryEvents(workspace.ID, "", 0)
 	if !hasWorkspaceConnectionHelperStatus(events, "upgrading") {
 		t.Fatalf("events = %#v, want helper_status upgrading before retry", events)
+	}
+}
+
+func TestSSHConnectFallsBackWhenRuntimeCandidateCannotExecute(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake proxy is POSIX-only")
+	}
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentClaude,
+		SSH: &SSHConfig{
+			Endpoint:  "root@example.test",
+			RemoteCWD: "/root",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}}
+	app.ssh = newSSHManager(app)
+	installFakeSSHProxy(t, dir, "1")
+	t.Setenv("ASTRALOPS_TEST_PROXY_FAIL_PREFIX", "/run/user/1000/astralops")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	state, err := app.ssh.connect(ctx, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRuntimeDir := "/tmp/.astralops-1000/" + workspace.ID
+	if state.Status != connectionConnected || state.HelperStatus != "running" {
+		t.Fatalf("connection = %#v, want connected running", state)
+	}
+	if state.HelperPath != wantRuntimeDir+"/astral-proxy-agent" {
+		t.Fatalf("helper path = %q, want fallback %q", state.HelperPath, wantRuntimeDir+"/astral-proxy-agent")
+	}
+	if got := stringValue(state.Raw["runtime_dir"]); got != wantRuntimeDir {
+		t.Fatalf("runtime_dir = %q, want %q", got, wantRuntimeDir)
 	}
 }
 
@@ -4260,14 +4372,25 @@ func installFakeSSHProxy(t *testing.T, dir string, succeedAt string) {
 set -e
 args="$*"
 if [[ "$args" == *"uname -s"* ]]; then
-  printf 'Linux\nx86_64\n/bin/sh\n/root\nroot\nhost\n\n\n'
+  printf 'Linux\nx86_64\n/bin/sh\n/root\nroot\nhost\n1000\n/run/user/1000\n\n/home/root\n\n\n'
   exit 0
 fi
 if [[ "$args" == *"sha256sum"* ]] || [[ "$args" == *"shasum -a 256"* ]]; then
   printf '%s\n' "$ASTRALOPS_TEST_HELPER_SHA"
   exit 0
 fi
+if [[ "$args" == *"cat > "*"astral-proxy-agent.upload-"* ]]; then
+  touch "$ASTRALOPS_TEST_PROXY_UPGRADE_MARKER"
+  exit 0
+fi
 if [[ "$args" == *"exec "*"astral-proxy-agent"* ]]; then
+  if [[ -n "${ASTRALOPS_TEST_PROXY_FAIL_PREFIX:-}" && "$args" == *"$ASTRALOPS_TEST_PROXY_FAIL_PREFIX"* ]]; then
+    echo "blocked runtime $ASTRALOPS_TEST_PROXY_FAIL_PREFIX" >&2
+    exit 126
+  fi
+  if [[ "$args" == *"--self-test"* ]]; then
+    exit 0
+  fi
   count=$(cat "$ASTRALOPS_TEST_PROXY_COUNT")
   count=$((count + 1))
   printf '%s' "$count" > "$ASTRALOPS_TEST_PROXY_COUNT"
@@ -4287,20 +4410,6 @@ fi
 exit 0
 `
 	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	scp := filepath.Join(binDir, "scp")
-	scpScript := `#!/bin/bash
-set -e
-dest="${@: -1}"
-if [[ "$dest" != *".upload-"* ]]; then
-  echo "helper upload did not use a temporary destination: $dest" >&2
-  exit 1
-fi
-touch "$ASTRALOPS_TEST_PROXY_UPGRADE_MARKER"
-exit 0
-`
-	if err := os.WriteFile(scp, []byte(scpScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))

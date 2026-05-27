@@ -115,6 +115,25 @@ func (m *sshManager) getConnection(ws Workspace) WorkspaceConnection {
 	return initialSSHConnection(ws, connectionDisconnected)
 }
 
+func (m *sshManager) remoteWorkspaceRuntimeDir(ws Workspace) string {
+	if ws.Target != "ssh" {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	target := m.by[ws.ID]
+	if target == nil {
+		return ""
+	}
+	if value := stringValue(mapValue(target.state.Raw)["runtime_dir"]); value != "" {
+		return remotePathClean(value)
+	}
+	if helperPath := strings.TrimSpace(target.state.HelperPath); helperPath != "" {
+		return remotePathDir(helperPath)
+	}
+	return ""
+}
+
 func (m *sshManager) connect(ctx context.Context, ws Workspace) (WorkspaceConnection, error) {
 	return m.connectInternal(ctx, ws, true)
 }
@@ -142,84 +161,52 @@ func (m *sshManager) connectInternal(ctx context.Context, ws Workspace, emitProg
 	var helper helperUpload
 	var proxy *proxyClient
 	var hello map[string]any
-	for forceUpload := false; ; forceUpload = true {
-		helper, err = m.ensureHelper(ctx, ws, probe, forceUpload)
-		if err != nil {
-			state := initialSSHConnection(ws, connectionFailed)
-			state.RemoteOS = probe.OS
-			state.RemoteArch = probe.Arch
-			state.RemoteShell = probe.Shell
-			state.RemoteUser = probe.User
-			state.RemoteHost = probe.Host
-			state.Capabilities = probeCapabilities(probe)
-			state.Message = err.Error()
-			if emitProgress {
-				m.setState(ws, state)
-			}
-			return state, err
-		}
-		proxy, err = startProxyClient(ws, helper)
-		if err != nil {
-			state := initialSSHConnection(ws, connectionFailed)
-			state.RemoteOS = probe.OS
-			state.RemoteArch = probe.Arch
-			state.RemoteShell = probe.Shell
-			state.RemoteUser = probe.User
-			state.RemoteHost = probe.Host
-			state.Capabilities = probeCapabilities(probe)
-			state.HelperPath = helper.RemotePath
-			state.HelperStatus = "uploaded"
-			state.Message = err.Error()
-			if emitProgress {
-				m.setState(ws, state)
-			}
-			return state, err
-		}
-		hello, err = proxy.hello(ctx)
-		if err != nil {
-			_ = proxy.close()
-			state := initialSSHConnection(ws, connectionFailed)
-			state.Message = err.Error()
-			if emitProgress {
-				m.setState(ws, state)
-			}
-			return state, err
-		}
-		if err = validateProxyHello(hello); err == nil {
-			break
-		}
-		_ = proxy.close()
-		if forceUpload || helper.Uploaded {
-			state := initialSSHConnection(ws, connectionFailed)
-			state.RemoteOS = probe.OS
-			state.RemoteArch = probe.Arch
-			state.RemoteShell = probe.Shell
-			state.RemoteUser = probe.User
-			state.RemoteHost = probe.Host
-			state.Capabilities = probeCapabilities(probe)
-			state.HelperPath = helper.RemotePath
-			state.HelperStatus = "incompatible"
-			state.Message = err.Error()
-			if emitProgress {
-				m.setState(ws, state)
-			}
-			return state, err
-		}
+	localHelper, err := m.localHelperBinary(ctx, probe)
+	if err != nil {
+		state := connectionFailedState(ws, probe, err)
 		if emitProgress {
-			state := initialSSHConnection(ws, connectionReconnecting)
-			state.RemoteOS = probe.OS
-			state.RemoteArch = probe.Arch
-			state.RemoteShell = probe.Shell
-			state.RemoteUser = probe.User
-			state.RemoteHost = probe.Host
-			state.Capabilities = probeCapabilities(probe)
-			state.HelperPath = helper.RemotePath
-			state.HelperStatus = "upgrading"
-			state.Message = err.Error()
-			state.RetryAttempt = 1
-			state.RetryMax = 2
 			m.setState(ws, state)
 		}
+		return state, err
+	}
+	localSum, err := fileSHA256(localHelper)
+	if err != nil {
+		state := connectionFailedState(ws, probe, err)
+		if emitProgress {
+			m.setState(ws, state)
+		}
+		return state, err
+	}
+	candidates := remoteHelperCandidates(ws, probe)
+	attempts := []remoteHelperAttempt{}
+	for _, candidate := range candidates {
+		helper, proxy, hello, err = m.tryRemoteHelperCandidate(ctx, ws, probe, candidate, localHelper, localSum, emitProgress)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			err = ctx.Err()
+			break
+		}
+		attempts = append(attempts, remoteHelperAttempt{Candidate: candidate, Err: err})
+		var noFallback remoteHelperNoFallbackError
+		if errors.As(err, &noFallback) {
+			break
+		}
+	}
+	if err != nil {
+		if ctx.Err() == nil {
+			err = remoteHelperAttemptsError(attempts)
+		}
+		state := connectionFailedState(ws, probe, err)
+		if len(attempts) > 0 {
+			state.HelperPath = remotePathJoin(attempts[len(attempts)-1].Candidate.RemoteDir, "astral-proxy-agent")
+			state.HelperStatus = "failed"
+		}
+		if emitProgress {
+			m.setState(ws, state)
+		}
+		return state, err
 	}
 	state := initialSSHConnection(ws, connectionConnected)
 	state.RemoteOS = probe.OS
@@ -235,6 +222,7 @@ func (m *sshManager) connectInternal(ctx context.Context, ws Workspace, emitProg
 		state.Capabilities = caps
 	}
 	hello["helper_uploaded"] = helper.Uploaded
+	hello["runtime_dir"] = helper.RemoteDir
 	state.Raw = hello
 
 	m.mu.Lock()
@@ -243,6 +231,20 @@ func (m *sshManager) connectInternal(ctx context.Context, ws Workspace, emitProg
 	m.emitConnection(ws, state)
 	go m.watchProxy(ws, proxy)
 	return state, nil
+}
+
+func connectionFailedState(ws Workspace, probe sshProbe, err error) WorkspaceConnection {
+	state := initialSSHConnection(ws, connectionFailed)
+	state.RemoteOS = probe.OS
+	state.RemoteArch = probe.Arch
+	state.RemoteShell = probe.Shell
+	state.RemoteUser = probe.User
+	state.RemoteHost = probe.Host
+	state.Capabilities = probeCapabilities(probe)
+	if err != nil {
+		state.Message = err.Error()
+	}
+	return state
 }
 
 func validateProxyHello(hello map[string]any) error {
@@ -519,25 +521,23 @@ func (m *sshManager) watchProxy(ws Workspace, proxy *proxyClient) {
 }
 
 type sshProbe struct {
-	OS        string
-	Arch      string
-	Shell     string
-	CWD       string
-	User      string
-	Host      string
-	RGPath    string
-	RGVersion string
+	OS            string
+	Arch          string
+	Shell         string
+	CWD           string
+	User          string
+	Host          string
+	UID           string
+	XDGRuntimeDir string
+	TMPDir        string
+	Home          string
+	RGPath        string
+	RGVersion     string
 }
 
 func (m *sshManager) probe(ctx context.Context, ws Workspace) (sshProbe, error) {
 	remoteCWD := strings.TrimSpace(ws.SSH.RemoteCWD)
-	script := strings.Join([]string{
-		"printf '%s\\n' \"$(uname -s)\" \"$(uname -m)\" \"${SHELL:-/bin/sh}\" \"$(pwd)\" \"$(whoami 2>/dev/null || id -un)\" \"$(hostname -s 2>/dev/null || hostname)\"",
-		"if command -v rg >/dev/null 2>&1; then command -v rg; rg --version | head -n 1; else printf '%s\\n' '' ''; fi",
-		"test -d " + shellQuote(remoteCWD),
-		"test -r " + shellQuote(remoteCWD),
-		"test -x " + shellQuote(remoteCWD),
-	}, "; ")
+	script := remoteProbeScript(remoteCWD)
 	cmd := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, script)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -566,10 +566,22 @@ func (m *sshManager) probe(ctx context.Context, ws Workspace) (sshProbe, error) 
 		probe.Host = strings.TrimSpace(lines[5])
 	}
 	if len(lines) > 6 {
-		probe.RGPath = strings.TrimSpace(lines[6])
+		probe.UID = strings.TrimSpace(lines[6])
 	}
 	if len(lines) > 7 {
-		probe.RGVersion = strings.TrimSpace(lines[7])
+		probe.XDGRuntimeDir = strings.TrimSpace(lines[7])
+	}
+	if len(lines) > 8 {
+		probe.TMPDir = strings.TrimSpace(lines[8])
+	}
+	if len(lines) > 9 {
+		probe.Home = strings.TrimSpace(lines[9])
+	}
+	if len(lines) > 10 {
+		probe.RGPath = strings.TrimSpace(lines[10])
+	}
+	if len(lines) > 11 {
+		probe.RGVersion = strings.TrimSpace(lines[11])
 	}
 	if probe.OS == "" || probe.Arch == "" {
 		return probe, fmt.Errorf("unsupported remote platform %q/%q", probe.OS, probe.Arch)
@@ -594,39 +606,193 @@ type helperUpload struct {
 	Uploaded   bool
 }
 
-func (m *sshManager) ensureHelper(ctx context.Context, ws Workspace, probe sshProbe, forceUpload bool) (helperUpload, error) {
-	local, err := m.localHelperBinary(ctx, probe)
-	if err != nil {
-		return helperUpload{}, err
+type remoteHelperCandidate struct {
+	Label     string
+	BaseDir   string
+	RemoteDir string
+}
+
+type remoteHelperAttempt struct {
+	Candidate remoteHelperCandidate
+	Err       error
+}
+
+func (m *sshManager) tryRemoteHelperCandidate(ctx context.Context, ws Workspace, probe sshProbe, candidate remoteHelperCandidate, localHelper, localSum string, emitProgress bool) (helperUpload, *proxyClient, map[string]any, error) {
+	helper, proxy, hello, err := m.tryRemoteHelperCandidateOnce(ctx, ws, candidate, localHelper, localSum, false)
+	if err == nil {
+		return helper, proxy, hello, nil
 	}
-	remoteDir := fmt.Sprintf("/tmp/.astralops/%s", ws.ID)
+	var validationErr remoteHelperValidationError
+	if helper.RemotePath == "" || helper.Uploaded || !errors.As(err, &validationErr) {
+		return helper, proxy, hello, err
+	}
+	if emitProgress {
+		state := initialSSHConnection(ws, connectionReconnecting)
+		state.RemoteOS = probe.OS
+		state.RemoteArch = probe.Arch
+		state.RemoteShell = probe.Shell
+		state.RemoteUser = probe.User
+		state.RemoteHost = probe.Host
+		state.Capabilities = probeCapabilities(probe)
+		state.HelperPath = helper.RemotePath
+		state.HelperStatus = "upgrading"
+		state.Message = err.Error()
+		state.RetryAttempt = 1
+		state.RetryMax = 2
+		m.setState(ws, state)
+	}
+	helper, proxy, hello, err = m.tryRemoteHelperCandidateOnce(ctx, ws, candidate, localHelper, localSum, true)
+	if err != nil {
+		var validationErr remoteHelperValidationError
+		if errors.As(err, &validationErr) {
+			err = remoteHelperNoFallbackError{err: err}
+		}
+	}
+	return helper, proxy, hello, err
+}
+
+func (m *sshManager) tryRemoteHelperCandidateOnce(ctx context.Context, ws Workspace, candidate remoteHelperCandidate, localHelper, localSum string, forceUpload bool) (helperUpload, *proxyClient, map[string]any, error) {
+	helper, err := m.ensureHelperAt(ctx, ws, candidate, localHelper, localSum, forceUpload)
+	if err != nil {
+		return helper, nil, nil, err
+	}
+	proxy, err := startProxyClient(ws, helper)
+	if err != nil {
+		return helper, nil, nil, remoteHelperNoFallbackError{err: err}
+	}
+	hello, err := proxy.hello(ctx)
+	if err != nil {
+		_ = proxy.close()
+		return helper, nil, nil, remoteHelperNoFallbackError{err: err}
+	}
+	if err = validateProxyHello(hello); err != nil {
+		_ = proxy.close()
+		return helper, nil, nil, remoteHelperValidationError{err: err}
+	}
+	return helper, proxy, hello, nil
+}
+
+type remoteHelperValidationError struct {
+	err error
+}
+
+func (e remoteHelperValidationError) Error() string {
+	if e.err == nil {
+		return "remote helper validation failed"
+	}
+	return e.err.Error()
+}
+
+func (e remoteHelperValidationError) Unwrap() error {
+	return e.err
+}
+
+type remoteHelperNoFallbackError struct {
+	err error
+}
+
+func (e remoteHelperNoFallbackError) Error() string {
+	if e.err == nil {
+		return "remote helper failed"
+	}
+	return e.err.Error()
+}
+
+func (e remoteHelperNoFallbackError) Unwrap() error {
+	return e.err
+}
+
+func (m *sshManager) ensureHelperAt(ctx context.Context, ws Workspace, candidate remoteHelperCandidate, local, localSum string, forceUpload bool) (helperUpload, error) {
+	remoteDir := candidate.RemoteDir
 	remotePath := remoteDir + "/astral-proxy-agent"
-	mkdir := "mkdir -p " + shellQuote(remoteDir) + " && chmod 700 " + shellQuote(remoteDir)
+	helper := helperUpload{LocalPath: local, RemoteDir: remoteDir, RemotePath: remotePath}
+	mkdir := "mkdir -p " + shellQuote(candidate.BaseDir) + " " + shellQuote(remoteDir) + " && chmod 700 " + shellQuote(candidate.BaseDir) + " " + shellQuote(remoteDir)
 	if out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, mkdir)...).CombinedOutput(); err != nil {
-		return helperUpload{}, fmt.Errorf("create remote helper dir failed: %s%s", err.Error(), stderrSuffix(string(out)))
+		return helper, fmt.Errorf("create remote helper dir failed: %s%s", err.Error(), stderrSuffix(string(out)))
 	}
 	uploaded := false
-	localSum, err := fileSHA256(local)
-	if err != nil {
-		return helperUpload{}, err
-	}
 	remoteSum := m.remoteHelperSHA256(ctx, ws, remotePath)
 	if forceUpload || remoteSum != localSum {
 		remoteTemp := remotePath + ".upload-" + randomID(8)
-		scpArgs := []string{"-P", strconv.Itoa(sshPort(ws))}
-		scpArgs = append(scpArgs, local, ws.SSH.Endpoint+":"+remoteTemp)
-		if out, err := exec.CommandContext(ctx, "scp", scpArgs...).CombinedOutput(); err != nil {
-			return helperUpload{}, fmt.Errorf("helper upload failed: %s%s", err.Error(), stderrSuffix(string(out)))
+		if err := uploadRemoteFile(ctx, ws, local, remoteTemp); err != nil {
+			return helper, fmt.Errorf("helper upload failed: %w", err)
 		}
 		uploaded = true
 		install := "chmod 700 " + shellQuote(remoteTemp) + " && mv -f " + shellQuote(remoteTemp) + " " + shellQuote(remotePath)
 		if out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, install)...).CombinedOutput(); err != nil {
 			cleanup := "rm -f " + shellQuote(remoteTemp)
 			_, _ = exec.CommandContext(context.Background(), "ssh", append(sshArgs(ws), ws.SSH.Endpoint, cleanup)...).CombinedOutput()
-			return helperUpload{}, fmt.Errorf("install remote helper failed: %s%s", err.Error(), stderrSuffix(string(out)))
+			return helper, fmt.Errorf("install remote helper failed: %s%s", err.Error(), stderrSuffix(string(out)))
 		}
 	}
-	return helperUpload{LocalPath: local, RemoteDir: remoteDir, RemotePath: remotePath, Uploaded: uploaded}, nil
+	helper.Uploaded = uploaded
+	verify := "exec " + shellQuote(remotePath) + " --self-test"
+	if out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, verify)...).CombinedOutput(); err != nil {
+		return helper, fmt.Errorf("verify remote helper failed: %s%s", err.Error(), stderrSuffix(string(out)))
+	}
+	return helper, nil
+}
+
+func remoteHelperCandidates(ws Workspace, probe sshProbe) []remoteHelperCandidate {
+	type candidateInput struct {
+		label string
+		base  string
+	}
+	tmpDir := firstString(probe.TMPDir, "/tmp")
+	tmpName := ".astralops"
+	if probe.UID != "" {
+		tmpName += "-" + probe.UID
+	}
+	inputs := []candidateInput{}
+	if probe.XDGRuntimeDir != "" {
+		inputs = append(inputs, candidateInput{"xdg-runtime", remotePathJoin(probe.XDGRuntimeDir, "astralops")})
+	}
+	inputs = append(inputs, candidateInput{"tmp", remotePathJoin(tmpDir, tmpName)})
+	if probe.Home != "" {
+		inputs = append(inputs, candidateInput{"home-cache", remotePathJoin(probe.Home, ".cache/astralops")})
+	}
+	if ws.SSH != nil && strings.TrimSpace(ws.SSH.RemoteCWD) != "" {
+		inputs = append(inputs, candidateInput{"workspace", remotePathJoin(ws.SSH.RemoteCWD, ".astralops")})
+	}
+	seen := map[string]bool{}
+	out := []remoteHelperCandidate{}
+	for _, input := range inputs {
+		base := remotePathClean(input.base)
+		if base == "" || !remotePathIsAbs(base) || seen[base] {
+			continue
+		}
+		seen[base] = true
+		out = append(out, remoteHelperCandidate{
+			Label:     input.label,
+			BaseDir:   base,
+			RemoteDir: remotePathJoin(base, ws.ID),
+		})
+	}
+	if len(out) == 0 {
+		base := "/tmp/.astralops"
+		out = append(out, remoteHelperCandidate{Label: "tmp", BaseDir: base, RemoteDir: remotePathJoin(base, ws.ID)})
+	}
+	return out
+}
+
+func remoteHelperAttemptsError(attempts []remoteHelperAttempt) error {
+	if len(attempts) == 0 {
+		return errors.New("remote helper failed")
+	}
+	var b strings.Builder
+	b.WriteString("remote helper failed")
+	for _, attempt := range attempts {
+		if attempt.Err == nil {
+			continue
+		}
+		b.WriteString("\n")
+		b.WriteString(attempt.Candidate.Label)
+		b.WriteString(" ")
+		b.WriteString(attempt.Candidate.RemoteDir)
+		b.WriteString(": ")
+		b.WriteString(attempt.Err.Error())
+	}
+	return errors.New(b.String())
 }
 
 func (m *sshManager) remoteHelperSHA256(ctx context.Context, ws Workspace, remotePath string) string {
@@ -636,6 +802,23 @@ func (m *sshManager) remoteHelperSHA256(ctx context.Context, ws Workspace, remot
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func uploadRemoteFile(ctx context.Context, ws Workspace, localPath, remotePath string) error {
+	file, err := os.Open(localPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	cmd := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, "cat > "+shellQuote(remotePath))...)
+	cmd.Stdin = file
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s%s", err.Error(), stderrSuffix(stderr.String()))
+	}
+	return nil
 }
 
 func fileSHA256(path string) (string, error) {
@@ -915,12 +1098,17 @@ func (p *proxyClient) wait() {
 	}
 	p.mu.Lock()
 	p.alive = false
+	exitText := p.errText
 	eventListeners := map[string][]chan proxyEvent{}
 	for id, listeners := range p.events {
 		eventListeners[id] = append([]chan proxyEvent(nil), listeners...)
 	}
 	for id, ch := range p.pending {
-		ch <- proxyResponse{ID: id, Error: "ssh proxy exited", Transport: true}
+		message := "ssh proxy exited"
+		if exitText != "" {
+			message += ": " + exitText
+		}
+		ch <- proxyResponse{ID: id, Error: message, Transport: true}
 		delete(p.pending, id)
 	}
 	p.mu.Unlock()
@@ -1076,7 +1264,31 @@ func sshPort(ws Workspace) int {
 }
 
 func sshArgs(ws Workspace) []string {
-	return []string{"-p", strconv.Itoa(sshPort(ws)), "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"}
+	args := []string{}
+	if port := sshPort(ws); port != 22 {
+		args = append(args, "-p", strconv.Itoa(port))
+	}
+	return append(args, "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3")
+}
+
+func remoteProbeScript(remoteCWD string) string {
+	return strings.Join([]string{
+		"cd " + shellQuote(remoteCWD),
+		remoteIdentityProbeScript(),
+		"if command -v rg >/dev/null 2>&1; then command -v rg; rg --version 2>/dev/null | { IFS= read -r line; printf '%s\\n' \"$line\"; }; else printf '%s\\n' '' ''; fi",
+	}, " && ")
+}
+
+func remoteIdentityProbeScript() string {
+	return strings.Join([]string{
+		"remote_os=$(uname -s)",
+		"remote_arch=$(uname -m)",
+		"remote_user=$(whoami 2>/dev/null || id -un 2>/dev/null || printf '')",
+		"remote_uid=$(id -u 2>/dev/null || printf '')",
+		"remote_host=$(uname -n 2>/dev/null || cat /etc/hostname 2>/dev/null || printf '')",
+		"if command -v hostname >/dev/null 2>&1; then remote_host=$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf '%s' \"$remote_host\"); fi",
+		"printf '%s\\n' \"$remote_os\" \"$remote_arch\" \"${SHELL:-/bin/sh}\" \"$(pwd)\" \"$remote_user\" \"$remote_host\" \"$remote_uid\" \"${XDG_RUNTIME_DIR:-}\" \"${TMPDIR:-}\" \"${HOME:-}\"",
+	}, " && ")
 }
 
 func shellQuote(value string) string {

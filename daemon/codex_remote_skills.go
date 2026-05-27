@@ -41,7 +41,14 @@ func (a *app) prepareCodexRemoteBundledSkills(ctx context.Context, ws Workspace,
 		return "", errors.New("no Codex bundled skills found")
 	}
 
-	root := remotePathClean(remotePathJoin("/tmp/.astralops", ws.ID, "codex-skills", bundle.Version))
+	runtimeDir := ""
+	if a.ssh != nil {
+		runtimeDir = a.ssh.remoteWorkspaceRuntimeDir(ws)
+	}
+	if runtimeDir == "" {
+		runtimeDir = remotePathJoin("/tmp/.astralops", ws.ID)
+	}
+	root := remotePathClean(remotePathJoin(runtimeDir, "codex-skills", bundle.Version))
 	remoteCodexHome := remotePathJoin(root, "codex-home")
 	remoteSystemRoot := remotePathJoin(remoteCodexHome, "skills/.system")
 	remoteAgentsRoot := remotePathJoin(root, "agents-skills/_astralops_codex_bundled")
