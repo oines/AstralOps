@@ -99,6 +99,12 @@ function writeBuilderConfig(target, stageBin, outputDir) {
     electronVersion: require("electron/package.json").version,
     extraMetadata: {
       version: releaseVersion,
+      description: "A cross-platform desktop workspace for Claude Code and Codex.",
+      homepage: "https://github.com/oines/AstralOps",
+      author: {
+        name: "AstralOps",
+        email: "oines@users.noreply.github.com",
+      },
     },
     asar: true,
     directories: {
@@ -122,6 +128,7 @@ function writeBuilderConfig(target, stageBin, outputDir) {
       target: ["AppImage", "deb"],
       icon: "assets/AstralOps-AppIcon.png",
       category: "Development",
+      maintainer: "AstralOps <oines@users.noreply.github.com>",
       artifactName: "AstralOps-${version}-linux-${arch}.${ext}",
     },
     win: {
@@ -214,10 +221,12 @@ function cleanDir(dir) {
 }
 
 function run(command, args, options = {}) {
-  const resolved = process.platform === "win32" && (command === "npm" || command === "npx") ? `${command}.cmd` : command;
+  const windowsCommand = process.platform === "win32" && (command === "npm" || command === "npx");
+  const resolved = windowsCommand ? "cmd.exe" : command;
+  const resolvedArgs = windowsCommand ? ["/d", "/s", "/c", command, ...args] : args;
   const { env: extraEnv, ...spawnOptions } = options;
   console.log(`\n> ${[command, ...args].join(" ")}`);
-  const result = spawnSync(resolved, args, {
+  const result = spawnSync(resolved, resolvedArgs, {
     cwd: repoRoot,
     env: { ...process.env, ...extraEnv },
     stdio: "inherit",
