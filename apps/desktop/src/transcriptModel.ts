@@ -54,6 +54,7 @@ export type TranscriptOperationGroup = {
 };
 
 export function groupTranscriptEvents(events: AstralEvent[]): TurnGroup[] {
+  events = filterReplacedTranscriptEvents(events);
   events = enrichToolLifecycleEvents(events);
   const groups: TurnGroup[] = [];
   let current: TurnGroup | null = null;
@@ -119,6 +120,7 @@ function hasVisibleTurnContent(group: TurnGroup): boolean {
 }
 
 export function groupMemoryCompactions(events: AstralEvent[]): MemoryCompactGroup[] {
+  events = filterReplacedTranscriptEvents(events);
   const groups: MemoryCompactGroup[] = [];
   let pending: MemoryCompactGroup | null = null;
   let compactRunOpen = false;
@@ -164,6 +166,20 @@ export function groupMemoryCompactions(events: AstralEvent[]): MemoryCompactGrou
 
 export function isAssistantContentEvent(event: AstralEvent): boolean {
   return event.kind === "message.delta" || event.kind === "message.assistant" || isTranscriptPlanEvent(event);
+}
+
+export function filterReplacedTranscriptEvents(events: AstralEvent[]): AstralEvent[] {
+  const hidden = new Set<number>();
+  for (const event of events) {
+    if (event.kind !== "turn.replaced") continue;
+    const value = event.normalized as Record<string, unknown>;
+    const start = numberValue(value.start_seq);
+    const end = numberValue(value.end_seq);
+    if (start <= 0 || end < start) continue;
+    for (let seq = start; seq <= end; seq += 1) hidden.add(seq);
+  }
+  if (hidden.size === 0) return events;
+  return events.filter((event) => event.kind !== "turn.replaced" && !hidden.has(event.seq));
 }
 
 export function visibleCollapsedAssistantSeqs(events: AstralEvent[]): Set<number> {

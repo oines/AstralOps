@@ -35,6 +35,7 @@ file diff approval
 Ask/user input form
 MCP elicitation form/url
 prompt queued / dequeued / cancelled
+last user message edit / turn replacement
 rate limit
 compact boundary
 projection hydrated / pushed
@@ -69,6 +70,7 @@ Do not implement speculative fallback mappings for Claude/Codex events.
 When adding or changing event normalization/rendering, first capture real local Claude Code/Codex samples into fixtures and implement against those exact observed shapes.
 If an event is not covered by a fixture, preserve it only as hidden control.raw for debug/replay. Do not create generic visible UI for it, and do not map it into a semantic event until a real fixture proves the shape.
 Do not add "best guess" UI branches for event names that have not been observed locally.
+turn.replaced is an AstralOps/Core-generated semantic event, not a Claude/Codex raw mapping. It marks a replaced transcript seq range after editing and resending the last user message. Normal transcript, pending interaction projection, and interaction responses must treat events in that seq range as stale/hidden.
 ```
 
 Architecture and fallback rule:

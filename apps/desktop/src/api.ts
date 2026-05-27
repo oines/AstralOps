@@ -1,6 +1,7 @@
 import type {
   AstralEvent,
   CreateWorkspaceRequest,
+  EditLastUserMessageRequest,
   FileListResponse,
   HealthResponse,
   Session,
@@ -74,6 +75,11 @@ export interface CoreClient {
   deleteSession(sessionId: string): Promise<{ ok: boolean }>;
   forkSession(sessionId: string, eventSeq: number): Promise<SessionForkResponse>;
   sendInput(sessionId: string, input: string, options?: { model?: string; reasoning_effort?: string; permission_mode?: string }): Promise<{ ok: boolean }>;
+  editLastUserMessage(
+    sessionId: string,
+    input: string,
+    options: Omit<EditLastUserMessageRequest, "input">,
+  ): Promise<{ ok: boolean }>;
   interrupt(sessionId: string): Promise<{ ok: boolean }>;
   cancelQueuedInput(sessionId: string, queueId: string): Promise<{ ok: boolean }>;
   steerQueuedInput(sessionId: string, queueId: string): Promise<{ ok: boolean }>;
@@ -232,6 +238,14 @@ export class LocalCoreClient implements CoreClient {
     options: { model?: string; reasoning_effort?: string; permission_mode?: string } = {},
   ): Promise<{ ok: boolean }> {
     return this.channel.request("POST", `/v1/sessions/${sessionId}/input`, { input, ...options });
+  }
+
+  editLastUserMessage(
+    sessionId: string,
+    input: string,
+    options: Omit<EditLastUserMessageRequest, "input">,
+  ): Promise<{ ok: boolean }> {
+    return this.channel.request("POST", `/v1/sessions/${sessionId}/edit-last-user-message`, { input, ...options });
   }
 
   interrupt(sessionId: string): Promise<{ ok: boolean }> {

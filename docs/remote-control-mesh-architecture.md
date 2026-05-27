@@ -337,6 +337,7 @@ Capability 描述可信 Controller 可以请求 Host 做什么。它不应该按
 ```text
 core.read
 core.control
+session.edit
 interaction.respond
 workspace.files.read
 workspace.files.write
@@ -354,6 +355,9 @@ core.read
 
 core.control
   发送 prompt、中断 turn、取消/steer queued prompt、fork/delete session。
+
+session.edit
+  编辑最后一条用户消息并由 Host/Core 执行 rollback/resend。被替换的旧 turn range 必须从 transcript 和 pending interaction projection 中隐藏，旧 approval/ask 响应必须由 Host 拒绝为 stale。
 
 interaction.respond
   回复 Ask，批准/拒绝 plan，批准/拒绝 command/file/permission request。

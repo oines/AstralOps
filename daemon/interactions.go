@@ -422,12 +422,16 @@ func (a *app) findInteractionEvent(id string) (AstralEvent, bool) {
 
 func (a *app) findPendingInteractionEvent(id string) (AstralEvent, bool, bool) {
 	events := a.store.queryEvents("", "", 0)
+	hidden := replacedTranscriptSeqs(events)
 	for i := len(events) - 1; i >= 0; i-- {
 		ev := events[i]
 		if interactionResponseMatches(ev, id) {
 			return AstralEvent{}, false, true
 		}
 		if interactionRequestMatches(ev, id) {
+			if hidden[ev.Seq] {
+				return AstralEvent{}, false, true
+			}
 			return ev, true, false
 		}
 	}

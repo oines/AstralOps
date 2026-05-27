@@ -523,6 +523,27 @@ export function App(): React.JSX.Element {
     [activeSession, activeWorkspace, api, claudeSSHRemote, permissionMode, runMode, selectedModel, selectedReasoningEffort, storeSessionView, workspaceInteractive],
   );
 
+  const handleEditUserMessage = useCallback(
+    async (eventSeq: number, input: string) => {
+      if (!api || !activeWorkspace || !activeSession || !workspaceInteractive) return;
+      setError("");
+      try {
+        await api.editLastUserMessage(activeSession.id, input, {
+          event_seq: eventSeq,
+          model: selectedModel,
+          reasoning_effort: selectedReasoningEffort,
+          permission_mode: runMode === "plan" ? "plan" : claudeSSHRemote ? "bypassPermissions" : permissionMode,
+        });
+        const view = await api.sessionView(activeSession.id).catch(() => null);
+        if (view) storeSessionView(view);
+      } catch (editError) {
+        setError(editError instanceof Error ? editError.message : String(editError));
+        throw editError;
+      }
+    },
+    [activeSession, activeWorkspace, api, claudeSSHRemote, permissionMode, runMode, selectedModel, selectedReasoningEffort, storeSessionView, workspaceInteractive],
+  );
+
   const handleInterrupt = useCallback(async () => {
     if (!api || !activeSession || !workspaceInteractive) return;
     setError("");
@@ -648,12 +669,14 @@ export function App(): React.JSX.Element {
           activeSession={activeSession}
           activeWorkspace={activeWorkspace}
           composerHeight={composerHeight}
+          editableUserMessage={activeSessionView?.editable_user_message ?? null}
           events={visibleEvents}
           forkingSeq={forkingSeq}
           hasOlder={activeSessionWindow?.hasOlder ?? false}
           loadingOlder={activeSessionWindow?.loadingOlder ?? false}
           scrollToEventSeq={scrollTarget?.sessionId === activeSessionId ? scrollTarget.eventSeq : null}
           sourceSessionExists={forkSourceSessionExists}
+          onEditUserMessage={handleEditUserMessage}
           onForkFromEvent={(event) => void handleForkFromEvent(event)}
           onLoadOlder={() => void loadOlderEvents()}
           onOpenSourceSession={handleOpenSourceSession}

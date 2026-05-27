@@ -486,9 +486,10 @@ function browserWindowOptions(icon) {
   if (process.platform !== "darwin") return base;
   return {
     ...base,
+    backgroundColor: "#00000000",
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 20, y: 18 },
-    vibrancy: "under-window",
+    vibrancy: "sidebar",
     visualEffectState: "active",
     transparent: true,
   };

@@ -2310,6 +2310,49 @@ func TestApprovalRespondRejectsStaleInteraction(t *testing.T) {
 	}
 }
 
+func TestApprovalRespondRejectsReplacedInteraction(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &recordingRuntime{}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
+	request, err := st.appendEvent(AstralEvent{
+		WorkspaceID: "ws_replaced_interaction",
+		SessionID:   "sess_replaced_interaction",
+		Agent:       AgentCodex,
+		Kind:        "approval.requested",
+		Normalized:  map[string]any{"approval_id": "approval_replaced"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: "ws_replaced_interaction",
+		SessionID:   "sess_replaced_interaction",
+		Agent:       AgentCodex,
+		Kind:        "turn.replaced",
+		Normalized: map[string]any{
+			"start_seq": request.Seq,
+			"end_seq":   request.Seq,
+			"hidden":    true,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_replaced/respond", strings.NewReader(`{"decision":"accept"}`))
+	rr := httptest.NewRecorder()
+	app.handleApprovalAction(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rr.Code)
+	}
+	if len(runtime.approvalResponses) != 0 {
+		t.Fatalf("runtime responses = %#v, want none", runtime.approvalResponses)
+	}
+}
+
 func TestCodexPlanApprovalStartsInternalFollowupTurn(t *testing.T) {
 	dir := t.TempDir()
 	st, err := loadStore(dir)
@@ -3639,6 +3682,20 @@ func (r *recordingSteerRuntime) Steer(sessionID string, input string, options Tu
 	return nil
 }
 
+type recordingEditRuntime struct {
+	recordingRuntime
+	editedInput string
+	editOptions TurnOptions
+	editCalls   int
+}
+
+func (r *recordingEditRuntime) EditLastUserMessageAndResend(session Session, workspace Workspace, input string, options TurnOptions) error {
+	r.editedInput = input
+	r.editOptions = options
+	r.editCalls++
+	return nil
+}
+
 type recordingForkRuntime struct {
 	recordingRuntime
 	source        Session
@@ -3887,6 +3944,171 @@ func TestCodexForkEndpointCallsForkRuntimeWithRollbackTurns(t *testing.T) {
 	}
 	if runtime.rollbackTurns != 1 {
 		t.Fatalf("rollbackTurns = %d, want 1", runtime.rollbackTurns)
+	}
+}
+
+func TestSessionViewProjectsEditableUserMessageOnlyForCodex(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexWorkspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Codex", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeWorkspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Claude", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexSession := st.createSession(codexWorkspace, AgentCodex)
+	claudeSession := st.createSession(claudeWorkspace, AgentClaude)
+	app := &app{store: st, hub: newEventHub()}
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "message.user", Normalized: map[string]any{"text": "codex prompt"}})
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn_codex"}})
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "message.assistant", Normalized: map[string]any{"text": "done"}})
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn_codex"}})
+	app.emit(AstralEvent{WorkspaceID: claudeWorkspace.ID, SessionID: claudeSession.ID, Agent: AgentClaude, Kind: "message.user", Normalized: map[string]any{"text": "claude prompt"}})
+	app.emit(AstralEvent{WorkspaceID: claudeWorkspace.ID, SessionID: claudeSession.ID, Agent: AgentClaude, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn_claude"}})
+	app.emit(AstralEvent{WorkspaceID: claudeWorkspace.ID, SessionID: claudeSession.ID, Agent: AgentClaude, Kind: "message.assistant", Normalized: map[string]any{"text": "done"}})
+	app.emit(AstralEvent{WorkspaceID: claudeWorkspace.ID, SessionID: claudeSession.ID, Agent: AgentClaude, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn_claude"}})
+
+	codexView, ok := app.buildSessionView(codexSession.ID)
+	if !ok || codexView.EditableUserMessage == nil || codexView.EditableUserMessage.Text != "codex prompt" {
+		t.Fatalf("codex editable user message = %#v, ok=%v", codexView.EditableUserMessage, ok)
+	}
+	claudeView, ok := app.buildSessionView(claudeSession.ID)
+	if !ok {
+		t.Fatal("missing claude view")
+	}
+	if claudeView.EditableUserMessage != nil {
+		t.Fatalf("claude editable user message = %#v, want nil", claudeView.EditableUserMessage)
+	}
+}
+
+func TestSessionViewIgnoresPendingInteractionInsideReplacedTurn(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Codex", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	app := &app{store: st, hub: newEventHub()}
+	user, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: map[string]any{"text": "old prompt"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "approval.requested", Normalized: map[string]any{"approval_id": "approval_old", "kind": "command"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	end, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn_old"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.replaced", Normalized: map[string]any{
+		"start_seq": user.Seq,
+		"end_seq":   end.Seq,
+		"hidden":    true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	view, ok := app.buildSessionView(session.ID)
+	if !ok {
+		t.Fatal("missing session view")
+	}
+	if view.PendingInteraction != nil {
+		t.Fatalf("pending interaction = %#v, want nil for replaced approval seq %d", view.PendingInteraction, approval.Seq)
+	}
+	if view.EditableUserMessage != nil {
+		t.Fatalf("editable user message = %#v, want nil for replaced user message", view.EditableUserMessage)
+	}
+}
+
+func TestEditLastUserMessageEndpointValidatesAndCallsCodexRuntime(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Codex", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	runtime := &recordingEditRuntime{}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: map[string]any{"text": "old prompt"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn_1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.assistant", Normalized: map[string]any{"text": "old answer"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn_1"}})
+	view, _ := app.buildSessionView(session.ID)
+	if view.EditableUserMessage == nil {
+		t.Fatal("missing editable user message")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+session.ID+"/edit-last-user-message", strings.NewReader(fmt.Sprintf(`{"event_seq":%d,"input":"new prompt","model":"gpt-test","reasoning_effort":"low","permission_mode":"auto"}`, view.EditableUserMessage.EventSeq)))
+	rr := httptest.NewRecorder()
+	app.handleSessionAction(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if runtime.editCalls != 1 || runtime.editedInput != "new prompt" || runtime.editOptions.Model != "gpt-test" || runtime.editOptions.ReasoningEffort != "low" || runtime.editOptions.PermissionMode != "auto" {
+		t.Fatalf("runtime edit = calls %d input %q options %#v", runtime.editCalls, runtime.editedInput, runtime.editOptions)
+	}
+	if !containsEventKind(st.queryEvents("", session.ID, 0), "turn.replaced") {
+		t.Fatalf("events = %#v, want turn.replaced", st.queryEvents("", session.ID, 0))
+	}
+}
+
+func TestEditLastUserMessageEndpointRejectsStaleEmptyAndClaude(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexWorkspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Codex", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeWorkspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Claude", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexSession := st.createSession(codexWorkspace, AgentCodex)
+	claudeSession := st.createSession(claudeWorkspace, AgentClaude)
+	runtime := &recordingEditRuntime{}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "message.user", Normalized: map[string]any{"text": "prompt"}})
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn_1"}})
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn_1"}})
+
+	for _, tc := range []struct {
+		name      string
+		sessionID string
+		body      string
+		want      int
+	}{
+		{name: "empty", sessionID: codexSession.ID, body: `{"event_seq":1,"input":" "}`, want: http.StatusBadRequest},
+		{name: "stale", sessionID: codexSession.ID, body: `{"event_seq":999,"input":"new"}`, want: http.StatusConflict},
+		{name: "claude", sessionID: claudeSession.ID, body: `{"event_seq":1,"input":"new"}`, want: http.StatusNotImplemented},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+tc.sessionID+"/edit-last-user-message", strings.NewReader(tc.body))
+			rr := httptest.NewRecorder()
+			app.handleSessionAction(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("status = %d, want %d, body = %s", rr.Code, tc.want, rr.Body.String())
+			}
+		})
+	}
+	if runtime.editCalls != 0 {
+		t.Fatalf("runtime edit calls = %d, want 0", runtime.editCalls)
 	}
 }
 
@@ -4751,6 +4973,74 @@ func TestCodexLocalRuntimeSteersActiveTurn(t *testing.T) {
 	}
 }
 
+func TestCodexLocalRuntimeEditLastUserMessageRollsBackThenStartsTurn(t *testing.T) {
+	app, session, workspace := newTestCodexApp(t, fakeCodexScript(t))
+	methodsPath := filepath.Join(t.TempDir(), "codex-methods.log")
+	messagesPath := filepath.Join(t.TempDir(), "codex-messages.jsonl")
+	t.Setenv("ASTRALOPS_TEST_CODEX_METHODS", methodsPath)
+	t.Setenv("ASTRALOPS_TEST_CODEX_MESSAGES", messagesPath)
+
+	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "old prompt", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.completed")
+	editor, ok := app.runtimes[AgentCodex].(LastUserMessageEditor)
+	if !ok {
+		t.Fatal("codex runtime does not implement LastUserMessageEditor")
+	}
+	if err := editor.EditLastUserMessageAndResend(session, workspace, "edited prompt", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKindCount(t, app.store, session.ID, "turn.started", 2)
+
+	methods, err := os.ReadFile(methodsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	methodText := string(methods)
+	if !strings.Contains(methodText, "thread/rollback") || !strings.Contains(methodText, "turn/start") {
+		t.Fatalf("codex runtime did not rollback and restart; methods:\n%s", methodText)
+	}
+	messages, err := os.ReadFile(messagesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageText := string(messages)
+	if !strings.Contains(messageText, `"numTurns":1`) || !strings.Contains(messageText, `"edited prompt"`) {
+		t.Fatalf("codex messages missing rollback numTurns or edited prompt:\n%s", messageText)
+	}
+}
+
+func TestCodexLocalRuntimeEditRunningTurnInterruptsBeforeRollback(t *testing.T) {
+	app, session, workspace := newTestCodexApp(t, fakeCodexScript(t))
+	methodsPath := filepath.Join(t.TempDir(), "codex-methods.log")
+	t.Setenv("ASTRALOPS_TEST_CODEX_METHODS", methodsPath)
+
+	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "old running prompt", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.started")
+	editor, ok := app.runtimes[AgentCodex].(LastUserMessageEditor)
+	if !ok {
+		t.Fatal("codex runtime does not implement LastUserMessageEditor")
+	}
+	if err := editor.EditLastUserMessageAndResend(session, workspace, "edited running prompt", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKindCount(t, app.store, session.ID, "turn.started", 2)
+
+	methods, err := os.ReadFile(methodsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	methodText := string(methods)
+	interruptIndex := strings.Index(methodText, "turn/interrupt")
+	rollbackIndex := strings.Index(methodText, "thread/rollback")
+	if interruptIndex < 0 || rollbackIndex < 0 || interruptIndex > rollbackIndex {
+		t.Fatalf("codex runtime did not interrupt before rollback; methods:\n%s", methodText)
+	}
+}
+
 func TestCodexSSHRuntimeUsesRemoteShellEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	st, err := loadStore(dir)
@@ -5577,6 +5867,10 @@ rl.on("line", (line) => {
     const thread = { id: msg.params.threadId, status: { type: "idle" } };
     write({ id: msg.id, result: { thread } });
     write({ method: "thread/started", params: { thread } });
+  }
+  if (msg.method === "thread/rollback") {
+    const thread = { id: msg.params.threadId, status: { type: "idle" }, turns: [] };
+    write({ id: msg.id, result: { thread } });
   }
   if (msg.method === "turn/start") {
     const turn = { id: "turn_fake", status: { type: "running" } };

@@ -7,11 +7,12 @@ import (
 )
 
 type sessionView struct {
-	Session            Session                 `json:"session"`
-	Title              string                  `json:"title,omitempty"`
-	Status             string                  `json:"status"`
-	PendingInteraction *pendingInteractionView `json:"pending_interaction,omitempty"`
-	QueuedInputs       []queuedInputView       `json:"queued_inputs,omitempty"`
+	Session             Session                  `json:"session"`
+	Title               string                   `json:"title,omitempty"`
+	Status              string                   `json:"status"`
+	PendingInteraction  *pendingInteractionView  `json:"pending_interaction,omitempty"`
+	QueuedInputs        []queuedInputView        `json:"queued_inputs,omitempty"`
+	EditableUserMessage *editableUserMessageView `json:"editable_user_message,omitempty"`
 }
 
 type pendingInteractionView struct {
@@ -43,6 +44,11 @@ type queuedInputView struct {
 	Text      string `json:"text"`
 }
 
+type editableUserMessageView struct {
+	EventSeq int64  `json:"event_seq"`
+	Text     string `json:"text"`
+}
+
 func (a *app) buildSessionView(sessionID string) (sessionView, bool) {
 	ss, ok := a.store.getSession(sessionID)
 	if !ok {
@@ -53,12 +59,54 @@ func (a *app) buildSessionView(sessionID string) (sessionView, bool) {
 	status := projectedSessionStatus(ss, events, pending != nil)
 	ss.Status = status
 	return sessionView{
-		Session:            ss,
-		Title:              a.store.sessionTitle(sessionID),
-		Status:             status,
-		PendingInteraction: pending,
-		QueuedInputs:       projectQueuedInputs(events),
+		Session:             ss,
+		Title:               a.store.sessionTitle(sessionID),
+		Status:              status,
+		PendingInteraction:  pending,
+		QueuedInputs:        projectQueuedInputs(events),
+		EditableUserMessage: projectEditableUserMessage(ss, events, status),
 	}, true
+}
+
+func projectEditableUserMessage(ss Session, events []AstralEvent, status string) *editableUserMessageView {
+	if ss.Agent != AgentCodex {
+		return nil
+	}
+	if status != "idle" && status != "running" && status != "requires_action" {
+		return nil
+	}
+	hidden := replacedTranscriptSeqs(events)
+	for index := len(events) - 1; index >= 0; index-- {
+		event := events[index]
+		if event.Kind != "message.user" || hidden[event.Seq] {
+			continue
+		}
+		text := stringValue(mapValue(event.Normalized)["text"])
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
+		return &editableUserMessageView{EventSeq: event.Seq, Text: text}
+	}
+	return nil
+}
+
+func replacedTranscriptSeqs(events []AstralEvent) map[int64]bool {
+	hidden := map[int64]bool{}
+	for _, event := range events {
+		if event.Kind != "turn.replaced" {
+			continue
+		}
+		value := mapValue(event.Normalized)
+		start := int64(numberValue(value["start_seq"]))
+		end := int64(numberValue(value["end_seq"]))
+		if start <= 0 || end < start {
+			continue
+		}
+		for seq := start; seq <= end; seq++ {
+			hidden[seq] = true
+		}
+	}
+	return hidden
 }
 
 func projectedSessionStatus(ss Session, events []AstralEvent, hasPending bool) string {
@@ -84,8 +132,12 @@ func projectedSessionStatus(ss Session, events []AstralEvent, hasPending bool) s
 
 func projectPendingInteraction(events []AstralEvent) *pendingInteractionView {
 	resolved := resolvedInteractionIDs(events)
+	hidden := replacedTranscriptSeqs(events)
 	for index := len(events) - 1; index >= 0; index-- {
 		event := events[index]
+		if hidden[event.Seq] {
+			continue
+		}
 		if event.Kind != "approval.requested" && event.Kind != "ask.requested" {
 			continue
 		}

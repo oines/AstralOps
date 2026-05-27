@@ -525,7 +525,11 @@ func (s *store) appendEvent(ev AstralEvent) (AstralEvent, error) {
 	s.touchSessionForEvent(ev)
 	s.mu.Unlock()
 
-	path := filepath.Join(s.dataDir, "events", ev.SessionID+".jsonl")
+	eventDir := filepath.Join(s.dataDir, "events")
+	if err := os.MkdirAll(eventDir, 0o700); err != nil {
+		return ev, err
+	}
+	path := filepath.Join(eventDir, ev.SessionID+".jsonl")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return ev, err
