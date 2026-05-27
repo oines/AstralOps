@@ -439,6 +439,10 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  if (process.platform !== "darwin") {
+    mainWindow.setAutoHideMenuBar(true);
+    mainWindow.setMenuBarVisibility(false);
+  }
 
   mainWindow.on("close", (event) => {
     if (!app.isQuitting && process.platform !== "darwin") {
@@ -476,6 +480,7 @@ function browserWindowOptions(icon) {
     minHeight: 720,
     title: "AstralOps",
     backgroundColor: "#ffffff",
+    autoHideMenuBar: process.platform !== "darwin",
     ...(icon ? { icon } : {}),
   };
   if (process.platform !== "darwin") return base;
@@ -571,6 +576,9 @@ ipcMain.handle("astral:show-notification", async (_event, payload) => {
 });
 
 app.whenReady().then(async () => {
+  if (process.platform !== "darwin") {
+    Menu.setApplicationMenu(null);
+  }
   if (process.platform === "darwin") {
     const icon = appIconImage();
     if (icon) app.dock.setIcon(icon);

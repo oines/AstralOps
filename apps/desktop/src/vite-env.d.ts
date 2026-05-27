@@ -13,6 +13,7 @@ declare global {
 
   interface Window {
     astral: {
+      platform: string;
       getDaemonInfo: () => Promise<{ host: string; port: number; token: string; pid: number }>;
       chooseDirectory: () => Promise<string | null>;
       chooseFiles: () => Promise<string[]>;
