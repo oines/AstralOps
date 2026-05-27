@@ -19,7 +19,7 @@ const initialDraft: WorkspaceDraft = {
   local_cwd: "",
   ssh_endpoint: "",
   ssh_port: 22,
-  ssh_remote_cwd: "/root",
+  ssh_remote_cwd: "",
 };
 
 export function WorkspaceModal({
@@ -175,7 +175,7 @@ export function WorkspaceModal({
                 <Field label="远端 cwd">
                   <input
                     className="h-10 w-full rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
-                    placeholder="/root/project"
+                    placeholder="/home/user/project"
                     value={draft.ssh_remote_cwd}
                     onChange={(event) => setDraft((current) => ({ ...current, ssh_remote_cwd: event.target.value }))}
                   />

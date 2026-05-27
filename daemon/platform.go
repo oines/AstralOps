@@ -105,6 +105,10 @@ func remotePathBase(value string) string {
 	return posixpath.Base(value)
 }
 
+func remotePathDir(value string) string {
+	return posixpath.Dir(remotePathClean(value))
+}
+
 func splitRemotePath(value string) []string {
 	value = strings.Trim(remotePathClean(value), "/")
 	if value == "" {
