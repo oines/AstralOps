@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Notification, dialog, ipcMain, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, shell } = require("electron");
 const { execFile, spawn } = require("child_process");
 const { promisify } = require("util");
 const fs = require("fs");
@@ -8,6 +8,7 @@ const path = require("path");
 let mainWindow;
 let daemonProcess;
 let daemonInfo;
+let tray;
 const recentNotificationIDs = [];
 const recentNotificationIDSet = new Set();
 const execFileAsync = promisify(execFile);
@@ -25,7 +26,26 @@ function runtimePath() {
 }
 
 function appIconPath() {
-  return path.join(repoRoot(), "apps", "desktop", "assets", "AstralOps-AppIcon.png");
+  return assetPath("AstralOps-AppIcon.png");
+}
+
+function assetPath(fileName) {
+  const candidates = app.isPackaged
+    ? [
+        path.join(__dirname, "..", "assets", fileName),
+        path.join(process.resourcesPath || "", "app.asar", "assets", fileName),
+        path.join(process.resourcesPath || "", "assets", fileName),
+      ]
+    : [path.join(repoRoot(), "apps", "desktop", "assets", fileName)];
+  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || "";
+}
+
+function appIconImage(size) {
+  const iconPath = appIconPath();
+  if (!iconPath) return undefined;
+  const image = nativeImage.createFromPath(iconPath);
+  if (image.isEmpty()) return undefined;
+  return size ? image.resize({ width: size, height: size }) : image;
 }
 
 function rendererIndexPath() {
@@ -48,10 +68,29 @@ function desktopEnv() {
   return env;
 }
 
-function commandExists(command) {
+function executableNameCandidates(command) {
+  const names = [command];
+  if (process.platform === "win32" && !path.extname(command)) {
+    const extParts = (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+    for (const ext of extParts) {
+      names.push(`${command}${ext.toLowerCase()}`);
+      names.push(`${command}${ext.toUpperCase()}`);
+    }
+  }
+  return [...new Set(names)];
+}
+
+function findCommandPath(command) {
+  if (path.isAbsolute(command) && fs.existsSync(command)) return command;
   const pathKey = process.platform === "win32" ? "Path" : "PATH";
   const parts = (desktopEnv()[pathKey] || "").split(path.delimiter).filter(Boolean);
-  return parts.some((part) => fs.existsSync(path.join(part, command)));
+  for (const part of parts) {
+    for (const name of executableNameCandidates(command)) {
+      const candidate = path.join(part, name);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return "";
 }
 
 async function appIconDataURL(appPath) {
@@ -120,6 +159,7 @@ function escapeRegExp(value) {
 }
 
 function findVSCodeAppPath() {
+  if (process.platform !== "darwin") return "";
   const candidates = [
     "/Applications/Visual Studio Code.app",
     path.join(os.homedir(), "Applications", "Visual Studio Code.app"),
@@ -135,27 +175,36 @@ function findVSCodeAppPath() {
   return realCodePath.slice(0, -marker.length) + ".app";
 }
 
-function findCommandPath(command) {
-  const pathKey = process.platform === "win32" ? "Path" : "PATH";
-  const parts = (desktopEnv()[pathKey] || "").split(path.delimiter).filter(Boolean);
-  for (const part of parts) {
-    const candidate = path.join(part, command);
-    if (fs.existsSync(candidate)) return candidate;
+function findVSCodeCommandPath() {
+  const commandPath = findCommandPath("code");
+  if (commandPath) return commandPath;
+  if (process.platform !== "win32") return "";
+  const candidates = [
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Programs", "Microsoft VS Code", "bin", "code.cmd") : "",
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Programs", "Microsoft VS Code", "Code.exe") : "",
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, "Microsoft VS Code", "bin", "code.cmd") : "",
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, "Microsoft VS Code", "Code.exe") : "",
+    process.env["ProgramFiles(x86)"] ? path.join(process.env["ProgramFiles(x86)"], "Microsoft VS Code", "bin", "code.cmd") : "",
+    process.env["ProgramFiles(x86)"] ? path.join(process.env["ProgramFiles(x86)"], "Microsoft VS Code", "Code.exe") : "",
+  ];
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
   }
   return "";
 }
 
 async function workspaceOpeners() {
   const vscodeApp = findVSCodeAppPath();
+  const vscodeCommand = findVSCodeCommandPath();
   const finderApp = "/System/Library/CoreServices/Finder.app";
   const terminalApp = "/System/Applications/Utilities/Terminal.app";
   return [
     {
       id: "vscode",
       label: "VS Code",
-      icon_data_url: await appIconDataURL(vscodeApp),
-      available: Boolean(vscodeApp || commandExists("code")),
-      disabled_reason: vscodeApp || commandExists("code") ? "" : "VS Code is not installed or code CLI is unavailable",
+      icon_data_url: await appIconDataURL(vscodeApp || vscodeCommand),
+      available: Boolean(vscodeApp || vscodeCommand),
+      disabled_reason: vscodeApp || vscodeCommand ? "" : "VS Code is not installed or code CLI is unavailable",
     },
     {
       id: "finder",
@@ -217,7 +266,19 @@ async function openWorkspaceInVSCode(workspace) {
       // Fall through to the code CLI when the app bundle name is unavailable.
     }
   }
-  await execFileAsync("code", ["--reuse-window", workspace.localCWD], { env: desktopEnv() });
+  await openWithVSCodeCommand(["--reuse-window", workspace.localCWD]);
+}
+
+async function openWithVSCodeCommand(args) {
+  const command = findVSCodeCommandPath();
+  if (!command) throw new Error("VS Code is not installed or code CLI is unavailable");
+  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(command)) {
+    const comspec = process.env.ComSpec || "cmd.exe";
+    const commandLine = [command, ...args].map(windowsShellQuote).join(" ");
+    await execFileAsync(comspec, ["/d", "/s", "/c", commandLine], { env: desktopEnv() });
+    return;
+  }
+  await execFileAsync(command, args, { env: desktopEnv() });
 }
 
 async function openWorkspaceInFinder(workspace) {
@@ -273,6 +334,10 @@ function appleScriptString(value) {
   return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
+function windowsShellQuote(value) {
+  return `"${String(value).replace(/"/g, '\\"')}"`;
+}
+
 function daemonBinaryName() {
   return process.platform === "win32" ? "daemon.exe" : "daemon";
 }
@@ -314,6 +379,38 @@ function startDaemon() {
   });
 }
 
+function createTray() {
+  if (process.platform === "darwin" || tray) return Boolean(tray);
+  const icon = appIconImage(process.platform === "win32" ? 16 : 22);
+  if (!icon) return false;
+  try {
+    tray = new Tray(icon);
+    tray.setToolTip("AstralOps");
+    tray.on("click", () => focusMainWindow());
+    updateTrayMenu();
+    return true;
+  } catch (trayError) {
+    console.error(`Failed to create tray: ${trayError instanceof Error ? trayError.message : String(trayError)}`);
+    tray = undefined;
+    return false;
+  }
+}
+
+function updateTrayMenu() {
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "Show AstralOps", click: () => focusMainWindow() },
+    { label: "Hide AstralOps", enabled: Boolean(mainWindow && mainWindow.isVisible()), click: () => mainWindow?.hide() },
+    { type: "separator" },
+    { label: "Quit", click: () => quitApp() },
+  ]));
+}
+
+function quitApp() {
+  app.isQuitting = true;
+  app.quit();
+}
+
 async function waitForDaemon() {
   const started = Date.now();
   while (Date.now() - started < 15000) {
@@ -333,19 +430,9 @@ async function waitForDaemon() {
 }
 
 function createWindow() {
-  const icon = appIconPath();
+  const icon = appIconImage();
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 920,
-    minWidth: 1120,
-    minHeight: 720,
-    title: "AstralOps",
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 20, y: 18 },
-    vibrancy: "under-window",
-    visualEffectState: "active",
-    transparent: true,
-    icon,
+    ...browserWindowOptions(icon),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -355,10 +442,18 @@ function createWindow() {
 
   mainWindow.on("close", (event) => {
     if (!app.isQuitting) {
-      event.preventDefault();
-      mainWindow.hide();
+      if (process.platform === "darwin" || tray) {
+        event.preventDefault();
+        mainWindow.hide();
+        updateTrayMenu();
+      } else {
+        app.isQuitting = true;
+      }
     }
   });
+  mainWindow.on("show", updateTrayMenu);
+  mainWindow.on("hide", updateTrayMenu);
+  updateTrayMenu();
 
   if (app.isPackaged) {
     mainWindow.loadFile(rendererIndexPath());
@@ -367,6 +462,27 @@ function createWindow() {
   } else {
     mainWindow.loadURL("http://127.0.0.1:5173");
   }
+}
+
+function browserWindowOptions(icon) {
+  const base = {
+    width: 1440,
+    height: 920,
+    minWidth: 1120,
+    minHeight: 720,
+    title: "AstralOps",
+    backgroundColor: "#ffffff",
+    ...(icon ? { icon } : {}),
+  };
+  if (process.platform !== "darwin") return base;
+  return {
+    ...base,
+    titleBarStyle: "hiddenInset",
+    trafficLightPosition: { x: 20, y: 18 },
+    vibrancy: "under-window",
+    visualEffectState: "active",
+    transparent: true,
+  };
 }
 
 function focusMainWindow() {
@@ -438,7 +554,7 @@ ipcMain.handle("astral:show-notification", async (_event, payload) => {
   const notification = new Notification({
     title,
     body,
-    icon: appIconPath(),
+    ...(appIconPath() ? { icon: appIconPath() } : {}),
   });
   notification.on("click", () => {
     focusMainWindow();
@@ -452,7 +568,10 @@ ipcMain.handle("astral:show-notification", async (_event, payload) => {
 
 app.whenReady().then(async () => {
   if (process.platform === "darwin") {
-    app.dock.setIcon(appIconPath());
+    const icon = appIconImage();
+    if (icon) app.dock.setIcon(icon);
+  } else {
+    createTray();
   }
   startDaemon();
   await waitForDaemon();
@@ -471,5 +590,11 @@ app.on("before-quit", () => {
   app.isQuitting = true;
   if (daemonProcess) {
     daemonProcess.kill();
+  }
+});
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin" && !tray) {
+    quitApp();
   }
 });
