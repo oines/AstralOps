@@ -4043,6 +4043,7 @@ sleep 30
 	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "first", TurnOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	run := claudeRunForTest(t, app, session.ID)
 	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "second", TurnOptions{}); !errors.Is(err, ErrSessionRunning) {
 		t.Fatalf("StartTurn while running error = %v, want ErrSessionRunning", err)
 	}
@@ -4050,6 +4051,7 @@ sleep 30
 		t.Fatal(err)
 	}
 	waitForKind(t, app.store, session.ID, "turn.cancelled")
+	waitForClaudeRunDone(t, run)
 }
 
 func TestClaudeLocalRuntimeSteersViaStreamInput(t *testing.T) {
@@ -4601,10 +4603,12 @@ func TestCodexLocalRuntimeRejectsConcurrentInputAndInterrupts(t *testing.T) {
 		t.Fatalf("StartTurn while running error = %v, want ErrSessionRunning", err)
 	}
 	waitForKind(t, app.store, session.ID, "turn.started")
+	client := codexClientForTest(t, app, session.ID)
 	if err := app.runtimes[AgentCodex].Interrupt(session.ID); err != nil {
 		t.Fatal(err)
 	}
 	waitForKind(t, app.store, session.ID, "turn.cancelled")
+	waitForCodexClientClosed(t, client)
 }
 
 func TestCodexLocalRuntimeSteersActiveTurn(t *testing.T) {
@@ -4624,6 +4628,7 @@ func TestCodexLocalRuntimeSteersActiveTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForKind(t, app.store, session.ID, "control.steer")
+	waitForKind(t, app.store, session.ID, "turn.completed")
 
 	methods, err := os.ReadFile(methodsPath)
 	if err != nil {
@@ -5428,6 +5433,7 @@ func fakeCodexScript(t *testing.T) string {
 const readline = require("readline");
 const rl = readline.createInterface({ input: process.stdin });
 function write(payload) { process.stdout.write(JSON.stringify(payload) + "\n"); }
+let turnTimer = null;
 if (process.env.ASTRALOPS_TEST_CODEX_ARGS) {
   require("fs").writeFileSync(process.env.ASTRALOPS_TEST_CODEX_ARGS, JSON.stringify(process.argv.slice(2)));
 }
@@ -5466,7 +5472,7 @@ rl.on("line", (line) => {
     write({ method: "turn/started", params: { threadId: "thread_fake", turn } });
     write({ method: "item/agentMessage/delta", params: { threadId: "thread_fake", turnId: "turn_fake", itemId: "item_1", delta: "hello " } });
     write({ method: "item/agentMessage/delta", params: { threadId: "thread_fake", turnId: "turn_fake", itemId: "item_1", delta: "codex" } });
-    setTimeout(() => {
+    turnTimer = setTimeout(() => {
       write({ method: "turn/completed", params: { threadId: "thread_fake", turn: { id: "turn_fake", status: { type: "completed" }, durationMs: 1 } } });
       process.exit(0);
     }, 150);
@@ -5475,7 +5481,9 @@ rl.on("line", (line) => {
     write({ id: msg.id, result: {} });
   }
   if (msg.method === "turn/interrupt") {
+    if (turnTimer) clearTimeout(turnTimer);
     write({ id: msg.id, result: {} });
+    setImmediate(() => process.exit(0));
   }
 });
 `
@@ -5536,6 +5544,54 @@ func waitForKindCount(t *testing.T, st *store, sessionID, kind string, want int)
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %d events of kind %s", want, kind)
+}
+
+func claudeRunForTest(t *testing.T, app *app, sessionID string) *claudeRun {
+	t.Helper()
+	runtime, ok := app.runtimes[AgentClaude].(*claudeLocalRuntime)
+	if !ok {
+		t.Fatal("Claude runtime has unexpected type")
+	}
+	runtime.mu.Lock()
+	run := runtime.running[sessionID]
+	runtime.mu.Unlock()
+	if run == nil {
+		t.Fatal("Claude run was not registered")
+	}
+	return run
+}
+
+func waitForClaudeRunDone(t *testing.T, run *claudeRun) {
+	t.Helper()
+	select {
+	case <-run.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for Claude run cleanup")
+	}
+}
+
+func codexClientForTest(t *testing.T, app *app, sessionID string) *codexClient {
+	t.Helper()
+	runtime, ok := app.runtimes[AgentCodex].(*codexLocalRuntime)
+	if !ok {
+		t.Fatal("Codex runtime has unexpected type")
+	}
+	runtime.mu.Lock()
+	client := runtime.clients[sessionID]
+	runtime.mu.Unlock()
+	if client == nil {
+		t.Fatal("Codex client was not registered")
+	}
+	return client
+}
+
+func waitForCodexClientClosed(t *testing.T, client *codexClient) {
+	t.Helper()
+	select {
+	case <-client.closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for Codex client cleanup")
+	}
 }
 
 func waitForClaudeTerminalKind(t *testing.T, st *store, sessionID string, timeout time.Duration) {

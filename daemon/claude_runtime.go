@@ -24,6 +24,7 @@ type claudeLocalRuntime struct {
 type claudeRun struct {
 	cancel            context.CancelFunc
 	stdin             io.WriteCloser
+	done              chan struct{}
 	mu                sync.Mutex
 	pausedForApproval bool
 }
@@ -87,7 +88,7 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 		cancel()
 		return ErrSessionRunning
 	}
-	run := &claudeRun{cancel: cancel}
+	run := &claudeRun{cancel: cancel, done: make(chan struct{})}
 	r.running[session.ID] = run
 	r.mu.Unlock()
 
@@ -193,6 +194,7 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 		r.mu.Lock()
 		delete(r.running, session.ID)
 		r.mu.Unlock()
+		close(run.done)
 		go r.app.startNextQueuedTurn(session.ID)
 	}()
 
