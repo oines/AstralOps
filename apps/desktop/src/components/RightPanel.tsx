@@ -25,15 +25,20 @@ type RightPanelProps = {
   open: boolean;
   width: number;
   workspace: Workspace | null;
+  onLiveResize?: (width: number) => void;
   onResize: (width: number) => void;
+  onResizeActiveChange?: (active: boolean) => void;
 };
 
-export function RightPanel({ api, health, open, width, workspace, onResize }: RightPanelProps): React.JSX.Element | null {
+export function RightPanel({ api, health, open, width, workspace, onLiveResize, onResize, onResizeActiveChange }: RightPanelProps): React.JSX.Element | null {
   const [tabs, setTabs] = useState<PanelTab[]>([]);
   const contentOrderRef = useRef<string[]>([]);
   const [activeTabId, setActiveTabId] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [liveWidth, setLiveWidth] = useState(width);
+  const liveWidthRef = useRef(width);
+  const resizeFrameRef = useRef<number | null>(null);
   const terminalAvailable = health?.features?.terminal?.available !== false;
   const tabDragSensors = useSensors(
     useSensor(PointerSensor, {
@@ -61,19 +66,51 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
 
   useEffect(() => {
     if (!dragging) return;
+    onResizeActiveChange?.(true);
+
+    function updateLiveWidth(nextWidth: number): void {
+      liveWidthRef.current = nextWidth;
+      onLiveResize?.(nextWidth);
+      if (resizeFrameRef.current !== null) return;
+      resizeFrameRef.current = window.requestAnimationFrame(() => {
+        resizeFrameRef.current = null;
+        setLiveWidth(liveWidthRef.current);
+      });
+    }
+
     function move(event: MouseEvent): void {
-      onResize(Math.min(720, Math.max(320, window.innerWidth - event.clientX)));
+      updateLiveWidth(clampRightPanelWidth(window.innerWidth - event.clientX));
     }
     function stop(): void {
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
+      setLiveWidth(liveWidthRef.current);
+      onLiveResize?.(liveWidthRef.current);
+      onResize(liveWidthRef.current);
+      onResizeActiveChange?.(false);
       setDragging(false);
     }
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", stop);
     return () => {
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", stop);
+      onResizeActiveChange?.(false);
     };
-  }, [dragging, onResize]);
+  }, [dragging, onLiveResize, onResize, onResizeActiveChange]);
+
+  useEffect(() => {
+    if (dragging) return;
+    liveWidthRef.current = width;
+    setLiveWidth(width);
+    onLiveResize?.(width);
+  }, [dragging, onLiveResize, width]);
 
   const updateTabTitle = useCallback((id: string, title: string): void => {
     setTabs((current) => current.map((tab) => (tab.id === id && tab.title !== title ? { ...tab, title } : tab)));
@@ -81,6 +118,7 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   const contentTabs = panelContentTabs(tabs, contentOrderRef);
+  const panelWidth = open ? liveWidth : 0;
 
   function addTab(kind: PanelTabKind): void {
     const tab = createTab(kind);
@@ -117,21 +155,25 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
       className={`relative flex h-screen shrink-0 flex-col overflow-hidden bg-white ${
         open ? "border-l border-black/5" : "border-l border-transparent"
       }`}
-      animate={{ width: open ? width : 0 }}
+      animate={{ width: panelWidth }}
       initial={false}
-      transition={{ type: "spring", stiffness: 360, damping: 36, mass: 0.85 }}
+      transition={dragging ? { duration: 0 } : { type: "spring", stiffness: 360, damping: 36, mass: 0.85 }}
       aria-hidden={!open}
     >
       <div
         className={`absolute inset-y-0 left-[-3px] z-20 w-1.5 cursor-col-resize transition-colors duration-150 ease-out hover:bg-[#d8d5cd] ${open ? "" : "hidden"}`}
         onMouseDown={(event) => {
           event.preventDefault();
+          liveWidthRef.current = width;
+          setLiveWidth(width);
+          onLiveResize?.(width);
+          onResizeActiveChange?.(true);
           setDragging(true);
         }}
       />
       <motion.div
         className={`flex h-full flex-col ${open ? "" : "pointer-events-none"}`}
-        style={{ width }}
+        style={{ width: liveWidth }}
         animate={{ opacity: open ? 1 : 0, x: open ? 0 : 16 }}
         initial={false}
         transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
@@ -473,6 +515,10 @@ function createTab(kind: PanelTabKind): PanelTab {
     kind,
     title: kind === "terminal" ? undefined : "文件",
   };
+}
+
+function clampRightPanelWidth(width: number): number {
+  return Math.min(720, Math.max(320, width));
 }
 
 function panelContentTabs(tabs: PanelTab[], orderRef: React.MutableRefObject<string[]>): PanelTab[] {

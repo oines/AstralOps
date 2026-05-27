@@ -130,6 +130,8 @@ export function Transcript({
   );
   const scrollRef = useRef<HTMLElement | null>(null);
   const stickToBottomRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
+  const userDetachedFromBottomRef = useRef(false);
   const [showBackToBottom, setShowBackToBottom] = useState(false);
   const lastSeq = events.at(-1)?.seq ?? 0;
   const rowVirtualizer = useVirtualizer({
@@ -143,7 +145,27 @@ export function Transcript({
   function updateScrollState(): void {
     const node = scrollRef.current;
     if (!node) return;
+    const previousScrollTop = lastScrollTopRef.current;
+    lastScrollTopRef.current = node.scrollTop;
+    if (node.scrollTop < previousScrollTop - 1) {
+      userDetachedFromBottomRef.current = true;
+      stickToBottomRef.current = false;
+      setShowBackToBottom(true);
+      return;
+    }
     const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
+    const atBottom = distance < 24;
+    if (userDetachedFromBottomRef.current) {
+      if (atBottom) {
+        userDetachedFromBottomRef.current = false;
+        stickToBottomRef.current = true;
+        setShowBackToBottom(false);
+      } else {
+        stickToBottomRef.current = false;
+        setShowBackToBottom(true);
+      }
+      return;
+    }
     const nearBottom = distance < 120;
     stickToBottomRef.current = nearBottom;
     setShowBackToBottom(!nearBottom);
@@ -152,19 +174,56 @@ export function Transcript({
   function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
     const node = scrollRef.current;
     if (!node) return;
+    lastScrollTopRef.current = node.scrollTop;
     node.scrollTo({ top: node.scrollHeight, behavior });
+    userDetachedFromBottomRef.current = false;
     stickToBottomRef.current = true;
     setShowBackToBottom(false);
+    if (behavior !== "smooth") {
+      requestAnimationFrame(() => {
+        if (userDetachedFromBottomRef.current) return;
+        lastScrollTopRef.current = node.scrollTop;
+      });
+    }
+  }
+
+  function handleWheel(event: React.WheelEvent<HTMLElement>): void {
+    if (event.deltaY >= 0) return;
+    if (scrollRef.current) lastScrollTopRef.current = scrollRef.current.scrollTop;
+    userDetachedFromBottomRef.current = true;
+    stickToBottomRef.current = false;
+    setShowBackToBottom(true);
   }
 
   useEffect(() => {
+    const virtualizer = rowVirtualizer;
+    virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item) => {
+      const node = scrollRef.current;
+      if (!node) return false;
+      if (userDetachedFromBottomRef.current && item.end >= node.scrollTop) {
+        return false;
+      }
+      return item.start < node.scrollTop && virtualizer.scrollDirection !== "backward";
+    };
+    return () => {
+      virtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined;
+    };
+  }, [rowVirtualizer]);
+
+  useEffect(() => {
+    userDetachedFromBottomRef.current = false;
     stickToBottomRef.current = true;
-    requestAnimationFrame(() => scrollToBottom("auto"));
+    const frame = requestAnimationFrame(() => scrollToBottom("auto"));
+    return () => cancelAnimationFrame(frame);
   }, [activeSession?.id]);
 
   useEffect(() => {
-    if (!stickToBottomRef.current) return;
-    requestAnimationFrame(() => scrollToBottom("auto"));
+    if (!stickToBottomRef.current || userDetachedFromBottomRef.current) return;
+    const frame = requestAnimationFrame(() => {
+      if (!stickToBottomRef.current || userDetachedFromBottomRef.current) return;
+      scrollToBottom("auto");
+    });
+    return () => cancelAnimationFrame(frame);
   }, [composerHeight, lastSeq, groups.length]);
 
   useEffect(() => {
@@ -173,6 +232,7 @@ export function Transcript({
     if (index < 0) return;
     requestAnimationFrame(() => {
       rowVirtualizer.scrollToIndex(index, { align: "center" });
+      userDetachedFromBottomRef.current = true;
       stickToBottomRef.current = false;
       setShowBackToBottom(true);
       onScrollTargetHandled?.();
@@ -193,6 +253,7 @@ export function Transcript({
         ref={scrollRef}
         style={{ paddingBottom: composerHeight + 56 }}
         onScroll={updateScrollState}
+        onWheel={handleWheel}
       >
         {groups.length === 0 ? (
           <EmptyState activeSession={activeSession} activeWorkspace={activeWorkspace} />

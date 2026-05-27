@@ -81,6 +81,7 @@ export function App(): React.JSX.Element {
   const sseFrameRef = useRef<number | null>(null);
   const notifiedIntentIDsRef = useRef<Set<string>>(new Set());
   const activeSessionIdRef = useRef("");
+  const appChromeRef = useRef<HTMLDivElement | null>(null);
 
   const mergeEvents = useCallback((incoming: AstralEvent[]) => {
     setEventIndex((current) => mergeEventIndex(current, incoming));
@@ -115,6 +116,17 @@ export function App(): React.JSX.Element {
     },
     [mergeEvents],
   );
+
+  const setRightPanelLiveWidth = useCallback((width: number) => {
+    appChromeRef.current?.style.setProperty("--astral-right-panel-width", `${Math.round(width)}px`);
+  }, []);
+
+  const setRightPanelResizeActive = useCallback((active: boolean) => {
+    const node = appChromeRef.current;
+    if (!node) return;
+    if (active) node.dataset.rightPanelResizing = "true";
+    else delete node.dataset.rightPanelResizing;
+  }, []);
 
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null,
@@ -173,6 +185,10 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    setRightPanelLiveWidth(rightPanelWidth);
+  }, [rightPanelWidth, setRightPanelLiveWidth]);
 
   const storeSessionView = useCallback((view: SessionView) => {
     setSessionViews((current) => ({ ...current, [view.session.id]: view }));
@@ -593,7 +609,7 @@ export function App(): React.JSX.Element {
     [sessionViews, sessions],
   );
   return (
-    <div className="relative flex h-screen min-h-0 select-none overflow-hidden bg-transparent text-[#1d1d1f]">
+    <div ref={appChromeRef} className="relative flex h-screen min-h-0 select-none overflow-hidden bg-transparent text-[#1d1d1f]">
 
 
       <Sidebar
@@ -684,7 +700,9 @@ export function App(): React.JSX.Element {
         open={rightPanelOpen}
         width={rightPanelWidth}
         workspace={activeWorkspace}
+        onLiveResize={setRightPanelLiveWidth}
         onResize={setRightPanelWidth}
+        onResizeActiveChange={setRightPanelResizeActive}
       />
 
       <WorkspaceModal
@@ -697,7 +715,7 @@ export function App(): React.JSX.Element {
       />
 
       <WorkspaceOpenerMenu
-        rightOffset={rightPanelOpen ? rightPanelWidth + 10 : 64}
+        rightPanelOpen={rightPanelOpen}
         workspace={activeWorkspace}
         onError={setError}
       />
