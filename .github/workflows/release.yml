@@ -129,11 +129,11 @@ jobs:
           name: desktop-${{ matrix.name }}
           if-no-files-found: error
           path: |
-            release/desktop/out/**/*.dmg
-            release/desktop/out/**/*.zip
-            release/desktop/out/**/*.AppImage
-            release/desktop/out/**/*.deb
-            release/desktop/out/**/*.exe
+            release/desktop/out/*/AstralOps-*.dmg
+            release/desktop/out/*/AstralOps-*.zip
+            release/desktop/out/*/AstralOps-*.AppImage
+            release/desktop/out/*/AstralOps-*.deb
+            release/desktop/out/*/AstralOps-*.exe
 
   publish:
     name: Publish Release
@@ -161,7 +161,7 @@ jobs:
           find release-artifacts -type f | sort
           cd release-artifacts
           find . -type f \
-            \( -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' \) \
+            \( -name 'AstralOps-*.dmg' -o -name 'AstralOps-*.zip' -o -name 'AstralOps-*.AppImage' -o -name 'AstralOps-*.deb' -o -name 'AstralOps-*.exe' \) \
             -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
           test -s SHA256SUMS.txt
 
@@ -195,7 +195,7 @@ jobs:
             exit 0
           fi
           mapfile -t assets < <(find release-artifacts -type f \
-            \( -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name 'SHA256SUMS.txt' \) \
+            \( -name 'AstralOps-*.dmg' -o -name 'AstralOps-*.zip' -o -name 'AstralOps-*.AppImage' -o -name 'AstralOps-*.deb' -o -name 'AstralOps-*.exe' -o -name 'SHA256SUMS.txt' \) \
             | sort)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "::error::No release assets found"
