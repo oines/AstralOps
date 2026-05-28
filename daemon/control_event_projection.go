@@ -64,3 +64,40 @@ func sanitizeControlEventMediaReference(value map[string]any) {
 		delete(value, key)
 	}
 }
+
+func sanitizeControlWorkspaces(workspaces []Workspace) []Workspace {
+	out := make([]Workspace, len(workspaces))
+	for index, workspace := range workspaces {
+		out[index] = sanitizeControlWorkspace(workspace)
+	}
+	return out
+}
+
+func sanitizeControlWorkspace(workspace Workspace) Workspace {
+	workspace.LocalProjectionRoot = ""
+	workspace.LocalCWD = ""
+	workspace.SSH = nil
+	workspace.NativeSessionID = ""
+	workspace.NativeThreadID = ""
+	return workspace
+}
+
+func sanitizeControlSessions(sessions []Session) []Session {
+	out := make([]Session, len(sessions))
+	for index, session := range sessions {
+		out[index] = sanitizeControlSession(session)
+	}
+	return out
+}
+
+func sanitizeControlSession(session Session) Session {
+	session.NativeSessionID = ""
+	session.NativeThreadID = ""
+	session.ForkedFromNativeAnchor = ""
+	return session
+}
+
+func sanitizeControlSessionView(view sessionView) sessionView {
+	view.Session = sanitizeControlSession(view.Session)
+	return view
+}

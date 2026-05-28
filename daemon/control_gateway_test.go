@@ -91,6 +91,11 @@ func TestControlGatewayRejectsCapabilityMismatch(t *testing.T) {
 
 func TestControlGatewayReadsSessionView(t *testing.T) {
 	app, _, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	session.NativeSessionID = "native-session-secret"
+	session.NativeThreadID = "native-thread-secret"
+	app.store.mu.Lock()
+	app.store.sessions[session.ID] = session
+	app.store.mu.Unlock()
 	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
 
 	response, err := app.executeControlRequest(ControlRequest{
@@ -112,6 +117,72 @@ func TestControlGatewayReadsSessionView(t *testing.T) {
 	}
 	if view.Session.ID != session.ID {
 		t.Fatalf("session id = %q, want %q", view.Session.ID, session.ID)
+	}
+	if view.Session.NativeSessionID != "" || view.Session.NativeThreadID != "" {
+		t.Fatalf("session view leaked native ids: %#v", view.Session)
+	}
+	stored, ok := app.store.getSession(session.ID)
+	if !ok || stored.NativeSessionID != "native-session-secret" || stored.NativeThreadID != "native-thread-secret" {
+		t.Fatalf("stored session was mutated: %#v", stored)
+	}
+}
+
+func TestControlGatewayCoreReadHidesHostWorkspaceAndSessionInternals(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	workspace.LocalProjectionRoot = "/host/private/projection"
+	workspace.NativeSessionID = "workspace-native-session"
+	workspace.NativeThreadID = "workspace-native-thread"
+	app.store.mu.Lock()
+	app.store.workspaces[workspace.ID] = workspace
+	session.NativeSessionID = "session-native-id"
+	session.NativeThreadID = "session-native-thread"
+	session.ForkedFromNativeAnchor = "native-anchor"
+	app.store.sessions[session.ID] = session
+	app.store.mu.Unlock()
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+
+	workspacesResponse, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionWorkspaces,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaces, ok := workspacesResponse.Result.([]Workspace)
+	if !ok || len(workspaces) != 1 {
+		t.Fatalf("workspaces result = %#v, want one workspace", workspacesResponse.Result)
+	}
+	remoteWorkspace := workspaces[0]
+	if remoteWorkspace.ID != workspace.ID || remoteWorkspace.LocalCWD != "" || remoteWorkspace.LocalProjectionRoot != "" || remoteWorkspace.NativeSessionID != "" || remoteWorkspace.NativeThreadID != "" || remoteWorkspace.SSH != nil {
+		t.Fatalf("remote workspace projection = %#v", remoteWorkspace)
+	}
+
+	sessionsResponse, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionSessions,
+		Params:             map[string]any{"workspace_id": workspace.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, ok := sessionsResponse.Result.([]Session)
+	if !ok || len(sessions) != 1 {
+		t.Fatalf("sessions result = %#v, want one session", sessionsResponse.Result)
+	}
+	remoteSession := sessions[0]
+	if remoteSession.ID != session.ID || remoteSession.NativeSessionID != "" || remoteSession.NativeThreadID != "" || remoteSession.ForkedFromNativeAnchor != "" {
+		t.Fatalf("remote session projection = %#v", remoteSession)
+	}
+
+	storedWorkspace, ok := app.store.getWorkspace(workspace.ID)
+	if !ok || storedWorkspace.LocalCWD == "" || storedWorkspace.LocalProjectionRoot != "/host/private/projection" || storedWorkspace.NativeSessionID != "workspace-native-session" || storedWorkspace.NativeThreadID != "workspace-native-thread" {
+		t.Fatalf("stored workspace was mutated: %#v", storedWorkspace)
+	}
+	storedSession, ok := app.store.getSession(session.ID)
+	if !ok || storedSession.NativeSessionID != "session-native-id" || storedSession.NativeThreadID != "session-native-thread" || storedSession.ForkedFromNativeAnchor != "native-anchor" {
+		t.Fatalf("stored session was mutated: %#v", storedSession)
 	}
 }
 

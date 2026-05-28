@@ -824,6 +824,8 @@ relay 解密或缓存明文媒体
 
 远控 `core.read.events` 和 `core.subscribe.events` 返回的是 Host Gateway 投影后的事件，不是 JSONL 原始事件直出。投影必须去掉 `AstralEvent.raw`，并从 `message.user.attachments`、`message.media` 等 transcript media surface 中移除 Host 私有 `path` / `saved_path` / `file_path` 字段。Controller 只能拿 `event_seq + media_id` 再通过 `media.read`、`media.download` 或 `media.stream` 读取内容。
 
+同理，远控 `core.read.workspaces`、`core.read.sessions`、`core.read.session_view` 返回 Host Gateway 投影后的 workspace/session 元数据。投影保留 `id`、`name`、`target`、`agent`、状态和时间等远控 UI 所需字段，但不暴露 `local_cwd`、`local_projection_root`、SSH endpoint/remote cwd、native session/thread id 等 Host/runtime 内部细节。
+
 ## PTY 架构
 
 远程终端是 Host-owned PTY，不是普通 AstralEvent stream。

@@ -161,7 +161,7 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, gra
 		if !ok {
 			return nil, newActionError(http.StatusNotFound, "session_not_found", "session not found")
 		}
-		return view, nil
+		return sanitizeControlSessionView(view), nil
 	case ControlActionSessions:
 		var params struct {
 			WorkspaceID string `json:"workspace_id"`
@@ -169,9 +169,9 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, gra
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.store.listSessions(params.WorkspaceID), nil
+		return sanitizeControlSessions(a.store.listSessions(params.WorkspaceID)), nil
 	case ControlActionWorkspaces:
-		return a.store.listWorkspaces(), nil
+		return sanitizeControlWorkspaces(a.store.listWorkspaces()), nil
 	case ControlActionEvents:
 		var params struct {
 			WorkspaceID string `json:"workspace_id"`
