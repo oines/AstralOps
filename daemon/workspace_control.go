@@ -19,6 +19,7 @@ import (
 const (
 	workspaceFileDefaultMaxBytes     = 10 * 1024 * 1024
 	workspaceFileHardMaxBytes        = 25 * 1024 * 1024
+	workspaceFileWriteMaxBytes       = workspaceFileHardMaxBytes
 	workspaceExecDefaultTimeout      = 60 * time.Second
 	workspaceExecMaxTimeout          = 120 * time.Second
 	workspaceExecOutputMaxBytes      = 1024 * 1024
@@ -1078,11 +1079,21 @@ func workspaceReadMaxBytes(requested int64) int64 {
 
 func workspaceWriteBody(params workspaceFilesWriteParams) ([]byte, error) {
 	if params.ContentBase64 != "" {
-		body, err := base64.StdEncoding.DecodeString(strings.TrimSpace(params.ContentBase64))
+		encoded := strings.TrimSpace(params.ContentBase64)
+		if len(encoded) > base64.StdEncoding.EncodedLen(workspaceFileWriteMaxBytes) {
+			return nil, newActionError(http.StatusRequestEntityTooLarge, "workspace_file_too_large", "workspace file is too large for workspace.files.write")
+		}
+		body, err := base64.StdEncoding.DecodeString(encoded)
 		if err != nil {
 			return nil, newActionError(http.StatusBadRequest, "workspace_file_content_invalid", "content_base64 is invalid")
 		}
+		if len(body) > workspaceFileWriteMaxBytes {
+			return nil, newActionError(http.StatusRequestEntityTooLarge, "workspace_file_too_large", "workspace file is too large for workspace.files.write")
+		}
 		return body, nil
+	}
+	if len(params.Content) > workspaceFileWriteMaxBytes {
+		return nil, newActionError(http.StatusRequestEntityTooLarge, "workspace_file_too_large", "workspace file is too large for workspace.files.write")
 	}
 	return []byte(params.Content), nil
 }

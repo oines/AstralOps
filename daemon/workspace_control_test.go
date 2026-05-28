@@ -120,6 +120,26 @@ func TestControlGatewayWritesWorkspaceFile(t *testing.T) {
 	}
 }
 
+func TestControlGatewayRejectsLargeWorkspaceFileWrite(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesWrite,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "too-large.txt",
+			"content":      strings.Repeat("x", workspaceFileWriteMaxBytes+1),
+		},
+	})
+	assertActionError(t, err, http.StatusRequestEntityTooLarge, "workspace_file_too_large")
+	if _, statErr := os.Stat(filepath.Join(workspace.LocalCWD, "too-large.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("large workspace write created file, stat err = %v", statErr)
+	}
+}
+
 func TestControlGatewayAppliesWorkspacePatch(t *testing.T) {
 	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "note.txt"), []byte("before\nold line\nafter\n"), 0o600); err != nil {
