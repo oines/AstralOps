@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1813,6 +1814,134 @@ func TestControlWebSocketRemoteWorkspaceFileStreamUsesProxyReadRange(t *testing.
 			t.Fatalf("stream frame type = %q", frame.Type)
 		}
 	}
+}
+
+func TestControlWebSocketRemoteWorkspaceFileStreamReportsTruncatedReadRange(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentCodex,
+		SSH:    &SSHConfig{Endpoint: "root@example.test", RemoteCWD: "/remote/project"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, cleanup := newTruncatedReadRangeRemoteProxy(t, workspace)
+	defer cleanup()
+	controllerPublicKey, controllerPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:  "dev_controller",
+		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
+		Capabilities:        []string{CapabilityWorkspaceFilesRead},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{
+		store:    st,
+		hub:      newEventHub(),
+		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
+	}
+	app.ssh = &sshManager{
+		app: app,
+		by: map[string]*sshTarget{
+			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
+		},
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "remote_workspace_file_stream_truncated",
+			Capability: CapabilityWorkspaceFilesRead,
+			Action:     ControlActionWorkspaceFilesStream,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"path":         "shrinking.txt",
+				"chunk_size":   4,
+			},
+		},
+	})
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("stream response = %#v, want ok", plain)
+	}
+	streamID := stringValue(mapValue(plain.Response.Result)["stream_id"])
+	frame := readEncryptedControlFrame(t, client, cipher)
+	if frame.Type != workspaceFileStreamFrameError || frame.WorkspaceFile == nil || frame.WorkspaceFile.StreamID != streamID {
+		t.Fatalf("stream frame = %#v, want truncated workspace file error", frame)
+	}
+	if frame.WorkspaceFile.ErrorCode != "workspace_file_stream_truncated" || frame.WorkspaceFile.Final {
+		t.Fatalf("stream error frame = %#v, want truncated non-final error", frame.WorkspaceFile)
+	}
+	if frame.WorkspaceFile.Offset != 0 || frame.WorkspaceFile.Size != 10 {
+		t.Fatalf("stream error offset/size = %#v, want offset 0 size 10", frame.WorkspaceFile)
+	}
+}
+
+func newTruncatedReadRangeRemoteProxy(t *testing.T, ws Workspace) (*proxyClient, func()) {
+	t.Helper()
+	script := `
+import json, sys
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    params = req.get("params") or {}
+    rid = req.get("id")
+    error = None
+    result = {}
+    try:
+        if method == "hello":
+            result = {"version":"fake","capabilities":{"methods":["hello","read","read_range","write","remove","move","list","stat","exec_start","exec_kill","pty_start","pty_kill"]}}
+        elif method == "stat":
+            result = {"path": params.get("path"), "name": "shrinking.txt", "size": 10, "is_dir": False}
+        elif method == "read_range":
+            result = {"path": params.get("path"), "offset": int(params.get("offset") or 0), "bytes": 0, "dataBase64": "", "eof": True}
+        else:
+            result = {}
+    except Exception as exc:
+        error = str(exc)
+    res = {"id": rid, "result": result}
+    if error:
+        res["result"] = None
+        res["error"] = error
+    print(json.dumps(res), flush=True)
+`
+	cmd := exec.Command("python3", "-u", "-c", script)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newProxyClient(ws, cmd, stdin, stdout, stderr)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	proxy.start()
+	cleanup := func() {
+		proxy.close()
+		<-proxy.done
+	}
+	return proxy, cleanup
 }
 
 func TestControlWebSocketRemoteWorkspaceFileWriteUsesProxyOverEncryptedChannel(t *testing.T) {

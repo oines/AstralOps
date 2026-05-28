@@ -805,6 +805,10 @@ func (a *app) streamLocalControlWorkspaceFile(ctx context.Context, ws Workspace,
 			continue
 		}
 		if readErr == io.EOF {
+			if offset < result.Size {
+				conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamOffsetErrorFrame(result, requestID, "workspace_file_stream_truncated", "workspace file changed during stream", offset)})
+				return
+			}
 			conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameComplete, WorkspaceFile: workspaceFileCompleteFrame(result, requestID, seq+1, offset)})
 			return
 		}
@@ -844,6 +848,10 @@ func (a *app) streamRemoteControlWorkspaceFile(ctx context.Context, ws Workspace
 			return
 		}
 		if len(body) == 0 {
+			if offset < result.Size {
+				conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamOffsetErrorFrame(result, requestID, "workspace_file_stream_truncated", "workspace file changed during stream", offset)})
+				return
+			}
 			break
 		}
 		if controlStreamCancelled(ctx) {
@@ -1145,8 +1153,12 @@ func workspaceFileCompleteFrame(result workspaceFileStreamResult, requestID stri
 }
 
 func workspaceFileStreamErrorFrame(result workspaceFileStreamResult, requestID, code, message string) *workspaceFileStreamFrame {
+	return workspaceFileStreamOffsetErrorFrame(result, requestID, code, message, result.Offset)
+}
+
+func workspaceFileStreamOffsetErrorFrame(result workspaceFileStreamResult, requestID, code, message string, offset int64) *workspaceFileStreamFrame {
 	frame := workspaceFileBaseStreamFrame(result, requestID)
-	frame.Offset = result.Offset
+	frame.Offset = offset
 	frame.ErrorCode = code
 	frame.ErrorMessage = message
 	return frame
