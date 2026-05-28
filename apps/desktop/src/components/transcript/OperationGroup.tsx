@@ -1,12 +1,13 @@
 import React, { useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronRight, Copy, FileCode2, FileText, TerminalSquare } from "lucide-react";
+import { ChevronRight, Copy, FileCode2, FileText, Search, TerminalSquare } from "lucide-react";
 import type { AstralEvent } from "../../types";
 import {
   buildCommandItems,
   type CommandItem,
   type FileDiff,
   type FileReadItem,
+  type SearchItem,
   type TranscriptOperationGroup,
   type TranscriptOperationStep,
   type TurnGroup,
@@ -21,7 +22,17 @@ type OperationGroupProps = {
 export function OperationGroup({ group, renderDetail, turnStatus }: OperationGroupProps): React.JSX.Element | null {
   const [open, setOpen] = useState(false);
 
-  if (group.steps.length === 0 || group.summary === "") return null;
+  if (group.summary === "") return null;
+  const expandable = group.steps.length > 0;
+
+  if (!expandable) {
+    return (
+      <div className="flex min-w-0 max-w-full items-center gap-2 text-left text-[13px] font-medium leading-6 text-[#a0a3a7]">
+        <TerminalSquare className="shrink-0" size={15} strokeWidth={1.8} />
+        <span className="min-w-0 truncate">{group.summary}</span>
+      </div>
+    );
+  }
 
   return (
     <div className="min-w-0">
@@ -61,7 +72,28 @@ function renderOperationStep(
   if (step.type === "command") return <CommandList events={step.events} key={step.id} />;
   if (step.type === "fileChanges") return <FileChangesGroup files={step.files} key={step.id} />;
   if (step.type === "fileReads") return <FileReadsRow files={step.files} key={step.id} />;
+  if (step.type === "searches") return <SearchesRow key={step.id} searches={step.searches} />;
   return <React.Fragment key={step.id}>{renderDetail(step.event)}</React.Fragment>;
+}
+
+function SearchesRow({
+  searches,
+}: {
+  searches: SearchItem[];
+}): React.JSX.Element | null {
+  if (searches.length === 0) return null;
+
+  return (
+    <div className="grid min-w-0 gap-1">
+      {searches.map((search) => (
+        <div className="flex min-w-0 max-w-full items-center gap-2 text-[13px] font-medium leading-6 text-[#a0a3a7]" key={search.id}>
+          <Search className="shrink-0" size={15} strokeWidth={1.8} />
+          <span className="shrink-0">{search.status === "running" ? "正在搜索" : "已搜索"}</span>
+          {search.target ? <span className="min-w-0 truncate font-mono text-[13px]">{search.target}</span> : <span className="min-w-0 truncate">{search.tool}</span>}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function FileReadsRow({

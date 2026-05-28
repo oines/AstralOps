@@ -429,7 +429,7 @@ const TurnBlock = React.memo(function TurnBlock({
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(group.status === "running");
   const isDone = group.status !== "running";
-  const detailSummary = summarizeDetails(group.details);
+  const detailSummary = expanded ? "" : summarizeDetails(group.details);
   const endTime = group.end?.ts ?? group.start?.ts ?? "";
   const collapsedAssistantSeqs = !expanded && isDone ? visibleCollapsedAssistantSeqs(group.timeline) : null;
   const operationGroups = expanded ? buildOperationGroups(group.timeline, group.status) : [];

@@ -47,10 +47,18 @@ export type FileReadItem = {
   status: "running" | "completed";
 };
 
+export type SearchItem = {
+  id: string;
+  target: string;
+  tool: string;
+  status: "running" | "completed";
+};
+
 export type TranscriptOperationStep =
   | { type: "command"; id: string; events: AstralEvent[] }
   | { type: "fileChanges"; id: string; files: FileDiff[] }
   | { type: "fileReads"; id: string; files: FileReadItem[] }
+  | { type: "searches"; id: string; searches: SearchItem[] }
   | { type: "detail"; id: string; event: AstralEvent };
 
 export type TranscriptOperationGroup = {
@@ -246,10 +254,11 @@ function buildOperationGroup(events: AstralEvent[], selectedFileDiffSeqs: Set<nu
   const visibleEvents = events.filter((event) => !isSilentOperationEvent(event));
   const summary = operationSummary(visibleEvents, selectedFileDiffSeqs, status);
   if (visibleEvents.length === 0 || summary === "") return null;
+  const steps = operationSteps(visibleEvents, selectedFileDiffSeqs);
   return {
     id: `operations-${visibleEvents[0]?.seq ?? events[0]?.seq ?? "empty"}`,
     events: visibleEvents,
-    steps: operationSteps(visibleEvents, selectedFileDiffSeqs),
+    steps,
     summary,
     status,
   };
@@ -262,12 +271,14 @@ function operationSteps(events: AstralEvent[], selectedFileDiffSeqs: Set<number>
   const fileReadEvents = collectFileReadEvents(events);
   const fileReadSeqs = new Set(fileReadEvents.map((event) => event.seq));
   const emittedFileReadIDs = new Set<string>();
+  const searchEvents = collectSearchEvents(events);
+  const searchSeqs = new Set(searchEvents.map((event) => event.seq));
+  const emittedSearchIDs = new Set<string>();
   const suppressReasoningSeqs = suppressedReasoningEventSeqs(events);
-  const suppressFileToolStartSeqs = suppressedFileToolStartSeqs(events);
+  const suppressToolStartSeqs = suppressedCompletedToolStartSeqs(events);
 
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
-    if (suppressFileToolStartSeqs.has(event.seq)) continue;
     if (fileReadSeqs.has(event.seq)) {
       const readIDs = new Set<string>();
       while (index < events.length && fileReadSeqs.has(events[index].seq)) {
@@ -288,6 +299,26 @@ function operationSteps(events: AstralEvent[], selectedFileDiffSeqs: Set<number>
       }
       continue;
     }
+    if (searchSeqs.has(event.seq)) {
+      const searchIDs = new Set<string>();
+      while (index < events.length && searchSeqs.has(events[index].seq)) {
+        const item = searchItemFromEvent(events[index]);
+        if (item && !emittedSearchIDs.has(item.id)) searchIDs.add(item.id);
+        index += 1;
+      }
+      index -= 1;
+      if (searchIDs.size === 0) continue;
+      for (const id of searchIDs) emittedSearchIDs.add(id);
+      const run = searchEvents.filter((searchEvent) => {
+        const item = searchItemFromEvent(searchEvent);
+        return item ? searchIDs.has(item.id) : false;
+      });
+      const searches = buildSearchItems(run);
+      if (searches.length > 0) {
+        steps.push({ type: "searches", id: `searches-${run[0]?.seq ?? event.seq}`, searches });
+      }
+      continue;
+    }
     if (commandSeqs.has(event.seq)) {
       const run: AstralEvent[] = [];
       while (index < events.length && commandSeqs.has(events[index].seq)) {
@@ -298,6 +329,7 @@ function operationSteps(events: AstralEvent[], selectedFileDiffSeqs: Set<number>
       steps.push({ type: "command", id: `commands-${run[0]?.seq ?? event.seq}`, events: run });
       continue;
     }
+    if (suppressToolStartSeqs.has(event.seq)) continue;
     if (isFileDiffEvent(event)) {
       if (!selectedFileDiffSeqs.has(event.seq)) continue;
       const run: AstralEvent[] = [];
@@ -314,10 +346,15 @@ function operationSteps(events: AstralEvent[], selectedFileDiffSeqs: Set<number>
       }
       continue;
     }
+    if (isSummaryOnlyOperationEvent(event)) continue;
     if (suppressReasoningSeqs.has(event.seq)) continue;
     steps.push({ type: "detail", id: `detail-${event.seq}`, event });
   }
   return steps;
+}
+
+function isSummaryOnlyOperationEvent(event: AstralEvent): boolean {
+  return event.kind === "control.steer";
 }
 
 function isSilentOperationEvent(event: AstralEvent): boolean {
@@ -355,12 +392,14 @@ function operationSummary(events: AstralEvent[], selectedFileDiffSeqs: Set<numbe
   const commands = buildCommandItems(collectCommandEvents(events)).length;
   const editedFiles = uniqueFileDiffs(events.filter((event) => isFileDiffEvent(event) && selectedFileDiffSeqs.has(event.seq))).length;
   const readFiles = buildFileReadItems(collectFileReadEvents(events));
+  const searches = buildSearchItems(collectSearchEvents(events));
   const readTools = new Set<string>();
   const searchTools = new Set<string>();
   let reasoning = 0;
   let approvals = 0;
   let asks = 0;
   let todos = 0;
+  let steers = 0;
 
   for (const event of events) {
     if (isFileDiffEvent(event) && selectedFileDiffSeqs.has(event.seq)) {
@@ -370,18 +409,20 @@ function operationSummary(events: AstralEvent[], selectedFileDiffSeqs: Set<numbe
     if (event.kind === "approval.requested") approvals += 1;
     if (event.kind === "ask.requested") asks += 1;
     if (event.kind === "tool.todo" || isTodoToolEvent(event)) todos += 1;
+    if (event.kind === "control.steer") steers += 1;
     if (event.kind.startsWith("tool.") && !isCommandEvent(event)) {
       const name = toolName(event).toLowerCase();
       const value = event.normalized as Record<string, unknown>;
       const category = textValue(value, "category").toLowerCase();
-      if (category === "search" || name.includes("grep") || name.includes("glob") || name.includes("search")) searchTools.add(toolIdentity(event));
+      if (searches.length === 0 && isSearchToolName(name, category)) searchTools.add(toolIdentity(event));
       if (readFiles.length === 0 && (category === "read" || name === "read" || name.includes("read") || name.includes("list"))) readTools.add(toolIdentity(event));
     }
   }
 
   const parts: string[] = [];
   if (editedFiles) parts.push(`已编辑 ${editedFiles} 个文件`);
-  if (searchTools.size) parts.push(`已探索 ${searchTools.size} 次`);
+  if (searches.length) parts.push(`已探索 ${searches.length} 次`);
+  else if (searchTools.size) parts.push(`已探索 ${searchTools.size} 次`);
   if (readFiles.length) parts.push(`${readFiles.some((file) => file.status === "running") ? "正在读取" : "已读取"} ${readFiles.length} 个文件`);
   else if (readTools.size) parts.push(`已读取 ${readTools.size} 个文件`);
   if (commands) parts.push(`已运行 ${commands} 条命令`);
@@ -389,6 +430,7 @@ function operationSummary(events: AstralEvent[], selectedFileDiffSeqs: Set<numbe
   if (todos) parts.push(`待办 ${todos} 次`);
   if (approvals) parts.push(`${approvals} 个确认`);
   if (asks) parts.push(`${asks} 个问题`);
+  if (steers) parts.push("已引导对话");
   return parts.join(" · ");
 }
 
@@ -405,6 +447,8 @@ function activeOperationSummary(events: AstralEvent[], selectedFileDiffSeqs: Set
     }
     const fileRead = fileReadItemFromEvent(event);
     if (fileRead) return `正在读取 ${fileRead.path}`;
+    const search = searchItemFromEvent(event);
+    if (search) return search.target ? `正在搜索 ${search.target}` : "正在搜索";
     if (isCommandEvent(event)) {
       const command = commandText(event);
       return command ? `正在运行 ${command}` : "正在运行命令";
@@ -415,7 +459,7 @@ function activeOperationSummary(events: AstralEvent[], selectedFileDiffSeqs: Set
       const name = toolName(event).toLowerCase();
       const category = textValue(value, "category").toLowerCase();
       const target = firstText(value, input, ["file_path", "path", "cwd", "pattern", "query", "url", "command", "name"]);
-      if (category === "search" || name.includes("grep") || name.includes("glob") || name.includes("search")) return target ? `正在搜索 ${target}` : "正在搜索";
+      if (isSearchToolName(name, category)) return target ? `正在搜索 ${target}` : "正在搜索";
       if (category === "read" || name === "read" || name.includes("read") || name.includes("list")) return target ? `正在读取 ${target}` : "正在读取";
       if (category === "file" || name.includes("write") || name.includes("edit") || name.includes("filechange")) return target ? `正在编辑 ${target}` : "正在编辑文件";
       return target ? `正在运行 ${target}` : "正在运行工具";
@@ -518,15 +562,12 @@ function isFileDiffEvent(event: AstralEvent): boolean {
   return textValue(value, "category") === "file" && fileDiffsFromEvent(event).length > 0;
 }
 
-function suppressedFileToolStartSeqs(events: AstralEvent[]): Set<number> {
-  const completedFileToolIDs = new Set(events.filter(isFileDiffEvent).map(toolIdentity));
+function suppressedCompletedToolStartSeqs(events: AstralEvent[]): Set<number> {
+  const completedToolIDs = new Set(events.filter((event) => event.kind === "tool.completed").map(toolIdentity));
   const suppressed = new Set<number>();
   for (const event of events) {
     if (event.kind !== "tool.started") continue;
-    const value = event.normalized as Record<string, unknown>;
-    if (textValue(value, "category") === "file" && completedFileToolIDs.has(toolIdentity(event))) {
-      suppressed.add(event.seq);
-    }
+    if (completedToolIDs.has(toolIdentity(event))) suppressed.add(event.seq);
   }
   return suppressed;
 }
@@ -615,6 +656,57 @@ function mergeFileReadItem(existing: FileReadItem | undefined, next: FileReadIte
     path: next.path || existing.path,
     status: existing.status === "completed" || next.status === "completed" ? "completed" : "running",
   };
+}
+
+export function buildSearchItems(events: AstralEvent[]): SearchItem[] {
+  const order: string[] = [];
+  const items = new Map<string, SearchItem>();
+
+  for (const event of events) {
+    const item = searchItemFromEvent(event);
+    if (!item) continue;
+    if (!items.has(item.id)) order.push(item.id);
+    const existing = items.get(item.id);
+    items.set(item.id, mergeSearchItem(existing, item));
+  }
+
+  return order.map((key) => items.get(key)).filter((item): item is SearchItem => Boolean(item));
+}
+
+function collectSearchEvents(events: AstralEvent[]): AstralEvent[] {
+  return events.filter((event) => searchItemFromEvent(event) !== null);
+}
+
+function searchItemFromEvent(event: AstralEvent): SearchItem | null {
+  if (event.kind !== "tool.started" && event.kind !== "tool.completed") return null;
+  if (isCommandEvent(event)) return null;
+  const value = event.normalized as Record<string, unknown>;
+  const input = mapValue(value.input);
+  const name = toolName(event);
+  const category = textValue(value, "category").toLowerCase();
+  if (!isSearchToolName(name.toLowerCase(), category)) return null;
+  const target = firstText(value, input, ["pattern", "query", "path", "file_path", "cwd", "url", "name"]);
+  const id = textValue(value, "id") || textValue(value, "item_id") || textValue(value, "call_id") || target || `${event.kind}:${event.seq}`;
+  return {
+    id,
+    target,
+    tool: name || "搜索",
+    status: event.kind === "tool.completed" ? "completed" : "running",
+  };
+}
+
+function mergeSearchItem(existing: SearchItem | undefined, next: SearchItem): SearchItem {
+  if (!existing) return next;
+  return {
+    id: existing.id,
+    target: next.target || existing.target,
+    tool: next.tool || existing.tool,
+    status: existing.status === "completed" || next.status === "completed" ? "completed" : "running",
+  };
+}
+
+function isSearchToolName(name: string, category: string): boolean {
+  return category === "search" || name.includes("grep") || name.includes("glob") || name.includes("search") || name === "ls";
 }
 
 function parseUnifiedDiff(diff: string): FileDiff[] {
