@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanelLeft, PanelRight } from "lucide-react";
-import { AstralApi } from "./api";
+import { createLocalCoreClient, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
 import { Sidebar } from "./components/Sidebar";
@@ -24,6 +24,7 @@ import type {
   AgentKind,
   AstralEvent,
   ConnectionState,
+  CreateWorkspaceRequest,
   HealthResponse,
   PermissionMode,
   ReasoningEffort,
@@ -47,7 +48,7 @@ function sessionTimestamp(session: Session): number {
 
 export function App(): React.JSX.Element {
   const [connection, setConnection] = useState<ConnectionState>("booting");
-  const [api, setApi] = useState<AstralApi | null>(null);
+  const [api, setApi] = useState<CoreClient | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceConnections, setWorkspaceConnections] = useState<Record<string, WorkspaceConnection>>({});
@@ -80,6 +81,7 @@ export function App(): React.JSX.Element {
   const sseFrameRef = useRef<number | null>(null);
   const notifiedIntentIDsRef = useRef<Set<string>>(new Set());
   const activeSessionIdRef = useRef("");
+  const appChromeRef = useRef<HTMLDivElement | null>(null);
 
   const mergeEvents = useCallback((incoming: AstralEvent[]) => {
     setEventIndex((current) => mergeEventIndex(current, incoming));
@@ -114,6 +116,17 @@ export function App(): React.JSX.Element {
     },
     [mergeEvents],
   );
+
+  const setRightPanelLiveWidth = useCallback((width: number) => {
+    appChromeRef.current?.style.setProperty("--astral-right-panel-width", `${Math.round(width)}px`);
+  }, []);
+
+  const setRightPanelResizeActive = useCallback((active: boolean) => {
+    const node = appChromeRef.current;
+    if (!node) return;
+    if (active) node.dataset.rightPanelResizing = "true";
+    else delete node.dataset.rightPanelResizing;
+  }, []);
 
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null,
@@ -173,6 +186,10 @@ export function App(): React.JSX.Element {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
 
+  useEffect(() => {
+    setRightPanelLiveWidth(rightPanelWidth);
+  }, [rightPanelWidth, setRightPanelLiveWidth]);
+
   const storeSessionView = useCallback((view: SessionView) => {
     setSessionViews((current) => ({ ...current, [view.session.id]: view }));
     setSessions((current) => sortSessionsByUpdated(current.map((session) => (session.id === view.session.id ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session))));
@@ -195,7 +212,7 @@ export function App(): React.JSX.Element {
     storeSessionView,
   });
 
-  const loadInitialState = useCallback(async (client: AstralApi) => {
+  const loadInitialState = useCallback(async (client: CoreClient) => {
     const [healthResponse, workspaceResponse, sessionResponse, recentEvents] = await Promise.all([
       client.health(),
       client.listWorkspaces(),
@@ -237,21 +254,19 @@ export function App(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
-    let source: EventSource | null = null;
+    let subscription: EventSubscription | null = null;
     let cancelled = false;
 
     async function boot(): Promise<void> {
       try {
         const info = await window.astral.getDaemonInfo();
         if (cancelled) return;
-        const client = new AstralApi(info);
+        const client = createLocalCoreClient(info);
         const initialEvents = await loadInitialState(client);
         if (cancelled) return;
         const afterSeq = Math.max(0, ...initialEvents.map((event) => event.seq));
-        source = client.eventsSource(afterSeq);
-        source.addEventListener("astral-event", (message) => {
-          try {
-            const event = JSON.parse((message as MessageEvent).data) as AstralEvent;
+        subscription = client.subscribeEvents(afterSeq, {
+          onEvent: (event) => {
             if (event.kind === "workspace.connection") {
               const state = event.normalized as WorkspaceConnection;
               setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
@@ -263,12 +278,13 @@ export function App(): React.JSX.Element {
             }
             maybeNotifyLiveEvent(event);
             queueLiveEvent(event);
-          } catch {
-            setError("bad SSE event payload");
-          }
+          },
+          onOpen: () => setConnection("connected"),
+          onError: (event) => {
+            if (event instanceof SyntaxError) setError("bad SSE event payload");
+            setConnection("reconnecting");
+          },
         });
-        source.onopen = () => setConnection("connected");
-        source.onerror = () => setConnection("reconnecting");
         setApi(client);
         setConnection("connected");
       } catch (bootError) {
@@ -285,7 +301,7 @@ export function App(): React.JSX.Element {
         sseFrameRef.current = null;
       }
       sseQueueRef.current = [];
-      source?.close();
+      subscription?.close();
     };
   }, [loadInitialState, maybeNotifyLiveEvent, queueLiveEvent, storeSessionView]);
 
@@ -310,7 +326,7 @@ export function App(): React.JSX.Element {
   }, [activeSession, activeWorkspaceId, sessions, workspaces]);
 
   const handleCreateWorkspace = useCallback(
-    async (request: Parameters<AstralApi["createWorkspace"]>[0]) => {
+    async (request: CreateWorkspaceRequest) => {
       if (!api) return;
       setError("");
       const workspace = await api.createWorkspace(request);
@@ -507,6 +523,27 @@ export function App(): React.JSX.Element {
     [activeSession, activeWorkspace, api, claudeSSHRemote, permissionMode, runMode, selectedModel, selectedReasoningEffort, storeSessionView, workspaceInteractive],
   );
 
+  const handleEditUserMessage = useCallback(
+    async (eventSeq: number, input: string) => {
+      if (!api || !activeWorkspace || !activeSession || !workspaceInteractive) return;
+      setError("");
+      try {
+        await api.editLastUserMessage(activeSession.id, input, {
+          event_seq: eventSeq,
+          model: selectedModel,
+          reasoning_effort: selectedReasoningEffort,
+          permission_mode: runMode === "plan" ? "plan" : claudeSSHRemote ? "bypassPermissions" : permissionMode,
+        });
+        const view = await api.sessionView(activeSession.id).catch(() => null);
+        if (view) storeSessionView(view);
+      } catch (editError) {
+        setError(editError instanceof Error ? editError.message : String(editError));
+        throw editError;
+      }
+    },
+    [activeSession, activeWorkspace, api, claudeSSHRemote, permissionMode, runMode, selectedModel, selectedReasoningEffort, storeSessionView, workspaceInteractive],
+  );
+
   const handleInterrupt = useCallback(async () => {
     if (!api || !activeSession || !workspaceInteractive) return;
     setError("");
@@ -593,7 +630,7 @@ export function App(): React.JSX.Element {
     [sessionViews, sessions],
   );
   return (
-    <div className="relative flex h-screen min-h-0 select-none overflow-hidden bg-transparent text-[#1d1d1f]">
+    <div ref={appChromeRef} className="relative flex h-screen min-h-0 select-none overflow-hidden bg-transparent text-[#1d1d1f]">
 
 
       <Sidebar
@@ -632,12 +669,14 @@ export function App(): React.JSX.Element {
           activeSession={activeSession}
           activeWorkspace={activeWorkspace}
           composerHeight={composerHeight}
+          editableUserMessage={activeSessionView?.editable_user_message ?? null}
           events={visibleEvents}
           forkingSeq={forkingSeq}
           hasOlder={activeSessionWindow?.hasOlder ?? false}
           loadingOlder={activeSessionWindow?.loadingOlder ?? false}
           scrollToEventSeq={scrollTarget?.sessionId === activeSessionId ? scrollTarget.eventSeq : null}
           sourceSessionExists={forkSourceSessionExists}
+          onEditUserMessage={handleEditUserMessage}
           onForkFromEvent={(event) => void handleForkFromEvent(event)}
           onLoadOlder={() => void loadOlderEvents()}
           onOpenSourceSession={handleOpenSourceSession}
@@ -684,7 +723,9 @@ export function App(): React.JSX.Element {
         open={rightPanelOpen}
         width={rightPanelWidth}
         workspace={activeWorkspace}
+        onLiveResize={setRightPanelLiveWidth}
         onResize={setRightPanelWidth}
+        onResizeActiveChange={setRightPanelResizeActive}
       />
 
       <WorkspaceModal
@@ -697,7 +738,7 @@ export function App(): React.JSX.Element {
       />
 
       <WorkspaceOpenerMenu
-        rightOffset={rightPanelOpen ? rightPanelWidth + 10 : 64}
+        rightPanelOpen={rightPanelOpen}
         workspace={activeWorkspace}
         onError={setError}
       />

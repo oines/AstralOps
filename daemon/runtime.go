@@ -23,6 +23,10 @@ type SessionForker interface {
 	ForkSession(source Session, fork Session, workspace Workspace, rollbackTurns int) error
 }
 
+type LastUserMessageEditor interface {
+	EditLastUserMessageAndResend(session Session, workspace Workspace, input string, options TurnOptions) error
+}
+
 type TurnSteerer interface {
 	Steer(sessionID string, input string, options TurnOptions) error
 }

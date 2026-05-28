@@ -258,6 +258,12 @@ export type SessionView = {
   status: "idle" | "running" | "requires_action" | "reconnecting" | "failed";
   pending_interaction?: PendingInteractionView | null;
   queued_inputs?: QueuedInputView[];
+  editable_user_message?: EditableUserMessageView | null;
+};
+
+export type EditableUserMessageView = {
+  event_seq: number;
+  text: string;
 };
 
 export type PendingInteractionView = {
@@ -334,6 +340,14 @@ export type CreateSessionRequest = {
 };
 
 export type SessionInputRequest = {
+  input: string;
+  model?: string;
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  permission_mode?: "default" | "auto" | "plan" | "bypassPermissions";
+};
+
+export type EditLastUserMessageRequest = {
+  event_seq: number;
   input: string;
   model?: string;
   reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";

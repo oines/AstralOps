@@ -46,6 +46,7 @@ type codexClient struct {
 	threadID     string
 	activeTurn   string
 	nextInternal bool
+	editingLast  bool
 	running      bool
 	initialized  bool
 	stopping     bool
@@ -139,6 +140,43 @@ func (r *codexLocalRuntime) ForkSession(source Session, fork Session, workspace 
 		return err
 	}
 	return client.forkThread(source.NativeThreadID, rollbackTurns)
+}
+
+func (r *codexLocalRuntime) EditLastUserMessageAndResend(session Session, workspace Workspace, input string, options TurnOptions) error {
+	client, err := r.clientForSession(session, workspace)
+	if err != nil {
+		return err
+	}
+	client.beginLastUserMessageEdit()
+	started := false
+	defer func() {
+		client.endLastUserMessageEdit()
+		if !started {
+			go r.app.startNextQueuedTurn(session.ID)
+		}
+	}()
+
+	if client.isRunning() {
+		if _, ok := client.waitForActiveTurn(2 * time.Second); ok {
+			if err := client.interruptForEdit(); err != nil {
+				return err
+			}
+		}
+		if err := client.waitUntilIdle(20 * time.Second); err != nil {
+			return err
+		}
+	}
+	if err := client.rollbackLastTurnWithRetry(10 * time.Second); err != nil {
+		return err
+	}
+	if updated, ok := r.app.store.getSession(session.ID); ok {
+		session = updated
+	}
+	if err := r.StartTurn(session, workspace, input, options); err != nil {
+		return err
+	}
+	started = true
+	return nil
 }
 
 func (r *codexLocalRuntime) clientForSession(session Session, workspace Workspace) (*codexClient, error) {
@@ -418,13 +456,65 @@ func (c *codexClient) forkThread(sourceThreadID string, rollbackTurns int) error
 	return nil
 }
 
+func (c *codexClient) rollbackLastTurnWithRetry(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := c.rollbackLastTurn()
+		if err == nil {
+			return nil
+		}
+		canRetry := strings.Contains(err.Error(), "Cannot rollback while a turn is in progress") || isCodexProcessRestartBoundaryError(err)
+		if !canRetry || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func isCodexProcessRestartBoundaryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "codex app-server exited") || strings.Contains(text, "broken pipe")
+}
+
+func (c *codexClient) rollbackLastTurn() error {
+	if err := c.ensureStarted(); err != nil {
+		return err
+	}
+	if err := c.ensureThread(); err != nil {
+		return err
+	}
+	threadID := c.getThreadID()
+	if threadID == "" {
+		return errors.New("codex thread is not available for rollback")
+	}
+	result, err := c.request("thread/rollback", map[string]any{
+		"threadId": threadID,
+		"numTurns": 1,
+	}, codexRequestTimeout)
+	if err != nil {
+		return err
+	}
+	if rolledThreadID := codexResultThreadID(result); rolledThreadID != "" && rolledThreadID != threadID {
+		c.mu.Lock()
+		c.threadID = rolledThreadID
+		c.session.NativeThreadID = rolledThreadID
+		c.mu.Unlock()
+		c.runtime.app.store.updateSessionNativeThreadID(c.session.ID, rolledThreadID)
+	}
+	return nil
+}
+
 func (c *codexClient) ensureStarted() error {
 	c.mu.Lock()
 	if c.initialized && c.stdin != nil {
 		c.mu.Unlock()
 		return nil
 	}
-	c.closed = make(chan struct{})
+	processClosed := make(chan struct{})
+	c.closed = processClosed
 	c.mu.Unlock()
 
 	cmd := exec.Command(c.path, codexAppServerArgs(c.execServerURL != "")...)
@@ -462,7 +552,7 @@ func (c *codexClient) ensureStarted() error {
 
 	go c.scan(stdout)
 	go c.scanStderr(stderr)
-	go c.wait()
+	go c.wait(cmd, processClosed)
 
 	if _, err := c.request("initialize", map[string]any{
 		"clientInfo": map[string]any{"name": "AstralOps", "version": version},
@@ -627,6 +717,26 @@ func (c *codexClient) interrupt() error {
 	return nil
 }
 
+func (c *codexClient) interruptForEdit() error {
+	threadID := c.getThreadID()
+	turnID := c.getActiveTurn()
+	if threadID == "" || turnID == "" {
+		return nil
+	}
+	_, err := c.request("turn/interrupt", map[string]any{
+		"threadId": threadID,
+		"turnId":   turnID,
+	}, 5*time.Second)
+	if err != nil {
+		if strings.Contains(err.Error(), "no active turn to interrupt") {
+			return nil
+		}
+		return err
+	}
+	c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.interrupt", Normalized: map[string]any{"status": "requested", "turn_id": turnID}})
+	return nil
+}
+
 func (c *codexClient) stop(reason string) {
 	c.mu.Lock()
 	wasRunning := c.running
@@ -768,6 +878,10 @@ func (c *codexClient) handleLine(line []byte) {
 		c.enrichServerRequestEvent(&ev)
 		c.runtime.app.emit(ev)
 		method := stringValue(raw["method"])
+		if !codexServerRequestSupported(method) {
+			_ = c.writeJSON(map[string]any{"id": raw["id"], "error": map[string]any{"code": -32601, "message": "unsupported codex server request " + method}})
+			return
+		}
 		approvalID := codexApprovalID(c.session.ID, raw["id"], mapValue(raw["params"]))
 		c.mu.Lock()
 		c.approvals[approvalID] = codexPendingApproval{RequestID: raw["id"], Method: method, Params: mapValue(raw["params"])}
@@ -840,22 +954,26 @@ func (c *codexClient) enrichRemoteCommandEvent(ev *AstralEvent) {
 	ev.Normalized = normalized
 }
 
-func (c *codexClient) wait() {
-	err := c.cmd.Wait()
-	close(c.closed)
+func (c *codexClient) wait(cmd *exec.Cmd, closed chan struct{}) {
+	err := cmd.Wait()
 	c.mu.Lock()
+	current := c.cmd == cmd && c.closed == closed
 	stopping := c.stopping
-	c.stdin = nil
-	c.running = false
-	c.initialized = false
-	c.threadID = ""
-	c.stopping = false
-	for id, ch := range c.pending {
-		ch <- codexRPCResponse{ID: id, Error: &codexRPCError{Code: -32000, Message: "codex app-server exited"}}
-		delete(c.pending, id)
+	if current {
+		c.cmd = nil
+		c.stdin = nil
+		c.running = false
+		c.initialized = false
+		c.threadID = ""
+		c.stopping = false
+		for id, ch := range c.pending {
+			ch <- codexRPCResponse{ID: id, Error: &codexRPCError{Code: -32000, Message: "codex app-server exited"}}
+			delete(c.pending, id)
+		}
 	}
 	c.mu.Unlock()
-	if err != nil && !stopping {
+	close(closed)
+	if err != nil && !stopping && current {
 		c.runtime.app.store.updateSessionStatus(c.session.ID, "failed")
 		c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.failed", Normalized: map[string]any{
 			"status":  "failed",
@@ -877,13 +995,16 @@ func (c *codexClient) markIdle(status string) {
 	c.mu.Lock()
 	c.running = false
 	c.activeTurn = ""
+	editingLast := c.editingLast
 	c.mu.Unlock()
 	if status == "failed" {
 		c.runtime.app.store.updateSessionStatus(c.session.ID, "failed")
 		return
 	}
 	c.runtime.app.store.updateSessionStatus(c.session.ID, "idle")
-	go c.runtime.app.startNextQueuedTurn(c.session.ID)
+	if !editingLast {
+		go c.runtime.app.startNextQueuedTurn(c.session.ID)
+	}
 }
 
 func (c *codexClient) setRunning(running bool) {
@@ -924,6 +1045,44 @@ func (c *codexClient) getActiveTurn() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.activeTurn
+}
+
+func (c *codexClient) waitForActiveTurn(timeout time.Duration) (string, bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if turnID := c.getActiveTurn(); turnID != "" {
+			return turnID, true
+		}
+		if !c.isRunning() || time.Now().After(deadline) {
+			return "", false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (c *codexClient) waitUntilIdle(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !c.isRunning() {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("timed out waiting for codex turn to stop before editing")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (c *codexClient) beginLastUserMessageEdit() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.editingLast = true
+}
+
+func (c *codexClient) endLastUserMessageEdit() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.editingLast = false
 }
 
 func (c *codexClient) updateSession(session Session) {

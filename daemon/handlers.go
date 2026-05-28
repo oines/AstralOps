@@ -678,6 +678,13 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.handleSessionInput(w, sessionID, req.Input, TurnOptions{Model: req.Model, ReasoningEffort: req.ReasoningEffort, PermissionMode: req.PermissionMode})
+	case action == "edit-last-user-message" && r.Method == http.MethodPost:
+		var req editLastUserMessageRequest
+		if err := decodeJSON(r.Body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		a.handleEditLastUserMessage(w, sessionID, req)
 	case action == "interrupt" && r.Method == http.MethodPost:
 		a.handleSessionInterrupt(w, sessionID)
 	case action == "queue" && len(parts) == 4 && parts[3] == "cancel" && r.Method == http.MethodPost:

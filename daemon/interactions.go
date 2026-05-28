@@ -15,49 +15,76 @@ func (a *app) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/approvals/"), "/respond")
 	var req map[string]any
-	_ = decodeJSON(r.Body, &req)
-	responded := AstralEvent{Kind: "approval.responded", Normalized: map[string]any{"approval_id": id, "response": req}}
-	var origin AstralEvent
-	var hasOrigin bool
-	if found, ok := a.findInteractionEvent(id); ok {
-		origin = found
-		hasOrigin = true
-		req = interactionResponseForClientAction(origin, req)
-		responded.WorkspaceID = origin.WorkspaceID
-		responded.SessionID = origin.SessionID
-		responded.Agent = origin.Agent
-		if origin.Kind == "ask.requested" {
-			responded.Kind = "ask.resolved"
-			responded.Normalized = map[string]any{"ask_id": id, "request_id": id, "response": req}
-		}
-	}
-	a.emit(responded)
-	if hasOrigin && isCancelResponse(req) {
-		if a.cancelInteraction(origin) {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-			return
-		}
-	}
-	if hasOrigin && origin.Agent == AgentClaude {
-		a.startClaudeInteractionFollowup(origin, req)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if err := decodeJSON(r.Body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if hasOrigin && origin.Agent == AgentCodex && isPlanApproval(origin) {
-		a.startCodexPlanFollowup(origin, req)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	origin, ok, stale := a.findPendingInteractionEvent(id)
+	if stale {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "interaction is no longer pending"})
 		return
 	}
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "interaction not found"})
+		return
+	}
+
+	req = interactionResponseForClientAction(origin, req)
+	if err := a.processInteractionResponse(id, origin, req); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	a.emit(interactionRespondedEvent(id, origin, req))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *app) processInteractionResponse(id string, origin AstralEvent, req map[string]any) error {
+	if isCancelResponse(req) {
+		handled, err := a.cancelInteraction(origin)
+		if err != nil {
+			return err
+		}
+		if handled {
+			return nil
+		}
+	}
+	if origin.Agent == AgentClaude {
+		return a.startClaudeInteractionFollowup(origin, req)
+	}
+	if origin.Agent == AgentCodex && isPlanApproval(origin) {
+		return a.startCodexPlanFollowup(origin, req)
+	}
+	var lastErr error
 	for _, runtime := range a.runtimes {
 		responder, ok := runtime.(ApprovalResponder)
 		if !ok {
 			continue
 		}
 		if err := responder.RespondApproval(id, req); err == nil {
-			break
+			return nil
+		} else {
+			lastErr = err
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("interaction %s is not pending in a runtime", id)
+}
+
+func interactionRespondedEvent(id string, origin AstralEvent, req map[string]any) AstralEvent {
+	responded := AstralEvent{
+		WorkspaceID: origin.WorkspaceID,
+		SessionID:   origin.SessionID,
+		Agent:       origin.Agent,
+		Kind:        "approval.responded",
+		Normalized:  map[string]any{"approval_id": id, "response": req},
+	}
+	if origin.Kind == "ask.requested" {
+		responded.Kind = "ask.resolved"
+		responded.Normalized = map[string]any{"ask_id": id, "request_id": id, "response": req}
+	}
+	return responded
 }
 
 func isCancelResponse(response map[string]any) bool {
@@ -75,25 +102,22 @@ func isDeclineResponse(response map[string]any) bool {
 	}
 }
 
-func (a *app) cancelInteraction(origin AstralEvent) bool {
+func (a *app) cancelInteraction(origin AstralEvent) (bool, error) {
 	value := mapValue(origin.Normalized)
 	if origin.Agent == AgentCodex {
 		kind := stringValue(value["kind"])
 		if origin.Kind == "ask.requested" && kind != "mcpServer/elicitation/request" {
-			a.interruptInteractionSession(origin)
-			return true
+			return true, a.interruptInteractionSession(origin)
 		}
 		if kind == "permissions" || kind == "plan" {
-			a.interruptInteractionSession(origin)
-			return true
+			return true, a.interruptInteractionSession(origin)
 		}
-		return false
+		return false, nil
 	}
 	if origin.Agent == AgentClaude {
-		a.interruptInteractionSession(origin)
-		return true
+		return true, a.interruptInteractionSession(origin)
 	}
-	return false
+	return false, nil
 }
 
 func interactionResponseForClientAction(origin AstralEvent, req map[string]any) map[string]any {
@@ -189,61 +213,63 @@ func clientDecisionPayload(available any, actionID string) any {
 	return actionID
 }
 
-func (a *app) interruptInteractionSession(origin AstralEvent) {
+func (a *app) interruptInteractionSession(origin AstralEvent) error {
 	runtime, ok := a.runtimes[origin.Agent]
 	if !ok {
-		return
+		return fmt.Errorf("%s runtime is not available", origin.Agent)
 	}
 	if err := runtime.Interrupt(origin.SessionID); err != nil {
 		if errors.Is(err, ErrSessionIdle) {
 			a.store.updateSessionStatus(origin.SessionID, "idle")
 			a.emit(AstralEvent{WorkspaceID: origin.WorkspaceID, SessionID: origin.SessionID, Agent: origin.Agent, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle"}})
-			return
+			return nil
 		}
-		a.emit(AstralEvent{WorkspaceID: origin.WorkspaceID, SessionID: origin.SessionID, Agent: origin.Agent, Kind: "control.error", Normalized: map[string]any{"message": err.Error()}})
+		return err
 	}
+	return nil
 }
 
-func (a *app) startCodexPlanFollowup(origin AstralEvent, response map[string]any) {
+func (a *app) startCodexPlanFollowup(origin AstralEvent, response map[string]any) error {
 	ss, ok := a.store.getSession(origin.SessionID)
 	if !ok {
-		return
+		return fmt.Errorf("session %s not found", origin.SessionID)
 	}
 	ws, ok := a.store.getWorkspace(ss.WorkspaceID)
 	if !ok {
-		return
+		return fmt.Errorf("workspace %s not found", ss.WorkspaceID)
 	}
 	runtime, ok := a.runtimes[AgentCodex]
 	if !ok {
-		return
+		return fmt.Errorf("%s runtime is not available", AgentCodex)
 	}
 	input := codexPlanFollowupText(response)
 	options := TurnOptions{Internal: true, DisplayInput: planInteractionDisplayText(response)}
 	if err := runtime.StartTurn(ss, ws, input, options); err != nil {
 		if errors.Is(err, ErrSessionRunning) {
 			a.enqueueTurn(ss, input, options)
-			return
+			return nil
 		}
-		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": err.Error()}})
+		return err
 	}
+	return nil
 }
 
-func (a *app) startClaudeInteractionFollowup(origin AstralEvent, response map[string]any) {
+func (a *app) startClaudeInteractionFollowup(origin AstralEvent, response map[string]any) error {
 	ss, ok := a.store.getSession(origin.SessionID)
 	if !ok {
-		return
+		return fmt.Errorf("session %s not found", origin.SessionID)
 	}
 	ws, ok := a.store.getWorkspace(ss.WorkspaceID)
 	if !ok {
-		return
+		return fmt.Errorf("workspace %s not found", ss.WorkspaceID)
 	}
 	runtime, ok := a.runtimes[AgentClaude]
 	if !ok {
-		return
+		return fmt.Errorf("%s runtime is not available", AgentClaude)
 	}
 	input := claudeInteractionFollowupText(origin, response)
 	if strings.TrimSpace(input) == "" {
-		return
+		return nil
 	}
 	options := TurnOptions{Internal: true, DisplayInput: claudeInteractionDisplayText(origin, response)}
 	if tools := claudeAllowedToolsForInteraction(origin, response, ws); len(tools) > 0 {
@@ -252,10 +278,11 @@ func (a *app) startClaudeInteractionFollowup(origin AstralEvent, response map[st
 	if err := runtime.StartTurn(ss, ws, input, options); err != nil {
 		if errors.Is(err, ErrSessionRunning) {
 			a.enqueueTurn(ss, input, options)
-			return
+			return nil
 		}
-		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": err.Error()}})
+		return err
 	}
+	return nil
 }
 
 func claudeAllowedToolsForInteraction(origin AstralEvent, response map[string]any, ws Workspace) []string {
@@ -391,4 +418,48 @@ func (a *app) findInteractionEvent(id string) (AstralEvent, bool) {
 		}
 	}
 	return AstralEvent{}, false
+}
+
+func (a *app) findPendingInteractionEvent(id string) (AstralEvent, bool, bool) {
+	events := a.store.queryEvents("", "", 0)
+	hidden := replacedTranscriptSeqs(events)
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if interactionResponseMatches(ev, id) {
+			return AstralEvent{}, false, true
+		}
+		if interactionRequestMatches(ev, id) {
+			if hidden[ev.Seq] {
+				return AstralEvent{}, false, true
+			}
+			return ev, true, false
+		}
+	}
+	return AstralEvent{}, false, false
+}
+
+func interactionRequestMatches(ev AstralEvent, id string) bool {
+	if ev.Kind != "approval.requested" && ev.Kind != "ask.requested" {
+		return false
+	}
+	normalized := mapValue(ev.Normalized)
+	if stringValue(normalized["approval_id"]) == id || stringValue(normalized["ask_id"]) == id {
+		return true
+	}
+	if stringValue(normalized["source"]) != "codex" && stringValue(normalized["request_id"]) == id {
+		return true
+	}
+	return false
+}
+
+func interactionResponseMatches(ev AstralEvent, id string) bool {
+	normalized := mapValue(ev.Normalized)
+	switch ev.Kind {
+	case "approval.responded":
+		return stringValue(normalized["approval_id"]) == id || stringValue(normalized["request_id"]) == id
+	case "ask.resolved":
+		return stringValue(normalized["ask_id"]) == id || stringValue(normalized["request_id"]) == id
+	default:
+		return false
+	}
 }

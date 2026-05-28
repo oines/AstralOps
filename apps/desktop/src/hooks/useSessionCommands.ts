@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AstralApi } from "../api";
+import type { CoreClient } from "../api";
 import type { Session, SessionCommand, SessionView, Workspace } from "../types";
 
 type UseSessionCommandsArgs = {
-  api: AstralApi | null;
+  api: CoreClient | null;
   activeSession: Session | null;
   activeWorkspace: Workspace | null;
   workspaceInteractive: boolean;

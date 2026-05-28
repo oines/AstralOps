@@ -6,20 +6,24 @@ import (
 )
 
 func codexApprovalResponse(method string, response map[string]any, requestParams map[string]any) (map[string]any, error) {
-	decisionPayload := firstNonNil(response["decision"], response["action"])
-	decision := stringValue(decisionPayload)
-	if decision == "" && decisionPayload == nil {
-		if approved, ok := response["approved"].(bool); ok && approved {
-			decision = "accept"
-		} else {
-			decision = "decline"
-		}
-		decisionPayload = decision
-	}
 	switch method {
 	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
+		decisionPayload, decision, err := codexDecisionPayload(response)
+		if err != nil {
+			return nil, err
+		}
+		if decision == "" && decisionPayload == nil {
+			return nil, errors.New("approval decision is required")
+		}
 		return map[string]any{"decision": decisionPayload}, nil
 	case "item/permissions/requestApproval":
+		_, decision, err := codexDecisionPayload(response)
+		if err != nil {
+			return nil, err
+		}
+		if decision == "" {
+			return nil, errors.New("permission approval decision is required")
+		}
 		if decision == "accept" || decision == "acceptForSession" {
 			scope := "turn"
 			if decision == "acceptForSession" {
@@ -38,9 +42,9 @@ func codexApprovalResponse(method string, response map[string]any, requestParams
 		}
 		return map[string]any{"answers": map[string]any{}}, nil
 	case "mcpServer/elicitation/request":
-		action := decision
+		action := firstString(response["action"], response["decision"])
 		if action == "" {
-			action = "accept"
+			return nil, errors.New("mcp elicitation action is required")
 		}
 		content := response["content"]
 		if action == "accept" && content == nil {
@@ -50,6 +54,38 @@ func codexApprovalResponse(method string, response map[string]any, requestParams
 	default:
 		return nil, fmt.Errorf("unsupported codex server request %s", method)
 	}
+}
+
+func codexServerRequestSupported(method string) bool {
+	switch method {
+	case "item/commandExecution/requestApproval",
+		"item/fileChange/requestApproval",
+		"item/permissions/requestApproval",
+		"item/tool/requestUserInput",
+		"mcpServer/elicitation/request":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexDecisionPayload(response map[string]any) (any, string, error) {
+	decisionPayload := firstNonNil(response["decision"], response["action"])
+	decision := stringValue(decisionPayload)
+	if decision == "" && decisionPayload == nil {
+		approved, ok := response["approved"].(bool)
+		if !ok {
+			return nil, "", nil
+		}
+		if approved {
+			return "accept", "accept", nil
+		}
+		return "decline", "decline", nil
+	}
+	if decision == "" {
+		return decisionPayload, "", nil
+	}
+	return decisionPayload, decision, nil
 }
 
 func codexFileChangePaths(changes any) []string {

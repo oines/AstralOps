@@ -13,6 +13,7 @@ import {
   Circle,
   CircleDot,
   Copy,
+  CornerDownLeft,
   FileCode2,
   FileText,
   GitBranch,
@@ -69,6 +70,7 @@ type TranscriptProps = {
   activeSession: Session | null;
   activeWorkspace: Workspace | null;
   composerHeight: number;
+  editableUserMessage?: { event_seq: number; text: string } | null;
   events: AstralEvent[];
   hasOlder?: boolean;
   loadingOlder?: boolean;
@@ -77,6 +79,7 @@ type TranscriptProps = {
   sourceSessionExists?: boolean;
   onLoadOlder?: () => void;
   onForkFromEvent?: (event: AstralEvent) => void;
+  onEditUserMessage?: (eventSeq: number, input: string) => Promise<void>;
   onOpenSourceSession?: (sessionId: string, eventSeq?: number) => void;
   onScrollTargetHandled?: () => void;
 };
@@ -91,6 +94,7 @@ export function Transcript({
   activeSession,
   activeWorkspace,
   composerHeight,
+  editableUserMessage = null,
   events,
   hasOlder = false,
   loadingOlder = false,
@@ -99,6 +103,7 @@ export function Transcript({
   sourceSessionExists = false,
   onLoadOlder,
   onForkFromEvent,
+  onEditUserMessage,
   onOpenSourceSession,
   onScrollTargetHandled,
 }: TranscriptProps): React.JSX.Element {
@@ -130,6 +135,8 @@ export function Transcript({
   );
   const scrollRef = useRef<HTMLElement | null>(null);
   const stickToBottomRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
+  const userDetachedFromBottomRef = useRef(false);
   const [showBackToBottom, setShowBackToBottom] = useState(false);
   const lastSeq = events.at(-1)?.seq ?? 0;
   const rowVirtualizer = useVirtualizer({
@@ -143,7 +150,27 @@ export function Transcript({
   function updateScrollState(): void {
     const node = scrollRef.current;
     if (!node) return;
+    const previousScrollTop = lastScrollTopRef.current;
+    lastScrollTopRef.current = node.scrollTop;
+    if (node.scrollTop < previousScrollTop - 1) {
+      userDetachedFromBottomRef.current = true;
+      stickToBottomRef.current = false;
+      setShowBackToBottom(true);
+      return;
+    }
     const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
+    const atBottom = distance < 24;
+    if (userDetachedFromBottomRef.current) {
+      if (atBottom) {
+        userDetachedFromBottomRef.current = false;
+        stickToBottomRef.current = true;
+        setShowBackToBottom(false);
+      } else {
+        stickToBottomRef.current = false;
+        setShowBackToBottom(true);
+      }
+      return;
+    }
     const nearBottom = distance < 120;
     stickToBottomRef.current = nearBottom;
     setShowBackToBottom(!nearBottom);
@@ -152,19 +179,56 @@ export function Transcript({
   function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
     const node = scrollRef.current;
     if (!node) return;
+    lastScrollTopRef.current = node.scrollTop;
     node.scrollTo({ top: node.scrollHeight, behavior });
+    userDetachedFromBottomRef.current = false;
     stickToBottomRef.current = true;
     setShowBackToBottom(false);
+    if (behavior !== "smooth") {
+      requestAnimationFrame(() => {
+        if (userDetachedFromBottomRef.current) return;
+        lastScrollTopRef.current = node.scrollTop;
+      });
+    }
+  }
+
+  function handleWheel(event: React.WheelEvent<HTMLElement>): void {
+    if (event.deltaY >= 0) return;
+    if (scrollRef.current) lastScrollTopRef.current = scrollRef.current.scrollTop;
+    userDetachedFromBottomRef.current = true;
+    stickToBottomRef.current = false;
+    setShowBackToBottom(true);
   }
 
   useEffect(() => {
+    const virtualizer = rowVirtualizer;
+    virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item) => {
+      const node = scrollRef.current;
+      if (!node) return false;
+      if (userDetachedFromBottomRef.current && item.end >= node.scrollTop) {
+        return false;
+      }
+      return item.start < node.scrollTop && virtualizer.scrollDirection !== "backward";
+    };
+    return () => {
+      virtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined;
+    };
+  }, [rowVirtualizer]);
+
+  useEffect(() => {
+    userDetachedFromBottomRef.current = false;
     stickToBottomRef.current = true;
-    requestAnimationFrame(() => scrollToBottom("auto"));
+    const frame = requestAnimationFrame(() => scrollToBottom("auto"));
+    return () => cancelAnimationFrame(frame);
   }, [activeSession?.id]);
 
   useEffect(() => {
-    if (!stickToBottomRef.current) return;
-    requestAnimationFrame(() => scrollToBottom("auto"));
+    if (!stickToBottomRef.current || userDetachedFromBottomRef.current) return;
+    const frame = requestAnimationFrame(() => {
+      if (!stickToBottomRef.current || userDetachedFromBottomRef.current) return;
+      scrollToBottom("auto");
+    });
+    return () => cancelAnimationFrame(frame);
   }, [composerHeight, lastSeq, groups.length]);
 
   useEffect(() => {
@@ -173,6 +237,7 @@ export function Transcript({
     if (index < 0) return;
     requestAnimationFrame(() => {
       rowVirtualizer.scrollToIndex(index, { align: "center" });
+      userDetachedFromBottomRef.current = true;
       stickToBottomRef.current = false;
       setShowBackToBottom(true);
       onScrollTargetHandled?.();
@@ -193,6 +258,7 @@ export function Transcript({
         ref={scrollRef}
         style={{ paddingBottom: composerHeight + 56 }}
         onScroll={updateScrollState}
+        onWheel={handleWheel}
       >
         {groups.length === 0 ? (
           <EmptyState activeSession={activeSession} activeWorkspace={activeWorkspace} />
@@ -212,7 +278,7 @@ export function Transcript({
                     {item?.type === "loader" ? (
                       <LoadOlderRow loading={loadingOlder} onLoadOlder={onLoadOlder} />
                     ) : item?.type === "turn" ? (
-                      <TurnBlock forkingSeq={forkingSeq} group={item.group} onForkFromEvent={onForkFromEvent} />
+                      <TurnBlock editableUserMessage={editableUserMessage} forkingSeq={forkingSeq} group={item.group} onEditUserMessage={onEditUserMessage} onForkFromEvent={onForkFromEvent} />
                     ) : item?.type === "compact" ? (
                       <MemoryCompactRow group={item.group} />
                     ) : item?.type === "fork-origin" ? (
@@ -342,12 +408,16 @@ function MemoryCompactRow({ group }: { group: MemoryCompactGroup }): React.JSX.E
 }
 
 const TurnBlock = React.memo(function TurnBlock({
+  editableUserMessage,
   forkingSeq,
   group,
+  onEditUserMessage,
   onForkFromEvent,
 }: {
+  editableUserMessage?: { event_seq: number; text: string } | null;
   forkingSeq?: number | null;
   group: TurnGroup;
+  onEditUserMessage?: (eventSeq: number, input: string) => Promise<void>;
   onForkFromEvent?: (event: AstralEvent) => void;
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(group.status === "running");
@@ -402,7 +472,13 @@ const TurnBlock = React.memo(function TurnBlock({
 
   return (
     <motion.article animate={{ opacity: 1, y: 0 }} className="mb-6 min-w-0" initial={{ opacity: 0, y: 4 }} transition={{ duration: 0.14 }}>
-      {group.user ? <UserMessage event={group.user} /> : null}
+      {group.user ? (
+        <UserMessage
+          canEdit={editableUserMessage?.event_seq === group.user.seq && textValue(group.user.normalized as Record<string, unknown>, "text") === editableUserMessage.text}
+          event={group.user}
+          onEdit={onEditUserMessage}
+        />
+      ) : null}
 
       {group.start || group.end ? (
         <button
@@ -431,12 +507,102 @@ function finalForkableAssistantSeq(events: AstralEvent[]): number | null {
   return null;
 }
 
-function UserMessage({ event }: { event: AstralEvent }): React.JSX.Element {
+function UserMessage({
+  canEdit = false,
+  event,
+  onEdit,
+}: {
+  canEdit?: boolean;
+  event: AstralEvent;
+  onEdit?: (eventSeq: number, input: string) => Promise<void>;
+}): React.JSX.Element {
   const value = event.normalized as Record<string, unknown>;
+  const text = textValue(value, "text");
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(text);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!editing) setDraft(text);
+  }, [editing, text]);
+
+  async function submitEdit(): Promise<void> {
+    const trimmed = draft.trim();
+    if (!trimmed || submitting || !onEdit) return;
+    setSubmitting(true);
+    try {
+      await onEdit(event.seq, trimmed);
+      setEditing(false);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="flex justify-end">
+        <div className="grid w-[min(80%,620px)] gap-2 rounded-[16px] bg-black/[0.045] p-2">
+          <textarea
+            className="max-h-40 min-h-20 resize-none rounded-[12px] border border-black/10 bg-white/85 px-3 py-2 text-[15px] font-semibold leading-6 text-[#202124] outline-none focus:border-[#2f8cff]/50"
+            disabled={submitting}
+            value={draft}
+            onChange={(changeEvent) => setDraft(changeEvent.target.value)}
+            onKeyDown={(keyEvent) => {
+              if ((keyEvent.metaKey || keyEvent.ctrlKey) && keyEvent.key === "Enter") {
+                keyEvent.preventDefault();
+                void submitEdit();
+              }
+              if (keyEvent.key === "Escape") {
+                keyEvent.preventDefault();
+                setEditing(false);
+                setDraft(text);
+              }
+            }}
+          />
+          <div className="flex justify-end gap-1.5">
+            <button
+              className="h-8 rounded-md px-2.5 text-[13px] font-semibold text-[#73777c] hover:bg-black/[0.04]"
+              disabled={submitting}
+              type="button"
+              onClick={() => {
+                setEditing(false);
+                setDraft(text);
+              }}
+            >
+              取消
+            </button>
+            <button
+              className="flex h-8 items-center gap-1.5 rounded-md bg-[#202124] px-2.5 text-[13px] font-semibold text-white disabled:cursor-default disabled:opacity-50"
+              disabled={submitting || draft.trim() === ""}
+              type="button"
+              onClick={() => void submitEdit()}
+            >
+              <CornerDownLeft size={14} strokeWidth={1.9} />
+              发送
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex justify-end">
-      <div className="max-w-[80%] rounded-[16px] bg-black/[0.045] px-4 py-2 text-[15px] font-semibold leading-6 text-[#202124]">
-        {textValue(value, "text")}
+      <div className="group flex max-w-[80%] items-start gap-1.5">
+        {canEdit && onEdit ? (
+          <button
+            className="mt-1 grid size-7 place-items-center rounded-md text-[#9a9da1] opacity-0 transition hover:bg-black/[0.04] hover:text-[#343438] group-hover:opacity-100"
+            type="button"
+            aria-label="编辑"
+            title="编辑"
+            onClick={() => setEditing(true)}
+          >
+            <Pencil size={15} strokeWidth={1.8} />
+          </button>
+        ) : null}
+        <div className="min-w-0 rounded-[16px] bg-black/[0.045] px-4 py-2 text-[15px] font-semibold leading-6 text-[#202124]">
+          {text}
+        </div>
       </div>
     </div>
   );

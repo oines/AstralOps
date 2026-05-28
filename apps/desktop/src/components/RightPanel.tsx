@@ -10,7 +10,7 @@ import { motion } from "framer-motion";
 import "@xterm/xterm/css/xterm.css";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AstralApi } from "../api";
+import type { CoreClient, TerminalConnection } from "../api";
 import type { FileListResponse, HealthResponse, PanelTabKind, Workspace } from "../types";
 
 type PanelTab = {
@@ -20,20 +20,25 @@ type PanelTab = {
 };
 
 type RightPanelProps = {
-  api: AstralApi | null;
+  api: CoreClient | null;
   health: HealthResponse | null;
   open: boolean;
   width: number;
   workspace: Workspace | null;
+  onLiveResize?: (width: number) => void;
   onResize: (width: number) => void;
+  onResizeActiveChange?: (active: boolean) => void;
 };
 
-export function RightPanel({ api, health, open, width, workspace, onResize }: RightPanelProps): React.JSX.Element | null {
+export function RightPanel({ api, health, open, width, workspace, onLiveResize, onResize, onResizeActiveChange }: RightPanelProps): React.JSX.Element | null {
   const [tabs, setTabs] = useState<PanelTab[]>([]);
   const contentOrderRef = useRef<string[]>([]);
   const [activeTabId, setActiveTabId] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [liveWidth, setLiveWidth] = useState(width);
+  const liveWidthRef = useRef(width);
+  const resizeFrameRef = useRef<number | null>(null);
   const terminalAvailable = health?.features?.terminal?.available !== false;
   const tabDragSensors = useSensors(
     useSensor(PointerSensor, {
@@ -61,19 +66,51 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
 
   useEffect(() => {
     if (!dragging) return;
+    onResizeActiveChange?.(true);
+
+    function updateLiveWidth(nextWidth: number): void {
+      liveWidthRef.current = nextWidth;
+      onLiveResize?.(nextWidth);
+      if (resizeFrameRef.current !== null) return;
+      resizeFrameRef.current = window.requestAnimationFrame(() => {
+        resizeFrameRef.current = null;
+        setLiveWidth(liveWidthRef.current);
+      });
+    }
+
     function move(event: MouseEvent): void {
-      onResize(Math.min(720, Math.max(320, window.innerWidth - event.clientX)));
+      updateLiveWidth(clampRightPanelWidth(window.innerWidth - event.clientX));
     }
     function stop(): void {
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
+      setLiveWidth(liveWidthRef.current);
+      onLiveResize?.(liveWidthRef.current);
+      onResize(liveWidthRef.current);
+      onResizeActiveChange?.(false);
       setDragging(false);
     }
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", stop);
     return () => {
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", stop);
+      onResizeActiveChange?.(false);
     };
-  }, [dragging, onResize]);
+  }, [dragging, onLiveResize, onResize, onResizeActiveChange]);
+
+  useEffect(() => {
+    if (dragging) return;
+    liveWidthRef.current = width;
+    setLiveWidth(width);
+    onLiveResize?.(width);
+  }, [dragging, onLiveResize, width]);
 
   const updateTabTitle = useCallback((id: string, title: string): void => {
     setTabs((current) => current.map((tab) => (tab.id === id && tab.title !== title ? { ...tab, title } : tab)));
@@ -81,6 +118,7 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   const contentTabs = panelContentTabs(tabs, contentOrderRef);
+  const panelWidth = open ? liveWidth : 0;
 
   function addTab(kind: PanelTabKind): void {
     const tab = createTab(kind);
@@ -117,21 +155,25 @@ export function RightPanel({ api, health, open, width, workspace, onResize }: Ri
       className={`relative flex h-screen shrink-0 flex-col overflow-hidden bg-white ${
         open ? "border-l border-black/5" : "border-l border-transparent"
       }`}
-      animate={{ width: open ? width : 0 }}
+      animate={{ width: panelWidth }}
       initial={false}
-      transition={{ type: "spring", stiffness: 360, damping: 36, mass: 0.85 }}
+      transition={dragging ? { duration: 0 } : { type: "spring", stiffness: 360, damping: 36, mass: 0.85 }}
       aria-hidden={!open}
     >
       <div
         className={`absolute inset-y-0 left-[-3px] z-20 w-1.5 cursor-col-resize transition-colors duration-150 ease-out hover:bg-[#d8d5cd] ${open ? "" : "hidden"}`}
         onMouseDown={(event) => {
           event.preventDefault();
+          liveWidthRef.current = width;
+          setLiveWidth(width);
+          onLiveResize?.(width);
+          onResizeActiveChange?.(true);
           setDragging(true);
         }}
       />
       <motion.div
         className={`flex h-full flex-col ${open ? "" : "pointer-events-none"}`}
-        style={{ width }}
+        style={{ width: liveWidth }}
         animate={{ opacity: open ? 1 : 0, x: open ? 0 : 16 }}
         initial={false}
         transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
@@ -260,7 +302,7 @@ function SortablePanelTab({
   );
 }
 
-function FilesTab({ api, workspace }: { api: AstralApi | null; workspace: Workspace | null }): React.JSX.Element {
+function FilesTab({ api, workspace }: { api: CoreClient | null; workspace: Workspace | null }): React.JSX.Element {
   const [path, setPath] = useState("");
   const [data, setData] = useState<FileListResponse | null>(null);
   const [error, setError] = useState("");
@@ -342,7 +384,7 @@ function FilesTab({ api, workspace }: { api: AstralApi | null; workspace: Worksp
   );
 }
 
-function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null; onTitleChange: (title: string) => void; workspace: Workspace | null }): React.JSX.Element {
+function TerminalTab({ api, onTitleChange, workspace }: { api: CoreClient | null; onTitleChange: (title: string) => void; workspace: Workspace | null }): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -396,11 +438,9 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
     term.open(hostRef.current);
     fit.fit();
 
-    const socket = api.workspacePTYSocket(workspaceId);
+    let terminalConnection: TerminalConnection | null = null;
     const sendResize = (): void => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-      }
+      terminalConnection?.resize(term.cols, term.rows);
     };
     const resizeObserver = new ResizeObserver(() => {
       fit.fit();
@@ -409,49 +449,38 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: AstralApi | null;
     resizeObserver.observe(hostRef.current);
 
     const input = term.onData((data) => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "input", data }));
-      }
+      terminalConnection?.input(data);
     });
     const isCurrent = (): boolean => !disposed && connectionIdRef.current === connectionId;
-    socket.onopen = () => {
-      if (!isCurrent()) return;
-      opened = true;
-      sendResize();
-    };
-    socket.onmessage = (event) => {
-      if (!isCurrent()) return;
-      try {
-        const message = JSON.parse(event.data as string) as { type: string; data?: string; message?: string; shell?: string; cwd?: string };
-        if (message.type === "ready") {
-          const nextShell = message.shell || "shell";
-          onTitleChangeRef.current(`${nextShell} · ${basename(message.cwd || workspaceRoot)}`);
-        }
-        if (message.type === "output" && message.data) term.write(message.data);
-        if (message.type === "error") {
-          const text = message.message || "PTY error";
+    terminalConnection = api.terminal.openWorkspaceTerminal(workspaceId, {
+      onOpen: () => {
+        if (!isCurrent()) return;
+        opened = true;
+        sendResize();
+      },
+      onReady: (message) => {
+        if (!isCurrent()) return;
+        const nextShell = message.shell || "shell";
+        onTitleChangeRef.current(`${nextShell} · ${basename(message.cwd || workspaceRoot)}`);
+      },
+      onOutput: (data) => {
+        if (isCurrent()) term.write(data);
+      },
+      onError: (text) => {
+        if (!isCurrent()) return;
+        if (opened || text !== "PTY 连接失败") {
           term.writeln(`\r\n\x1b[31m${text}\x1b[0m`);
+        } else {
+          term.writeln("\r\n\x1b[31mPTY 连接失败\x1b[0m");
         }
-      } catch {
-        term.write(String(event.data));
-      }
-    };
-    socket.onerror = () => {
-      if (!isCurrent() || opened) return;
-      term.writeln("\r\n\x1b[31mPTY 连接失败\x1b[0m");
-    };
-    socket.onclose = () => {
-      input.dispose();
-    };
+      },
+    });
 
     return () => {
       disposed = true;
       input.dispose();
       resizeObserver.disconnect();
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "close" }));
-      }
-      socket.close();
+      terminalConnection?.close();
       term.dispose();
       if (termRef.current === term) termRef.current = null;
       if (fitRef.current === fit) fitRef.current = null;
@@ -486,6 +515,10 @@ function createTab(kind: PanelTabKind): PanelTab {
     kind,
     title: kind === "terminal" ? undefined : "文件",
   };
+}
+
+function clampRightPanelWidth(width: number): number {
+  return Math.min(720, Math.max(320, width));
 }
 
 function panelContentTabs(tabs: PanelTab[], orderRef: React.MutableRefObject<string[]>): PanelTab[] {

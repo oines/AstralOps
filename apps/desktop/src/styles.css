@@ -17,6 +17,14 @@ html, body, #root {
   background-color: transparent !important;
 }
 
+.workspace-opener-menu {
+  will-change: right;
+}
+
+[data-right-panel-resizing="true"] .workspace-opener-menu {
+  transition: none !important;
+}
+
 *::-webkit-scrollbar,
 .xterm .xterm-viewport::-webkit-scrollbar {
   width: 6px !important;
