@@ -125,6 +125,89 @@ const LANGUAGE_OPTIONS: SettingOption[] = [
   { value: "en", label: "English" },
 ];
 
+function updateCheckingStatus(current: AppUpdateStatus | null): AppUpdateStatus {
+  return {
+    current_version: current?.current_version ?? "0.1.0",
+    is_packaged: current?.is_packaged ?? false,
+    platform: current?.platform ?? window.astral.platform,
+    status: "checking",
+  };
+}
+
+function updateInstallingStatus(current: AppUpdateStatus | null): AppUpdateStatus {
+  return {
+    current_version: current?.current_version ?? "0.1.0",
+    is_packaged: current?.is_packaged ?? true,
+    platform: current?.platform ?? window.astral.platform,
+    available_version: current?.available_version,
+    status: "installing",
+  };
+}
+
+function updateErrorStatus(current: AppUpdateStatus | null, error: unknown): AppUpdateStatus {
+  return {
+    current_version: current?.current_version ?? "0.1.0",
+    is_packaged: current?.is_packaged ?? false,
+    platform: current?.platform ?? window.astral.platform,
+    status: "error",
+    error: error instanceof Error ? error.message : String(error),
+  };
+}
+
+function updateActionLabel(status: AppUpdateStatus | null): string {
+  switch (status?.status) {
+    case "checking":
+      return "检查中";
+    case "available":
+    case "downloading":
+      return "下载中";
+    case "downloaded":
+      return "重启安装";
+    case "installing":
+      return "正在重启";
+    case "not-available":
+      return "再次检查";
+    case "error":
+    case "cancelled":
+      return "重试";
+    case "dev":
+      return "开发模式";
+    default:
+      return "检查更新";
+  }
+}
+
+function updateStatusDescription(status: AppUpdateStatus | null): string {
+  switch (status?.status) {
+    case "checking":
+      return "正在检查 GitHub Release 中的新版本";
+    case "available":
+      return status.available_version ? `发现 ${status.available_version}，正在下载` : "发现新版本，正在下载";
+    case "downloading":
+      return `正在下载${updateProgressLabel(status)}`;
+    case "downloaded":
+      return status.available_version ? `${status.available_version} 已下载，重启后安装` : "更新已下载，重启后安装";
+    case "installing":
+      return "正在重启并安装更新";
+    case "not-available":
+      return status.checked_at ? "已是最新版本" : "当前已是最新版本";
+    case "cancelled":
+      return "更新下载已取消";
+    case "error":
+      return status.error || "检查更新失败";
+    case "dev":
+      return status.message || "开发模式不支持自动更新";
+    default:
+      return "从 GitHub Release 检查并自动下载新版本";
+  }
+}
+
+function updateProgressLabel(status: AppUpdateStatus): string {
+  const percent = status.progress?.percent;
+  if (!Number.isFinite(percent)) return "";
+  return ` ${Math.max(0, Math.min(100, percent ?? 0)).toFixed(0)}%`;
+}
+
 export function SettingsView({
   health,
   nativeVibrancy,
@@ -138,6 +221,7 @@ export function SettingsView({
 }: SettingsViewProps): React.JSX.Element {
   const [activeId, setActiveId] = useState<SettingsCategoryId>("general");
   const [actionStatus, setActionStatus] = useState<ActionStatus>({});
+  const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null);
   const [language, setLanguage] = useState("system");
   const categories = useMemo(() => SETTINGS_GROUPS.flatMap((group) => group.items), []);
   const active = categories.find((category) => category.id === activeId) ?? categories[0];
@@ -162,6 +246,41 @@ export function SettingsView({
       setActionStatus((current) => ({ ...current, logs: "打开失败" }));
     }
   }
+
+  async function checkForUpdates(): Promise<void> {
+    try {
+      setUpdateStatus((current) => updateCheckingStatus(current));
+      setUpdateStatus(await window.astral.checkForUpdates());
+    } catch (error) {
+      setUpdateStatus((current) => updateErrorStatus(current, error));
+    }
+  }
+
+  async function installUpdate(): Promise<void> {
+    try {
+      const result = await window.astral.installUpdate();
+      if (!result.ok) throw new Error(result.error || "安装更新失败");
+      setUpdateStatus((current) => updateInstallingStatus(current));
+    } catch (error) {
+      setUpdateStatus((current) => updateErrorStatus(current, error));
+    }
+  }
+
+  useEffect(() => {
+    let active = true;
+    void window.astral.getUpdateStatus().then((status) => {
+      if (active) setUpdateStatus(status);
+    }).catch((error) => {
+      if (active) setUpdateStatus((current) => updateErrorStatus(current, error));
+    });
+    const unsubscribe = window.astral.onUpdateStatus((status) => {
+      if (active) setUpdateStatus(status);
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
 
   return (
     <div className="relative flex h-full min-h-0 w-full bg-transparent text-[var(--ao-text)]">
@@ -223,6 +342,9 @@ export function SettingsView({
             onPatchSettings={onPatchSettings}
             savingKeys={savingKeys}
             settings={resolvedSettings}
+            updateStatus={updateStatus}
+            onCheckForUpdates={checkForUpdates}
+            onInstallUpdate={installUpdate}
           />
         </div>
       </main>
@@ -239,19 +361,25 @@ function SettingsContent({
   onLanguageChange,
   onOpenLogs,
   onPatchSettings,
+  onCheckForUpdates,
+  onInstallUpdate,
   savingKeys,
   settings,
+  updateStatus,
 }: {
   activeId: SettingsCategoryId;
   actionStatus: ActionStatus;
   health: HealthResponse | null;
   language: string;
   onClearMediaCache: () => Promise<void>;
+  onCheckForUpdates: () => Promise<void>;
+  onInstallUpdate: () => Promise<void>;
   onLanguageChange: (value: string) => void;
   onOpenLogs: () => Promise<void>;
   onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
   savingKeys: ReadonlySet<string>;
   settings: AppSettings;
+  updateStatus: AppUpdateStatus | null;
 }): React.JSX.Element {
   switch (activeId) {
     case "appearance":
@@ -423,7 +551,7 @@ function SettingsContent({
         </div>
       );
     case "about":
-      return <AboutContent health={health} onPatchSettings={onPatchSettings} savingKeys={savingKeys} settings={settings} />;
+      return <AboutContent health={health} onCheckForUpdates={onCheckForUpdates} onInstallUpdate={onInstallUpdate} onPatchSettings={onPatchSettings} savingKeys={savingKeys} settings={settings} updateStatus={updateStatus} />;
     case "general":
     default:
       return (
@@ -449,16 +577,24 @@ function SettingsContent({
 
 function AboutContent({
   health,
+  onCheckForUpdates,
+  onInstallUpdate,
   onPatchSettings,
   savingKeys,
   settings,
+  updateStatus,
 }: {
   health: HealthResponse | null;
+  onCheckForUpdates: () => Promise<void>;
+  onInstallUpdate: () => Promise<void>;
   onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
   savingKeys: ReadonlySet<string>;
   settings: AppSettings;
+  updateStatus: AppUpdateStatus | null;
 }): React.JSX.Element {
   const version = healthValue(health, "version") || "0.1.0";
+  const updateAction = updateStatus?.status === "downloaded" ? onInstallUpdate : onCheckForUpdates;
+  const updateBusy = updateStatus?.status === "checking" || updateStatus?.status === "available" || updateStatus?.status === "downloading" || updateStatus?.status === "installing";
   return (
     <div className="grid gap-8">
       <SettingsSection title="版本">
@@ -470,7 +606,18 @@ function AboutContent({
         <InfoRow label="Codex CLI 路径" value={agentPath(health, "codex")} />
       </SettingsSection>
       <SettingsSection title="更新">
-        <SettingRow title="检查更新" description="当前版本暂不支持自动更新" control={<ButtonControl disabled icon={RefreshCw} label="暂不可用" onClick={() => undefined} />} />
+        <SettingRow
+          title="检查更新"
+          description={updateStatusDescription(updateStatus)}
+          control={
+            <ButtonControl
+              disabled={updateStatus?.status === "dev" || updateBusy}
+              icon={RefreshCw}
+              label={updateActionLabel(updateStatus)}
+              onClick={updateAction}
+            />
+          }
+        />
         <SettingRow
           title="自动检查"
           description="启动后定期检查新版本"

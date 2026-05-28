@@ -101,6 +101,7 @@ export function App(): React.JSX.Element {
   const sseFrameRef = useRef<number | null>(null);
   const notifiedIntentIDsRef = useRef<Set<string>>(new Set());
   const activeSessionIdRef = useRef("");
+  const updateAutoCheckStartedRef = useRef(false);
   const appSettingsRef = useRef<AppSettings>(DEFAULT_APP_SETTINGS);
   const appChromeRef = useRef<HTMLDivElement | null>(null);
 
@@ -217,6 +218,15 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     appSettingsRef.current = appSettings;
   }, [appSettings]);
+
+  useEffect(() => {
+    if (connection !== "connected" || !appSettings.updates.auto_check || updateAutoCheckStartedRef.current) return;
+    updateAutoCheckStartedRef.current = true;
+    const timeout = window.setTimeout(() => {
+      void window.astral.checkForUpdates({ automatic: true }).catch(() => undefined);
+    }, 2500);
+    return () => window.clearTimeout(timeout);
+  }, [appSettings.updates.auto_check, connection]);
 
   useEffect(() => {
     const theme = appSettings.appearance.theme;
