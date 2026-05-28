@@ -308,6 +308,118 @@ func TestControlWebSocketMediaStreamChunksAreEncrypted(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketMediaStreamResumesAcrossControlReconnect(t *testing.T) {
+	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityMediaStream)
+	secret := []byte("0123456789abcdef")
+	media := addControlMediaFixture(t, app, workspace, session, secret)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "media_stream_initial",
+			Capability: CapabilityMediaStream,
+			Action:     ControlActionMediaStream,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"event_seq":  media.eventSeq,
+				"media_id":   media.mediaID,
+				"chunk_size": 4,
+			},
+		},
+	})
+
+	plain, sealed := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealed), string(secret)) || strings.Contains(string(sealed), media.path) {
+		t.Fatalf("sealed media stream response leaked payload: %s", string(sealed))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("initial stream response = %#v, want ok", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	streamID := stringValue(result["stream_id"])
+	resumeToken := stringValue(result["resume_token"])
+	if streamID == "" || resumeToken == "" {
+		t.Fatalf("stream result = %#v, want stream_id and resume_token", result)
+	}
+	if strings.Contains(resumeToken, media.path) {
+		t.Fatalf("resume token leaked Host path: %s", resumeToken)
+	}
+
+	firstChunk := readEncryptedControlFrame(t, client, cipher)
+	if firstChunk.Type != mediaStreamFrameChunk || firstChunk.Media == nil || firstChunk.Media.StreamID != streamID {
+		t.Fatalf("first stream frame = %#v, want chunk for stream %q", firstChunk, streamID)
+	}
+	if firstChunk.Media.ResumeToken != resumeToken {
+		t.Fatalf("first chunk resume token = %q, want %q", firstChunk.Media.ResumeToken, resumeToken)
+	}
+	body, err := base64.StdEncoding.DecodeString(firstChunk.Media.DataBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "0123" {
+		t.Fatalf("first chunk body = %q, want 0123", string(body))
+	}
+	nextOffset := firstChunk.Media.Offset + int64(len(body))
+	_ = client.Close()
+
+	nextClient, nextCipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer nextClient.Close()
+	writeEncryptedControlFrame(t, nextClient, nextCipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "media_stream_reconnect",
+			Capability: CapabilityMediaStream,
+			Action:     ControlActionMediaStream,
+			Params: map[string]any{
+				"resume_token": resumeToken,
+				"offset":       nextOffset,
+				"chunk_size":   5,
+			},
+		},
+	})
+
+	reconnectResponse := readEncryptedControlFrame(t, nextClient, nextCipher)
+	if reconnectResponse.Type != "response" || reconnectResponse.Response == nil || !reconnectResponse.Response.OK {
+		t.Fatalf("reconnect stream response = %#v, want ok", reconnectResponse)
+	}
+	reconnectResult := mapValue(reconnectResponse.Response.Result)
+	reconnectStreamID := stringValue(reconnectResult["stream_id"])
+	if reconnectStreamID == "" {
+		t.Fatalf("reconnect stream id = %q, want non-empty stream id", reconnectStreamID)
+	}
+	if got := stringValue(reconnectResult["resume_token"]); got != resumeToken {
+		t.Fatalf("reconnect resume token = %q, want %q", got, resumeToken)
+	}
+
+	var streamed []byte
+	for {
+		frame := readEncryptedControlFrame(t, nextClient, nextCipher)
+		if frame.Media == nil || frame.Media.StreamID != reconnectStreamID {
+			t.Fatalf("reconnect stream frame = %#v, want media frame for stream %q", frame, reconnectStreamID)
+		}
+		switch frame.Type {
+		case mediaStreamFrameChunk:
+			body, err := base64.StdEncoding.DecodeString(frame.Media.DataBase64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			streamed = append(streamed, body...)
+		case mediaStreamFrameComplete:
+			if !frame.Media.Final {
+				t.Fatalf("completion frame = %#v, want final", frame.Media)
+			}
+			if string(streamed) != "456789abcdef" {
+				t.Fatalf("resumed stream after reconnect = %q, want 456789abcdef", string(streamed))
+			}
+			return
+		default:
+			t.Fatalf("reconnect stream frame type = %q", frame.Type)
+		}
+	}
+}
+
 func TestControlWebSocketMediaStreamResumesFromOffset(t *testing.T) {
 	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityMediaStream)
 	secret := []byte("0123456789")

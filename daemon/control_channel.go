@@ -253,15 +253,11 @@ func (c *controlWSConn) afterControlResponse(req ControlRequest, response Contro
 		if !ok {
 			return nil
 		}
-		var params mediaStreamParams
-		if err := decodeControlParams(req.Params, &params); err != nil {
-			return nil
-		}
 		ctx, cancel := context.WithCancel(context.Background())
 		c.registerControlStream(result.StreamID, cancel)
 		return func() {
 			defer c.unregisterControlStream(result.StreamID)
-			c.app.streamControlMedia(ctx, params, result, c, req.RequestID)
+			c.app.streamControlMedia(ctx, result, c, req.RequestID)
 		}
 	case ControlActionWorkspaceFilesStream:
 		result, ok := response.Result.(workspaceFileStreamResult)

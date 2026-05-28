@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -19,6 +20,7 @@ const (
 	mediaStreamFrameError    = "media.error"
 	mediaStreamDefaultChunk  = 64 * 1024
 	mediaStreamMaxChunk      = 256 * 1024
+	mediaStreamTokenPrefix   = "media_stream_v1."
 )
 
 type resolvedSessionMedia struct {
@@ -39,11 +41,12 @@ type mediaReadParams struct {
 }
 
 type mediaStreamParams struct {
-	SessionID string `json:"session_id"`
-	EventSeq  int64  `json:"event_seq"`
-	MediaID   string `json:"media_id"`
-	Offset    int64  `json:"offset,omitempty"`
-	ChunkSize int    `json:"chunk_size,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	EventSeq    int64  `json:"event_seq,omitempty"`
+	MediaID     string `json:"media_id,omitempty"`
+	ResumeToken string `json:"resume_token,omitempty"`
+	Offset      int64  `json:"offset,omitempty"`
+	ChunkSize   int    `json:"chunk_size,omitempty"`
 }
 
 type mediaStreamCancelParams struct {
@@ -63,16 +66,17 @@ type mediaReadResult struct {
 }
 
 type mediaStreamResult struct {
-	StreamID  string `json:"stream_id"`
-	SessionID string `json:"session_id"`
-	EventSeq  int64  `json:"event_seq"`
-	MediaID   string `json:"media_id"`
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	MIMEType  string `json:"mime_type,omitempty"`
-	Size      int64  `json:"size,omitempty"`
-	Offset    int64  `json:"offset"`
-	ChunkSize int    `json:"chunk_size"`
+	StreamID    string `json:"stream_id"`
+	ResumeToken string `json:"resume_token"`
+	SessionID   string `json:"session_id"`
+	EventSeq    int64  `json:"event_seq"`
+	MediaID     string `json:"media_id"`
+	Kind        string `json:"kind"`
+	Name        string `json:"name"`
+	MIMEType    string `json:"mime_type,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	Offset      int64  `json:"offset"`
+	ChunkSize   int    `json:"chunk_size"`
 }
 
 type mediaStreamCancelResult struct {
@@ -82,6 +86,7 @@ type mediaStreamCancelResult struct {
 
 type mediaStreamFrame struct {
 	StreamID     string `json:"stream_id"`
+	ResumeToken  string `json:"resume_token,omitempty"`
 	RequestID    string `json:"request_id,omitempty"`
 	SessionID    string `json:"session_id"`
 	EventSeq     int64  `json:"event_seq"`
@@ -96,6 +101,12 @@ type mediaStreamFrame struct {
 	Final        bool   `json:"final,omitempty"`
 	ErrorCode    string `json:"error_code,omitempty"`
 	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+type mediaStreamTokenPayload struct {
+	SessionID string `json:"session_id"`
+	EventSeq  int64  `json:"event_seq"`
+	MediaID   string `json:"media_id"`
 }
 
 func (a *app) handleSessionMedia(w http.ResponseWriter, r *http.Request, sessionID, seqText, mediaID string) {
@@ -119,7 +130,11 @@ func (a *app) handleSessionMedia(w http.ResponseWriter, r *http.Request, session
 }
 
 func (a *app) prepareControlMediaStream(params mediaStreamParams) (mediaStreamResult, error) {
-	media, err := a.resolveSessionMedia(params.SessionID, params.EventSeq, params.MediaID)
+	ref, err := mediaStreamReference(params)
+	if err != nil {
+		return mediaStreamResult{}, err
+	}
+	media, err := a.resolveSessionMedia(ref.SessionID, ref.EventSeq, ref.MediaID)
 	if err != nil {
 		return mediaStreamResult{}, err
 	}
@@ -128,21 +143,22 @@ func (a *app) prepareControlMediaStream(params mediaStreamParams) (mediaStreamRe
 		return mediaStreamResult{}, newActionError(http.StatusBadRequest, "media_stream_offset_invalid", "media stream offset is invalid")
 	}
 	return mediaStreamResult{
-		StreamID:  "media_" + randomID(16),
-		SessionID: media.SessionID,
-		EventSeq:  media.EventSeq,
-		MediaID:   media.MediaID,
-		Kind:      media.Kind,
-		Name:      media.Name,
-		MIMEType:  media.MIMEType,
-		Size:      media.Size,
-		Offset:    offset,
-		ChunkSize: mediaStreamChunkSize(params.ChunkSize),
+		StreamID:    "media_" + randomID(16),
+		ResumeToken: mediaStreamResumeToken(media.SessionID, media.EventSeq, media.MediaID),
+		SessionID:   media.SessionID,
+		EventSeq:    media.EventSeq,
+		MediaID:     media.MediaID,
+		Kind:        media.Kind,
+		Name:        media.Name,
+		MIMEType:    media.MIMEType,
+		Size:        media.Size,
+		Offset:      offset,
+		ChunkSize:   mediaStreamChunkSize(params.ChunkSize),
 	}, nil
 }
 
-func (a *app) streamControlMedia(ctx context.Context, params mediaStreamParams, result mediaStreamResult, conn *controlWSConn, requestID string) {
-	media, err := a.resolveSessionMedia(params.SessionID, params.EventSeq, params.MediaID)
+func (a *app) streamControlMedia(ctx context.Context, result mediaStreamResult, conn *controlWSConn, requestID string) {
+	media, err := a.resolveSessionMedia(result.SessionID, result.EventSeq, result.MediaID)
 	if err != nil {
 		conn.writePlain(controlPlainFrame{Type: mediaStreamFrameError, Media: mediaStreamErrorFrame(result, requestID, "media_not_found", err.Error())})
 		return
@@ -173,18 +189,19 @@ func (a *app) streamControlMedia(ctx context.Context, params mediaStreamParams, 
 			}
 			seq++
 			chunk := mediaStreamFrame{
-				StreamID:   result.StreamID,
-				RequestID:  requestID,
-				SessionID:  media.SessionID,
-				EventSeq:   media.EventSeq,
-				MediaID:    media.MediaID,
-				Kind:       media.Kind,
-				Name:       media.Name,
-				MIMEType:   media.MIMEType,
-				Size:       media.Size,
-				Seq:        seq,
-				Offset:     offset,
-				DataBase64: base64.StdEncoding.EncodeToString(buffer[:n]),
+				StreamID:    result.StreamID,
+				ResumeToken: result.ResumeToken,
+				RequestID:   requestID,
+				SessionID:   media.SessionID,
+				EventSeq:    media.EventSeq,
+				MediaID:     media.MediaID,
+				Kind:        media.Kind,
+				Name:        media.Name,
+				MIMEType:    media.MIMEType,
+				Size:        media.Size,
+				Seq:         seq,
+				Offset:      offset,
+				DataBase64:  base64.StdEncoding.EncodeToString(buffer[:n]),
 			}
 			conn.writePlain(controlPlainFrame{Type: mediaStreamFrameChunk, Media: &chunk})
 			offset += int64(n)
@@ -197,18 +214,19 @@ func (a *app) streamControlMedia(ctx context.Context, params mediaStreamParams, 
 		}
 		if readErr == io.EOF {
 			conn.writePlain(controlPlainFrame{Type: mediaStreamFrameComplete, Media: &mediaStreamFrame{
-				StreamID:  result.StreamID,
-				RequestID: requestID,
-				SessionID: media.SessionID,
-				EventSeq:  media.EventSeq,
-				MediaID:   media.MediaID,
-				Kind:      media.Kind,
-				Name:      media.Name,
-				MIMEType:  media.MIMEType,
-				Size:      media.Size,
-				Seq:       seq + 1,
-				Offset:    offset,
-				Final:     true,
+				StreamID:    result.StreamID,
+				ResumeToken: result.ResumeToken,
+				RequestID:   requestID,
+				SessionID:   media.SessionID,
+				EventSeq:    media.EventSeq,
+				MediaID:     media.MediaID,
+				Kind:        media.Kind,
+				Name:        media.Name,
+				MIMEType:    media.MIMEType,
+				Size:        media.Size,
+				Seq:         seq + 1,
+				Offset:      offset,
+				Final:       true,
 			}})
 			return
 		}
@@ -262,9 +280,70 @@ func mediaStreamChunkSize(requested int) int {
 	return requested
 }
 
+func mediaStreamReference(params mediaStreamParams) (mediaReadParams, error) {
+	token := strings.TrimSpace(params.ResumeToken)
+	if token == "" {
+		return mediaReadParams{
+			SessionID: params.SessionID,
+			EventSeq:  params.EventSeq,
+			MediaID:   params.MediaID,
+		}, nil
+	}
+	ref, err := decodeMediaStreamResumeToken(token)
+	if err != nil {
+		return mediaReadParams{}, err
+	}
+	if strings.TrimSpace(params.SessionID) != "" && strings.TrimSpace(params.SessionID) != ref.SessionID {
+		return mediaReadParams{}, newActionError(http.StatusBadRequest, "media_stream_resume_token_mismatch", "resume token does not match session_id")
+	}
+	if params.EventSeq != 0 && params.EventSeq != ref.EventSeq {
+		return mediaReadParams{}, newActionError(http.StatusBadRequest, "media_stream_resume_token_mismatch", "resume token does not match event_seq")
+	}
+	if strings.TrimSpace(params.MediaID) != "" && strings.TrimSpace(params.MediaID) != ref.MediaID {
+		return mediaReadParams{}, newActionError(http.StatusBadRequest, "media_stream_resume_token_mismatch", "resume token does not match media_id")
+	}
+	return ref, nil
+}
+
+func mediaStreamResumeToken(sessionID string, eventSeq int64, mediaID string) string {
+	body, err := json.Marshal(mediaStreamTokenPayload{
+		SessionID: sessionID,
+		EventSeq:  eventSeq,
+		MediaID:   mediaID,
+	})
+	if err != nil {
+		return ""
+	}
+	return mediaStreamTokenPrefix + base64.RawURLEncoding.EncodeToString(body)
+}
+
+func decodeMediaStreamResumeToken(token string) (mediaReadParams, error) {
+	token = strings.TrimSpace(token)
+	if !strings.HasPrefix(token, mediaStreamTokenPrefix) {
+		return mediaReadParams{}, newActionError(http.StatusBadRequest, "media_stream_resume_token_invalid", "invalid media stream resume token")
+	}
+	body, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(token, mediaStreamTokenPrefix))
+	if err != nil {
+		return mediaReadParams{}, newActionError(http.StatusBadRequest, "media_stream_resume_token_invalid", "invalid media stream resume token")
+	}
+	var payload mediaStreamTokenPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return mediaReadParams{}, newActionError(http.StatusBadRequest, "media_stream_resume_token_invalid", "invalid media stream resume token")
+	}
+	if strings.TrimSpace(payload.SessionID) == "" || payload.EventSeq <= 0 || strings.TrimSpace(payload.MediaID) == "" {
+		return mediaReadParams{}, newActionError(http.StatusBadRequest, "media_stream_resume_token_invalid", "invalid media stream resume token")
+	}
+	return mediaReadParams{
+		SessionID: strings.TrimSpace(payload.SessionID),
+		EventSeq:  payload.EventSeq,
+		MediaID:   strings.TrimSpace(payload.MediaID),
+	}, nil
+}
+
 func mediaStreamErrorFrame(result mediaStreamResult, requestID, code, message string) *mediaStreamFrame {
 	return &mediaStreamFrame{
 		StreamID:     result.StreamID,
+		ResumeToken:  result.ResumeToken,
 		RequestID:    requestID,
 		SessionID:    result.SessionID,
 		EventSeq:     result.EventSeq,

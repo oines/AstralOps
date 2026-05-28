@@ -397,7 +397,8 @@ export type MediaReadParams = {
 
 export type MediaDownloadParams = MediaReadParams;
 
-export type MediaStreamParams = MediaReadParams & {
+export type MediaStreamParams = Partial<MediaReadParams> & {
+  resume_token?: string;
   offset?: number;
   chunk_size?: number;
 };
@@ -477,6 +478,7 @@ export type MediaReadResult = {
 
 export type MediaStreamResult = {
   stream_id: string;
+  resume_token: string;
   session_id: string;
   event_seq: number;
   media_id: string;
@@ -495,6 +497,7 @@ export type MediaStreamCancelResult = {
 
 export type MediaStreamFrame = {
   stream_id: string;
+  resume_token?: string;
   request_id?: string;
   session_id: string;
   event_seq: number;

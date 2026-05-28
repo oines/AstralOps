@@ -136,6 +136,38 @@ func TestControlGatewayMediaStreamRequiresCapability(t *testing.T) {
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }
 
+func TestControlGatewayMediaStreamRejectsInvalidResumeToken(t *testing.T) {
+	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityMediaStream)
+
+	_, err := app.executeControlRequestWithConnection(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityMediaStream,
+		Action:             ControlActionMediaStream,
+		Params: map[string]any{
+			"resume_token": "invalid",
+		},
+	}, &controlWSConn{})
+	assertActionError(t, err, http.StatusBadRequest, "media_stream_resume_token_invalid")
+}
+
+func TestControlGatewayMediaStreamRejectsResumeTokenMismatch(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	media := addControlMediaFixture(t, app, workspace, session, []byte("stream-body"))
+	trustControlDevice(t, app, "device_mobile", CapabilityMediaStream)
+
+	_, err := app.executeControlRequestWithConnection(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityMediaStream,
+		Action:             ControlActionMediaStream,
+		Params: map[string]any{
+			"resume_token": mediaStreamResumeToken(session.ID, media.eventSeq, media.mediaID),
+			"media_id":     "other_media",
+		},
+	}, &controlWSConn{})
+	assertActionError(t, err, http.StatusBadRequest, "media_stream_resume_token_mismatch")
+}
+
 func TestControlGatewayMediaStreamCancelCancelsRegisteredStream(t *testing.T) {
 	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	trustControlDevice(t, app, "device_mobile", CapabilityMediaStream)
