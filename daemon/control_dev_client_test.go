@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func rememberTestKnownHost(t *testing.T, st *store, deviceID string) KnownHost {
@@ -90,6 +91,34 @@ func TestValidateKnownLanHostRejectsIdentityMismatch(t *testing.T) {
 	hostInfo.Identity.DeviceID = "dev_other"
 	if err := validateKnownLanHost(candidate, knownHost, hostInfo); err == nil {
 		t.Fatal("identity mismatch was accepted")
+	}
+}
+
+func TestControlClientResolveTargetFallsBackToExplicitHostWhenLanMissing(t *testing.T) {
+	hostApp, _ := newRemoteControlHandlerTestApp(t)
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, false))
+	defer hostServer.Close()
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := controlClientResolveTarget(controllerStore, controlClientTargetOptions{
+		Host:             hostServer.URL,
+		Discover:         true,
+		HostDeviceID:     hostApp.store.deviceIdentity.DeviceID,
+		DiscoveryPort:    9,
+		DiscoveryTimeout: time.Millisecond,
+		LANTimeout:       time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.BaseURL != hostServer.URL || target.Timeout != 0 {
+		t.Fatalf("target = %#v, want explicit host fallback without LAN timeout", target)
+	}
+	if target.HostInfo.Identity.DeviceID != hostApp.store.deviceIdentity.DeviceID {
+		t.Fatalf("target HostInfo = %#v, want fallback Host identity", target.HostInfo)
 	}
 }
 

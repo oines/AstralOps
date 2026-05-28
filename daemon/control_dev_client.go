@@ -412,15 +412,8 @@ type controlClientSmokeStep struct {
 }
 
 func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (controlClientTarget, error) {
-	if opts.Host != "" && opts.Discover {
-		return controlClientTarget{}, fmt.Errorf("--host and --discover cannot be used together")
-	}
-	if opts.Host != "" {
-		hostInfo, err := controlClientHostInfo(opts.Host)
-		if err != nil {
-			return controlClientTarget{}, err
-		}
-		return controlClientTarget{BaseURL: opts.Host, HostInfo: hostInfo}, nil
+	if opts.Host != "" && !opts.Discover {
+		return controlClientExplicitTarget(opts.Host)
 	}
 	if !opts.Discover {
 		return controlClientTarget{}, fmt.Errorf("--host is required unless --discover is set")
@@ -433,21 +426,40 @@ func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (con
 	}
 	candidates, err := discoverRemoteControlHostsWithTimeout(opts.DiscoveryTimeout, opts.DiscoveryPort)
 	if err != nil {
-		return controlClientTarget{}, err
+		return controlClientFallbackTarget(opts.Host, err)
 	}
 	candidate, knownHost, err := selectKnownLanCandidate(st, candidates, opts.HostDeviceID)
 	if err != nil {
-		return controlClientTarget{}, err
+		return controlClientFallbackTarget(opts.Host, err)
 	}
 	client := &http.Client{Timeout: opts.LANTimeout}
 	hostInfo, err := controlClientHostInfoWithClient(candidate.BaseURL, client)
 	if err != nil {
-		return controlClientTarget{}, err
+		return controlClientFallbackTarget(opts.Host, err)
 	}
 	if err := validateKnownLanHost(candidate, knownHost, hostInfo); err != nil {
-		return controlClientTarget{}, err
+		return controlClientFallbackTarget(opts.Host, err)
 	}
 	return controlClientTarget{BaseURL: candidate.BaseURL, HostInfo: hostInfo, Timeout: opts.LANTimeout}, nil
+}
+
+func controlClientExplicitTarget(host string) (controlClientTarget, error) {
+	hostInfo, err := controlClientHostInfo(host)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	return controlClientTarget{BaseURL: host, HostInfo: hostInfo}, nil
+}
+
+func controlClientFallbackTarget(host string, lanErr error) (controlClientTarget, error) {
+	if strings.TrimSpace(host) == "" {
+		return controlClientTarget{}, lanErr
+	}
+	target, err := controlClientExplicitTarget(host)
+	if err != nil {
+		return controlClientTarget{}, fmt.Errorf("LAN target unavailable: %v; fallback host failed: %w", lanErr, err)
+	}
+	return target, nil
 }
 
 func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlClientSmokeResult, error) {
