@@ -2152,6 +2152,72 @@ func TestControlWebSocketRevokeClosesActiveSession(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketHostTrustListIsEncrypted(t *testing.T) {
+	app, _, _, adminPublicKey, adminPrivateKey := newControlChannelTestApp(t, CapabilityHostManage)
+	readerPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerKey := base64.StdEncoding.EncodeToString(readerPublicKey)
+	readerFingerprint := devicePublicKeyFingerprint(readerPublicKey)
+	_, err = app.store.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:   "device_reader_secret_for_trust_list",
+		ControllerDeviceName: "Trust List Secret Reader",
+		ControllerPublicKey:  readerKey,
+		Capabilities:         []string{CapabilityCoreRead, CapabilityMediaStream},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, adminPublicKey, adminPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "host_trust_list",
+			Capability: CapabilityHostManage,
+			Action:     ControlActionHostTrustList,
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionHostTrustList) || strings.Contains(string(sealedRequest), "host_trust_list") {
+		t.Fatalf("sealed trust list request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	for _, secret := range []string{"device_reader_secret_for_trust_list", "Trust List Secret Reader", readerKey, readerFingerprint} {
+		if strings.Contains(string(sealedResponse), secret) {
+			t.Fatalf("sealed trust list response leaked %q: %s", secret, string(sealedResponse))
+		}
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("trust list response = %#v, want ok", plain)
+	}
+	grants := arrayValue(mapValue(plain.Response.Result)["grants"])
+	if len(grants) < 2 {
+		t.Fatalf("trust list grants = %#v, want admin and reader grants", grants)
+	}
+	var readerGrant map[string]any
+	for _, grant := range grants {
+		item := mapValue(grant)
+		if stringValue(item["controller_device_id"]) == "device_reader_secret_for_trust_list" {
+			readerGrant = item
+			break
+		}
+	}
+	if readerGrant == nil {
+		t.Fatalf("trust list grants = %#v, missing reader grant", grants)
+	}
+	if stringValue(readerGrant["controller_device_name"]) != "Trust List Secret Reader" || stringValue(readerGrant["controller_public_key"]) != readerKey || stringValue(readerGrant["controller_public_key_fingerprint"]) != readerFingerprint || stringValue(readerGrant["status"]) != TrustStatusTrusted {
+		t.Fatalf("reader trust grant = %#v", readerGrant)
+	}
+	capabilities := arrayValue(readerGrant["capabilities"])
+	if len(capabilities) != 2 || stringValue(capabilities[0]) != CapabilityCoreRead || stringValue(capabilities[1]) != CapabilityMediaStream {
+		t.Fatalf("reader trust capabilities = %#v", capabilities)
+	}
+}
+
 func TestControlWebSocketHostTrustSelfRevokeRespondsThenCloses(t *testing.T) {
 	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityHostManage)
 	server := startControlChannelTestServer(t, app)
