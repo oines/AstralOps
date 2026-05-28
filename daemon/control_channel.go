@@ -259,6 +259,14 @@ func (c *controlWSConn) afterControlResponse(req ControlRequest, response Contro
 			defer c.unregisterControlStream(result.StreamID)
 			c.app.streamControlMedia(ctx, result, c, req.RequestID)
 		}
+	case ControlActionHostTrustRevoke:
+		result, ok := response.Result.(hostTrustRevokeResult)
+		if !ok || result.ControllerDeviceID != c.controllerDeviceID {
+			return nil
+		}
+		return func() {
+			c.app.closeControlSessionsForDevice(c.controllerDeviceID, "trust_revoked")
+		}
 	case ControlActionWorkspaceFilesStream:
 		result, ok := response.Result.(workspaceFileStreamResult)
 		if !ok {
@@ -414,10 +422,14 @@ func (a *app) unregisterControlSession(connectionID string) {
 }
 
 func (a *app) closeControlSessionsForDevice(controllerDeviceID, reason string) int {
+	return a.closeControlSessionsForDeviceExcept(controllerDeviceID, reason, "")
+}
+
+func (a *app) closeControlSessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID string) int {
 	a.controlMu.Lock()
 	sessions := []*controlWSConn{}
 	for id, conn := range a.controlSessions {
-		if conn.controllerDeviceID == controllerDeviceID {
+		if conn.controllerDeviceID == controllerDeviceID && id != exceptConnectionID {
 			sessions = append(sessions, conn)
 			delete(a.controlSessions, id)
 		}

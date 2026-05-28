@@ -949,6 +949,47 @@ func TestControlWebSocketRevokeClosesActiveSession(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketHostTrustSelfRevokeRespondsThenCloses(t *testing.T) {
+	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityHostManage)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "host_trust_revoke_self",
+			Capability: CapabilityHostManage,
+			Action:     ControlActionHostTrustRevoke,
+			Params: map[string]any{
+				"controller_device_id": "dev_controller",
+			},
+		},
+	})
+
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("self revoke response = %#v, want ok response before close", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["controller_device_id"]) != "dev_controller" {
+		t.Fatalf("self revoke result = %#v", result)
+	}
+
+	plain = readEncryptedControlFrame(t, client, cipher)
+	if plain.Type != "close" || plain.Code != "trust_revoked" {
+		t.Fatalf("close frame = %#v, want trust_revoked", plain)
+	}
+	_ = client.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := app.activeControlSessionCountForDevice("dev_controller"); got == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("active sessions = %d, want 0 after self revoke", app.activeControlSessionCountForDevice("dev_controller"))
+}
+
 func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 

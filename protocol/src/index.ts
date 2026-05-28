@@ -723,6 +723,8 @@ export type ControlAction =
   | "terminal.input"
   | "terminal.resize"
   | "terminal.close"
+  | "host.trust.list"
+  | "host.trust.revoke"
   | (string & {});
 
 export type TerminalOpenParams = {
@@ -865,6 +867,22 @@ export type TrustDeviceRequest = {
   scope?: "full" | string;
   capabilities?: ControlCapability[];
   workspace_exec_policy?: "trusted" | "require_approval" | "disabled" | string;
+};
+
+export type HostTrustListResult = {
+  grants: TrustGrant[];
+};
+
+export type HostTrustRevokeParams = {
+  controller_device_id: string;
+};
+
+export type HostTrustRevokeResult = {
+  controller_device_id: string;
+  grant: TrustGrant;
+  closed_control_sessions: number;
+  released_terminal_writers: number;
+  revoked_at?: string;
 };
 
 export type ControlProtocolVersion = "astralops-control-v1" | string;

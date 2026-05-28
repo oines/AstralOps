@@ -5,6 +5,22 @@ import (
 	"strings"
 )
 
+type hostTrustListResult struct {
+	Grants []TrustGrant `json:"grants"`
+}
+
+type hostTrustRevokeParams struct {
+	ControllerDeviceID string `json:"controller_device_id"`
+}
+
+type hostTrustRevokeResult struct {
+	ControllerDeviceID      string     `json:"controller_device_id"`
+	Grant                   TrustGrant `json:"grant"`
+	ClosedControlSessions   int        `json:"closed_control_sessions"`
+	ReleasedTerminalWriters int        `json:"released_terminal_writers"`
+	RevokedAt               string     `json:"revoked_at,omitempty"`
+}
+
 func (a *app) handleHost(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -47,28 +63,41 @@ func (a *app) handleTrustDeviceAction(w http.ResponseWriter, r *http.Request) {
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/trust/devices/"), "/")
 	parts := strings.Split(rest, "/")
 	if len(parts) == 2 && parts[1] == "revoke" && r.Method == http.MethodPost {
-		grant, ok, err := a.store.revokeTrustGrant(parts[0])
+		result, err := a.revokeTrustedControlDevice(parts[0], "")
 		if err != nil {
 			writeActionError(w, err)
 			return
 		}
-		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "trusted device not found"})
-			return
-		}
-		releasedWriters := a.releaseTerminalWritersForDevice(grant.ControllerDeviceID)
-		a.emit(AstralEvent{
-			Kind: "control.trust.revoked",
-			Normalized: map[string]any{
-				"host_device_id":            grant.HostDeviceID,
-				"controller_device_id":      grant.ControllerDeviceID,
-				"revoked_at":                grant.RevokedAt,
-				"released_terminal_writers": releasedWriters,
-			},
-		})
-		closed := a.closeControlSessionsForDevice(grant.ControllerDeviceID, "trust_revoked")
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "grant": grant, "closed_control_sessions": closed, "released_terminal_writers": releasedWriters})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "grant": result.Grant, "closed_control_sessions": result.ClosedControlSessions, "released_terminal_writers": result.ReleasedTerminalWriters})
 		return
 	}
 	w.WriteHeader(http.StatusNotFound)
+}
+
+func (a *app) revokeTrustedControlDevice(controllerDeviceID, exceptConnectionID string) (hostTrustRevokeResult, error) {
+	grant, ok, err := a.store.revokeTrustGrant(controllerDeviceID)
+	if err != nil {
+		return hostTrustRevokeResult{}, err
+	}
+	if !ok {
+		return hostTrustRevokeResult{}, newActionError(http.StatusNotFound, "trusted_device_not_found", "trusted device not found")
+	}
+	releasedWriters := a.releaseTerminalWritersForDevice(grant.ControllerDeviceID)
+	a.emit(AstralEvent{
+		Kind: "control.trust.revoked",
+		Normalized: map[string]any{
+			"host_device_id":            grant.HostDeviceID,
+			"controller_device_id":      grant.ControllerDeviceID,
+			"revoked_at":                grant.RevokedAt,
+			"released_terminal_writers": releasedWriters,
+		},
+	})
+	closed := a.closeControlSessionsForDeviceExcept(grant.ControllerDeviceID, "trust_revoked", exceptConnectionID)
+	return hostTrustRevokeResult{
+		ControllerDeviceID:      grant.ControllerDeviceID,
+		Grant:                   grant,
+		ClosedControlSessions:   closed,
+		ReleasedTerminalWriters: releasedWriters,
+		RevokedAt:               grant.RevokedAt,
+	}, nil
 }

@@ -221,3 +221,72 @@ func TestControlGatewayRejectsUnknownAction(t *testing.T) {
 	})
 	assertActionError(t, err, http.StatusNotFound, "control_action_unknown")
 }
+
+func TestControlGatewayHostTrustListRequiresHostManage(t *testing.T) {
+	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityHostManage,
+		Action:             ControlActionHostTrustList,
+	})
+	assertActionError(t, err, http.StatusForbidden, "capability_denied")
+}
+
+func TestControlGatewayHostTrustListReturnsTrustGrants(t *testing.T) {
+	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_admin", CapabilityHostManage)
+	trustControlDevice(t, app, "device_reader", CapabilityCoreRead)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_admin",
+		Capability:         CapabilityHostManage,
+		Action:             ControlActionHostTrustList,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(hostTrustListResult)
+	if !ok {
+		t.Fatalf("trust list result = %#v, want hostTrustListResult", response.Result)
+	}
+	seen := map[string]bool{}
+	for _, grant := range result.Grants {
+		seen[grant.ControllerDeviceID] = true
+	}
+	if !seen["device_admin"] || !seen["device_reader"] {
+		t.Fatalf("trust grants = %#v, want admin and reader", result.Grants)
+	}
+}
+
+func TestControlGatewayHostTrustRevokeRevokesTrustedDevice(t *testing.T) {
+	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_admin", CapabilityHostManage)
+	trustControlDevice(t, app, "device_reader", CapabilityCoreRead)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_admin",
+		Capability:         CapabilityHostManage,
+		Action:             ControlActionHostTrustRevoke,
+		Params: map[string]any{
+			"controller_device_id": "device_reader",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(hostTrustRevokeResult)
+	if !ok {
+		t.Fatalf("trust revoke result = %#v, want hostTrustRevokeResult", response.Result)
+	}
+	if result.ControllerDeviceID != "device_reader" || result.Grant.Status != TrustStatusRevoked || result.RevokedAt == "" {
+		t.Fatalf("trust revoke result = %#v", result)
+	}
+	if _, ok := app.store.trustedControlGrant("device_reader"); ok {
+		t.Fatal("revoked device still has trusted control grant")
+	}
+	if countKind(app.store.queryEvents("", "", 0), "control.trust.revoked") != 1 {
+		t.Fatalf("events = %#v, want one trust revoke audit event", eventKinds(app.store.queryEvents("", "", 0)))
+	}
+}

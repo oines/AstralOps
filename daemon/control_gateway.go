@@ -54,6 +54,8 @@ const (
 	ControlActionTerminalInput              = "terminal.input"
 	ControlActionTerminalResize             = "terminal.resize"
 	ControlActionTerminalClose              = "terminal.close"
+	ControlActionHostTrustList              = "host.trust.list"
+	ControlActionHostTrustRevoke            = "host.trust.revoke"
 )
 
 type ControlRequest struct {
@@ -132,6 +134,8 @@ func controlActionCapability(action string) string {
 		return CapabilityTerminalOpen
 	case ControlActionTerminalInput, ControlActionTerminalResize, ControlActionTerminalClose:
 		return CapabilityTerminalInput
+	case ControlActionHostTrustList, ControlActionHostTrustRevoke:
+		return CapabilityHostManage
 	default:
 		return ""
 	}
@@ -371,6 +375,18 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, gra
 			return nil, err
 		}
 		return a.terminalManager().close(context.Background(), req.ControllerDeviceID, params)
+	case ControlActionHostTrustList:
+		return hostTrustListResult{Grants: a.store.listTrustGrants()}, nil
+	case ControlActionHostTrustRevoke:
+		var params hostTrustRevokeParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		exceptConnectionID := ""
+		if conn != nil {
+			exceptConnectionID = conn.id
+		}
+		return a.revokeTrustedControlDevice(params.ControllerDeviceID, exceptConnectionID)
 	default:
 		return nil, newActionError(http.StatusNotFound, "control_action_unknown", "control action not found")
 	}

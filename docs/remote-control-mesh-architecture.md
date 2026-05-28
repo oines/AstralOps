@@ -655,7 +655,7 @@ terminal.input
   向 Host 拥有的 PTY 发送原始按键输入。
 
 host.manage
-  创建/删除 workspace，连接/断开 SSH workspace，管理 trusted devices，撤销会话。
+  管理 Host-owned 控制面能力。v1 先只开放 `host.trust.list` 和 `host.trust.revoke`，用于通过 E2EE control channel 查看 trusted devices、撤销某个 Controller，并触发 Host 本地立即断开和 terminal writer lock 释放。创建/删除 workspace、连接/断开 SSH workspace、settings 和 updates 不塞进这个 v1 action。
 ```
 
 UI 可以展示更简单的模式：
@@ -959,6 +959,16 @@ revoked_at
 ```
 
 Host 在执行任何远程动作前，必须本地强制校验 trust。
+
+当前 daemon 已落地：
+
+```text
+host.trust.list over E2EE control channel
+host.trust.revoke over E2EE control channel
+local trust revoke HTTP endpoint
+immediate active control session close
+terminal active writer release on revoke
+```
 
 批准新设备后，Host 可以写入本地审计事件：
 
