@@ -424,6 +424,343 @@ func TestHistoricalContextBackfillCorrectsPersistedCodexCumulativeUsage(t *testi
 	}
 }
 
+func TestHistoricalContextBackfillPrefersClaudeStreamUsageOverAggregateResult(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local Project", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, workspace.Agent)
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "control.raw",
+		Raw: map[string]any{
+			"type":       "stream_event",
+			"session_id": "native_claude",
+			"event": map[string]any{
+				"type": "message_delta",
+				"usage": map[string]any{
+					"input_tokens":                12000,
+					"output_tokens":               100,
+					"cache_read_input_tokens":     18000,
+					"cache_creation_input_tokens": 0,
+					"server_tool_use":             map[string]any{},
+					"service_tier":                "standard",
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "control.raw",
+		Raw: map[string]any{
+			"type":       "result",
+			"session_id": "native_claude",
+			"modelUsage": map[string]any{
+				"claude-test": map[string]any{
+					"inputTokens":              400000,
+					"outputTokens":             58200,
+					"cacheReadInputTokens":     180000,
+					"cacheCreationInputTokens": 20000,
+					"contextWindow":            200000,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), projections: newSessionProjectionCache()}
+	app.rebuildSessionProjections()
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if got := countKind(events, "control.context"); got != 1 {
+		t.Fatalf("control.context count = %d, want one current-window correction", got)
+	}
+	context := app.sessionProjections().latestContext(session.ID)
+	if got := stringValue(context["scope"]); got != "current" {
+		t.Fatalf("projected scope = %q, want current", got)
+	}
+	if got := numberValue(context["total_tokens"]); got != 30100 {
+		t.Fatalf("projected total_tokens = %v, want stream message_delta usage", got)
+	}
+	if got := numberValue(context["cumulative_total_tokens"]); got != 658200 {
+		t.Fatalf("projected cumulative_total_tokens = %v, want aggregate result total", got)
+	}
+	if got := numberValue(context["model_context_window"]); got != 200000 {
+		t.Fatalf("projected model_context_window = %v, want 200000", got)
+	}
+	if got := numberValue(context["used_percent"]); got != 15 {
+		t.Fatalf("projected used_percent = %v, want current-window percent", got)
+	}
+}
+
+func TestHistoricalContextBackfillCorrectsPersistedClaudeAggregateUsage(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local Project", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, workspace.Agent)
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "control.raw",
+		Raw: map[string]any{
+			"type":       "stream_event",
+			"session_id": "native_claude",
+			"event": map[string]any{
+				"type": "message_delta",
+				"usage": map[string]any{
+					"input_tokens":                9000,
+					"output_tokens":               200,
+					"cache_read_input_tokens":     20800,
+					"cache_creation_input_tokens": 0,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resultRaw := map[string]any{
+		"type":       "result",
+		"session_id": "native_claude",
+		"modelUsage": map[string]any{
+			"claude-test": map[string]any{
+				"inputTokens":              400000,
+				"outputTokens":             58200,
+				"cacheReadInputTokens":     180000,
+				"cacheCreationInputTokens": 20000,
+				"contextWindow":            200000,
+			},
+		},
+	}
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "control.context",
+		Normalized: map[string]any{
+			"source":               "claude",
+			"total_tokens":         658200,
+			"input_tokens":         400000,
+			"output_tokens":        58200,
+			"model_context_window": 200000,
+			"used_percent":         329,
+			"usage":                map[string]any{},
+			"model_usage":          mapValue(resultRaw["modelUsage"]),
+		},
+		Raw: resultRaw,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), projections: newSessionProjectionCache()}
+	app.rebuildSessionProjections()
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if got := countKind(events, "control.context"); got != 2 {
+		t.Fatalf("control.context count = %d, want legacy event plus correction", got)
+	}
+	context := app.sessionProjections().latestContext(session.ID)
+	if got := stringValue(context["scope"]); got != "current" {
+		t.Fatalf("projected scope = %q, want current", got)
+	}
+	if got := numberValue(context["total_tokens"]); got != 30000 {
+		t.Fatalf("projected total_tokens = %v, want stream message_delta usage", got)
+	}
+	if got := numberValue(context["cumulative_total_tokens"]); got != 658200 {
+		t.Fatalf("projected cumulative_total_tokens = %v, want legacy aggregate total", got)
+	}
+	if got := numberValue(context["used_percent"]); got != 15 {
+		t.Fatalf("projected used_percent = %v, want corrected current-window percent", got)
+	}
+}
+
+func TestSessionProjectionKeepsClaudeCurrentContextOverAggregateResult(t *testing.T) {
+	cache := newSessionProjectionCache()
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "control.context",
+		Normalized: map[string]any{
+			"source":       "claude",
+			"scope":        "current",
+			"total_tokens": 30000,
+		},
+	})
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "control.context",
+		Normalized: map[string]any{
+			"source":                  "claude",
+			"scope":                   "aggregate",
+			"total_tokens":            658200,
+			"cumulative_total_tokens": 658200,
+			"model_context_window":    200000,
+		},
+	})
+	context := cache.latestContext("sess_claude")
+	if got := stringValue(context["scope"]); got != "current" {
+		t.Fatalf("projected scope = %q, want current", got)
+	}
+	if got := numberValue(context["total_tokens"]); got != 30000 {
+		t.Fatalf("projected total_tokens = %v, want current usage", got)
+	}
+	if got := numberValue(context["cumulative_total_tokens"]); got != 658200 {
+		t.Fatalf("projected cumulative_total_tokens = %v, want aggregate metadata", got)
+	}
+	if got := numberValue(context["model_context_window"]); got != 200000 {
+		t.Fatalf("projected model_context_window = %v, want aggregate metadata", got)
+	}
+	if got := numberValue(context["used_percent"]); got != 15 {
+		t.Fatalf("projected used_percent = %v, want current-window percent", got)
+	}
+}
+
+func TestSessionProjectionInvalidatesContextOnCompact(t *testing.T) {
+	cache := newSessionProjectionCache()
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "control.context",
+		Normalized: map[string]any{
+			"source":               "claude",
+			"scope":                "current",
+			"total_tokens":         30000,
+			"model_context_window": 200000,
+		},
+	})
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "memory.compacted",
+		Normalized: map[string]any{
+			"source": "claude",
+		},
+	})
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "control.context",
+		Normalized: map[string]any{
+			"source":               "astralops",
+			"total_tokens":         30000,
+			"model_context_window": 200000,
+		},
+	})
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "control.context",
+		Normalized: map[string]any{
+			"source":                  "claude",
+			"scope":                   "aggregate",
+			"total_tokens":            658200,
+			"cumulative_total_tokens": 658200,
+			"model_context_window":    200000,
+		},
+	})
+	if context := cache.latestContext("sess_claude"); len(context) > 0 {
+		t.Fatalf("projected context = %#v, want compacted session to ignore aggregate-only usage", context)
+	}
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "control.context",
+		Normalized: map[string]any{
+			"source":       "claude",
+			"scope":        "current",
+			"total_tokens": 12000,
+		},
+	})
+	context := cache.latestContext("sess_claude")
+	if got := numberValue(context["total_tokens"]); got != 12000 {
+		t.Fatalf("projected total_tokens = %v, want post-compact current usage", got)
+	}
+}
+
+func TestHistoricalContextBackfillDoesNotRevivePreCompactClaudeUsage(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local Project", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, workspace.Agent)
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "control.raw",
+		Raw: map[string]any{
+			"type":       "stream_event",
+			"session_id": "native_claude",
+			"event": map[string]any{
+				"type": "message_delta",
+				"usage": map[string]any{
+					"input_tokens":                9000,
+					"output_tokens":               200,
+					"cache_read_input_tokens":     20800,
+					"cache_creation_input_tokens": 0,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "memory.compacted",
+		Normalized: map[string]any{
+			"source": "claude",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), projections: newSessionProjectionCache()}
+	app.rebuildSessionProjections()
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if got := countKind(events, "control.context"); got != 0 {
+		t.Fatalf("control.context count = %d, want no pre-compact context backfill", got)
+	}
+	if context := app.sessionProjections().latestContext(session.ID); len(context) > 0 {
+		t.Fatalf("projected context = %#v, want no context after compact until fresh usage arrives", context)
+	}
+}
+
 func TestHistoricalApprovalBackfillRestoresClaudeEditPermission(t *testing.T) {
 	dir := t.TempDir()
 	st, err := loadStore(dir)
@@ -2111,6 +2448,24 @@ func TestNormalizeCodexRealLocalFixture(t *testing.T) {
 			t.Fatalf("real codex approval fixture missing %s in %#v", kind, approvalKinds)
 		}
 	}
+
+	imageKinds := []string{}
+	for _, line := range readFixtureLines(t, "../fixtures/codex-app-server/real-local-image-generation.jsonl") {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range normalizeCodexMessage(session, raw) {
+			imageKinds = append(imageKinds, event.Kind)
+			value := mapValue(event.Normalized)
+			if event.Kind == "message.media" && value["result"] != nil {
+				t.Fatalf("message.media normalized leaked base64 result: %#v", value)
+			}
+		}
+	}
+	if !reflect.DeepEqual(imageKinds, []string{"message.media", "message.media"}) {
+		t.Fatalf("image fixture kinds = %#v, want two message.media events", imageKinds)
+	}
 }
 
 func TestCodexCompletedPlanRequestsApproval(t *testing.T) {
@@ -3652,6 +4007,7 @@ type recordingRuntime struct {
 	options           []TurnOptions
 	interrupts        []string
 	approvalResponses []map[string]any
+	startErr          error
 	interruptErr      error
 	approvalErr       error
 }
@@ -3659,7 +4015,7 @@ type recordingRuntime struct {
 func (r *recordingRuntime) StartTurn(session Session, workspace Workspace, input string, options TurnOptions) error {
 	r.inputs = append(r.inputs, input)
 	r.options = append(r.options, options)
-	return nil
+	return r.startErr
 }
 
 func (r *recordingRuntime) Interrupt(sessionID string) error {
@@ -4379,22 +4735,29 @@ sleep 30
 	waitForClaudeRunDone(t, run)
 }
 
-func TestClaudeLocalRuntimeSteersViaStreamInput(t *testing.T) {
+func TestClaudeLocalRuntimeSteerInterruptsAndResumes(t *testing.T) {
 	inputsPath := filepath.Join(t.TempDir(), "claude-inputs.jsonl")
 	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
-IFS= read -r first
-printf '%s\n' "$first" >> "$ASTRALOPS_TEST_CLAUDE_INPUTS"
-IFS= read -r second
-printf '%s\n' "$second" >> "$ASTRALOPS_TEST_CLAUDE_INPUTS"
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"steered"}]}}'
-`))
+	printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+	IFS= read -r input
+	printf '%s\n' "$input" >> "$ASTRALOPS_TEST_CLAUDE_INPUTS"
+	case "$input" in
+	*"first"*)
+		printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}'
+		exec sleep 30
+		;;
+	*)
+		printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"steered"}]}}'
+		;;
+	esac
+	`))
 	t.Setenv("ASTRALOPS_TEST_CLAUDE_INPUTS", inputsPath)
 
 	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "first", TurnOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	waitForKind(t, app.store, session.ID, "session.native")
+	waitForKind(t, app.store, session.ID, "message.delta")
+	run := claudeRunForTest(t, app, session.ID)
 	steerer, ok := app.runtimes[AgentClaude].(TurnSteerer)
 	if !ok {
 		t.Fatal("claude runtime does not implement TurnSteerer")
@@ -4410,33 +4773,93 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 	}
 	text := string(inputs)
 	if !strings.Contains(text, `"text":"first"`) || !strings.Contains(text, `"text":"mid task guidance"`) {
-		t.Fatalf("claude stream inputs did not include initial and steer messages:\n%s", text)
+		t.Fatalf("claude inputs did not include initial and steered messages:\n%s", text)
+	}
+	waitForClaudeRunDone(t, run)
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if !containsEventKind(events, "turn.cancelled") {
+		t.Fatalf("events = %#v, want cancelled turn before steered turn", events)
 	}
 }
 
-func TestSessionInputQueuesWhileRuntimeIsBusy(t *testing.T) {
+func TestClaudeSessionInputSteersWhileRuntimeIsBusy(t *testing.T) {
+	inputsPath := filepath.Join(t.TempDir(), "claude-inputs.jsonl")
 	app, session, _ := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
-sleep 0.2
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'
-`))
+	printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+	IFS= read -r input
+	printf '%s\n' "$input" >> "$ASTRALOPS_TEST_CLAUDE_INPUTS"
+	case "$input" in
+	*"first"*)
+		printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}'
+		exec sleep 30
+		;;
+	*)
+		printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'
+		;;
+	esac
+	`))
+	t.Setenv("ASTRALOPS_TEST_CLAUDE_INPUTS", inputsPath)
 
 	first := httptest.NewRecorder()
 	app.handleSessionInput(first, session.ID, "first", TurnOptions{})
 	if first.Code != http.StatusOK {
 		t.Fatalf("first status = %d, want 200", first.Code)
 	}
+	waitForKind(t, app.store, session.ID, "message.delta")
 
 	second := httptest.NewRecorder()
 	app.handleSessionInput(second, session.ID, "second", TurnOptions{})
-	if second.Code != http.StatusOK {
-		t.Fatalf("second status = %d, want 200 queued", second.Code)
+	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"steered":true`) {
+		t.Fatalf("second response = %d %s, want 200 steered", second.Code, second.Body.String())
 	}
 
-	waitForKind(t, app.store, session.ID, "queue.queued")
-	waitForKind(t, app.store, session.ID, "queue.dequeued")
 	waitForKindCount(t, app.store, session.ID, "message.user", 2)
-	waitForKindCount(t, app.store, session.ID, "turn.completed", 2)
+	waitForKind(t, app.store, session.ID, "turn.completed")
+	events := app.store.queryEvents("", session.ID, 0)
+	if containsEventKind(events, "queue.queued") {
+		t.Fatalf("events = %#v, want running Claude input to steer instead of queue", events)
+	}
+	inputs, err := os.ReadFile(inputsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(inputs); !strings.Contains(text, `"text":"first"`) || !strings.Contains(text, `"text":"second"`) {
+		t.Fatalf("claude inputs = %s, want first and second prompts", text)
+	}
+}
+
+func TestCodexSessionInputSteersWhileRuntimeIsBusy(t *testing.T) {
+	app, session, _ := newTestCodexApp(t, fakeCodexScript(t))
+	methodsPath := filepath.Join(t.TempDir(), "codex-methods.log")
+	t.Setenv("ASTRALOPS_TEST_CODEX_METHODS", methodsPath)
+
+	first := httptest.NewRecorder()
+	app.handleSessionInput(first, session.ID, "first", TurnOptions{})
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", first.Code)
+	}
+	waitForKind(t, app.store, session.ID, "turn.started")
+
+	second := httptest.NewRecorder()
+	app.handleSessionInput(second, session.ID, "second", TurnOptions{})
+	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"steered":true`) {
+		t.Fatalf("second response = %d %s, want 200 steered", second.Code, second.Body.String())
+	}
+
+	waitForKindCount(t, app.store, session.ID, "message.user", 2)
+	waitForKind(t, app.store, session.ID, "control.steer")
+	waitForKind(t, app.store, session.ID, "turn.completed")
+	events := app.store.queryEvents("", session.ID, 0)
+	if containsEventKind(events, "queue.queued") {
+		t.Fatalf("events = %#v, want running Codex input to steer instead of queue", events)
+	}
+	methods, err := os.ReadFile(methodsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(methods), "turn/steer") {
+		t.Fatalf("codex runtime did not send turn/steer; methods:\n%s", methods)
+	}
 }
 
 func TestCancelQueuedTurnEmitsCancelled(t *testing.T) {
@@ -4485,6 +4908,90 @@ func TestSteerQueuedTurnInjectsAndRemovesQueuedMessage(t *testing.T) {
 	events := st.queryEvents(workspace.ID, session.ID, 0)
 	if !containsEventKind(events, "queue.queued") || !containsEventKind(events, "queue.steered") {
 		t.Fatalf("events = %#v, want queue.queued and queue.steered", events)
+	}
+}
+
+func TestSessionInputQueuesAttachments(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	runtime := &recordingRuntime{startErr: ErrSessionRunning}
+	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}, runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
+	attachmentPath := filepath.Join(dir, "clip.png")
+	if err := os.WriteFile(attachmentPath, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"input":"","attachments":[{"id":"att_1","kind":"image","path":%q,"name":"clip.png","mime_type":"image/png","size":3,"detail":"high"}]}`, attachmentPath)
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+session.ID+"/input", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	app.handleSessionAction(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	queue := app.queues[session.ID]
+	if len(queue) != 1 || len(queue[0].Options.Attachments) != 1 {
+		t.Fatalf("queue = %#v, want one queued attachment", queue)
+	}
+	attachment := queue[0].Options.Attachments[0]
+	if attachment.ID != "att_1" || attachment.Kind != "image" || attachment.Detail != "high" {
+		t.Fatalf("queued attachment = %#v", attachment)
+	}
+}
+
+func TestSessionMediaEndpointServesOnlyEventReferencedMedia(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	app := &app{store: st, hub: newEventHub(), token: "test-token"}
+	imagePath := filepath.Join(dir, "clip.png")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app.emit(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentCodex,
+		Kind:        "message.user",
+		Normalized: map[string]any{"text": "", "attachments": []map[string]any{{
+			"id":        "att_1",
+			"media_id":  "att_1",
+			"kind":      "image",
+			"path":      imagePath,
+			"name":      "clip.png",
+			"mime_type": "image/png",
+		}}},
+	})
+	events := st.queryEvents(workspace.ID, session.ID, 0)
+	seq := events[0].Seq
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sessions/%s/media/%d/att_1?download=1", session.ID, seq), nil)
+	rr := httptest.NewRecorder()
+	app.handleSessionAction(rr, req)
+	if rr.Code != http.StatusOK || rr.Body.String() != "png" {
+		t.Fatalf("status/body = %d/%q, want media bytes", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Header().Get("Content-Disposition"), "clip.png") {
+		t.Fatalf("content-disposition = %q, want filename", rr.Header().Get("Content-Disposition"))
+	}
+
+	badReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sessions/%s/media/%d/missing", session.ID, seq), nil)
+	badRR := httptest.NewRecorder()
+	app.handleSessionAction(badRR, badReq)
+	if badRR.Code != http.StatusNotFound {
+		t.Fatalf("missing media status = %d, want 404", badRR.Code)
 	}
 }
 
@@ -4851,6 +5358,100 @@ func TestCodexLocalRuntimeStreamsFakeAppServer(t *testing.T) {
 		t.Fatalf("native thread id was not persisted: %#v", updated)
 	}
 	assertCodexConfigUnchanged(t, beforeConfig)
+}
+
+func TestCodexLocalRuntimeSendsImageAttachments(t *testing.T) {
+	app, session, workspace := newTestCodexApp(t, fakeCodexScript(t))
+	messagesPath := filepath.Join(t.TempDir(), "codex-messages.jsonl")
+	t.Setenv("ASTRALOPS_TEST_CODEX_MESSAGES", messagesPath)
+	imagePath := filepath.Join(t.TempDir(), "clip.png")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "describe this", TurnOptions{Attachments: []InputAttachment{{
+		ID:       "att_1",
+		Kind:     "image",
+		Path:     imagePath,
+		Name:     "clip.png",
+		MIMEType: "image/png",
+		Size:     3,
+		Detail:   "high",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.completed")
+
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	userValue := mapValue(events[0].Normalized)
+	if len(attachmentsFromNormalized(userValue["attachments"])) != 1 {
+		t.Fatalf("message.user normalized = %#v, want attachment metadata", userValue)
+	}
+	body, err := os.ReadFile(messagesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var turnStart map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			t.Fatal(err)
+		}
+		if stringValue(raw["method"]) == "turn/start" {
+			turnStart = mapValue(raw["params"])
+			break
+		}
+	}
+	inputs, ok := turnStart["input"].([]any)
+	if !ok || len(inputs) != 2 {
+		t.Fatalf("turn/start params = %#v, want text and localImage input", turnStart)
+	}
+	textInput := mapValue(inputs[0])
+	if !strings.Contains(stringValue(textInput["text"]), imagePath) {
+		t.Fatalf("text input = %#v, want attachment manifest path", textInput)
+	}
+	imageInput := mapValue(inputs[1])
+	if stringValue(imageInput["type"]) != "localImage" || stringValue(imageInput["path"]) != imagePath || stringValue(imageInput["detail"]) != "high" {
+		t.Fatalf("image input = %#v, want localImage path/detail", imageInput)
+	}
+}
+
+func TestWriteClaudeUserInputIncludesImageAttachments(t *testing.T) {
+	imagePath := filepath.Join(t.TempDir(), "clip.png")
+	body := []byte("png")
+	if err := os.WriteFile(imagePath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err := writeClaudeUserInput(&out, "describe this", []InputAttachment{{
+		ID:       "att_1",
+		Kind:     "image",
+		Path:     imagePath,
+		Name:     "clip.png",
+		MIMEType: "image/png",
+		Size:     int64(len(body)),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &payload); err != nil {
+		t.Fatal(err)
+	}
+	message := mapValue(payload["message"])
+	content, ok := message["content"].([]any)
+	if !ok || len(content) != 2 {
+		t.Fatalf("content = %#v, want text plus image block", message["content"])
+	}
+	textBlock := mapValue(content[0])
+	if !strings.Contains(stringValue(textBlock["text"]), imagePath) {
+		t.Fatalf("text block = %#v, want attachment manifest path", textBlock)
+	}
+	imageBlock := mapValue(content[1])
+	source := mapValue(imageBlock["source"])
+	if stringValue(imageBlock["type"]) != "image" || stringValue(source["media_type"]) != "image/png" || stringValue(source["data"]) != base64.StdEncoding.EncodeToString(body) {
+		t.Fatalf("image block = %#v", imageBlock)
+	}
 }
 
 func TestCodexLocalRuntimeCleansUpAfterInitializeFailure(t *testing.T) {

@@ -1,4 +1,4 @@
-import type { AgentKind, AstralEvent, CreateWorkspaceRequest, HealthResponse, ModelInfo, PendingInteractionView, QueuedInputView, Session, SessionCommand, SessionView, Workspace, WorkspaceConnection } from "@astralops/protocol";
+import type { AgentKind, AppSettings, AppSettingsPatch, AstralEvent, ClearMediaCacheResponse, CreateWorkspaceRequest, HealthResponse, ModelInfo, PendingInteractionView, QueuedInputView, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, Workspace, WorkspaceConnection } from "@astralops/protocol";
 
 export type DaemonInfo = {
   host: string;
@@ -12,7 +12,6 @@ export type ConnectionState = "booting" | "connected" | "reconnecting" | "failed
 export type WorkspaceDraft = {
   name: string;
   target: "local" | "ssh";
-  agent: "claude" | "codex";
   local_cwd: string;
   ssh_endpoint: string;
   ssh_port: number;
@@ -50,4 +49,4 @@ export type WorkspaceCommandResponse = {
   duration_ms: number;
 };
 
-export type { AgentKind, AstralEvent, CreateWorkspaceRequest, HealthResponse, ModelInfo, QueuedInputView, Session, SessionCommand, SessionView, Workspace, WorkspaceConnection };
+export type { AgentKind, AppSettings, AppSettingsPatch, AstralEvent, ClearMediaCacheResponse, CreateWorkspaceRequest, HealthResponse, ModelInfo, QueuedInputView, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, Workspace, WorkspaceConnection };

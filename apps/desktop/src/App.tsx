@@ -3,6 +3,7 @@ import { PanelLeft, PanelRight } from "lucide-react";
 import { createLocalCoreClient, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
+import { SettingsView } from "./components/SettingsView";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { Transcript } from "./components/Transcript";
@@ -22,7 +23,10 @@ import { useSessionCommands } from "./hooks/useSessionCommands";
 import { useSessionEventWindow } from "./hooks/useSessionEventWindow";
 import type {
   AgentKind,
+  AppSettings,
+  AppSettingsPatch,
   AstralEvent,
+  ClearMediaCacheResponse,
   ConnectionState,
   CreateWorkspaceRequest,
   HealthResponse,
@@ -30,12 +34,23 @@ import type {
   ReasoningEffort,
   RunMode,
   Session,
+  SessionInputAttachment,
   SessionView,
   Workspace,
   WorkspaceConnection,
 } from "./types";
 
 const EVENT_WINDOW_SIZE = 1000;
+
+const DEFAULT_APP_SETTINGS: AppSettings = {
+  version: 1,
+  general: { restore_on_launch: true },
+  appearance: { theme: "system", mac_sidebar_effect: true, preview_theme: "light" },
+  session: { default_agent: "remember", default_permission_mode: "default", default_reasoning_effort: "high" },
+  workspace: { default_opener: "vscode", ssh_auto_reconnect: true },
+  notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
+  updates: { auto_check: true },
+};
 
 function sortSessionsByUpdated(sessions: Session[]): Session[] {
   return [...sessions].sort((a, b) => sessionTimestamp(b) - sessionTimestamp(a));
@@ -50,6 +65,10 @@ export function App(): React.JSX.Element {
   const [connection, setConnection] = useState<ConnectionState>("booting");
   const [api, setApi] = useState<CoreClient | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
+  const [settingsSavingKeys, setSettingsSavingKeys] = useState<Set<string>>(() => new Set());
+  const [settingsError, setSettingsError] = useState("");
+  const [lastSessionAgent, setLastSessionAgent] = useState<AgentKind>("claude");
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceConnections, setWorkspaceConnections] = useState<Record<string, WorkspaceConnection>>({});
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -59,6 +78,7 @@ export function App(): React.JSX.Element {
   const [pendingOpenSessionId, setPendingOpenSessionId] = useState("");
   const [eventIndex, setEventIndex] = useState<EventIndex>(EMPTY_EVENT_INDEX);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string>("");
   const [modelOverride, setModelOverride] = useState("");
   const [modelSlotOverride, setModelSlotOverride] = useState("");
@@ -81,6 +101,8 @@ export function App(): React.JSX.Element {
   const sseFrameRef = useRef<number | null>(null);
   const notifiedIntentIDsRef = useRef<Set<string>>(new Set());
   const activeSessionIdRef = useRef("");
+  const updateAutoCheckStartedRef = useRef(false);
+  const appSettingsRef = useRef<AppSettings>(DEFAULT_APP_SETTINGS);
   const appChromeRef = useRef<HTMLDivElement | null>(null);
 
   const mergeEvents = useCallback((incoming: AstralEvent[]) => {
@@ -90,6 +112,10 @@ export function App(): React.JSX.Element {
   const maybeNotifyLiveEvent = useCallback((event: AstralEvent) => {
     if (event.kind !== "control.notification") return;
     const payload = event.normalized as Record<string, unknown>;
+    const settings = appSettingsRef.current.notifications;
+    const reason = typeof payload.reason === "string" ? payload.reason : "";
+    if ((reason === "turn_completed" || reason === "turn_failed") && !settings.task_complete) return;
+    if ((reason === "ask_required" || reason === "approval_required") && !settings.requires_action) return;
     const notificationID = typeof payload.notification_id === "string" ? payload.notification_id : "";
     if (!notificationID || notifiedIntentIDsRef.current.has(notificationID)) return;
     notifiedIntentIDsRef.current.add(notificationID);
@@ -99,7 +125,7 @@ export function App(): React.JSX.Element {
     }
     const target = payload.target && typeof payload.target === "object" ? payload.target as Record<string, unknown> : {};
     const targetSessionID = typeof target.session_id === "string" ? target.session_id : "";
-    const deliverWhenFocused = Boolean(targetSessionID && targetSessionID !== activeSessionIdRef.current);
+    const deliverWhenFocused = !settings.quiet_when_focused || Boolean(targetSessionID && targetSessionID !== activeSessionIdRef.current);
     void window.astral.showNotification(deliverWhenFocused ? { ...payload, deliver_when_focused: true } : payload);
   }, []);
 
@@ -162,17 +188,20 @@ export function App(): React.JSX.Element {
     [activeSessionView],
   );
   const queuedCount = queuedInputs.length;
+  const runningInputMode = activeAgent === "claude" || activeAgent === "codex" ? "interject" : "queue";
   const composerPlaceholder = !activeWorkspace
     ? "创建 workspace 后开始"
     : !activeSession
       ? "点项目旁边 + 新建 session"
       : !workspaceInteractive
         ? "SSH 已断开，先连接工作区"
-      : sessionRunning
-        ? queuedCount > 0
-          ? `继续输入；前面还有 ${queuedCount} 条已排队`
-          : "继续输入；会在当前任务后接上"
-        : "要求后续变更";
+        : sessionRunning
+          ? queuedCount > 0
+            ? `继续输入；前面还有 ${queuedCount} 条已排队`
+            : runningInputMode === "interject"
+              ? "继续输入；会打断当前任务并接上"
+              : "继续输入；会在当前任务后接上"
+          : "要求后续变更";
   const activeAgentInfo = activeAgent ? health?.agents[activeAgent] : undefined;
   const modelOptions = useMemo(() => activeAgentInfo?.models ?? [], [activeAgentInfo]);
   const currentModel = activeAgentInfo?.current_model;
@@ -185,6 +214,30 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    appSettingsRef.current = appSettings;
+  }, [appSettings]);
+
+  useEffect(() => {
+    if (connection !== "connected" || !appSettings.updates.auto_check || updateAutoCheckStartedRef.current) return;
+    updateAutoCheckStartedRef.current = true;
+    const timeout = window.setTimeout(() => {
+      void window.astral.checkForUpdates({ automatic: true }).catch(() => undefined);
+    }, 2500);
+    return () => window.clearTimeout(timeout);
+  }, [appSettings.updates.auto_check, connection]);
+
+  useEffect(() => {
+    const theme = appSettings.appearance.theme;
+    document.documentElement.dataset.theme = theme;
+    void window.astral.setThemeSource(theme);
+  }, [appSettings.appearance.theme]);
+
+  useEffect(() => {
+    setPermissionMode(appSettings.session.default_permission_mode);
+    setReasoningEffort(appSettings.session.default_reasoning_effort === "default" ? "" : appSettings.session.default_reasoning_effort);
+  }, [appSettings.session.default_permission_mode, appSettings.session.default_reasoning_effort]);
 
   useEffect(() => {
     setRightPanelLiveWidth(rightPanelWidth);
@@ -213,8 +266,9 @@ export function App(): React.JSX.Element {
   });
 
   const loadInitialState = useCallback(async (client: CoreClient) => {
-    const [healthResponse, workspaceResponse, sessionResponse, recentEvents] = await Promise.all([
+    const [healthResponse, settingsResponse, workspaceResponse, sessionResponse, recentEvents] = await Promise.all([
       client.health(),
+      client.settings(),
       client.listWorkspaces(),
       client.listSessions(),
       client.events({ limit: EVENT_WINDOW_SIZE }),
@@ -228,7 +282,7 @@ export function App(): React.JSX.Element {
     for (const result of connectionResults) {
       if (result.status === "fulfilled") connectionMap[result.value.workspace_id] = result.value;
     }
-    const initialSession = sessionResponse[0] ?? null;
+    const initialSession = settingsResponse.general.restore_on_launch ? sessionResponse[0] ?? null : null;
     const sessionEvents = initialSession ? await client.events({ session_id: initialSession.id, limit: EVENT_WINDOW_SIZE }) : [];
     const viewResults = await Promise.allSettled(sessionResponse.map((session) => client.sessionView(session.id)));
     const viewMap: Record<string, SessionView> = {};
@@ -237,6 +291,9 @@ export function App(): React.JSX.Element {
     }
     const eventResponse = [...recentEvents, ...sessionEvents];
     setHealth(healthResponse);
+    setAppSettings(settingsResponse);
+    appSettingsRef.current = settingsResponse;
+    setLastSessionAgent(sessionResponse[0]?.agent ?? "claude");
     setWorkspaces(workspaceResponse);
     setWorkspaceConnections(connectionMap);
     setSessions(sortSessionsByUpdated(sessionResponse.map((session) => {
@@ -248,7 +305,7 @@ export function App(): React.JSX.Element {
     if (initialSession) {
       setSessionWindows((current) => updateWindowAfterLatest(current, initialSession.id, sessionEvents, EVENT_WINDOW_SIZE));
     }
-    setActiveWorkspaceId((current) => current || sessionResponse[0]?.workspace_id || workspaceResponse[0]?.id || "");
+    setActiveWorkspaceId((current) => current || initialSession?.workspace_id || sessionResponse[0]?.workspace_id || workspaceResponse[0]?.id || "");
     setActiveSession((current) => current ?? initialSession);
     return eventResponse;
   }, []);
@@ -312,6 +369,42 @@ export function App(): React.JSX.Element {
       setModelSlotOverride("");
     }
   }, [modelOptions, modelOverride, modelSlotOverride]);
+
+  const patchAppSettings = useCallback(
+    async (patch: AppSettingsPatch, key: string) => {
+      if (!api) return;
+      setSettingsError("");
+      setSettingsSavingKeys((current) => new Set(current).add(key));
+      const previous = appSettingsRef.current;
+      try {
+        const next = await api.patchSettings(patch);
+        appSettingsRef.current = next;
+        setAppSettings(next);
+      } catch (settingsPatchError) {
+        setAppSettings(previous);
+        const message = settingsPatchError instanceof Error ? settingsPatchError.message : String(settingsPatchError);
+        setSettingsError(message);
+        throw settingsPatchError;
+      } finally {
+        setSettingsSavingKeys((current) => {
+          const next = new Set(current);
+          next.delete(key);
+          return next;
+        });
+      }
+    },
+    [api],
+  );
+
+  const clearMediaCache = useCallback(async (): Promise<ClearMediaCacheResponse> => {
+    if (!api) return { ok: false, removed_bytes: 0 };
+    return api.clearMediaCache();
+  }, [api]);
+
+  const openLogsDirectory = useCallback(async (): Promise<void> => {
+    const result = await window.astral.openLogsDirectory();
+    if (!result.ok) throw new Error(result.error || "无法打开日志目录");
+  }, []);
 
   useEffect(() => {
     if (activeWorkspaceId && !workspaces.some((workspace) => workspace.id === activeWorkspaceId)) {
@@ -395,6 +488,7 @@ export function App(): React.JSX.Element {
       setSessions((current) => [displaySession, ...current.filter((item) => item.id !== session.id)]);
       setActiveWorkspaceId(workspaceId);
       setActiveSession(displaySession);
+      setLastSessionAgent(agent);
     },
     [api, storeSessionView, workspaces, workspaceConnections],
   );
@@ -500,11 +594,24 @@ export function App(): React.JSX.Element {
   }, []);
 
   const handleChooseFiles = useCallback(async () => {
-    return window.astral.chooseFiles();
-  }, []);
+    if (!activeSession) return [];
+    const paths = await window.astral.chooseFiles();
+    if (paths.length === 0) return [];
+    return window.astral.ingestFiles(activeSession.id, paths);
+  }, [activeSession]);
+
+  const handleIngestFiles = useCallback(async (paths: string[]) => {
+    if (!activeSession || paths.length === 0) return [];
+    return window.astral.ingestFiles(activeSession.id, paths);
+  }, [activeSession]);
+
+  const handlePasteImage = useCallback(async () => {
+    if (!activeSession) return null;
+    return window.astral.ingestClipboardImage(activeSession.id);
+  }, [activeSession]);
 
   const handleSend = useCallback(
-    async (input: string) => {
+    async (input: string, attachments: SessionInputAttachment[] = []) => {
       if (!api || !activeWorkspace || !activeSession || !workspaceInteractive) return;
       setError("");
       try {
@@ -512,6 +619,7 @@ export function App(): React.JSX.Element {
           model: selectedModel,
           reasoning_effort: selectedReasoningEffort,
           permission_mode: runMode === "plan" ? "plan" : claudeSSHRemote ? "bypassPermissions" : permissionMode,
+          attachments,
         });
         const view = await api.sessionView(activeSession.id).catch(() => null);
         if (view) storeSessionView(view);
@@ -621,6 +729,9 @@ export function App(): React.JSX.Element {
 
   const pendingInteraction = activeSessionView?.pending_interaction ?? null;
   const sessionState = activeSession ? activeSessionView?.status ?? activeSession.status ?? "idle" : "idle";
+  const composerVisible = Boolean(activeWorkspace && activeSession);
+  const nativeVibrancy = isMacDesktop && appSettings.appearance.mac_sidebar_effect;
+  const preferredSessionAgent: AgentKind = appSettings.session.default_agent === "remember" ? lastSessionAgent : appSettings.session.default_agent;
   const sessionTitles = useMemo(
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),
     [sessionViews, sessions],
@@ -631,11 +742,25 @@ export function App(): React.JSX.Element {
   );
   return (
     <div ref={appChromeRef} className="relative flex h-screen min-h-0 select-none overflow-hidden bg-transparent text-[#1d1d1f]">
-
-
+      {settingsOpen ? (
+        <SettingsView
+          settings={appSettings}
+          settingsError={settingsError}
+          savingKeys={settingsSavingKeys}
+          health={health}
+          nativeVibrancy={nativeVibrancy}
+          onBack={() => setSettingsOpen(false)}
+          onClearMediaCache={clearMediaCache}
+          onOpenLogs={openLogsDirectory}
+          onPatchSettings={patchAppSettings}
+        />
+      ) : (
+        <>
       <Sidebar
         activeSessionId={activeSessionId}
         collapsed={sidebarCollapsed}
+        defaultSessionAgent={preferredSessionAgent}
+        nativeVibrancy={nativeVibrancy}
         sessions={sessions}
         sessionStates={sessionStates}
         sessionTitles={sessionTitles}
@@ -648,6 +773,7 @@ export function App(): React.JSX.Element {
         onDisconnectWorkspace={(workspaceId) => void handleDisconnectWorkspace(workspaceId)}
         onDeleteSession={(sessionId) => void deleteSession(sessionId)}
         onDeleteWorkspace={(workspaceId) => void deleteWorkspace(workspaceId)}
+        onOpenSettings={() => setSettingsOpen(true)}
         onResize={setSidebarWidth}
         onSelectSession={handleSelectSession}
         onSelectWorkspace={handleSelectWorkspace}
@@ -667,8 +793,7 @@ export function App(): React.JSX.Element {
         />
         <Transcript
           activeSession={activeSession}
-          activeWorkspace={activeWorkspace}
-          composerHeight={composerHeight}
+          composerHeight={composerVisible ? composerHeight : 0}
           editableUserMessage={activeSessionView?.editable_user_message ?? null}
           events={visibleEvents}
           forkingSeq={forkingSeq}
@@ -681,41 +806,47 @@ export function App(): React.JSX.Element {
           onLoadOlder={() => void loadOlderEvents()}
           onOpenSourceSession={handleOpenSourceSession}
           onScrollTargetHandled={() => setScrollTarget(null)}
+          mediaUrl={api?.mediaUrl.bind(api)}
         />
-        <Composer
-          commands={activeCommands}
-          commandsLoaded={activeCommandsLoaded}
-          commandLoadError={activeCommandError}
-          currentModel={currentModel}
-          currentEffort={currentEffort}
-          contextUsage={contextUsage}
-          disabled={!canUseDaemon || !activeWorkspace || !activeSession || !workspaceInteractive}
-          effortOverride={reasoningEffort}
-          modelOptions={modelOptions}
-          modelOverride={modelOverride}
-          modelSlotOverride={modelSlotOverride}
-          pendingInteraction={workspaceInteractive ? pendingInteraction : null}
-          permissionMode={permissionMode}
-          permissionLocked={claudeSSHRemote}
-          placeholder={composerPlaceholder}
-          queuedInputs={workspaceInteractive ? queuedInputs : []}
-          runMode={runMode}
-          running={workspaceInteractive ? sessionRunning : false}
-          onChooseAttachments={handleChooseFiles}
-          onExecuteCommand={handleExecuteCommand}
-          onRefreshCommands={handleRefreshCommands}
-          onModelOverrideChange={setModelOverride}
-          onModelSlotOverrideChange={setModelSlotOverride}
-          onEffortOverrideChange={setReasoningEffort}
-          onRespond={handleEventResponse}
-          onHeightChange={setComposerHeight}
-          onPermissionModeChange={setPermissionMode}
-          onRunModeChange={setRunMode}
-          onInterrupt={handleInterrupt}
-          onCancelQueuedInput={handleCancelQueue}
-          onSend={handleSend}
-          onSteerQueuedInput={handleSteerQueue}
-        />
+        {composerVisible ? (
+          <Composer
+            commands={activeCommands}
+            commandsLoaded={activeCommandsLoaded}
+            commandLoadError={activeCommandError}
+            currentModel={currentModel}
+            currentEffort={currentEffort}
+            contextUsage={contextUsage}
+            disabled={!canUseDaemon || !workspaceInteractive}
+            effortOverride={reasoningEffort}
+            modelOptions={modelOptions}
+            modelOverride={modelOverride}
+            modelSlotOverride={modelSlotOverride}
+            pendingInteraction={workspaceInteractive ? pendingInteraction : null}
+            permissionMode={permissionMode}
+            permissionLocked={claudeSSHRemote}
+            placeholder={composerPlaceholder}
+            queuedInputs={workspaceInteractive ? queuedInputs : []}
+            runMode={runMode}
+            running={workspaceInteractive ? sessionRunning : false}
+            runningInputMode={runningInputMode}
+            onChooseAttachments={handleChooseFiles}
+            onIngestFiles={handleIngestFiles}
+            onPasteImage={handlePasteImage}
+            onExecuteCommand={handleExecuteCommand}
+            onRefreshCommands={handleRefreshCommands}
+            onModelOverrideChange={setModelOverride}
+            onModelSlotOverrideChange={setModelSlotOverride}
+            onEffortOverrideChange={setReasoningEffort}
+            onRespond={handleEventResponse}
+            onHeightChange={setComposerHeight}
+            onPermissionModeChange={setPermissionMode}
+            onRunModeChange={setRunMode}
+            onInterrupt={handleInterrupt}
+            onCancelQueuedInput={handleCancelQueue}
+            onSend={handleSend}
+            onSteerQueuedInput={handleSteerQueue}
+          />
+        ) : null}
       </main>
       <RightPanel
         api={api}
@@ -729,8 +860,6 @@ export function App(): React.JSX.Element {
       />
 
       <WorkspaceModal
-        defaultAgent={health?.agents.claude.available ? "claude" : "codex"}
-        health={health}
         open={workspaceOpen}
         onChooseDirectory={handleChooseDirectory}
         onClose={() => setWorkspaceOpen(false)}
@@ -738,13 +867,15 @@ export function App(): React.JSX.Element {
       />
 
       <WorkspaceOpenerMenu
+        defaultOpener={appSettings.workspace.default_opener}
         rightPanelOpen={rightPanelOpen}
         workspace={activeWorkspace}
         onError={setError}
+        onDefaultOpenerChange={(opener) => void patchAppSettings({ workspace: { default_opener: opener } }, "workspace.default_opener")}
       />
 
       <button
-        className={`[-webkit-app-region:no-drag] absolute top-[10px] z-[200] grid size-8 place-items-center rounded-lg text-[#8f9296] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 ${sidebarToggleLeftClass}`}
+        className={`[-webkit-app-region:no-drag] absolute top-[10px] z-[var(--ao-z-chrome)] grid size-8 place-items-center rounded-lg text-[#8f9296] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 ${sidebarToggleLeftClass}`}
         type="button"
         aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
         title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
@@ -761,7 +892,7 @@ export function App(): React.JSX.Element {
         <PanelLeft size={19} strokeWidth={1.8} />
       </button>
       <button
-        className={`[-webkit-app-region:no-drag] absolute right-[20px] top-[10px] z-[200] grid size-8 place-items-center rounded-lg transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 ${
+        className={`[-webkit-app-region:no-drag] absolute right-[20px] top-[10px] z-[var(--ao-z-chrome)] grid size-8 place-items-center rounded-lg transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 ${
           rightPanelOpen ? "bg-black/[0.055] text-[#343438]" : "text-[#8f9296]"
         }`}
         type="button"
@@ -779,6 +910,8 @@ export function App(): React.JSX.Element {
       >
         <PanelRight size={19} strokeWidth={1.8} />
       </button>
+        </>
+      )}
     </div>
   );
 }

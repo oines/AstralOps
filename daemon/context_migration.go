@@ -6,17 +6,39 @@ func (a *app) backfillHistoricalContextEvents() error {
 		if ev.Kind == "control.context" {
 			latestContext[ev.SessionID] = ev
 		}
+		if ev.Kind == "memory.compacted" {
+			delete(latestContext, ev.SessionID)
+		}
 	}
 	events := a.store.allEvents()
 	handled := map[string]bool{}
+	claudeAggregateFallbacks := map[string]AstralEvent{}
+	claudeAggregateOrder := []string{}
 	for index := len(events) - 1; index >= 0; index-- {
 		source := events[index]
 		if source.SessionID == "" || handled[source.SessionID] {
 			continue
 		}
+		if source.Kind == "memory.compacted" {
+			handled[source.SessionID] = true
+			continue
+		}
 		contextEvent, ok := a.contextEventFromHistoricalRaw(source)
 		if !ok {
 			continue
+		}
+		if source.Agent == AgentClaude {
+			switch stringValue(mapValue(contextEvent.Normalized)["scope"]) {
+			case "aggregate":
+				if _, ok := claudeAggregateFallbacks[source.SessionID]; !ok {
+					claudeAggregateFallbacks[source.SessionID] = contextEvent
+					claudeAggregateOrder = append(claudeAggregateOrder, source.SessionID)
+				}
+				continue
+			case "current":
+				contextEvent = hydrateHistoricalCurrentContext(contextEvent, latestContext[source.SessionID])
+				contextEvent = hydrateHistoricalCurrentContext(contextEvent, claudeAggregateFallbacks[source.SessionID])
+			}
 		}
 		if !shouldAppendHistoricalContext(latestContext[source.SessionID], source, contextEvent) {
 			handled[source.SessionID] = true
@@ -29,6 +51,23 @@ func (a *app) backfillHistoricalContextEvents() error {
 		a.sessionProjections().apply(saved)
 		latestContext[source.SessionID] = saved
 		handled[source.SessionID] = true
+	}
+	for _, sessionID := range claudeAggregateOrder {
+		if handled[sessionID] {
+			continue
+		}
+		contextEvent := claudeAggregateFallbacks[sessionID]
+		if !shouldAppendHistoricalContext(latestContext[sessionID], contextEvent, contextEvent) {
+			handled[sessionID] = true
+			continue
+		}
+		saved, err := a.store.appendEvent(contextEvent)
+		if err != nil {
+			return err
+		}
+		a.sessionProjections().apply(saved)
+		latestContext[sessionID] = saved
+		handled[sessionID] = true
 	}
 	return nil
 }
@@ -94,10 +133,14 @@ func (a *app) contextEventFromHistoricalRaw(source AstralEvent) (AstralEvent, bo
 	}
 	switch source.Agent {
 	case AgentClaude:
-		if stringValue(raw["type"]) != "result" {
+		switch stringValue(raw["type"]) {
+		case "stream_event":
+			return claudeStreamContextUsageEvent(session, raw)
+		case "result":
+			return claudeResultContextUsageEvent(session, raw)
+		default:
 			return AstralEvent{}, false
 		}
-		return claudeResultContextUsageEvent(session, raw)
 	case AgentCodex:
 		if stringValue(raw["method"]) != "thread/tokenUsage/updated" {
 			return AstralEvent{}, false
@@ -116,11 +159,43 @@ func shouldAppendHistoricalContext(existing AstralEvent, source AstralEvent, can
 	if sameContextUsage(existingValue, candidateValue) {
 		return false
 	}
+	if source.Agent == AgentClaude {
+		switch stringValue(candidateValue["scope"]) {
+		case "current":
+			return true
+		case "aggregate":
+			return false
+		}
+	}
 	raw := mapValue(source.Raw)
 	if source.Agent == AgentCodex && source.Kind == "control.context" && stringValue(raw["method"]) == "thread/tokenUsage/updated" {
 		return true
 	}
 	return false
+}
+
+func hydrateHistoricalCurrentContext(candidate AstralEvent, source AstralEvent) AstralEvent {
+	if stringValue(mapValue(candidate.Normalized)["scope"]) != "current" {
+		return candidate
+	}
+	sourceValue := mapValue(source.Normalized)
+	if len(sourceValue) == 0 {
+		return candidate
+	}
+	next := copyStringAny(mapValue(candidate.Normalized))
+	copyContextFields(next, sourceValue, []string{
+		"model",
+		"model_context_window",
+		"model_usage",
+		"cumulative_total_tokens",
+		"cumulative_input_tokens",
+		"cumulative_output_tokens",
+		"cumulative_cached_input_tokens",
+		"cumulative_cache_creation_input_tokens",
+	})
+	refreshProjectedContextPercent(next)
+	candidate.Normalized = next
+	return candidate
 }
 
 func sameContextUsage(left map[string]any, right map[string]any) bool {

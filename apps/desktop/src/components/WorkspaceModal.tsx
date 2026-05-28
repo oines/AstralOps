@@ -1,11 +1,9 @@
-import { Bot, Check, FolderGit2, Server, X } from "lucide-react";
+import { Check, FolderGit2, Server, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { CreateWorkspaceRequest } from "@astralops/protocol";
-import type { HealthResponse, WorkspaceDraft } from "../types";
+import type { WorkspaceDraft } from "../types";
 
 type WorkspaceModalProps = {
-  defaultAgent: "claude" | "codex";
-  health: HealthResponse | null;
   open: boolean;
   onChooseDirectory: () => Promise<string | null>;
   onClose: () => void;
@@ -15,7 +13,6 @@ type WorkspaceModalProps = {
 const initialDraft: WorkspaceDraft = {
   name: "",
   target: "local",
-  agent: "claude",
   local_cwd: "",
   ssh_endpoint: "",
   ssh_port: 22,
@@ -23,36 +20,29 @@ const initialDraft: WorkspaceDraft = {
 };
 
 export function WorkspaceModal({
-  defaultAgent,
-  health,
   open,
   onChooseDirectory,
   onClose,
   onCreate,
 }: WorkspaceModalProps): React.JSX.Element | null {
-  const [draft, setDraft] = useState<WorkspaceDraft>({ ...initialDraft, agent: defaultAgent });
+  const [draft, setDraft] = useState<WorkspaceDraft>(initialDraft);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     if (open) {
-      setDraft({ ...initialDraft, agent: defaultAgent });
+      setDraft(initialDraft);
       setError("");
       setBusy(false);
     }
-  }, [defaultAgent, open]);
+  }, [open]);
 
   if (!open) return null;
 
-  const agents = health?.agents;
-  const claudeAvailable = Boolean(agents?.claude.available);
-  const codexAvailable = Boolean(agents?.codex.available);
-  const selectedAvailable = draft.agent === "claude" ? claudeAvailable : codexAvailable;
   const canCreate =
-    selectedAvailable &&
-    (draft.target === "local"
+    draft.target === "local"
       ? draft.local_cwd.trim() !== ""
-      : draft.ssh_endpoint.trim() !== "" && draft.ssh_remote_cwd.trim().startsWith("/"));
+      : draft.ssh_endpoint.trim() !== "" && draft.ssh_remote_cwd.trim().startsWith("/");
 
   async function chooseFolder(): Promise<void> {
     const folder = await onChooseDirectory();
@@ -66,9 +56,7 @@ export function WorkspaceModal({
 
   async function submit(): Promise<void> {
     if (!canCreate) {
-      if (!selectedAvailable) {
-        setError("当前 agent 不可用");
-      } else if (draft.target === "local") {
+      if (draft.target === "local") {
         setError("先选择本机文件夹");
       } else {
         setError("填写 SSH endpoint，并使用绝对远端路径");
@@ -83,7 +71,6 @@ export function WorkspaceModal({
           ? {
               name: draft.name || draft.ssh_endpoint || "SSH",
               target: "ssh",
-              agent: draft.agent,
               ssh: {
                 endpoint: draft.ssh_endpoint.trim(),
                 port: draft.ssh_port || 22,
@@ -93,7 +80,6 @@ export function WorkspaceModal({
           : {
               name: draft.name || draft.local_cwd.split("/").at(-1) || "Local",
               target: "local",
-              agent: draft.agent,
               local_cwd: draft.local_cwd,
             };
       await onCreate(request);
@@ -105,33 +91,30 @@ export function WorkspaceModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-[rgba(20,20,22,0.36)] p-6 backdrop-blur-md">
-      <section className="w-[min(580px,100%)] overflow-hidden rounded-[18px] border border-[#e9e7e1] bg-white shadow-[0_18px_48px_rgba(29,29,31,0.16)]">
-        <header className="flex items-start justify-between gap-5 border-b border-[#e7e5e0] px-5 pb-4 pt-5">
+    <div className="fixed inset-0 z-[var(--ao-z-modal)] grid place-items-center bg-[rgba(20,20,22,0.36)] p-4 backdrop-blur-md">
+      <section className="w-[min(520px,100%)] overflow-hidden rounded-lg border border-[#e9e7e1] bg-white shadow-[0_18px_48px_rgba(29,29,31,0.16)]">
+        <header className="flex items-start justify-between gap-4 border-b border-[#e7e5e0] px-4 pb-3 pt-4">
           <div>
-            <h2 className="m-0 text-[18px] font-bold text-[#1d1d1f]">创建工作区</h2>
-            <p className="m-0 mt-1.5 max-w-[430px] text-[13px] leading-5 text-[#6b6b70]">
-              选择本机目录，或连接 SSH 远程 cwd。远程目录按需读取，不做全量同步。
-            </p>
+            <h2 className="m-0 text-[16px] font-bold text-[#1d1d1f]">创建工作区</h2>
           </div>
-          <button className="grid size-8 place-items-center rounded-[10px] text-[#98979c] hover:bg-black/[0.035]" type="button" title="Close" onClick={onClose}>
+          <button className="grid size-8 place-items-center rounded-lg text-[#98979c] hover:bg-black/[0.035]" type="button" title="Close" onClick={onClose}>
             <X size={16} />
           </button>
         </header>
 
-        <div className="grid gap-4 px-5 py-5">
+        <div className="grid gap-3 px-4 py-4">
           <Field label="位置">
             <div className="grid grid-cols-2 gap-2">
               <TargetChoice
                 active={draft.target === "local"}
-                description="选择本机文件夹"
+                description="本机文件夹"
                 icon={<FolderGit2 size={17} strokeWidth={1.8} />}
                 label="本地"
                 onClick={() => setDraft((current) => ({ ...current, target: "local" }))}
               />
               <TargetChoice
                 active={draft.target === "ssh"}
-                description="远端透明执行"
+                description="远程目录"
                 icon={<Server size={17} strokeWidth={1.8} />}
                 label="SSH 远程"
                 onClick={() => setDraft((current) => ({ ...current, target: "ssh" }))}
@@ -142,7 +125,7 @@ export function WorkspaceModal({
           {draft.target === "local" ? (
             <Field label="本机文件夹">
               <button
-                className="flex h-11 w-full items-center gap-2 rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 text-left text-[14px] font-semibold text-[#343438] hover:bg-[#f1f0ec]"
+                className="flex h-10 w-full items-center gap-2 rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 text-left text-[13px] font-semibold text-[#343438] hover:bg-[#f1f0ec]"
                 type="button"
                 onClick={() => void chooseFolder()}
               >
@@ -154,9 +137,9 @@ export function WorkspaceModal({
             </Field>
           ) : (
             <div className="grid gap-3">
-              <Field label="SSH endpoint">
+              <Field label="SSH 地址">
                 <input
-                  className="h-10 w-full rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
+                  className="h-10 w-full rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
                   placeholder="root@example.com"
                   value={draft.ssh_endpoint}
                   onChange={(event) => setDraft((current) => ({ ...current, ssh_endpoint: event.target.value }))}
@@ -165,16 +148,16 @@ export function WorkspaceModal({
               <div className="grid grid-cols-[110px_1fr] gap-3">
                 <Field label="端口">
                   <input
-                    className="h-10 w-full rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
+                    className="h-10 w-full rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
                     min={1}
                     type="number"
                     value={draft.ssh_port}
                     onChange={(event) => setDraft((current) => ({ ...current, ssh_port: Number(event.target.value) || 22 }))}
                   />
                 </Field>
-                <Field label="远端 cwd">
+                <Field label="远程目录">
                   <input
-                    className="h-10 w-full rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
+                    className="h-10 w-full rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
                     placeholder="/home/user/project"
                     value={draft.ssh_remote_cwd}
                     onChange={(event) => setDraft((current) => ({ ...current, ssh_remote_cwd: event.target.value }))}
@@ -184,43 +167,24 @@ export function WorkspaceModal({
             </div>
           )}
 
-          <Field label="Agent">
-            <div className="grid grid-cols-2 gap-2">
-              <AgentChoice
-                active={draft.agent === "claude"}
-                available={claudeAvailable}
-                label="Claude Code"
-                meta={agents?.claude.version || agents?.claude.path || "未找到"}
-                onClick={() => setDraft((current) => ({ ...current, agent: "claude" }))}
-              />
-              <AgentChoice
-                active={draft.agent === "codex"}
-                available={codexAvailable}
-                label="Codex"
-                meta={agents?.codex.version || agents?.codex.path || "未找到"}
-                onClick={() => setDraft((current) => ({ ...current, agent: "codex" }))}
-              />
-            </div>
-          </Field>
-
           <Field label="名称">
             <input
-              className="h-10 w-full rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 text-[14px] outline-none focus:border-[#2563eb]"
+              className="h-10 w-full rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 text-[14px] outline-none focus:border-[#2563eb]"
               placeholder="默认使用文件夹名"
               value={draft.name}
               onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
             />
           </Field>
 
-          {error ? <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-600">{error}</div> : null}
+          {error ? <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-600">{error}</div> : null}
         </div>
 
-        <footer className="flex justify-end gap-2 border-t border-[#e7e5e0] px-5 pb-5 pt-4">
-          <button className="rounded-full border border-[#e7e5e0] px-4 py-2 text-[14px] font-semibold text-[#1d1d1f] hover:bg-black/[0.035]" type="button" onClick={onClose}>
+        <footer className="flex justify-end gap-2 border-t border-[#e7e5e0] px-4 pb-4 pt-3">
+          <button className="rounded-lg border border-[#e7e5e0] px-3 py-1.5 text-[13px] font-semibold text-[#1d1d1f] hover:bg-black/[0.035]" type="button" onClick={onClose}>
             取消
           </button>
-          <button className="rounded-full bg-[#2563eb] px-4 py-2 text-[14px] font-semibold text-white disabled:opacity-50" type="button" disabled={busy || !canCreate} onClick={() => void submit()}>
-            创建并开始
+          <button className="rounded-lg bg-[#2563eb] px-3 py-1.5 text-[13px] font-semibold text-white disabled:opacity-50" type="button" disabled={busy || !canCreate} onClick={() => void submit()}>
+            创建工作区
           </button>
         </footer>
       </section>
@@ -254,7 +218,7 @@ type TargetChoiceProps = {
 function TargetChoice({ active, description, disabled = false, icon, label, onClick }: TargetChoiceProps): React.JSX.Element {
   return (
     <button
-      className={`flex min-w-0 items-center gap-2 rounded-xl border px-3 py-3 text-left transition ${
+      className={`flex min-w-0 items-center gap-2 rounded-lg border px-3 py-2.5 text-left transition ${
         active
           ? "border-[#2563eb] bg-[#eff4ff] text-[#1d1d1f]"
           : "border-[#e7e5e0] bg-[#f7f6f3] text-[#343438] hover:bg-[#f1f0ec]"
@@ -265,39 +229,11 @@ function TargetChoice({ active, description, disabled = false, icon, label, onCl
     >
       {icon}
       <span className="min-w-0">
-        <span className="flex items-center gap-1.5 text-[14px] font-semibold">
+        <span className="flex items-center gap-1.5 text-[13px] font-semibold">
           {label}
           {active ? <Check size={14} strokeWidth={2} /> : null}
         </span>
         <span className="block truncate text-[12px] font-medium text-[#8b8a90]">{description}</span>
-      </span>
-    </button>
-  );
-}
-
-type AgentChoiceProps = {
-  active: boolean;
-  available: boolean;
-  label: string;
-  meta: string;
-  onClick: () => void;
-};
-
-function AgentChoice({ active, available, label, meta, onClick }: AgentChoiceProps): React.JSX.Element {
-  return (
-    <button
-      className={`flex min-w-0 items-center gap-2 rounded-xl border px-3 py-2.5 text-left transition ${
-        active
-          ? "border-[#2563eb] bg-[#eff4ff] text-[#1d1d1f]"
-          : "border-[#e7e5e0] bg-[#f7f6f3] text-[#343438] hover:bg-[#f1f0ec]"
-      } ${available ? "" : "opacity-55"}`}
-      type="button"
-      onClick={onClick}
-    >
-      <Bot size={16} strokeWidth={1.8} />
-      <span className="min-w-0">
-        <span className="block truncate text-[14px] font-semibold">{label}</span>
-        <span className="block truncate text-[12px] font-medium text-[#8b8a90]">{available ? meta : "PATH 中未找到"}</span>
       </span>
     </button>
   );

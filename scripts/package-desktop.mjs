@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -11,6 +12,12 @@ const require = createRequire(import.meta.url);
 const desktopDir = path.join(repoRoot, "apps", "desktop");
 const releaseRoot = path.join(repoRoot, "release", "desktop");
 const releaseVersion = normalizeVersion(process.env.ASTRALOPS_VERSION) || packageVersion();
+const updatePublishConfig = {
+  provider: "github",
+  owner: "oines",
+  repo: "AstralOps",
+  releaseType: "release",
+};
 
 const proxyHelperTargets = [
   { goos: "linux", goarch: "amd64" },
@@ -36,6 +43,7 @@ buildProxyHelpers(stageBin);
 
 const configPath = writeBuilderConfig(target, stageBin, outputDir);
 runElectronBuilder(target, arch, configPath);
+writeUpdateMetadata(target, outputDir);
 
 console.log(`\nPackaged desktop target: ${target} (${arch})`);
 console.log(`Version: ${releaseVersion}`);
@@ -107,6 +115,8 @@ function writeBuilderConfig(target, stageBin, outputDir) {
       },
     },
     asar: true,
+    publish: [updatePublishConfig],
+    electronUpdaterCompatibility: ">=2.16",
     directories: {
       output: outputDir,
     },
@@ -150,6 +160,94 @@ function writeBuilderConfig(target, stageBin, outputDir) {
 function runElectronBuilder(target, goarch, configPath) {
   const platformFlag = target === "darwin" ? "--mac" : target === "windows" ? "--win" : "--linux";
   run("npx", ["electron-builder", "--projectDir", desktopDir, "--config", configPath, platformFlag, `--${electronArch(goarch)}`, "--publish", "never"]);
+}
+
+function writeUpdateMetadata(target, outputDir) {
+  const artifacts = updateArtifacts(target, outputDir);
+  if (artifacts.length === 0) {
+    console.warn(`No auto-update artifact found for ${target}; skipping update metadata.`);
+    return;
+  }
+  const primary = artifacts[0];
+  const metadataPath = path.join(outputDir, updateMetadataFileName(target));
+  const releaseDate = new Date().toISOString();
+  const lines = [
+    `version: ${yamlString(releaseVersion)}`,
+    "files:",
+    ...artifacts.flatMap((artifact) => {
+      const lines = [
+        `  - url: ${yamlString(artifact.name)}`,
+        `    sha512: ${yamlString(artifact.sha512)}`,
+        `    size: ${artifact.size}`,
+      ];
+      if (artifact.blockMapSize) lines.push(`    blockMapSize: ${artifact.blockMapSize}`);
+      return lines;
+    }),
+    `path: ${yamlString(primary.name)}`,
+    `sha512: ${yamlString(primary.sha512)}`,
+    `releaseDate: ${yamlString(releaseDate)}`,
+    "",
+  ];
+  writeFileSync(metadataPath, lines.join("\n"));
+}
+
+function updateArtifacts(target, outputDir) {
+  const artifactNames = readdirSync(outputDir)
+    .filter((fileName) => updateArtifactPriority(target, fileName) > 0)
+    .sort((a, b) => updateArtifactPriority(target, a) - updateArtifactPriority(target, b) || a.localeCompare(b));
+  return artifactNames.map((name) => {
+    const filePath = path.join(outputDir, name);
+    const blockMapPath = `${filePath}.blockmap`;
+    return {
+      name,
+      sha512: createHash("sha512").update(readFileSync(filePath)).digest("base64"),
+      size: statSync(filePath).size,
+      blockMapSize: fsExists(blockMapPath) ? statSync(blockMapPath).size : 0,
+    };
+  });
+}
+
+function updateArtifactPriority(target, fileName) {
+  switch (target) {
+    case "darwin":
+      if (/\.zip$/i.test(fileName)) return 1;
+      if (/\.dmg$/i.test(fileName)) return 2;
+      return 0;
+    case "windows":
+      return /-setup\.exe$/i.test(fileName) ? 1 : 0;
+    case "linux":
+      if (/\.AppImage$/i.test(fileName)) return 1;
+      if (/\.deb$/i.test(fileName)) return 2;
+      return 0;
+    default:
+      return 0;
+  }
+}
+
+function updateMetadataFileName(target) {
+  switch (target) {
+    case "darwin":
+      return "latest-mac.yml";
+    case "linux":
+      return "latest-linux.yml";
+    case "windows":
+      return "latest.yml";
+    default:
+      throw new Error(`Unsupported update metadata target: ${target}`);
+  }
+}
+
+function yamlString(value) {
+  return JSON.stringify(String(value));
+}
+
+function fsExists(filePath) {
+  try {
+    statSync(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeTarget(value) {

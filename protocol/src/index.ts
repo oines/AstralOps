@@ -83,10 +83,39 @@ export type AstralNormalizedBase = {
   [key: string]: unknown;
 };
 
+export type SessionInputAttachment = {
+  id: string;
+  kind: "image" | "file" | string;
+  path: string;
+  name: string;
+  mime_type?: string;
+  size?: number;
+  detail?: "high" | "original" | string;
+};
+
+export type TranscriptMedia = SessionInputAttachment & {
+  media_id?: string;
+  item_id?: string;
+  saved_path?: string;
+  status?: string;
+  revised_prompt?: string;
+};
+
 export type MessageNormalized = AstralNormalizedBase & {
   text?: string;
   item_id?: string;
   native_message_uuid?: string;
+  attachments?: SessionInputAttachment[];
+  media?: TranscriptMedia | TranscriptMedia[];
+  media_id?: string;
+  kind?: "image" | "file" | string;
+  path?: string;
+  saved_path?: string;
+  name?: string;
+  mime_type?: string;
+  size?: number;
+  status?: string;
+  revised_prompt?: string;
 };
 
 export type ReasoningNormalized = AstralNormalizedBase & {
@@ -325,7 +354,7 @@ export type QueuedInputView = {
 export type CreateWorkspaceRequest = {
   name: string;
   target: WorkspaceTarget;
-  agent: AgentKind;
+  agent?: AgentKind;
   local_cwd?: string;
   ssh?: {
     endpoint: string;
@@ -341,6 +370,7 @@ export type CreateSessionRequest = {
 
 export type SessionInputRequest = {
   input: string;
+  attachments?: SessionInputAttachment[];
   model?: string;
   reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
   permission_mode?: "default" | "auto" | "plan" | "bypassPermissions";
@@ -387,6 +417,49 @@ export type SessionCommandResponse = {
   ok: boolean;
   queued?: boolean;
   queue_id?: string;
+};
+
+export type AppSettings = {
+  version: number;
+  general: {
+    restore_on_launch: boolean;
+  };
+  appearance: {
+    theme: "system" | "light" | "dark";
+    mac_sidebar_effect: boolean;
+    preview_theme: "light" | "dark" | "system";
+  };
+  session: {
+    default_agent: "remember" | AgentKind;
+    default_permission_mode: "default" | "auto" | "bypassPermissions";
+    default_reasoning_effort: "default" | "low" | "medium" | "high" | "xhigh" | "max";
+  };
+  workspace: {
+    default_opener: "vscode" | "finder" | "terminal";
+    ssh_auto_reconnect: boolean;
+  };
+  notifications: {
+    task_complete: boolean;
+    requires_action: boolean;
+    quiet_when_focused: boolean;
+  };
+  updates: {
+    auto_check: boolean;
+  };
+};
+
+export type AppSettingsPatch = {
+  general?: Partial<AppSettings["general"]>;
+  appearance?: Partial<AppSettings["appearance"]>;
+  session?: Partial<AppSettings["session"]>;
+  workspace?: Partial<AppSettings["workspace"]>;
+  notifications?: Partial<AppSettings["notifications"]>;
+  updates?: Partial<AppSettings["updates"]>;
+};
+
+export type ClearMediaCacheResponse = {
+  ok: boolean;
+  removed_bytes: number;
 };
 
 export type HealthResponse = {

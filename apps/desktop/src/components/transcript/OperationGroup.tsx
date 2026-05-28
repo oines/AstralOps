@@ -1,11 +1,13 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronRight, Copy, FileCode2, TerminalSquare } from "lucide-react";
+import { ChevronRight, Copy, FileCode2, FileText, Search, TerminalSquare } from "lucide-react";
 import type { AstralEvent } from "../../types";
 import {
   buildCommandItems,
   type CommandItem,
   type FileDiff,
+  type FileReadItem,
+  type SearchItem,
   type TranscriptOperationGroup,
   type TranscriptOperationStep,
   type TurnGroup,
@@ -18,13 +20,19 @@ type OperationGroupProps = {
 };
 
 export function OperationGroup({ group, renderDetail, turnStatus }: OperationGroupProps): React.JSX.Element | null {
-  const [open, setOpen] = useState(turnStatus === "running");
+  const [open, setOpen] = useState(false);
 
-  useEffect(() => {
-    setOpen(turnStatus === "running");
-  }, [turnStatus]);
+  if (group.summary === "") return null;
+  const expandable = group.steps.length > 0;
 
-  if (group.steps.length === 0 || group.summary === "") return null;
+  if (!expandable) {
+    return (
+      <div className="flex min-w-0 max-w-full items-center gap-2 text-left text-[13px] font-medium leading-6 text-[#a0a3a7]">
+        <TerminalSquare className="shrink-0" size={15} strokeWidth={1.8} />
+        <span className="min-w-0 truncate">{group.summary}</span>
+      </div>
+    );
+  }
 
   return (
     <div className="min-w-0">
@@ -63,7 +71,49 @@ function renderOperationStep(
 ): React.ReactNode {
   if (step.type === "command") return <CommandList events={step.events} key={step.id} />;
   if (step.type === "fileChanges") return <FileChangesGroup files={step.files} key={step.id} />;
+  if (step.type === "fileReads") return <FileReadsRow files={step.files} key={step.id} />;
+  if (step.type === "searches") return <SearchesRow key={step.id} searches={step.searches} />;
   return <React.Fragment key={step.id}>{renderDetail(step.event)}</React.Fragment>;
+}
+
+function SearchesRow({
+  searches,
+}: {
+  searches: SearchItem[];
+}): React.JSX.Element | null {
+  if (searches.length === 0) return null;
+
+  return (
+    <div className="grid min-w-0 gap-1">
+      {searches.map((search) => (
+        <div className="flex min-w-0 max-w-full items-center gap-2 text-[13px] font-medium leading-6 text-[#a0a3a7]" key={search.id}>
+          <Search className="shrink-0" size={15} strokeWidth={1.8} />
+          <span className="shrink-0">{search.status === "running" ? "正在搜索" : "已搜索"}</span>
+          {search.target ? <span className="min-w-0 truncate font-mono text-[13px]">{search.target}</span> : <span className="min-w-0 truncate">{search.tool}</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FileReadsRow({
+  files,
+}: {
+  files: FileReadItem[];
+}): React.JSX.Element | null {
+  if (files.length === 0) return null;
+
+  return (
+    <div className="grid min-w-0 gap-1">
+      {files.map((file) => (
+        <div className="flex min-w-0 max-w-full items-center gap-2 text-[13px] font-medium leading-6 text-[#a0a3a7]" key={file.id}>
+          <FileText className="shrink-0" size={15} strokeWidth={1.8} />
+          <span className="shrink-0">{file.status === "running" ? "正在读取" : "已读取"}</span>
+          <span className="min-w-0 truncate font-mono text-[13px]">{file.path}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function FileChangesGroup({ files }: { files: FileDiff[] }): React.JSX.Element | null {
@@ -234,7 +284,7 @@ function CommandRow({ item }: { item: CommandItem }): React.JSX.Element {
         {hasOutput ? <ChevronRight className={`ml-auto shrink-0 transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`} size={15} strokeWidth={2} /> : null}
       </button>
       {open && hasOutput ? (
-        <div className="min-w-0 rounded-[12px] bg-black/5 px-3 py-2 text-[#5f6368]">
+        <div className="min-w-0 rounded-lg bg-black/5 px-3 py-2 text-[#5f6368]">
           <div className="mb-1.5 text-[13px] font-medium">Shell</div>
           {outputClipped ? <div className="mb-2 text-[12px] font-semibold text-[#a0a3a7]">已显示最新 12000 个字符</div> : null}
           <pre className="max-h-72 min-w-0 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 [overflow-wrap:anywhere]">{outputPreview}</pre>

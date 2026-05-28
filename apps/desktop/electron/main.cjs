@@ -1,6 +1,8 @@
-const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, Menu, Notification, Tray, clipboard, dialog, ipcMain, nativeImage, nativeTheme, shell } = require("electron");
 const { execFile, spawn } = require("child_process");
+const { autoUpdater } = require("electron-updater");
 const { promisify } = require("util");
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -9,9 +11,14 @@ let mainWindow;
 let daemonProcess;
 let daemonInfo;
 let tray;
+let updateCheckPromise;
+let updateStatus = initialUpdateStatus();
 const recentNotificationIDs = [];
 const recentNotificationIDSet = new Set();
 const execFileAsync = promisify(execFile);
+
+autoUpdater.autoDownload = true;
+autoUpdater.autoInstallOnAppQuit = true;
 
 function repoRoot() {
   return path.resolve(__dirname, "../../..");
@@ -46,6 +53,45 @@ function appIconImage(size) {
   const image = nativeImage.createFromPath(iconPath);
   if (image.isEmpty()) return undefined;
   return size ? image.resize({ width: size, height: size }) : image;
+}
+
+function initialUpdateStatus() {
+  return {
+    current_version: app.getVersion(),
+    is_packaged: app.isPackaged,
+    platform: process.platform,
+    status: app.isPackaged ? "idle" : "dev",
+  };
+}
+
+function setUpdateStatus(next) {
+  updateStatus = {
+    current_version: app.getVersion(),
+    is_packaged: app.isPackaged,
+    platform: process.platform,
+    ...next,
+  };
+  mainWindow?.webContents.send("astral:update-status", updateStatus);
+  return updateStatus;
+}
+
+function updateInfoDetails(info) {
+  if (!info || typeof info !== "object") return {};
+  const details = {};
+  if (typeof info.version === "string") details.available_version = info.version;
+  if (typeof info.releaseName === "string") details.release_name = info.releaseName;
+  if (typeof info.releaseDate === "string") details.release_date = info.releaseDate;
+  return details;
+}
+
+function updateErrorMessage(error) {
+  if (error instanceof Error) return error.message;
+  return String(error || "Update check failed");
+}
+
+function progressNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
 }
 
 function rendererIndexPath() {
@@ -515,6 +561,115 @@ function rememberNotificationID(id) {
   return true;
 }
 
+function attachmentID() {
+  return `att_${crypto.randomBytes(9).toString("hex")}`;
+}
+
+function safeSessionSegment(sessionId) {
+  return String(sessionId || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function uploadDir(sessionId, attachmentId) {
+  return path.join(dataDir(), "runtime", "uploads", safeSessionSegment(sessionId), attachmentId);
+}
+
+function mimeTypeForPath(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const map = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+    ".json": "application/json",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".csv": "text/csv",
+  };
+  return map[ext] || "application/octet-stream";
+}
+
+function attachmentKindForMime(mimeType) {
+  return ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mimeType) ? "image" : "file";
+}
+
+function attachmentRecord({ id, kind, filePath, name, mimeType, size }) {
+  return {
+    id,
+    kind,
+    path: filePath,
+    name,
+    mime_type: mimeType,
+    size,
+    detail: kind === "image" ? "high" : undefined,
+  };
+}
+
+async function ingestFiles(sessionId, filePaths) {
+  const attachments = [];
+  for (const source of filePaths) {
+    if (!source || typeof source !== "string") continue;
+    const stat = await fs.promises.stat(source).catch(() => null);
+    if (!stat || !stat.isFile()) continue;
+    const id = attachmentID();
+    const dir = uploadDir(sessionId, id);
+    await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+    const name = path.basename(source);
+    const target = path.join(dir, name);
+    await fs.promises.copyFile(source, target);
+    const mimeType = mimeTypeForPath(source);
+    attachments.push(attachmentRecord({
+      id,
+      kind: attachmentKindForMime(mimeType),
+      filePath: target,
+      name,
+      mimeType,
+      size: stat.size,
+    }));
+  }
+  return attachments;
+}
+
+autoUpdater.on("checking-for-update", () => {
+  setUpdateStatus({ status: "checking" });
+});
+
+autoUpdater.on("update-available", (info) => {
+  setUpdateStatus({ status: "available", ...updateInfoDetails(info) });
+});
+
+autoUpdater.on("update-not-available", (info) => {
+  setUpdateStatus({ status: "not-available", checked_at: new Date().toISOString(), ...updateInfoDetails(info) });
+});
+
+autoUpdater.on("download-progress", (progress) => {
+  setUpdateStatus({
+    status: "downloading",
+    available_version: updateStatus.available_version,
+    progress: {
+      bytes_per_second: progressNumber(progress?.bytesPerSecond),
+      percent: progressNumber(progress?.percent),
+      total: progressNumber(progress?.total),
+      transferred: progressNumber(progress?.transferred),
+    },
+  });
+});
+
+autoUpdater.on("update-downloaded", (info) => {
+  setUpdateStatus({ status: "downloaded", ...updateInfoDetails(info) });
+});
+
+autoUpdater.on("update-cancelled", (info) => {
+  setUpdateStatus({ status: "cancelled", ...updateInfoDetails(info) });
+});
+
+autoUpdater.on("error", (error) => {
+  setUpdateStatus({ status: "error", error: updateErrorMessage(error) });
+});
+
 ipcMain.handle("astral:get-daemon-info", async () => {
   if (daemonInfo) return daemonInfo;
   return waitForDaemon();
@@ -536,6 +691,23 @@ ipcMain.handle("astral:choose-files", async () => {
   return result.filePaths;
 });
 
+ipcMain.handle("astral:ingest-files", async (_event, sessionId, filePaths) => {
+  return ingestFiles(sessionId, Array.isArray(filePaths) ? filePaths : []);
+});
+
+ipcMain.handle("astral:ingest-clipboard-image", async (_event, sessionId) => {
+  const image = clipboard.readImage();
+  if (!image || image.isEmpty()) return null;
+  const id = attachmentID();
+  const dir = uploadDir(sessionId, id);
+  await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+  const name = "clipboard.png";
+  const target = path.join(dir, name);
+  const body = image.toPNG();
+  await fs.promises.writeFile(target, body, { mode: 0o600 });
+  return attachmentRecord({ id, kind: "image", filePath: target, name, mimeType: "image/png", size: body.length });
+});
+
 ipcMain.handle("astral:get-workspace-openers", async () => {
   return workspaceOpeners();
 });
@@ -547,6 +719,56 @@ ipcMain.handle("astral:open-workspace", async (_event, opener, workspace) => {
   } catch (openError) {
     return { ok: false, error: openError instanceof Error ? openError.message : String(openError) };
   }
+});
+
+ipcMain.handle("astral:open-logs-directory", async () => {
+  try {
+    const logsDir = path.join(dataDir(), "logs");
+    await fs.promises.mkdir(logsDir, { recursive: true, mode: 0o700 });
+    const error = await shell.openPath(logsDir);
+    if (error) return { ok: false, error };
+    return { ok: true };
+  } catch (openError) {
+    return { ok: false, error: openError instanceof Error ? openError.message : String(openError) };
+  }
+});
+
+ipcMain.handle("astral:set-theme-source", async (_event, theme) => {
+  if (!["system", "light", "dark"].includes(theme)) {
+    return { ok: false, error: "invalid theme source" };
+  }
+  nativeTheme.themeSource = theme;
+  return { ok: true };
+});
+
+ipcMain.handle("astral:get-update-status", async () => {
+  return updateStatus;
+});
+
+ipcMain.handle("astral:check-for-updates", async (_event, options = {}) => {
+  if (!app.isPackaged) {
+    return setUpdateStatus({ status: "dev", message: "开发模式不支持自动更新" });
+  }
+  if (updateStatus.status === "downloaded") return updateStatus;
+  if (updateCheckPromise) return updateCheckPromise;
+
+  setUpdateStatus({ status: "checking", triggered_by: options?.automatic ? "auto" : "manual" });
+  updateCheckPromise = autoUpdater.checkForUpdates()
+    .then(() => updateStatus)
+    .catch((error) => setUpdateStatus({ status: "error", error: updateErrorMessage(error) }))
+    .finally(() => {
+      updateCheckPromise = undefined;
+    });
+  return updateCheckPromise;
+});
+
+ipcMain.handle("astral:install-update", async () => {
+  if (updateStatus.status !== "downloaded") {
+    return { ok: false, error: "update is not downloaded" };
+  }
+  setUpdateStatus({ status: "installing", available_version: updateStatus.available_version });
+  setImmediate(() => autoUpdater.quitAndInstall(false, true));
+  return { ok: true };
 });
 
 ipcMain.handle("astral:show-notification", async (_event, payload) => {
@@ -577,6 +799,7 @@ ipcMain.handle("astral:show-notification", async (_event, payload) => {
 });
 
 app.whenReady().then(async () => {
+  nativeTheme.themeSource = "system";
   if (process.platform !== "darwin") {
     Menu.setApplicationMenu(null);
   }

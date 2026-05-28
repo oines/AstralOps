@@ -1,5 +1,8 @@
 import type {
   AstralEvent,
+  AppSettings,
+  AppSettingsPatch,
+  ClearMediaCacheResponse,
   CreateWorkspaceRequest,
   EditLastUserMessageRequest,
   FileListResponse,
@@ -7,6 +10,7 @@ import type {
   Session,
   SessionCommandListResponse,
   SessionCommandResponse,
+  SessionInputAttachment,
   SessionForkResponse,
   SessionView,
   Workspace,
@@ -59,6 +63,9 @@ export interface TerminalClient {
 export interface CoreClient {
   readonly terminal: TerminalClient;
   health(): Promise<HealthResponse>;
+  settings(): Promise<AppSettings>;
+  patchSettings(patch: AppSettingsPatch): Promise<AppSettings>;
+  clearMediaCache(): Promise<ClearMediaCacheResponse>;
   listWorkspaces(): Promise<Workspace[]>;
   createWorkspace(input: CreateWorkspaceRequest): Promise<Workspace>;
   workspaceConnection(id: string): Promise<WorkspaceConnection>;
@@ -74,7 +81,7 @@ export interface CoreClient {
   runSessionCommand(sessionId: string, commandId: string, args?: Record<string, unknown>): Promise<SessionCommandResponse>;
   deleteSession(sessionId: string): Promise<{ ok: boolean }>;
   forkSession(sessionId: string, eventSeq: number): Promise<SessionForkResponse>;
-  sendInput(sessionId: string, input: string, options?: { model?: string; reasoning_effort?: string; permission_mode?: string }): Promise<{ ok: boolean }>;
+  sendInput(sessionId: string, input: string, options?: { model?: string; reasoning_effort?: string; permission_mode?: string; attachments?: SessionInputAttachment[] }): Promise<{ ok: boolean }>;
   editLastUserMessage(
     sessionId: string,
     input: string,
@@ -86,10 +93,11 @@ export interface CoreClient {
   respondApproval(approvalId: string, response: Record<string, unknown>): Promise<{ ok: boolean }>;
   events(options?: number | EventQuery): Promise<AstralEvent[]>;
   subscribeEvents(afterSeq: number, handlers: EventSubscriptionHandlers): EventSubscription;
+  mediaUrl(sessionId: string, eventSeq: number, mediaId: string, download?: boolean): string;
 }
 
 export interface ControlChannel {
-  request<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown, auth?: boolean): Promise<T>;
+  request<T>(method: "GET" | "PATCH" | "POST" | "DELETE", path: string, body?: unknown, auth?: boolean): Promise<T>;
   subscribeEvents(afterSeq: number, handlers: EventSubscriptionHandlers): EventSubscription;
   openSocket(path: string): WebSocket;
 }
@@ -107,7 +115,7 @@ export class LocalHttpControlChannel implements ControlChannel {
     this.token = info.token;
   }
 
-  async request<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown, auth = true): Promise<T> {
+  async request<T>(method: "GET" | "PATCH" | "POST" | "DELETE", path: string, body?: unknown, auth = true): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method,
       headers: {
@@ -144,6 +152,15 @@ export class LocalHttpControlChannel implements ControlChannel {
     return new WebSocket(`${this.baseUrl.replace(/^http/, "ws")}${path}${separator}${params.toString()}`);
   }
 
+  url(path: string, params: Record<string, string | number | boolean | undefined> = {}): string {
+    const query = new URLSearchParams({ token: this.token });
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) query.set(key, String(value));
+    }
+    const separator = path.includes("?") ? "&" : "?";
+    return `${this.baseUrl}${path}${separator}${query.toString()}`;
+  }
+
   private headers(auth: boolean): HeadersInit {
     return auth ? { Authorization: `Bearer ${this.token}` } : {};
   }
@@ -151,6 +168,16 @@ export class LocalHttpControlChannel implements ControlChannel {
   private async parse<T>(res: Response): Promise<T> {
     if (!res.ok) {
       const text = await res.text();
+      try {
+        const payload = JSON.parse(text) as { error?: unknown };
+        if (typeof payload.error === "string" && payload.error) {
+          throw new Error(payload.error);
+        }
+      } catch (parseOrPayloadError) {
+        if (parseOrPayloadError instanceof Error && parseOrPayloadError.name !== "SyntaxError") {
+          throw parseOrPayloadError;
+        }
+      }
       throw new Error(text || `${res.status} ${res.statusText}`);
     }
     return (await res.json()) as T;
@@ -166,6 +193,18 @@ export class LocalCoreClient implements CoreClient {
 
   health(): Promise<HealthResponse> {
     return this.channel.request("GET", "/v1/health", undefined, false);
+  }
+
+  settings(): Promise<AppSettings> {
+    return this.channel.request("GET", "/v1/settings");
+  }
+
+  patchSettings(patch: AppSettingsPatch): Promise<AppSettings> {
+    return this.channel.request("PATCH", "/v1/settings", patch);
+  }
+
+  clearMediaCache(): Promise<ClearMediaCacheResponse> {
+    return this.channel.request("POST", "/v1/settings/actions/clear-media-cache", {});
   }
 
   listWorkspaces(): Promise<Workspace[]> {
@@ -235,7 +274,7 @@ export class LocalCoreClient implements CoreClient {
   sendInput(
     sessionId: string,
     input: string,
-    options: { model?: string; reasoning_effort?: string; permission_mode?: string } = {},
+    options: { model?: string; reasoning_effort?: string; permission_mode?: string; attachments?: SessionInputAttachment[] } = {},
   ): Promise<{ ok: boolean }> {
     return this.channel.request("POST", `/v1/sessions/${sessionId}/input`, { input, ...options });
   }
@@ -278,6 +317,11 @@ export class LocalCoreClient implements CoreClient {
 
   subscribeEvents(afterSeq: number, handlers: EventSubscriptionHandlers): EventSubscription {
     return this.channel.subscribeEvents(afterSeq, handlers);
+  }
+
+  mediaUrl(sessionId: string, eventSeq: number, mediaId: string, download = false): string {
+    if (!(this.channel instanceof LocalHttpControlChannel)) return "";
+    return this.channel.url(`/v1/sessions/${sessionId}/media/${eventSeq}/${encodeURIComponent(mediaId)}`, download ? { download: 1 } : {});
   }
 }
 

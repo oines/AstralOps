@@ -206,7 +206,7 @@ export function RightPanel({ api, health, open, width, workspace, onLiveResize, 
             <Plus size={17} strokeWidth={2} />
           </button>
           {menuOpen ? (
-            <div className="absolute left-0 top-9 z-30 w-36 rounded-[14px] border border-black/10 bg-white/80 p-1 shadow-[0_18px_45px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)] backdrop-blur-xl">
+            <div className="absolute left-0 top-9 z-30 w-36 rounded-lg border border-black/10 bg-white/80 p-1 shadow-[0_18px_45px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)] backdrop-blur-xl">
               {terminalAvailable ? <PanelMenuButton icon={<TerminalSquare size={16} strokeWidth={1.8} />} label="终端" onClick={() => addTab("terminal")} /> : null}
               <PanelMenuButton icon={<Folder size={16} strokeWidth={1.8} />} label="文件浏览" onClick={() => addTab("files")} />
             </div>
@@ -237,7 +237,7 @@ export function RightPanel({ api, health, open, width, workspace, onLiveResize, 
 
 function PanelMenuButton({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }): React.JSX.Element {
   return (
-    <button className="flex h-9 w-full items-center gap-2 rounded-[10px] px-2.5 text-left text-[13px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5" type="button" onClick={onClick}>
+    <button className="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[13px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5" type="button" onClick={onClick}>
       {icon}
       {label}
     </button>
@@ -267,7 +267,7 @@ function SortablePanelTab({
 
   return (
     <div
-      className={`group flex h-9 max-w-[198px] shrink-0 cursor-default items-center gap-2 rounded-xl border px-3 text-left text-[13px] font-semibold transition-[background-color,border-color,color,opacity] duration-150 ease-out ${
+      className={`group flex h-9 max-w-[198px] shrink-0 cursor-default items-center gap-2 rounded-lg border px-3 text-left text-[13px] font-semibold transition-[background-color,border-color,color,opacity] duration-150 ease-out ${
         active
           ? "border-black/5 bg-black/5 text-[#202124]"
           : "border-transparent bg-transparent text-[#8e8d91] hover:bg-black/5 hover:text-[#4f4f53]"
@@ -348,7 +348,7 @@ function FilesTab({ api, workspace }: { api: CoreClient | null; workspace: Works
 
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-black/5 px-4 py-3">
+      <div className="border-b border-black/5 px-3 py-2.5">
         <div className="truncate text-[13px] font-semibold text-[#96949a]">{data?.root ?? workspaceRoot}</div>
         <div className="mt-1 flex items-center gap-2">
           <button
@@ -359,11 +359,11 @@ function FilesTab({ api, workspace }: { api: CoreClient | null; workspace: Works
           >
             <ChevronLeft size={17} strokeWidth={2} />
           </button>
-          <div className="min-w-0 flex-1 truncate text-[15px] font-semibold text-[#202124]">{path || "/"}</div>
+          <div className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[#202124]">{path || "/"}</div>
           {loading ? <div className="text-[12px] font-semibold text-[#a0a3a7]">读取中</div> : null}
         </div>
       </div>
-      {error ? <div className="px-4 py-3 text-[13px] font-semibold text-[#b45309]">{error}</div> : null}
+      {error ? <div className="px-3 py-2 text-[13px] font-semibold text-[#b45309]">{error}</div> : null}
       <div className="min-h-0 flex-1 overflow-auto px-2 py-2">
         {(data?.entries ?? []).map((entry) => (
           <button
@@ -503,7 +503,7 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: CoreClient | null
 function PanelMessage({ body, title }: { body: string; title: string }): React.JSX.Element {
   return (
     <div className="p-5">
-      <div className="text-[15px] font-semibold text-[#202124]">{title}</div>
+      <div className="text-[14px] font-semibold text-[#202124]">{title}</div>
       <div className="mt-1 text-[13px] font-medium leading-5 text-[#8f9296]">{body}</div>
     </div>
   );

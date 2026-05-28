@@ -3,8 +3,10 @@ import { ChevronDown, Code2, Folder, TerminalSquare } from "lucide-react";
 import type { Workspace } from "../types";
 
 type WorkspaceOpenerMenuProps = {
+  defaultOpener: WorkspaceOpenerId;
   rightPanelOpen: boolean;
   workspace: Workspace | null;
+  onDefaultOpenerChange: (opener: WorkspaceOpenerId) => void;
   onError: (message: string) => void;
 };
 
@@ -14,9 +16,9 @@ const DEFAULT_OPENERS: WorkspaceOpenerInfo[] = [
   { id: "terminal", label: "Terminal", available: true },
 ];
 
-export function WorkspaceOpenerMenu({ rightPanelOpen, workspace, onError }: WorkspaceOpenerMenuProps): React.JSX.Element {
+export function WorkspaceOpenerMenu({ defaultOpener, rightPanelOpen, workspace, onDefaultOpenerChange, onError }: WorkspaceOpenerMenuProps): React.JSX.Element {
   const [openers, setOpeners] = useState<WorkspaceOpenerInfo[]>(DEFAULT_OPENERS);
-  const [selectedId, setSelectedId] = useState<WorkspaceOpenerId>("vscode");
+  const [selectedId, setSelectedId] = useState<WorkspaceOpenerId>(defaultOpener);
   const [menuOpen, setMenuOpen] = useState(false);
   const [openingId, setOpeningId] = useState<WorkspaceOpenerId | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -32,6 +34,14 @@ export function WorkspaceOpenerMenu({ rightPanelOpen, workspace, onError }: Work
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (openers.some((opener) => opener.id === defaultOpener)) {
+      setSelectedId(defaultOpener);
+      return;
+    }
+    setSelectedId(openers[0]?.id ?? "vscode");
+  }, [defaultOpener, openers]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -74,6 +84,7 @@ export function WorkspaceOpenerMenu({ rightPanelOpen, workspace, onError }: Work
           return;
         }
         setSelectedId(opener.id);
+        onDefaultOpenerChange(opener.id);
         setMenuOpen(false);
       } catch (openError) {
         onError(openError instanceof Error ? openError.message : String(openError));
@@ -81,19 +92,19 @@ export function WorkspaceOpenerMenu({ rightPanelOpen, workspace, onError }: Work
         setOpeningId(null);
       }
     },
-    [onError, workspace],
+    [onDefaultOpenerChange, onError, workspace],
   );
 
   return (
     <div
       ref={rootRef}
-      className="workspace-opener-menu [-webkit-app-region:no-drag] absolute top-[10px] z-[220] transition-[right] duration-180 ease-out"
+      className="workspace-opener-menu [-webkit-app-region:no-drag] absolute top-[10px] z-[var(--ao-z-chrome-menu)] transition-[right] duration-180 ease-out"
       style={{ right: rightPanelOpen ? "calc(var(--astral-right-panel-width, 420px) + 10px)" : 64 }}
     >
-      <div className={`flex h-8 overflow-hidden rounded-xl border border-black/10 bg-white/90 shadow-[0_1px_2px_rgba(0,0,0,0.06)] backdrop-blur ${disabled ? "opacity-45" : ""}`}>
+      <div className={`flex h-7 overflow-hidden rounded-lg border border-black/10 bg-white/90 shadow-[0_1px_2px_rgba(0,0,0,0.06)] backdrop-blur ${disabled ? "opacity-45" : ""}`}>
         <button
           aria-label={`Open workspace in ${selected.label}`}
-          className="grid h-8 w-11 place-items-center transition-[background-color,transform] duration-150 ease-out hover:bg-black/[0.045] active:scale-95 disabled:pointer-events-none"
+          className="grid h-7 w-10 place-items-center transition-[background-color,transform] duration-150 ease-out hover:bg-black/[0.045] active:scale-95 disabled:pointer-events-none"
           disabled={disabled || Boolean(selectedDisabledReason) || openingId !== null}
           title={selectedDisabledReason || `Open workspace in ${selected.label}`}
           type="button"
@@ -103,13 +114,13 @@ export function WorkspaceOpenerMenu({ rightPanelOpen, workspace, onError }: Work
             event.stopPropagation();
           }}
         >
-          <OpenerIcon opener={selected} size={20} />
+          <OpenerIcon opener={selected} size={17} />
         </button>
-        <div className="h-8 w-px bg-black/5" />
+        <div className="h-7 w-px bg-black/5" />
         <button
           aria-expanded={menuOpen}
           aria-label="Choose workspace opener"
-          className="grid h-8 w-9 place-items-center text-[#767a80] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 disabled:pointer-events-none"
+          className="grid h-7 w-8 place-items-center text-[#767a80] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 disabled:pointer-events-none"
           disabled={disabled}
           title={disabled ? "No workspace selected" : "Choose workspace opener"}
           type="button"
@@ -123,19 +134,19 @@ export function WorkspaceOpenerMenu({ rightPanelOpen, workspace, onError }: Work
             event.stopPropagation();
           }}
         >
-          <ChevronDown className={`transition-transform duration-150 ease-out ${menuOpen ? "rotate-180" : ""}`} size={16} strokeWidth={2} />
+          <ChevronDown className={`transition-transform duration-150 ease-out ${menuOpen ? "rotate-180" : ""}`} size={14} strokeWidth={2} />
         </button>
       </div>
 
       {menuOpen ? (
-        <div className="absolute right-0 top-[42px] w-[238px] rounded-[18px] border border-black/10 bg-white/95 p-2 shadow-[0_18px_55px_rgba(0,0,0,0.16)] backdrop-blur">
+        <div className="absolute right-0 top-9 w-44 rounded-lg border border-black/10 bg-white/95 p-1 shadow-[0_18px_55px_rgba(0,0,0,0.16)] backdrop-blur">
           {openers.map((opener) => {
             const reason = workspace ? disabledReasonForOpener(opener, workspace) : "No workspace selected";
             const rowDisabled = Boolean(reason) || openingId !== null;
             return (
               <button
                 key={opener.id}
-                className={`flex h-12 w-full items-center gap-3 rounded-xl px-3 text-left text-[15px] font-medium transition-colors duration-150 ${
+                className={`flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[13px] font-medium transition-colors duration-150 ${
                   rowDisabled ? "cursor-not-allowed text-[#b3b1ad]" : "text-[#1f2227] hover:bg-black/[0.045]"
                 }`}
                 disabled={rowDisabled}
@@ -143,7 +154,7 @@ export function WorkspaceOpenerMenu({ rightPanelOpen, workspace, onError }: Work
                 type="button"
                 onClick={() => void openWorkspace(opener)}
               >
-                <OpenerIcon opener={opener} size={22} muted={rowDisabled} />
+                <OpenerIcon opener={opener} size={18} muted={rowDisabled} />
                 <span className="truncate">{opener.label}</span>
               </button>
             );

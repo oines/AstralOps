@@ -338,7 +338,7 @@ func (s *store) createWorkspace(req createWorkspaceRequest) (Workspace, error) {
 		ID:                  id,
 		Name:                strings.TrimSpace(req.Name),
 		Target:              req.Target,
-		Agent:               req.Agent,
+		Agent:               workspaceAgentOrDefault(req.Agent),
 		LocalProjectionRoot: projection,
 		LocalCWD:            strings.TrimSpace(req.LocalCWD),
 		SSH:                 req.SSH,
@@ -386,6 +386,13 @@ func (s *store) createWorkspace(req createWorkspaceRequest) (Workspace, error) {
 	s.workspaces[id] = ws
 	s.mu.Unlock()
 	return ws, nil
+}
+
+func workspaceAgentOrDefault(agent AgentKind) AgentKind {
+	if agent == "" {
+		return AgentClaude
+	}
+	return agent
 }
 
 func (s *store) createSession(workspace Workspace, agent AgentKind) Session {
