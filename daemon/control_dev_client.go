@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -152,9 +153,12 @@ func runControlDevClientCommand(args []string) error {
 		discoveryTimeout := fs.Duration("discovery-timeout", 3*time.Second, "LAN discovery timeout")
 		lanTimeout := fs.Duration("lan-timeout", 2*time.Second, "LAN host validation and handshake timeout")
 		workspaceID := fs.String("workspace-id", "", "workspace id for workspace/terminal checks")
+		sessionID := fs.String("session-id", "", "session id for attachment checks")
 		path := fs.String("path", ".", "workspace path to read when --workspace-id is set")
 		streamPath := fs.String("stream-path", "", "optional workspace path to read via workspace.files.stream")
 		streamChunkSize := fs.Int("stream-chunk-size", 64*1024, "workspace.files.stream chunk size")
+		attachmentPath := fs.String("attachment-path", "", "optional local Controller file to upload with chunked attachment.ingest")
+		attachmentChunkSize := fs.Int("attachment-chunk-size", 64*1024, "attachment ingest chunk size")
 		execCommand := fs.String("exec-command", "", "optional workspace.exec command to run")
 		terminal := fs.Bool("terminal", false, "open and close a Host-owned terminal session")
 		if err := fs.Parse(args[1:]); err != nil {
@@ -169,12 +173,15 @@ func runControlDevClientCommand(args []string) error {
 				DiscoveryTimeout: *discoveryTimeout,
 				LANTimeout:       *lanTimeout,
 			},
-			WorkspaceID:     *workspaceID,
-			Path:            *path,
-			StreamPath:      *streamPath,
-			StreamChunkSize: *streamChunkSize,
-			ExecCommand:     *execCommand,
-			Terminal:        *terminal,
+			WorkspaceID:         *workspaceID,
+			SessionID:           *sessionID,
+			Path:                *path,
+			StreamPath:          *streamPath,
+			StreamChunkSize:     *streamChunkSize,
+			AttachmentPath:      *attachmentPath,
+			AttachmentChunkSize: *attachmentChunkSize,
+			ExecCommand:         *execCommand,
+			Terminal:            *terminal,
 		})
 		if err != nil {
 			return err
@@ -201,13 +208,16 @@ type controlClientTarget struct {
 }
 
 type controlClientSmokeOptions struct {
-	Target          controlClientTargetOptions
-	WorkspaceID     string
-	Path            string
-	StreamPath      string
-	StreamChunkSize int
-	ExecCommand     string
-	Terminal        bool
+	Target              controlClientTargetOptions
+	WorkspaceID         string
+	SessionID           string
+	Path                string
+	StreamPath          string
+	StreamChunkSize     int
+	AttachmentPath      string
+	AttachmentChunkSize int
+	ExecCommand         string
+	Terminal            bool
 }
 
 type controlClientSmokeResult struct {
@@ -266,6 +276,7 @@ func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (con
 
 func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlClientSmokeResult, error) {
 	opts.WorkspaceID = strings.TrimSpace(opts.WorkspaceID)
+	opts.SessionID = strings.TrimSpace(opts.SessionID)
 	if opts.Path == "" {
 		opts.Path = "."
 	}
@@ -277,6 +288,9 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 	}
 	if opts.WorkspaceID == "" && (strings.TrimSpace(opts.ExecCommand) != "" || opts.Terminal) {
 		return controlClientSmokeResult{}, fmt.Errorf("--workspace-id is required for --exec-command or --terminal")
+	}
+	if opts.SessionID == "" && strings.TrimSpace(opts.AttachmentPath) != "" {
+		return controlClientSmokeResult{}, fmt.Errorf("--session-id is required for --attachment-path")
 	}
 	target, err := controlClientResolveTarget(st, opts.Target)
 	if err != nil {
@@ -304,6 +318,14 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 			return result, err
 		}
 		if err := controlClientSmokeResponseError("workspace_files_read", files); err != nil {
+			return result, err
+		}
+	}
+
+	if opts.SessionID != "" && strings.TrimSpace(opts.AttachmentPath) != "" {
+		step, err := controlClientSmokeAttachmentIngest(st, target, opts.SessionID, opts.AttachmentPath, opts.AttachmentChunkSize)
+		result.Steps = append(result.Steps, step)
+		if err != nil {
 			return result, err
 		}
 	}
@@ -457,6 +479,149 @@ func controlClientSmokeRequest(st *store, target controlClientTarget, requestID,
 		Action:     action,
 		Params:     params,
 	})
+}
+
+func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, sessionID, path string, chunkSize int) (controlClientSmokeStep, error) {
+	name := "attachment_ingest"
+	step := controlClientSmokeStep{Name: name, Capability: CapabilityAttachmentIngest, Action: "attachment.ingest.start/chunk/finish"}
+	path = strings.TrimSpace(path)
+	info, err := os.Stat(path)
+	if err != nil {
+		step.Error = &ControlError{Code: "attachment_file_not_found", Message: err.Error()}
+		return step, err
+	}
+	if info.IsDir() {
+		err := fmt.Errorf("attachment path is a directory")
+		step.Error = &ControlError{Code: "attachment_path_is_directory", Message: err.Error()}
+		return step, err
+	}
+	chunkSize = controlClientAttachmentChunkSize(chunkSize)
+	sha, err := fileSHA256Hex(path)
+	if err != nil {
+		step.Error = &ControlError{Code: "attachment_hash_failed", Message: err.Error()}
+		return step, err
+	}
+
+	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	if err != nil {
+		step.Error = &ControlError{Code: "connect_failed", Message: err.Error()}
+		return step, err
+	}
+	defer socket.Close()
+
+	start, err := controlClientRoundTrip(socket, cipher, target.Timeout, st, ControlRequest{
+		RequestID:  "smoke_attachment_start",
+		Capability: CapabilityAttachmentIngest,
+		Action:     ControlActionAttachmentIngestStart,
+		Params: map[string]any{
+			"session_id": sessionID,
+			"name":       filepath.Base(path),
+			"mime_type":  attachmentMIMEType(filepath.Base(path), "", nil),
+			"size":       info.Size(),
+			"sha256":     sha,
+		},
+	})
+	if err != nil {
+		step.Error = &ControlError{Code: "attachment_start_failed", Message: err.Error()}
+		return step, err
+	}
+	if err := controlClientSmokeResponseError("attachment_ingest.start", start); err != nil {
+		step.Error = start.Error
+		return step, err
+	}
+	uploadID := stringValue(mapValue(start.Result)["upload_id"])
+	if uploadID == "" {
+		err := fmt.Errorf("smoke step attachment_ingest.start failed: upload_id missing")
+		step.Error = &ControlError{Code: "attachment_upload_id_missing", Message: err.Error()}
+		return step, err
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		step.Error = &ControlError{Code: "attachment_file_open_failed", Message: err.Error()}
+		return step, err
+	}
+	defer file.Close()
+	buffer := make([]byte, chunkSize)
+	seq := int64(0)
+	offset := int64(0)
+	for {
+		n, readErr := file.Read(buffer)
+		if n > 0 {
+			seq++
+			chunk := buffer[:n]
+			response, err := controlClientRoundTrip(socket, cipher, target.Timeout, st, ControlRequest{
+				RequestID:  fmt.Sprintf("smoke_attachment_chunk_%d", seq),
+				Capability: CapabilityAttachmentIngest,
+				Action:     ControlActionAttachmentIngestChunk,
+				Params: map[string]any{
+					"session_id":  sessionID,
+					"upload_id":   uploadID,
+					"seq":         seq,
+					"offset":      offset,
+					"data_base64": base64.StdEncoding.EncodeToString(chunk),
+				},
+			})
+			if err != nil {
+				step.Error = &ControlError{Code: "attachment_chunk_failed", Message: err.Error()}
+				return step, err
+			}
+			if err := controlClientSmokeResponseError("attachment_ingest.chunk", response); err != nil {
+				step.Error = response.Error
+				return step, err
+			}
+			offset += int64(n)
+		}
+		if readErr == nil {
+			continue
+		}
+		if readErr == io.EOF {
+			break
+		}
+		step.Error = &ControlError{Code: "attachment_file_read_failed", Message: readErr.Error()}
+		return step, readErr
+	}
+
+	finish, err := controlClientRoundTrip(socket, cipher, target.Timeout, st, ControlRequest{
+		RequestID:  "smoke_attachment_finish",
+		Capability: CapabilityAttachmentIngest,
+		Action:     ControlActionAttachmentIngestFinish,
+		Params: map[string]any{
+			"session_id": sessionID,
+			"upload_id":  uploadID,
+		},
+	})
+	if err != nil {
+		step.Error = &ControlError{Code: "attachment_finish_failed", Message: err.Error()}
+		return step, err
+	}
+	if err := controlClientSmokeResponseError("attachment_ingest.finish", finish); err != nil {
+		step.Error = finish.Error
+		return step, err
+	}
+	attachment := mapValue(mapValue(finish.Result)["attachment"])
+	step.OK = true
+	step.Summary = map[string]any{
+		"session_id":    sessionID,
+		"attachment_id": stringValue(attachment["id"]),
+		"name":          stringValue(attachment["name"]),
+		"kind":          stringValue(attachment["kind"]),
+		"mime_type":     stringValue(attachment["mime_type"]),
+		"host_owned":    boolValue(attachment["host_owned"]),
+		"bytes":         offset,
+		"chunks":        seq,
+	}
+	return step, nil
+}
+
+func controlClientAttachmentChunkSize(requested int) int {
+	if requested <= 0 {
+		return 64 * 1024
+	}
+	if requested > controlAttachmentChunkMaxBytes {
+		return controlAttachmentChunkMaxBytes
+	}
+	return requested
 }
 
 func controlClientSmokeStepFromResponse(name, capability, action string, response ControlResponse, summary map[string]any) controlClientSmokeStep {
@@ -630,11 +795,15 @@ func controlClientRequestToTarget(target controlClientTarget, st *store, req Con
 	}
 	defer socket.Close()
 
+	return controlClientRoundTrip(socket, cipher, target.Timeout, st, req)
+}
+
+func controlClientRoundTrip(socket *websocket.Conn, cipher *controlCipher, timeout time.Duration, st *store, req ControlRequest) (ControlResponse, error) {
 	req.ControllerDeviceID = st.deviceIdentity.DeviceID
 	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req}); err != nil {
 		return ControlResponse{}, err
 	}
-	plain, err := controlClientRead(socket, cipher)
+	plain, err := controlClientReadWithTimeout(socket, cipher, timeout)
 	if err != nil {
 		return ControlResponse{}, err
 	}
