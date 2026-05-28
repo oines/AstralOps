@@ -234,5 +234,18 @@ func turnDisplayInput(input string, options TurnOptions) string {
 	if options.Internal {
 		return ""
 	}
-	return input
+	if text := strings.TrimSpace(input); text != "" {
+		return text
+	}
+	if len(options.Attachments) == 1 {
+		name := options.Attachments[0].Name
+		if name == "" {
+			name = options.Attachments[0].Path
+		}
+		return "附件：" + name
+	}
+	if len(options.Attachments) > 1 {
+		return fmt.Sprintf("%d 个附件", len(options.Attachments))
+	}
+	return ""
 }

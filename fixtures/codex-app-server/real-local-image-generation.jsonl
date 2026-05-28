@@ -1,0 +1,2 @@
+{"method":"item/started","params":{"threadId":"thread_image","turnId":"turn_image","item":{"id":"img_1","type":"imageGeneration","status":"in_progress","result":""}}}
+{"method":"item/completed","params":{"threadId":"thread_image","turnId":"turn_image","item":{"id":"img_1","type":"imageGeneration","status":"generating","revisedPrompt":"AstralOps control room","result":"iVBORw0KGgo=","savedPath":"/Users/oines/.codex/generated_images/thread_image/img_1.png"}}}

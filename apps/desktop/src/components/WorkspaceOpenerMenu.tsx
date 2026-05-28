@@ -87,7 +87,7 @@ export function WorkspaceOpenerMenu({ rightPanelOpen, workspace, onError }: Work
   return (
     <div
       ref={rootRef}
-      className="workspace-opener-menu [-webkit-app-region:no-drag] absolute top-[10px] z-[220] transition-[right] duration-180 ease-out"
+      className="workspace-opener-menu [-webkit-app-region:no-drag] absolute top-[10px] z-[var(--ao-z-chrome-menu)] transition-[right] duration-180 ease-out"
       style={{ right: rightPanelOpen ? "calc(var(--astral-right-panel-width, 420px) + 10px)" : 64 }}
     >
       <div className={`flex h-8 overflow-hidden rounded-xl border border-black/10 bg-white/90 shadow-[0_1px_2px_rgba(0,0,0,0.06)] backdrop-blur ${disabled ? "opacity-45" : ""}`}>

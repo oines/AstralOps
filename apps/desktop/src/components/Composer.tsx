@@ -1,7 +1,7 @@
 import { ArrowUp, Brain, Box, Check, ChevronDown, ChevronLeft, CornerDownRight, Eraser, FilePlus, GitFork, ListChecks, ListTodo, Paperclip, Plus, Radio, RotateCcw, Shield, ShieldCheck, Square, Target, Terminal, Undo2, X } from "lucide-react";
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ModelInfo, PendingInteraction, PermissionMode, ReasoningEffort, RunMode, SessionCommand } from "../types";
+import type { ModelInfo, PendingInteraction, PermissionMode, ReasoningEffort, RunMode, SessionCommand, SessionInputAttachment } from "../types";
 import { PendingInteractionPanel } from "./PendingInteractionPanel";
 
 type ComposerProps = {
@@ -23,7 +23,9 @@ type ComposerProps = {
   queuedInputs: QueuedComposerInput[];
   runMode: RunMode;
   running: boolean;
-  onChooseAttachments: () => Promise<string[]>;
+  onChooseAttachments: () => Promise<SessionInputAttachment[]>;
+  onIngestFiles: (paths: string[]) => Promise<SessionInputAttachment[]>;
+  onPasteImage: () => Promise<SessionInputAttachment | null>;
   onEffortOverrideChange: (effort: ReasoningEffort | "") => void;
   onExecuteCommand: (command: SessionCommand) => Promise<void>;
   onHeightChange?: (height: number) => void;
@@ -35,7 +37,7 @@ type ComposerProps = {
   onRunModeChange: (mode: RunMode) => void;
   onInterrupt: () => Promise<void>;
   onCancelQueuedInput: (sessionId: string, queueId: string) => Promise<void>;
-  onSend: (input: string) => Promise<void>;
+  onSend: (input: string, attachments: SessionInputAttachment[]) => Promise<void>;
   onSteerQueuedInput: (sessionId: string, queueId: string) => Promise<void>;
 };
 
@@ -71,6 +73,8 @@ export function Composer({
   runMode,
   running,
   onChooseAttachments,
+  onIngestFiles,
+  onPasteImage,
   onEffortOverrideChange,
   onExecuteCommand,
   onHeightChange,
@@ -86,7 +90,7 @@ export function Composer({
   onSteerQueuedInput,
 }: ComposerProps): React.JSX.Element {
   const [input, setInput] = useState("");
-  const [attachments, setAttachments] = useState<string[]>([]);
+  const [attachments, setAttachments] = useState<SessionInputAttachment[]>([]);
   const [openMenu, setOpenMenu] = useState<"actions" | "model" | "permission" | null>(null);
   const [sending, setSending] = useState(false);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
@@ -150,7 +154,7 @@ export function Composer({
     if (disabled || sending) return;
     setSending(true);
     try {
-      await onSend(withAttachments(trimmed, attachments));
+      await onSend(trimmed, attachments);
       setInput("");
       setAttachments([]);
     } finally {
@@ -159,10 +163,40 @@ export function Composer({
   }
 
   async function chooseAttachments(): Promise<void> {
-    const paths = await onChooseAttachments();
-    if (paths.length === 0) return;
-    setAttachments((current) => [...new Set([...current, ...paths])]);
+    const next = await onChooseAttachments();
+    if (next.length === 0) return;
+    addAttachments(next);
     setOpenMenu(null);
+  }
+
+  function addAttachments(next: SessionInputAttachment[]): void {
+    setAttachments((current) => {
+      const seen = new Set(current.map((item) => item.id));
+      const merged = [...current];
+      for (const attachment of next) {
+        if (!attachment.id || seen.has(attachment.id)) continue;
+        seen.add(attachment.id);
+        merged.push(attachment);
+      }
+      return merged;
+    });
+  }
+
+  async function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
+    if (disabled || sending) return;
+    const files = Array.from(event.clipboardData.files || []);
+    const paths = files.map((file) => (file as File & { path?: string }).path || "").filter(Boolean);
+    if (paths.length > 0) {
+      event.preventDefault();
+      const next = await onIngestFiles(paths);
+      addAttachments(next);
+      return;
+    }
+    const hasImage = Array.from(event.clipboardData.items || []).some((item) => item.kind === "file" && item.type.startsWith("image/"));
+    if (!hasImage) return;
+    event.preventDefault();
+    const attachment = await onPasteImage();
+    if (attachment) addAttachments([attachment]);
   }
 
   async function executeCommand(command: SessionCommand | undefined): Promise<void> {
@@ -232,15 +266,15 @@ export function Composer({
         ) : null}
         {attachments.length > 0 ? (
           <div className="flex flex-wrap gap-1.5 px-0.5">
-            {attachments.map((path) => (
-              <span className="flex h-7 max-w-[230px] items-center gap-1.5 rounded-full bg-black/5 pl-2.5 pr-1 text-[12px] font-semibold text-[#6f7378]" key={path}>
+            {attachments.map((attachment) => (
+              <span className="flex h-7 max-w-[230px] items-center gap-1.5 rounded-full bg-black/5 pl-2.5 pr-1 text-[12px] font-semibold text-[#6f7378]" key={attachment.id}>
                 <Paperclip size={13} strokeWidth={1.9} />
-                <span className="truncate">{fileName(path)}</span>
+                <span className="truncate">{attachment.name || fileName(attachment.path)}</span>
                 <button
                   className="grid size-5 place-items-center rounded-full transition-colors duration-150 ease-out hover:bg-black/[0.06] hover:text-[#202124]"
                   type="button"
                   aria-label="移除附件"
-                  onClick={() => setAttachments((current) => current.filter((item) => item !== path))}
+                  onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
                 >
                   <X size={12} strokeWidth={2} />
                 </button>
@@ -256,6 +290,7 @@ export function Composer({
           rows={1}
           value={input}
           onChange={(event) => setInput(event.target.value)}
+          onPaste={(event) => void handlePaste(event)}
           onKeyDown={(event) => {
             if (slashPaletteOpen) {
               if (event.key === "ArrowDown") {
@@ -904,10 +939,4 @@ function jsonPreview(value: unknown): string {
 
 function fileName(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).at(-1) || path;
-}
-
-function withAttachments(input: string, attachments: string[]): string {
-  if (attachments.length === 0) return input;
-  const attachmentBlock = ["", "附件路径：", ...attachments.map((path) => `- ${path}`)].join("\n");
-  return input ? `${input}${attachmentBlock}` : attachmentBlock.trimStart();
 }

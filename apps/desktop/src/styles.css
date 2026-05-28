@@ -1,6 +1,10 @@
 @import "tailwindcss";
 
 :root {
+  /* Shared layer scale: app modals must sit above chrome controls and menus. */
+  --ao-z-chrome: 200;
+  --ao-z-chrome-menu: 220;
+  --ao-z-modal: 1000;
   --ao-context-ring: #2f8cff;
   --ao-context-track: rgba(0, 0, 0, 0.12);
   --ao-context-center: #ffffff;

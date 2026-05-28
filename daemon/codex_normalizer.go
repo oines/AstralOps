@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -289,6 +290,33 @@ func normalizeCodexItemLifecycle(session Session, lifecycle string, params map[s
 				}, raw)}
 			}
 		}
+	case "imageGeneration":
+		status := "generating"
+		if lifecycle == "started" {
+			status = "in_progress"
+		}
+		savedPath := firstString(item["savedPath"], item["saved_path"])
+		name := filepath.Base(savedPath)
+		if name == "." || name == string(filepath.Separator) || name == "" {
+			name = itemID + ".png"
+		}
+		normalized := map[string]any{
+			"source":         "codex",
+			"id":             itemID,
+			"media_id":       itemID,
+			"item_id":        itemID,
+			"kind":           "image",
+			"name":           name,
+			"path":           savedPath,
+			"saved_path":     savedPath,
+			"mime_type":      "image/png",
+			"status":         status,
+			"revised_prompt": firstString(item["revisedPrompt"], item["revised_prompt"]),
+		}
+		if lifecycle == "completed" {
+			normalized["status"] = "completed"
+		}
+		return []AstralEvent{baseCodexEvent(session, "message.media", normalized, raw)}
 	case "reasoning":
 		return []AstralEvent{baseCodexEvent(session, "reasoning."+lifecycle, map[string]any{
 			"source":  "codex",

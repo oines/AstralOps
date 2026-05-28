@@ -65,6 +65,8 @@ import {
   visibleCollapsedAssistantSeqs,
 } from "../transcriptModel";
 import { OperationGroup } from "./transcript/OperationGroup";
+import { attachmentsFromEvent, mediaFromEvent, TranscriptMediaBlock } from "./transcript/TranscriptMedia";
+import type { MediaUrlResolver } from "./transcript/mediaTypes";
 
 type TranscriptProps = {
   activeSession: Session | null;
@@ -82,6 +84,7 @@ type TranscriptProps = {
   onEditUserMessage?: (eventSeq: number, input: string) => Promise<void>;
   onOpenSourceSession?: (sessionId: string, eventSeq?: number) => void;
   onScrollTargetHandled?: () => void;
+  mediaUrl?: MediaUrlResolver;
 };
 
 type TranscriptItem =
@@ -106,6 +109,7 @@ export function Transcript({
   onEditUserMessage,
   onOpenSourceSession,
   onScrollTargetHandled,
+  mediaUrl,
 }: TranscriptProps): React.JSX.Element {
   const renderedEvents = useMemo(() => compactStreamingEvents(events.filter(shouldRenderEvent)), [events]);
   const groups = useMemo(() => groupTranscriptEvents(renderedEvents), [renderedEvents]);
@@ -278,7 +282,7 @@ export function Transcript({
                     {item?.type === "loader" ? (
                       <LoadOlderRow loading={loadingOlder} onLoadOlder={onLoadOlder} />
                     ) : item?.type === "turn" ? (
-                      <TurnBlock editableUserMessage={editableUserMessage} forkingSeq={forkingSeq} group={item.group} onEditUserMessage={onEditUserMessage} onForkFromEvent={onForkFromEvent} />
+                      <TurnBlock editableUserMessage={editableUserMessage} forkingSeq={forkingSeq} group={item.group} mediaUrl={mediaUrl} onEditUserMessage={onEditUserMessage} onForkFromEvent={onForkFromEvent} />
                     ) : item?.type === "compact" ? (
                       <MemoryCompactRow group={item.group} />
                     ) : item?.type === "fork-origin" ? (
@@ -411,12 +415,14 @@ const TurnBlock = React.memo(function TurnBlock({
   editableUserMessage,
   forkingSeq,
   group,
+  mediaUrl,
   onEditUserMessage,
   onForkFromEvent,
 }: {
   editableUserMessage?: { event_seq: number; text: string } | null;
   forkingSeq?: number | null;
   group: TurnGroup;
+  mediaUrl?: MediaUrlResolver;
   onEditUserMessage?: (eventSeq: number, input: string) => Promise<void>;
   onForkFromEvent?: (event: AstralEvent) => void;
 }): React.JSX.Element {
@@ -459,6 +465,7 @@ const TurnBlock = React.memo(function TurnBlock({
               event={event}
               forking={forkingSeq === event.seq}
               key={event.seq}
+              mediaUrl={mediaUrl}
               onFork={onForkFromEvent}
             />
           ),
@@ -476,6 +483,7 @@ const TurnBlock = React.memo(function TurnBlock({
         <UserMessage
           canEdit={editableUserMessage?.event_seq === group.user.seq && textValue(group.user.normalized as Record<string, unknown>, "text") === editableUserMessage.text}
           event={group.user}
+          mediaUrl={mediaUrl}
           onEdit={onEditUserMessage}
         />
       ) : null}
@@ -510,14 +518,17 @@ function finalForkableAssistantSeq(events: AstralEvent[]): number | null {
 function UserMessage({
   canEdit = false,
   event,
+  mediaUrl,
   onEdit,
 }: {
   canEdit?: boolean;
   event: AstralEvent;
+  mediaUrl?: MediaUrlResolver;
   onEdit?: (eventSeq: number, input: string) => Promise<void>;
 }): React.JSX.Element {
   const value = event.normalized as Record<string, unknown>;
   const text = textValue(value, "text");
+  const attachments = attachmentsFromEvent(event);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(text);
   const [submitting, setSubmitting] = useState(false);
@@ -589,7 +600,7 @@ function UserMessage({
   return (
     <div className="flex justify-end">
       <div className="group flex max-w-[80%] items-start gap-1.5">
-        {canEdit && onEdit ? (
+        {canEdit && attachments.length === 0 && onEdit ? (
           <button
             className="mt-1 grid size-7 place-items-center rounded-md text-[#9a9da1] opacity-0 transition hover:bg-black/[0.04] hover:text-[#343438] group-hover:opacity-100"
             type="button"
@@ -600,8 +611,19 @@ function UserMessage({
             <Pencil size={15} strokeWidth={1.8} />
           </button>
         ) : null}
-        <div className="min-w-0 rounded-[16px] bg-black/[0.045] px-4 py-2 text-[15px] font-semibold leading-6 text-[#202124]">
-          {text}
+        <div className="grid min-w-0 gap-2">
+          {text ? (
+            <div className="min-w-0 rounded-[16px] bg-black/[0.045] px-4 py-2 text-[15px] font-semibold leading-6 text-[#202124]">
+              {text}
+            </div>
+          ) : null}
+          {attachments.length > 0 ? (
+            <div className="grid justify-items-end gap-2">
+              {attachments.map((media) => (
+                <TranscriptMediaBlock align="right" event={event} key={media.id} media={media} mediaUrl={mediaUrl} />
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -855,15 +877,21 @@ function AssistantEvent({
   canFork = false,
   event,
   forking = false,
+  mediaUrl,
   onFork,
 }: {
   canFork?: boolean;
   event: AstralEvent;
   forking?: boolean;
+  mediaUrl?: MediaUrlResolver;
   onFork?: (event: AstralEvent) => void;
 }): React.ReactNode {
   const value = event.normalized as Record<string, unknown>;
   const text = textValue(value, "text");
+  if (event.kind === "message.media") {
+    const media = mediaFromEvent(event);
+    return media ? <TranscriptMediaBlock align="left" event={event} media={media} mediaUrl={mediaUrl} /> : null;
+  }
   if (!text) return null;
   return (
     <div className="group min-w-0 text-[15px] font-semibold leading-6 text-[#202124]">

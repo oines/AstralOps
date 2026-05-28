@@ -83,10 +83,39 @@ export type AstralNormalizedBase = {
   [key: string]: unknown;
 };
 
+export type SessionInputAttachment = {
+  id: string;
+  kind: "image" | "file" | string;
+  path: string;
+  name: string;
+  mime_type?: string;
+  size?: number;
+  detail?: "high" | "original" | string;
+};
+
+export type TranscriptMedia = SessionInputAttachment & {
+  media_id?: string;
+  item_id?: string;
+  saved_path?: string;
+  status?: string;
+  revised_prompt?: string;
+};
+
 export type MessageNormalized = AstralNormalizedBase & {
   text?: string;
   item_id?: string;
   native_message_uuid?: string;
+  attachments?: SessionInputAttachment[];
+  media?: TranscriptMedia | TranscriptMedia[];
+  media_id?: string;
+  kind?: "image" | "file" | string;
+  path?: string;
+  saved_path?: string;
+  name?: string;
+  mime_type?: string;
+  size?: number;
+  status?: string;
+  revised_prompt?: string;
 };
 
 export type ReasoningNormalized = AstralNormalizedBase & {
@@ -341,6 +370,7 @@ export type CreateSessionRequest = {
 
 export type SessionInputRequest = {
   input: string;
+  attachments?: SessionInputAttachment[];
   model?: string;
   reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
   permission_mode?: "default" | "auto" | "plan" | "bypassPermissions";

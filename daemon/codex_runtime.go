@@ -87,11 +87,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 
 	r.app.store.updateSessionStatus(session.ID, "running")
 	if !options.Internal {
-		displayInput := input
-		if strings.TrimSpace(options.DisplayInput) != "" {
-			displayInput = options.DisplayInput
-		}
-		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": displayInput}})
+		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
 	}
 
 	go client.startTurn(input, options)
@@ -365,13 +361,27 @@ func (c *codexClient) startTurn(input string, options TurnOptions) {
 		return
 	}
 
+	turnInput := []map[string]any{{
+		"type":          "text",
+		"text":          inputWithAttachmentManifest(input, options.Attachments),
+		"text_elements": []any{},
+	}}
+	for _, attachment := range options.Attachments {
+		if !isNativeImageAttachment(attachment) || attachment.Path == "" {
+			continue
+		}
+		item := map[string]any{
+			"type": "localImage",
+			"path": attachment.Path,
+		}
+		if attachment.Detail != "" {
+			item["detail"] = attachment.Detail
+		}
+		turnInput = append(turnInput, item)
+	}
 	params := map[string]any{
 		"threadId": c.getThreadID(),
-		"input": []map[string]any{{
-			"type":          "text",
-			"text":          input,
-			"text_elements": []any{},
-		}},
+		"input":    turnInput,
 	}
 	applyCodexTurnOptions(params, options, c.cwd, c.defaultModel(), c.defaultReasoningEffort())
 	c.mu.Lock()

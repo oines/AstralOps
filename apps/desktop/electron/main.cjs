@@ -1,6 +1,7 @@
-const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, Menu, Notification, Tray, clipboard, dialog, ipcMain, nativeImage, shell } = require("electron");
 const { execFile, spawn } = require("child_process");
 const { promisify } = require("util");
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -515,6 +516,78 @@ function rememberNotificationID(id) {
   return true;
 }
 
+function attachmentID() {
+  return `att_${crypto.randomBytes(9).toString("hex")}`;
+}
+
+function safeSessionSegment(sessionId) {
+  return String(sessionId || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function uploadDir(sessionId, attachmentId) {
+  return path.join(dataDir(), "runtime", "uploads", safeSessionSegment(sessionId), attachmentId);
+}
+
+function mimeTypeForPath(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const map = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+    ".json": "application/json",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".csv": "text/csv",
+  };
+  return map[ext] || "application/octet-stream";
+}
+
+function attachmentKindForMime(mimeType) {
+  return ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mimeType) ? "image" : "file";
+}
+
+function attachmentRecord({ id, kind, filePath, name, mimeType, size }) {
+  return {
+    id,
+    kind,
+    path: filePath,
+    name,
+    mime_type: mimeType,
+    size,
+    detail: kind === "image" ? "high" : undefined,
+  };
+}
+
+async function ingestFiles(sessionId, filePaths) {
+  const attachments = [];
+  for (const source of filePaths) {
+    if (!source || typeof source !== "string") continue;
+    const stat = await fs.promises.stat(source).catch(() => null);
+    if (!stat || !stat.isFile()) continue;
+    const id = attachmentID();
+    const dir = uploadDir(sessionId, id);
+    await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+    const name = path.basename(source);
+    const target = path.join(dir, name);
+    await fs.promises.copyFile(source, target);
+    const mimeType = mimeTypeForPath(source);
+    attachments.push(attachmentRecord({
+      id,
+      kind: attachmentKindForMime(mimeType),
+      filePath: target,
+      name,
+      mimeType,
+      size: stat.size,
+    }));
+  }
+  return attachments;
+}
+
 ipcMain.handle("astral:get-daemon-info", async () => {
   if (daemonInfo) return daemonInfo;
   return waitForDaemon();
@@ -534,6 +607,23 @@ ipcMain.handle("astral:choose-files", async () => {
   });
   if (result.canceled) return [];
   return result.filePaths;
+});
+
+ipcMain.handle("astral:ingest-files", async (_event, sessionId, filePaths) => {
+  return ingestFiles(sessionId, Array.isArray(filePaths) ? filePaths : []);
+});
+
+ipcMain.handle("astral:ingest-clipboard-image", async (_event, sessionId) => {
+  const image = clipboard.readImage();
+  if (!image || image.isEmpty()) return null;
+  const id = attachmentID();
+  const dir = uploadDir(sessionId, id);
+  await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+  const name = "clipboard.png";
+  const target = path.join(dir, name);
+  const body = image.toPNG();
+  await fs.promises.writeFile(target, body, { mode: 0o600 });
+  return attachmentRecord({ id, kind: "image", filePath: target, name, mimeType: "image/png", size: body.length });
 });
 
 ipcMain.handle("astral:get-workspace-openers", async () => {

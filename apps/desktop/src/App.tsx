@@ -30,6 +30,7 @@ import type {
   ReasoningEffort,
   RunMode,
   Session,
+  SessionInputAttachment,
   SessionView,
   Workspace,
   WorkspaceConnection,
@@ -500,11 +501,24 @@ export function App(): React.JSX.Element {
   }, []);
 
   const handleChooseFiles = useCallback(async () => {
-    return window.astral.chooseFiles();
-  }, []);
+    if (!activeSession) return [];
+    const paths = await window.astral.chooseFiles();
+    if (paths.length === 0) return [];
+    return window.astral.ingestFiles(activeSession.id, paths);
+  }, [activeSession]);
+
+  const handleIngestFiles = useCallback(async (paths: string[]) => {
+    if (!activeSession || paths.length === 0) return [];
+    return window.astral.ingestFiles(activeSession.id, paths);
+  }, [activeSession]);
+
+  const handlePasteImage = useCallback(async () => {
+    if (!activeSession) return null;
+    return window.astral.ingestClipboardImage(activeSession.id);
+  }, [activeSession]);
 
   const handleSend = useCallback(
-    async (input: string) => {
+    async (input: string, attachments: SessionInputAttachment[] = []) => {
       if (!api || !activeWorkspace || !activeSession || !workspaceInteractive) return;
       setError("");
       try {
@@ -512,6 +526,7 @@ export function App(): React.JSX.Element {
           model: selectedModel,
           reasoning_effort: selectedReasoningEffort,
           permission_mode: runMode === "plan" ? "plan" : claudeSSHRemote ? "bypassPermissions" : permissionMode,
+          attachments,
         });
         const view = await api.sessionView(activeSession.id).catch(() => null);
         if (view) storeSessionView(view);
@@ -681,6 +696,7 @@ export function App(): React.JSX.Element {
           onLoadOlder={() => void loadOlderEvents()}
           onOpenSourceSession={handleOpenSourceSession}
           onScrollTargetHandled={() => setScrollTarget(null)}
+          mediaUrl={api?.mediaUrl.bind(api)}
         />
         <Composer
           commands={activeCommands}
@@ -702,6 +718,8 @@ export function App(): React.JSX.Element {
           runMode={runMode}
           running={workspaceInteractive ? sessionRunning : false}
           onChooseAttachments={handleChooseFiles}
+          onIngestFiles={handleIngestFiles}
+          onPasteImage={handlePasteImage}
           onExecuteCommand={handleExecuteCommand}
           onRefreshCommands={handleRefreshCommands}
           onModelOverrideChange={setModelOverride}
@@ -744,7 +762,7 @@ export function App(): React.JSX.Element {
       />
 
       <button
-        className={`[-webkit-app-region:no-drag] absolute top-[10px] z-[200] grid size-8 place-items-center rounded-lg text-[#8f9296] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 ${sidebarToggleLeftClass}`}
+        className={`[-webkit-app-region:no-drag] absolute top-[10px] z-[var(--ao-z-chrome)] grid size-8 place-items-center rounded-lg text-[#8f9296] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 ${sidebarToggleLeftClass}`}
         type="button"
         aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
         title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
@@ -761,7 +779,7 @@ export function App(): React.JSX.Element {
         <PanelLeft size={19} strokeWidth={1.8} />
       </button>
       <button
-        className={`[-webkit-app-region:no-drag] absolute right-[20px] top-[10px] z-[200] grid size-8 place-items-center rounded-lg transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 ${
+        className={`[-webkit-app-region:no-drag] absolute right-[20px] top-[10px] z-[var(--ao-z-chrome)] grid size-8 place-items-center rounded-lg transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 ${
           rightPanelOpen ? "bg-black/[0.055] text-[#343438]" : "text-[#8f9296]"
         }`}
         type="button"

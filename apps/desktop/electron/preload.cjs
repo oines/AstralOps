@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld("astral", {
   getDaemonInfo: () => ipcRenderer.invoke("astral:get-daemon-info"),
   chooseDirectory: () => ipcRenderer.invoke("astral:choose-directory"),
   chooseFiles: () => ipcRenderer.invoke("astral:choose-files"),
+  ingestFiles: (sessionId, filePaths) => ipcRenderer.invoke("astral:ingest-files", sessionId, filePaths),
+  ingestClipboardImage: (sessionId) => ipcRenderer.invoke("astral:ingest-clipboard-image", sessionId),
   getWorkspaceOpeners: () => ipcRenderer.invoke("astral:get-workspace-openers"),
   openWorkspace: (opener, workspace) => ipcRenderer.invoke("astral:open-workspace", opener, workspace),
   showNotification: (payload) => ipcRenderer.invoke("astral:show-notification", payload),

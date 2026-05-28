@@ -2111,6 +2111,24 @@ func TestNormalizeCodexRealLocalFixture(t *testing.T) {
 			t.Fatalf("real codex approval fixture missing %s in %#v", kind, approvalKinds)
 		}
 	}
+
+	imageKinds := []string{}
+	for _, line := range readFixtureLines(t, "../fixtures/codex-app-server/real-local-image-generation.jsonl") {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range normalizeCodexMessage(session, raw) {
+			imageKinds = append(imageKinds, event.Kind)
+			value := mapValue(event.Normalized)
+			if event.Kind == "message.media" && value["result"] != nil {
+				t.Fatalf("message.media normalized leaked base64 result: %#v", value)
+			}
+		}
+	}
+	if !reflect.DeepEqual(imageKinds, []string{"message.media", "message.media"}) {
+		t.Fatalf("image fixture kinds = %#v, want two message.media events", imageKinds)
+	}
 }
 
 func TestCodexCompletedPlanRequestsApproval(t *testing.T) {
@@ -3652,6 +3670,7 @@ type recordingRuntime struct {
 	options           []TurnOptions
 	interrupts        []string
 	approvalResponses []map[string]any
+	startErr          error
 	interruptErr      error
 	approvalErr       error
 }
@@ -3659,7 +3678,7 @@ type recordingRuntime struct {
 func (r *recordingRuntime) StartTurn(session Session, workspace Workspace, input string, options TurnOptions) error {
 	r.inputs = append(r.inputs, input)
 	r.options = append(r.options, options)
-	return nil
+	return r.startErr
 }
 
 func (r *recordingRuntime) Interrupt(sessionID string) error {
@@ -4488,6 +4507,90 @@ func TestSteerQueuedTurnInjectsAndRemovesQueuedMessage(t *testing.T) {
 	}
 }
 
+func TestSessionInputQueuesAttachments(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	runtime := &recordingRuntime{startErr: ErrSessionRunning}
+	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}, runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
+	attachmentPath := filepath.Join(dir, "clip.png")
+	if err := os.WriteFile(attachmentPath, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"input":"","attachments":[{"id":"att_1","kind":"image","path":%q,"name":"clip.png","mime_type":"image/png","size":3,"detail":"high"}]}`, attachmentPath)
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+session.ID+"/input", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	app.handleSessionAction(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	queue := app.queues[session.ID]
+	if len(queue) != 1 || len(queue[0].Options.Attachments) != 1 {
+		t.Fatalf("queue = %#v, want one queued attachment", queue)
+	}
+	attachment := queue[0].Options.Attachments[0]
+	if attachment.ID != "att_1" || attachment.Kind != "image" || attachment.Detail != "high" {
+		t.Fatalf("queued attachment = %#v", attachment)
+	}
+}
+
+func TestSessionMediaEndpointServesOnlyEventReferencedMedia(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	app := &app{store: st, hub: newEventHub(), token: "test-token"}
+	imagePath := filepath.Join(dir, "clip.png")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app.emit(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentCodex,
+		Kind:        "message.user",
+		Normalized: map[string]any{"text": "", "attachments": []map[string]any{{
+			"id":        "att_1",
+			"media_id":  "att_1",
+			"kind":      "image",
+			"path":      imagePath,
+			"name":      "clip.png",
+			"mime_type": "image/png",
+		}}},
+	})
+	events := st.queryEvents(workspace.ID, session.ID, 0)
+	seq := events[0].Seq
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sessions/%s/media/%d/att_1?download=1", session.ID, seq), nil)
+	rr := httptest.NewRecorder()
+	app.handleSessionAction(rr, req)
+	if rr.Code != http.StatusOK || rr.Body.String() != "png" {
+		t.Fatalf("status/body = %d/%q, want media bytes", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Header().Get("Content-Disposition"), "clip.png") {
+		t.Fatalf("content-disposition = %q, want filename", rr.Header().Get("Content-Disposition"))
+	}
+
+	badReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sessions/%s/media/%d/missing", session.ID, seq), nil)
+	badRR := httptest.NewRecorder()
+	app.handleSessionAction(badRR, badReq)
+	if badRR.Code != http.StatusNotFound {
+		t.Fatalf("missing media status = %d, want 404", badRR.Code)
+	}
+}
+
 func TestStopWorkspaceSessionsInterruptsAndClearsQueue(t *testing.T) {
 	dir := t.TempDir()
 	st, err := loadStore(dir)
@@ -4851,6 +4954,100 @@ func TestCodexLocalRuntimeStreamsFakeAppServer(t *testing.T) {
 		t.Fatalf("native thread id was not persisted: %#v", updated)
 	}
 	assertCodexConfigUnchanged(t, beforeConfig)
+}
+
+func TestCodexLocalRuntimeSendsImageAttachments(t *testing.T) {
+	app, session, workspace := newTestCodexApp(t, fakeCodexScript(t))
+	messagesPath := filepath.Join(t.TempDir(), "codex-messages.jsonl")
+	t.Setenv("ASTRALOPS_TEST_CODEX_MESSAGES", messagesPath)
+	imagePath := filepath.Join(t.TempDir(), "clip.png")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "describe this", TurnOptions{Attachments: []InputAttachment{{
+		ID:       "att_1",
+		Kind:     "image",
+		Path:     imagePath,
+		Name:     "clip.png",
+		MIMEType: "image/png",
+		Size:     3,
+		Detail:   "high",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.completed")
+
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	userValue := mapValue(events[0].Normalized)
+	if len(attachmentsFromNormalized(userValue["attachments"])) != 1 {
+		t.Fatalf("message.user normalized = %#v, want attachment metadata", userValue)
+	}
+	body, err := os.ReadFile(messagesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var turnStart map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			t.Fatal(err)
+		}
+		if stringValue(raw["method"]) == "turn/start" {
+			turnStart = mapValue(raw["params"])
+			break
+		}
+	}
+	inputs, ok := turnStart["input"].([]any)
+	if !ok || len(inputs) != 2 {
+		t.Fatalf("turn/start params = %#v, want text and localImage input", turnStart)
+	}
+	textInput := mapValue(inputs[0])
+	if !strings.Contains(stringValue(textInput["text"]), imagePath) {
+		t.Fatalf("text input = %#v, want attachment manifest path", textInput)
+	}
+	imageInput := mapValue(inputs[1])
+	if stringValue(imageInput["type"]) != "localImage" || stringValue(imageInput["path"]) != imagePath || stringValue(imageInput["detail"]) != "high" {
+		t.Fatalf("image input = %#v, want localImage path/detail", imageInput)
+	}
+}
+
+func TestWriteClaudeUserInputIncludesImageAttachments(t *testing.T) {
+	imagePath := filepath.Join(t.TempDir(), "clip.png")
+	body := []byte("png")
+	if err := os.WriteFile(imagePath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err := writeClaudeUserInput(&out, "describe this", []InputAttachment{{
+		ID:       "att_1",
+		Kind:     "image",
+		Path:     imagePath,
+		Name:     "clip.png",
+		MIMEType: "image/png",
+		Size:     int64(len(body)),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &payload); err != nil {
+		t.Fatal(err)
+	}
+	message := mapValue(payload["message"])
+	content, ok := message["content"].([]any)
+	if !ok || len(content) != 2 {
+		t.Fatalf("content = %#v, want text plus image block", message["content"])
+	}
+	textBlock := mapValue(content[0])
+	if !strings.Contains(stringValue(textBlock["text"]), imagePath) {
+		t.Fatalf("text block = %#v, want attachment manifest path", textBlock)
+	}
+	imageBlock := mapValue(content[1])
+	source := mapValue(imageBlock["source"])
+	if stringValue(imageBlock["type"]) != "image" || stringValue(source["media_type"]) != "image/png" || stringValue(source["data"]) != base64.StdEncoding.EncodeToString(body) {
+		t.Fatalf("image block = %#v", imageBlock)
+	}
 }
 
 func TestCodexLocalRuntimeCleansUpAfterInitializeFailure(t *testing.T) {

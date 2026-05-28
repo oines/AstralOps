@@ -105,7 +105,7 @@ export function WorkspaceModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-[rgba(20,20,22,0.36)] p-6 backdrop-blur-md">
+    <div className="fixed inset-0 z-[var(--ao-z-modal)] grid place-items-center bg-[rgba(20,20,22,0.36)] p-6 backdrop-blur-md">
       <section className="w-[min(580px,100%)] overflow-hidden rounded-[18px] border border-[#e9e7e1] bg-white shadow-[0_18px_48px_rgba(29,29,31,0.16)]">
         <header className="flex items-start justify-between gap-5 border-b border-[#e7e5e0] px-5 pb-4 pt-5">
           <div>

@@ -103,7 +103,7 @@ export function groupTranscriptEvents(events: AstralEvent[]): TurnGroup[] {
       }
       continue;
     }
-    if (event.kind === "message.delta" || event.kind === "message.assistant" || isTranscriptPlanEvent(event)) {
+    if (event.kind === "message.delta" || event.kind === "message.assistant" || event.kind === "message.media" || isTranscriptPlanEvent(event)) {
       group.assistant.push(event);
       group.timeline.push(event);
       continue;
@@ -165,7 +165,7 @@ export function groupMemoryCompactions(events: AstralEvent[]): MemoryCompactGrou
 }
 
 export function isAssistantContentEvent(event: AstralEvent): boolean {
-  return event.kind === "message.delta" || event.kind === "message.assistant" || isTranscriptPlanEvent(event);
+  return event.kind === "message.delta" || event.kind === "message.assistant" || event.kind === "message.media" || isTranscriptPlanEvent(event);
 }
 
 export function filterReplacedTranscriptEvents(events: AstralEvent[]): AstralEvent[] {
@@ -184,8 +184,13 @@ export function filterReplacedTranscriptEvents(events: AstralEvent[]): AstralEve
 
 export function visibleCollapsedAssistantSeqs(events: AstralEvent[]): Set<number> {
   const visible = new Set<number>();
+  for (const event of events) {
+    if (event.kind === "message.media") {
+      visible.add(event.seq);
+    }
+  }
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    if (isAssistantContentEvent(events[index])) {
+    if (isAssistantContentEvent(events[index]) && events[index].kind !== "message.media") {
       visible.add(events[index].seq);
       break;
     }
@@ -1070,7 +1075,18 @@ export function compactStreamingEvents(events: AstralEvent[]): AstralEvent[] {
   let pendingText = "";
 
   function flush(): void {
-    if (!pending || !pendingText) {
+    if (!pending) {
+      pending = null;
+      pendingText = "";
+      return;
+    }
+    if (pending.kind === "message.media") {
+      compacted.push(pending);
+      pending = null;
+      pendingText = "";
+      return;
+    }
+    if (!pendingText) {
       pending = null;
       pendingText = "";
       return;
@@ -1093,6 +1109,18 @@ export function compactStreamingEvents(events: AstralEvent[]): AstralEvent[] {
       if (pending && pendingKey !== currentKey) flush();
       pending ??= event;
       pendingText += text;
+      continue;
+    }
+
+    if (event.kind === "message.media") {
+      const currentKey = eventKey(event);
+      const pendingKey = pending ? eventKey(pending) : "";
+      if (pending && pending.kind === "message.media" && pendingKey === currentKey) {
+        pending = event;
+        continue;
+      }
+      flush();
+      pending = event;
       continue;
     }
 

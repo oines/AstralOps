@@ -94,11 +94,7 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 
 	r.app.store.updateSessionStatus(session.ID, "running")
 	if !options.Internal {
-		displayInput := input
-		if strings.TrimSpace(options.DisplayInput) != "" {
-			displayInput = options.DisplayInput
-		}
-		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": displayInput}})
+		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
 	}
 	started := map[string]any{"status": "running"}
 	if options.Internal {
@@ -162,7 +158,7 @@ func (r *claudeLocalRuntime) Steer(sessionID string, input string, options TurnO
 	if run.stdin == nil {
 		return ErrSessionIdle
 	}
-	if err := writeClaudeUserInput(run.stdin, input); err != nil {
+	if err := writeClaudeUserInput(run.stdin, input, options.Attachments); err != nil {
 		return err
 	}
 	session, _ := r.app.store.getSession(sessionID)
@@ -233,7 +229,7 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 	run.mu.Lock()
 	run.stdin = stdin
 	run.mu.Unlock()
-	if err := writeClaudeUserInput(stdin, input); err != nil {
+	if err := writeClaudeUserInput(stdin, input, options.Attachments); err != nil {
 		r.finishFailed(session, err.Error(), nil)
 		_ = cmd.Process.Kill()
 		return
@@ -326,6 +322,9 @@ func (r *claudeLocalRuntime) claudeArgs(session Session, options TurnOptions, re
 	if mode := strings.TrimSpace(options.PermissionMode); mode != "" && mode != "default" {
 		args = append(args, "--permission-mode", mode)
 	}
+	for _, dir := range attachmentAllowedDirs(options.Attachments) {
+		args = append(args, "--add-dir", dir)
+	}
 	if len(options.AllowedTools) > 0 {
 		allowed := append([]string{}, options.AllowedTools...)
 		if remote.RemoteCWD != "" {
@@ -349,15 +348,17 @@ func (r *claudeLocalRuntime) claudeArgs(session Session, options TurnOptions, re
 	return args, nil
 }
 
-func writeClaudeUserInput(writer io.Writer, input string) error {
+func writeClaudeUserInput(writer io.Writer, input string, attachments []InputAttachment) error {
+	content := []map[string]any{{
+		"type": "text",
+		"text": inputWithAttachmentManifest(input, attachments),
+	}}
+	content = append(content, claudeImageContentBlocks(attachments)...)
 	payload := map[string]any{
 		"type": "user",
 		"message": map[string]any{
-			"role": "user",
-			"content": []map[string]any{{
-				"type": "text",
-				"text": input,
-			}},
+			"role":    "user",
+			"content": content,
 		},
 		"parent_tool_use_id": nil,
 	}

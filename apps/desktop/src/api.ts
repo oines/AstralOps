@@ -7,6 +7,7 @@ import type {
   Session,
   SessionCommandListResponse,
   SessionCommandResponse,
+  SessionInputAttachment,
   SessionForkResponse,
   SessionView,
   Workspace,
@@ -74,7 +75,7 @@ export interface CoreClient {
   runSessionCommand(sessionId: string, commandId: string, args?: Record<string, unknown>): Promise<SessionCommandResponse>;
   deleteSession(sessionId: string): Promise<{ ok: boolean }>;
   forkSession(sessionId: string, eventSeq: number): Promise<SessionForkResponse>;
-  sendInput(sessionId: string, input: string, options?: { model?: string; reasoning_effort?: string; permission_mode?: string }): Promise<{ ok: boolean }>;
+  sendInput(sessionId: string, input: string, options?: { model?: string; reasoning_effort?: string; permission_mode?: string; attachments?: SessionInputAttachment[] }): Promise<{ ok: boolean }>;
   editLastUserMessage(
     sessionId: string,
     input: string,
@@ -86,6 +87,7 @@ export interface CoreClient {
   respondApproval(approvalId: string, response: Record<string, unknown>): Promise<{ ok: boolean }>;
   events(options?: number | EventQuery): Promise<AstralEvent[]>;
   subscribeEvents(afterSeq: number, handlers: EventSubscriptionHandlers): EventSubscription;
+  mediaUrl(sessionId: string, eventSeq: number, mediaId: string, download?: boolean): string;
 }
 
 export interface ControlChannel {
@@ -142,6 +144,15 @@ export class LocalHttpControlChannel implements ControlChannel {
     const params = new URLSearchParams({ token: this.token });
     const separator = path.includes("?") ? "&" : "?";
     return new WebSocket(`${this.baseUrl.replace(/^http/, "ws")}${path}${separator}${params.toString()}`);
+  }
+
+  url(path: string, params: Record<string, string | number | boolean | undefined> = {}): string {
+    const query = new URLSearchParams({ token: this.token });
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) query.set(key, String(value));
+    }
+    const separator = path.includes("?") ? "&" : "?";
+    return `${this.baseUrl}${path}${separator}${query.toString()}`;
   }
 
   private headers(auth: boolean): HeadersInit {
@@ -235,7 +246,7 @@ export class LocalCoreClient implements CoreClient {
   sendInput(
     sessionId: string,
     input: string,
-    options: { model?: string; reasoning_effort?: string; permission_mode?: string } = {},
+    options: { model?: string; reasoning_effort?: string; permission_mode?: string; attachments?: SessionInputAttachment[] } = {},
   ): Promise<{ ok: boolean }> {
     return this.channel.request("POST", `/v1/sessions/${sessionId}/input`, { input, ...options });
   }
@@ -278,6 +289,11 @@ export class LocalCoreClient implements CoreClient {
 
   subscribeEvents(afterSeq: number, handlers: EventSubscriptionHandlers): EventSubscription {
     return this.channel.subscribeEvents(afterSeq, handlers);
+  }
+
+  mediaUrl(sessionId: string, eventSeq: number, mediaId: string, download = false): string {
+    if (!(this.channel instanceof LocalHttpControlChannel)) return "";
+    return this.channel.url(`/v1/sessions/${sessionId}/media/${eventSeq}/${encodeURIComponent(mediaId)}`, download ? { download: 1 } : {});
   }
 }
 
