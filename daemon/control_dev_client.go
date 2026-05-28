@@ -390,26 +390,9 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 	}
 
 	if opts.WorkspaceID != "" && opts.Terminal {
-		openParams := map[string]any{"workspace_id": opts.WorkspaceID, "cols": 80, "rows": 24}
-		open, err := controlClientSmokeRequest(st, target, "terminal_open", CapabilityTerminalOpen, ControlActionTerminalOpen, openParams)
-		result.Steps = append(result.Steps, controlClientSmokeStepFromResponse("terminal_open", CapabilityTerminalOpen, ControlActionTerminalOpen, open, controlClientTerminalSmokeSummary(open)))
+		steps, err := controlClientSmokeTerminalFlow(st, target, opts.WorkspaceID)
+		result.Steps = append(result.Steps, steps...)
 		if err != nil {
-			return result, err
-		}
-		if err := controlClientSmokeResponseError("terminal_open", open); err != nil {
-			return result, err
-		}
-		terminalID := stringValue(mapValue(open.Result)["terminal_id"])
-		if terminalID == "" {
-			return result, fmt.Errorf("smoke step terminal_open failed: terminal_id missing")
-		}
-		closeParams := map[string]any{"terminal_id": terminalID}
-		close, err := controlClientSmokeRequest(st, target, "terminal_close", CapabilityTerminalInput, ControlActionTerminalClose, closeParams)
-		result.Steps = append(result.Steps, controlClientSmokeStepFromResponse("terminal_close", CapabilityTerminalInput, ControlActionTerminalClose, close, controlClientTerminalSmokeSummary(close)))
-		if err != nil {
-			return result, err
-		}
-		if err := controlClientSmokeResponseError("terminal_close", close); err != nil {
 			return result, err
 		}
 	}
@@ -669,6 +652,244 @@ func controlClientSmokeWorkspaceWriteFlow(st *store, target controlClientTarget,
 		return steps, err
 	}
 	return steps, nil
+}
+
+func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, workspaceID string) ([]controlClientSmokeStep, error) {
+	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	if err != nil {
+		return []controlClientSmokeStep{{Name: "terminal_open", Capability: CapabilityTerminalOpen, Action: ControlActionTerminalOpen, Error: &ControlError{Code: "connect_failed", Message: err.Error()}}}, err
+	}
+	defer socket.Close()
+
+	steps := []controlClientSmokeStep{}
+	terminalID := ""
+	closed := false
+	defer func() {
+		if terminalID != "" && !closed {
+			_, _ = controlClientSmokeRequest(st, target, "terminal_close_cleanup", CapabilityTerminalInput, ControlActionTerminalClose, map[string]any{"terminal_id": terminalID})
+		}
+	}()
+
+	open, err := controlClientRoundTrip(socket, cipher, target.Timeout, st, ControlRequest{
+		RequestID:  "smoke_terminal_open",
+		Capability: CapabilityTerminalOpen,
+		Action:     ControlActionTerminalOpen,
+		Params:     map[string]any{"workspace_id": workspaceID, "cols": 80, "rows": 24},
+	})
+	steps = append(steps, controlClientSmokeStepFromResponse("terminal_open", CapabilityTerminalOpen, ControlActionTerminalOpen, open, controlClientTerminalSmokeSummary(open)))
+	if err != nil {
+		return steps, err
+	}
+	if err := controlClientSmokeResponseError("terminal_open", open); err != nil {
+		return steps, err
+	}
+	terminalID = stringValue(mapValue(open.Result)["terminal_id"])
+	if terminalID == "" {
+		err := fmt.Errorf("smoke step terminal_open failed: terminal_id missing")
+		steps[len(steps)-1].OK = false
+		steps[len(steps)-1].Error = &ControlError{Code: "terminal_id_missing", Message: err.Error()}
+		return steps, err
+	}
+
+	attach, err := controlClientTerminalResponseRoundTrip(socket, cipher, target.Timeout, st, ControlRequest{
+		RequestID:  "smoke_terminal_attach",
+		Capability: CapabilityTerminalOpen,
+		Action:     ControlActionTerminalAttach,
+		Params:     map[string]any{"terminal_id": terminalID},
+	})
+	steps = append(steps, controlClientSmokeStepFromResponse("terminal_attach", CapabilityTerminalOpen, ControlActionTerminalAttach, attach, controlClientTerminalAttachSmokeSummary(attach)))
+	if err != nil {
+		return steps, err
+	}
+	if err := controlClientSmokeResponseError("terminal_attach", attach); err != nil {
+		return steps, err
+	}
+
+	marker := "terminal-smoke-" + randomID(8)
+	inputReq := ControlRequest{
+		RequestID:  "smoke_terminal_input",
+		Capability: CapabilityTerminalInput,
+		Action:     ControlActionTerminalInput,
+		Params: map[string]any{
+			"terminal_id": terminalID,
+			"data":        "printf '%s\\n' " + marker + "\n",
+		},
+	}
+	inputReq.ControllerDeviceID = st.deviceIdentity.DeviceID
+	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &inputReq}); err != nil {
+		step := controlClientSmokeStep{Name: "terminal_input", Capability: CapabilityTerminalInput, Action: ControlActionTerminalInput, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
+		steps = append(steps, step)
+		return steps, err
+	}
+	var inputResponse *ControlResponse
+	outputFrames := 0
+	outputBytes := 0
+	sawMarker := false
+	for i := 0; i < 40 && (inputResponse == nil || !sawMarker); i++ {
+		frame, err := controlClientReadWithTimeout(socket, cipher, target.Timeout)
+		if err != nil {
+			step := controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "terminal_read_failed", Message: err.Error()}}
+			steps = appendTerminalInputStep(steps, inputResponse)
+			steps = append(steps, step)
+			return steps, err
+		}
+		switch frame.Type {
+		case "response":
+			if frame.Response != nil && frame.Response.RequestID == inputReq.RequestID {
+				response := *frame.Response
+				inputResponse = &response
+			}
+		case terminalFrameOutput:
+			if frame.Terminal == nil || frame.Terminal.TerminalID != terminalID {
+				err := fmt.Errorf("unexpected terminal output frame")
+				steps = appendTerminalInputStep(steps, inputResponse)
+				steps = append(steps, controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "unexpected_terminal_frame", Message: err.Error()}})
+				return steps, err
+			}
+			outputFrames++
+			outputBytes += len(frame.Terminal.Data)
+			if strings.Contains(frame.Terminal.Data, marker) {
+				sawMarker = true
+			}
+		case terminalFrameClosed:
+			err := fmt.Errorf("terminal closed before smoke output was observed")
+			steps = appendTerminalInputStep(steps, inputResponse)
+			steps = append(steps, controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "terminal_closed", Message: err.Error()}})
+			return steps, err
+		}
+	}
+	steps = appendTerminalInputStep(steps, inputResponse)
+	if inputResponse == nil {
+		err := fmt.Errorf("smoke step terminal_input failed: response missing")
+		steps[len(steps)-1].Error = &ControlError{Code: "terminal_input_response_missing", Message: err.Error()}
+		return steps, err
+	}
+	if err := controlClientSmokeResponseError("terminal_input", *inputResponse); err != nil {
+		return steps, err
+	}
+	outputStep := controlClientSmokeStep{
+		Name:       "terminal_output",
+		Capability: CapabilityTerminalOpen,
+		Action:     terminalFrameOutput,
+		OK:         sawMarker,
+		Summary: map[string]any{
+			"terminal_id": terminalID,
+			"frames":      outputFrames,
+			"bytes":       outputBytes,
+			"marker_seen": sawMarker,
+		},
+	}
+	if !sawMarker {
+		err := fmt.Errorf("smoke step terminal_output failed: marker output missing")
+		outputStep.Error = &ControlError{Code: "terminal_output_missing", Message: err.Error()}
+		steps = append(steps, outputStep)
+		return steps, err
+	}
+	steps = append(steps, outputStep)
+
+	closeSteps, err := controlClientSmokeTerminalClose(socket, cipher, target.Timeout, st, terminalID)
+	steps = append(steps, closeSteps...)
+	if err != nil {
+		return steps, err
+	}
+	closed = true
+	return steps, nil
+}
+
+func appendTerminalInputStep(steps []controlClientSmokeStep, response *ControlResponse) []controlClientSmokeStep {
+	if response == nil {
+		return append(steps, controlClientSmokeStep{Name: "terminal_input", Capability: CapabilityTerminalInput, Action: ControlActionTerminalInput})
+	}
+	return append(steps, controlClientSmokeStepFromResponse("terminal_input", CapabilityTerminalInput, ControlActionTerminalInput, *response, controlClientTerminalSmokeSummary(*response)))
+}
+
+func controlClientTerminalResponseRoundTrip(socket *websocket.Conn, cipher *controlCipher, timeout time.Duration, st *store, req ControlRequest) (ControlResponse, error) {
+	req.ControllerDeviceID = st.deviceIdentity.DeviceID
+	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req}); err != nil {
+		return ControlResponse{}, err
+	}
+	for i := 0; i < 20; i++ {
+		frame, err := controlClientReadWithTimeout(socket, cipher, timeout)
+		if err != nil {
+			return ControlResponse{}, err
+		}
+		if frame.Response != nil && frame.Response.RequestID == req.RequestID {
+			return *frame.Response, nil
+		}
+		if frame.Type == terminalFrameClosed {
+			return ControlResponse{}, fmt.Errorf("terminal closed before %s response", req.Action)
+		}
+	}
+	return ControlResponse{}, fmt.Errorf("remote did not return response frame for %s", req.Action)
+}
+
+func controlClientSmokeTerminalClose(socket *websocket.Conn, cipher *controlCipher, timeout time.Duration, st *store, terminalID string) ([]controlClientSmokeStep, error) {
+	req := ControlRequest{
+		RequestID:  "smoke_terminal_close",
+		Capability: CapabilityTerminalInput,
+		Action:     ControlActionTerminalClose,
+		Params:     map[string]any{"terminal_id": terminalID},
+	}
+	req.ControllerDeviceID = st.deviceIdentity.DeviceID
+	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req}); err != nil {
+		step := controlClientSmokeStep{Name: "terminal_close", Capability: CapabilityTerminalInput, Action: ControlActionTerminalClose, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
+		return []controlClientSmokeStep{step}, err
+	}
+	var closeResponse *ControlResponse
+	sawClosedFrame := false
+	for i := 0; i < 20 && (closeResponse == nil || !sawClosedFrame); i++ {
+		frame, err := controlClientReadWithTimeout(socket, cipher, timeout)
+		if err != nil {
+			steps := appendTerminalCloseStep(nil, closeResponse, sawClosedFrame)
+			steps = append(steps, controlClientSmokeStep{Name: "terminal_closed", Capability: CapabilityTerminalOpen, Action: terminalFrameClosed, Error: &ControlError{Code: "terminal_read_failed", Message: err.Error()}})
+			return steps, err
+		}
+		switch frame.Type {
+		case "response":
+			if frame.Response != nil && frame.Response.RequestID == req.RequestID {
+				response := *frame.Response
+				closeResponse = &response
+			}
+		case terminalFrameClosed:
+			if frame.Terminal != nil && frame.Terminal.TerminalID == terminalID && frame.Terminal.Status == terminalStatusClosed {
+				sawClosedFrame = true
+			}
+		}
+	}
+	steps := appendTerminalCloseStep(nil, closeResponse, sawClosedFrame)
+	if closeResponse == nil {
+		err := fmt.Errorf("smoke step terminal_close failed: response missing")
+		steps[0].Error = &ControlError{Code: "terminal_close_response_missing", Message: err.Error()}
+		return steps, err
+	}
+	if err := controlClientSmokeResponseError("terminal_close", *closeResponse); err != nil {
+		return steps, err
+	}
+	if !sawClosedFrame {
+		err := fmt.Errorf("smoke step terminal_closed failed: closed frame missing")
+		steps = append(steps, controlClientSmokeStep{Name: "terminal_closed", Capability: CapabilityTerminalOpen, Action: terminalFrameClosed, Error: &ControlError{Code: "terminal_closed_frame_missing", Message: err.Error()}})
+		return steps, err
+	}
+	steps = append(steps, controlClientSmokeStep{
+		Name:       "terminal_closed",
+		Capability: CapabilityTerminalOpen,
+		Action:     terminalFrameClosed,
+		OK:         true,
+		Summary:    map[string]any{"terminal_id": terminalID, "closed_frame": true},
+	})
+	return steps, nil
+}
+
+func appendTerminalCloseStep(steps []controlClientSmokeStep, response *ControlResponse, sawClosedFrame bool) []controlClientSmokeStep {
+	if response == nil {
+		return append(steps, controlClientSmokeStep{Name: "terminal_close", Capability: CapabilityTerminalInput, Action: ControlActionTerminalClose, Summary: map[string]any{"closed_frame": sawClosedFrame}})
+	}
+	step := controlClientSmokeStepFromResponse("terminal_close", CapabilityTerminalInput, ControlActionTerminalClose, *response, controlClientTerminalSmokeSummary(*response))
+	if step.Summary == nil {
+		step.Summary = map[string]any{}
+	}
+	step.Summary["closed_frame"] = sawClosedFrame
+	return append(steps, step)
 }
 
 func controlClientSmokeRequest(st *store, target controlClientTarget, requestID, capability, action string, params map[string]any) (ControlResponse, error) {
@@ -955,6 +1176,20 @@ func controlClientTerminalSmokeSummary(response ControlResponse) map[string]any 
 	return map[string]any{
 		"terminal_id": stringValue(result["terminal_id"]),
 		"status":      stringValue(result["status"]),
+	}
+}
+
+func controlClientTerminalAttachSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	return map[string]any{
+		"terminal_id":      stringValue(result["terminal_id"]),
+		"workspace_id":     stringValue(result["workspace_id"]),
+		"target":           stringValue(result["target"]),
+		"status":           stringValue(result["status"]),
+		"viewer_device_id": stringValue(result["viewer_device_id"]),
+		"connection_id":    stringValue(result["connection_id"]),
+		"writer_device_id": stringValue(result["writer_device_id"]),
+		"output_seq":       int64(numberValue(result["output_seq"])),
 	}
 }
 

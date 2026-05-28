@@ -148,7 +148,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	}
 	wantSteps := []string{"workspaces", "workspace_files_read", "attachment_ingest", "workspace_files_stream", "workspace_files_write", "workspace_files_apply_patch", "workspace_files_move", "workspace_files_delete", "media_stream", "workspace_exec"}
 	if runTerminal {
-		wantSteps = append(wantSteps, "terminal_open", "terminal_close")
+		wantSteps = append(wantSteps, "terminal_open", "terminal_attach", "terminal_input", "terminal_output", "terminal_close", "terminal_closed")
 	}
 	for _, name := range wantSteps {
 		step, ok := smokeStepByName(result, name)
@@ -205,6 +205,16 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workspace.LocalCWD, stringValue(deleteStep.Summary["path"]))); !os.IsNotExist(err) {
 		t.Fatalf("workspace write smoke temp path stat err = %v, want not exist", err)
 	}
+	if runTerminal {
+		outputStep, _ := smokeStepByName(result, "terminal_output")
+		if !boolValue(outputStep.Summary["marker_seen"]) || int(numberValue(outputStep.Summary["frames"])) == 0 || int(numberValue(outputStep.Summary["bytes"])) == 0 {
+			t.Fatalf("terminal_output summary = %#v, want observed terminal output frame", outputStep.Summary)
+		}
+		closedStep, _ := smokeStepByName(result, "terminal_closed")
+		if !boolValue(closedStep.Summary["closed_frame"]) {
+			t.Fatalf("terminal_closed summary = %#v, want closed frame", closedStep.Summary)
+		}
+	}
 	wire, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
@@ -215,6 +225,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 		strings.Contains(wireText, string(mediaBody)) ||
 		strings.Contains(wireText, "astralops smoke before") ||
 		strings.Contains(wireText, "astralops smoke after") ||
+		strings.Contains(wireText, "terminal-smoke-") ||
 		strings.Contains(wireText, media.path) {
 		t.Fatalf("smoke result leaked streamed file content, attached file content, media content, workspace write content, or Host path: %s", string(wire))
 	}
