@@ -1138,7 +1138,8 @@ func TestControlWebSocketChunkedAttachmentIngestIsEncrypted(t *testing.T) {
 	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
 	defer client.Close()
 
-	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+	name := "chunked-secret-upload.txt"
+	sealedStartRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
 		Type: "request",
 		Request: &ControlRequest{
 			RequestID:  "attachment_start",
@@ -1146,17 +1147,24 @@ func TestControlWebSocketChunkedAttachmentIngestIsEncrypted(t *testing.T) {
 			Action:     ControlActionAttachmentIngestStart,
 			Params: map[string]any{
 				"session_id": session.ID,
-				"name":       "upload.txt",
+				"name":       name,
+				"mime_type":  "text/plain",
 			},
 		},
 	})
-	startPlain := readEncryptedControlFrame(t, client, cipher)
+	if strings.Contains(string(sealedStartRequest), ControlActionAttachmentIngestStart) || strings.Contains(string(sealedStartRequest), session.ID) || strings.Contains(string(sealedStartRequest), name) || strings.Contains(string(sealedStartRequest), "text/plain") {
+		t.Fatalf("sealed attachment start request leaked payload: %s", string(sealedStartRequest))
+	}
+	startPlain, sealedStartResponse := readEncryptedControlFrameWithBody(t, client, cipher)
 	if startPlain.Response == nil || !startPlain.Response.OK {
 		t.Fatalf("start response = %#v, want ok", startPlain)
 	}
 	uploadID := stringValue(mapValue(startPlain.Response.Result)["upload_id"])
 	if uploadID == "" {
 		t.Fatalf("start result = %#v, want upload id", startPlain.Response.Result)
+	}
+	if strings.Contains(string(sealedStartResponse), uploadID) || strings.Contains(string(sealedStartResponse), session.ID) || strings.Contains(string(sealedStartResponse), name) || strings.Contains(string(sealedStartResponse), app.store.dataDir) {
+		t.Fatalf("sealed attachment start response leaked payload: %s", string(sealedStartResponse))
 	}
 
 	chunk := []byte("chunk-upload-secret")
@@ -1176,18 +1184,18 @@ func TestControlWebSocketChunkedAttachmentIngestIsEncrypted(t *testing.T) {
 			},
 		},
 	})
-	if strings.Contains(string(sealedRequest), string(chunk)) || strings.Contains(string(sealedRequest), encoded) {
+	if strings.Contains(string(sealedRequest), ControlActionAttachmentIngestChunk) || strings.Contains(string(sealedRequest), session.ID) || strings.Contains(string(sealedRequest), uploadID) || strings.Contains(string(sealedRequest), string(chunk)) || strings.Contains(string(sealedRequest), encoded) {
 		t.Fatalf("sealed attachment chunk request leaked payload: %s", string(sealedRequest))
 	}
 	chunkPlain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
-	if strings.Contains(string(sealedResponse), string(chunk)) || strings.Contains(string(sealedResponse), encoded) {
+	if strings.Contains(string(sealedResponse), uploadID) || strings.Contains(string(sealedResponse), string(chunk)) || strings.Contains(string(sealedResponse), encoded) {
 		t.Fatalf("sealed attachment chunk response leaked payload: %s", string(sealedResponse))
 	}
 	if chunkPlain.Response == nil || !chunkPlain.Response.OK {
 		t.Fatalf("chunk response = %#v, want ok", chunkPlain)
 	}
 
-	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+	sealedFinishRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
 		Type: "request",
 		Request: &ControlRequest{
 			RequestID:  "attachment_finish",
@@ -1199,13 +1207,24 @@ func TestControlWebSocketChunkedAttachmentIngestIsEncrypted(t *testing.T) {
 			},
 		},
 	})
-	finishPlain := readEncryptedControlFrame(t, client, cipher)
+	if strings.Contains(string(sealedFinishRequest), ControlActionAttachmentIngestFinish) || strings.Contains(string(sealedFinishRequest), session.ID) || strings.Contains(string(sealedFinishRequest), uploadID) {
+		t.Fatalf("sealed attachment finish request leaked payload: %s", string(sealedFinishRequest))
+	}
+	finishPlain, sealedFinishResponse := readEncryptedControlFrameWithBody(t, client, cipher)
 	if finishPlain.Response == nil || !finishPlain.Response.OK {
 		t.Fatalf("finish response = %#v, want ok", finishPlain)
 	}
 	attachment := mapValue(mapValue(finishPlain.Response.Result)["attachment"])
 	if stringValue(attachment["id"]) == "" || !boolValue(attachment["host_owned"]) || stringValue(attachment["path"]) != "" {
 		t.Fatalf("finish attachment = %#v", attachment)
+	}
+	for _, secret := range []string{name, uploadID, encoded, string(chunk), app.store.dataDir} {
+		if strings.Contains(string(sealedFinishResponse), secret) {
+			t.Fatalf("sealed attachment finish response leaked %q: %s", secret, string(sealedFinishResponse))
+		}
+	}
+	if stringValue(attachment["name"]) != name || stringValue(attachment["mime_type"]) != "text/plain" || int64(numberValue(attachment["size"])) != int64(len(chunk)) {
+		t.Fatalf("finish attachment metadata = %#v", attachment)
 	}
 }
 
