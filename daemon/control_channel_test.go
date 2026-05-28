@@ -62,6 +62,11 @@ func startControlChannelTestServer(t *testing.T, app *app) *httptest.Server {
 
 func dialControlChannel(t *testing.T, serverURL string, app *app, controllerPublicKey ed25519.PublicKey, controllerPrivateKey ed25519.PrivateKey) (*websocket.Conn, *controlCipher, controlHelloAckFrame) {
 	t.Helper()
+	return dialControlChannelAs(t, serverURL, app, "dev_controller", controllerPublicKey, controllerPrivateKey)
+}
+
+func dialControlChannelAs(t *testing.T, serverURL string, app *app, controllerDeviceID string, controllerPublicKey ed25519.PublicKey, controllerPrivateKey ed25519.PrivateKey) (*websocket.Conn, *controlCipher, controlHelloAckFrame) {
+	t.Helper()
 
 	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(serverURL, "http"), nil)
 	if err != nil {
@@ -80,7 +85,7 @@ func dialControlChannel(t *testing.T, serverURL string, app *app, controllerPubl
 	hello := controlHelloFrame{
 		Type:                   "hello",
 		Version:                controlProtocolVersion,
-		ControllerDeviceID:     "dev_controller",
+		ControllerDeviceID:     controllerDeviceID,
 		ControllerPublicKey:    base64.StdEncoding.EncodeToString(controllerPublicKey),
 		ControllerEphemeralKey: base64.StdEncoding.EncodeToString(controllerEphemeral.PublicKey().Bytes()),
 		ClientNonce:            clientNonce,
@@ -1648,6 +1653,88 @@ func TestControlWebSocketHostTrustSelfRevokeRespondsThenCloses(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("active sessions = %d, want 0 after self revoke", app.activeControlSessionCountForDevice("dev_controller"))
+}
+
+func TestControlWebSocketHostTrustRevokeClosesTargetSessionOnly(t *testing.T) {
+	app, _, _, adminPublicKey, adminPrivateKey := newControlChannelTestApp(t, CapabilityHostManage)
+	readerPublicKey, readerPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = app.store.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:  "device_reader",
+		ControllerPublicKey: base64.StdEncoding.EncodeToString(readerPublicKey),
+		Capabilities:        []string{CapabilityCoreRead},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := startControlChannelTestServer(t, app)
+	adminClient, adminCipher, _ := dialControlChannel(t, server.URL, app, adminPublicKey, adminPrivateKey)
+	defer adminClient.Close()
+	readerClient, readerCipher, _ := dialControlChannelAs(t, server.URL, app, "device_reader", readerPublicKey, readerPrivateKey)
+	defer readerClient.Close()
+
+	if got := app.activeControlSessionCountForDevice("dev_controller"); got != 1 {
+		t.Fatalf("admin active sessions = %d, want 1", got)
+	}
+	if got := app.activeControlSessionCountForDevice("device_reader"); got != 1 {
+		t.Fatalf("reader active sessions = %d, want 1", got)
+	}
+
+	sealedRequest := writeEncryptedControlFrame(t, adminClient, adminCipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "host_trust_revoke_reader",
+			Capability: CapabilityHostManage,
+			Action:     ControlActionHostTrustRevoke,
+			Params: map[string]any{
+				"controller_device_id": "device_reader",
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionHostTrustRevoke) || strings.Contains(string(sealedRequest), "device_reader") {
+		t.Fatalf("sealed trust revoke request leaked payload: %s", string(sealedRequest))
+	}
+
+	adminPlain, sealedResponse := readEncryptedControlFrameWithBody(t, adminClient, adminCipher)
+	if strings.Contains(string(sealedResponse), "device_reader") || strings.Contains(string(sealedResponse), "trust_revoked") {
+		t.Fatalf("sealed trust revoke response leaked payload: %s", string(sealedResponse))
+	}
+	if adminPlain.Type != "response" || adminPlain.Response == nil || !adminPlain.Response.OK {
+		t.Fatalf("admin revoke response = %#v, want ok", adminPlain)
+	}
+	revokeResult := mapValue(adminPlain.Response.Result)
+	if stringValue(revokeResult["controller_device_id"]) != "device_reader" || int(numberValue(revokeResult["closed_control_sessions"])) != 1 {
+		t.Fatalf("trust revoke result = %#v", revokeResult)
+	}
+
+	readerPlain, sealedClose := readEncryptedControlFrameWithBody(t, readerClient, readerCipher)
+	if strings.Contains(string(sealedClose), "trust_revoked") || strings.Contains(string(sealedClose), "device_reader") {
+		t.Fatalf("sealed reader close leaked payload: %s", string(sealedClose))
+	}
+	if readerPlain.Type != "close" || readerPlain.Code != "trust_revoked" {
+		t.Fatalf("reader close frame = %#v, want trust_revoked", readerPlain)
+	}
+	if got := app.activeControlSessionCountForDevice("device_reader"); got != 0 {
+		t.Fatalf("reader active sessions = %d, want 0 after revoke", got)
+	}
+	if got := app.activeControlSessionCountForDevice("dev_controller"); got != 1 {
+		t.Fatalf("admin active sessions = %d, want 1 after reader revoke", got)
+	}
+
+	writeEncryptedControlFrame(t, adminClient, adminCipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "host_trust_list_after_revoke",
+			Capability: CapabilityHostManage,
+			Action:     ControlActionHostTrustList,
+		},
+	})
+	adminPlain = readEncryptedControlFrame(t, adminClient, adminCipher)
+	if adminPlain.Type != "response" || adminPlain.Response == nil || !adminPlain.Response.OK {
+		t.Fatalf("admin trust list response = %#v, want ok after revoking reader", adminPlain)
+	}
 }
 
 func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *testing.T) {
