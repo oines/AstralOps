@@ -537,10 +537,11 @@ POST /v1/trust/devices/:device_id/revoke
 2. 找到 controller_device_id == device_id 的所有 active control sessions。
 3. 对每个 session 发送 encrypted close frame，reason=trust_revoked。
 4. 关闭 transport。
-5. 清理该设备的 event subscription、pending request、PTY attach。
-6. 如果该设备是某个 PTY 的 active writer，释放 writer lock，并让下一台仍可信且具备 `terminal.input` 能力的 Controller 由 Host 在 input/resize/close 时重新认领。
-7. append 本地 audit event，例如 control.trust.revoked。
-8. 通知云端同步 trust metadata。
+5. 取消该 control connection 绑定的 Host-owned action context，包括 event/media/workspace file streams 和正在执行的 workspace.exec。
+6. 清理该设备的 event subscription、pending request、PTY attach。
+7. 如果该设备是某个 PTY 的 active writer，释放 writer lock，并让下一台仍可信且具备 `terminal.input` 能力的 Controller 由 Host 在 input/resize/close 时重新认领。
+8. append 本地 audit event，例如 control.trust.revoked。
+9. 通知云端同步 trust metadata。
 ```
 
 被踢出的 Controller 收到连接关闭后，UI 显示：
@@ -1177,7 +1178,7 @@ async workspace.exec approval interaction, if product needs per-command confirma
 
 `workspace.exec` v1 由 Host trust grant 的 `workspace_exec_policy` 决定是否执行。默认 `trusted` 表示 `workspace.exec` capability 本身就是执行授权；`require_approval` 会同步拒绝执行并返回 `workspace_exec_approval_required`，不会启动本地或 SSH command；`disabled` 直接拒绝为 `workspace_exec_disabled`。这先把 command approval policy 放进 Core/daemon 决策层，避免 Controller 自行判断或把 gateway command 伪装成 Claude/Codex 原生 approval。若未来需要逐条命令确认，应该在这个 policy gate 之上新增 Host-owned async interaction，而不是让客户端绕过策略。
 
-`workspace.exec` v1 是同步 request/response 能力，不是长输出流。Host 必须限制 stdout/stderr/output 的响应大小，并在结果里返回 `stdout_truncated` / `stderr_truncated` / `output_truncated` / `output_bytes_limit` 这类 metadata。需要持续输出、交互输入或大输出的场景应该使用 Host-owned PTY/terminal 能力，而不是把同步 exec response 扩成无限大 payload。
+`workspace.exec` v1 是同步 request/response 能力，不是长输出流。Host 必须限制 stdout/stderr/output 的响应大小，并在结果里返回 `stdout_truncated` / `stderr_truncated` / `output_truncated` / `output_bytes_limit` 这类 metadata。需要持续输出、交互输入或大输出的场景应该使用 Host-owned PTY/terminal 能力，而不是把同步 exec response 扩成无限大 payload。`workspace.exec` 必须绑定发起它的 control connection context；Controller 断线、Host 主动关闭连接或 trust revoke 时，Host 要取消对应本地/SSH exec，而不是让命令脱离远控连接继续运行。
 
 ### Phase 9 - PTY Attach Manager
 

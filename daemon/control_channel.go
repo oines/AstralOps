@@ -75,6 +75,8 @@ type controlWSConn struct {
 	id                 string
 	controllerDeviceID string
 	cipher             *controlCipher
+	ctx                context.Context
+	cancel             context.CancelFunc
 	writeMu            sync.Mutex
 	streamMu           sync.Mutex
 	streams            map[string]context.CancelFunc
@@ -96,8 +98,10 @@ func (a *app) handleControlWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	socket.SetReadLimit(a.controlHelloFrameMaxBytes())
-	conn := &controlWSConn{app: a, socket: socket}
+	ctx, cancel := context.WithCancel(context.Background())
+	conn := &controlWSConn{app: a, socket: socket, ctx: ctx, cancel: cancel}
 	if err := conn.acceptHello(); err != nil {
+		cancel()
 		_ = socket.Close()
 		return
 	}
@@ -274,7 +278,7 @@ func (c *controlWSConn) afterControlResponse(req ControlRequest, response Contro
 		if !ok {
 			return nil
 		}
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(c.requestContext())
 		c.registerEventSubscription(result.StreamID, cancel)
 		return func() {
 			defer c.unregisterEventSubscription(result.StreamID)
@@ -285,7 +289,7 @@ func (c *controlWSConn) afterControlResponse(req ControlRequest, response Contro
 		if !ok {
 			return nil
 		}
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(c.requestContext())
 		c.registerControlStream(result.StreamID, cancel)
 		return func() {
 			defer c.unregisterControlStream(result.StreamID)
@@ -308,7 +312,7 @@ func (c *controlWSConn) afterControlResponse(req ControlRequest, response Contro
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil
 		}
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(c.requestContext())
 		c.registerControlStream(result.StreamID, cancel)
 		return func() {
 			defer c.unregisterControlStream(result.StreamID)
@@ -371,6 +375,20 @@ func (c *controlWSConn) cancelControlStream(streamID string) bool {
 		cancel()
 	}
 	return ok
+}
+
+func (c *controlWSConn) requestContext() context.Context {
+	if c == nil || c.ctx == nil {
+		return context.Background()
+	}
+	return c.ctx
+}
+
+func (c *controlWSConn) cancelControlSession() {
+	if c == nil || c.cancel == nil {
+		return
+	}
+	c.cancel()
 }
 
 func (c *controlWSConn) unregisterMediaStream(streamID string) {
@@ -441,6 +459,7 @@ func (c *controlWSConn) writeUnsealedClose(code, reason string) {
 }
 
 func (c *controlWSConn) shutdown() {
+	c.cancelControlSession()
 	c.cancelAllMediaStreams()
 	c.app.detachTerminalViewersForControlSession(c.id, "connection_closed")
 	c.app.unregisterControlSession(c.id)
@@ -480,6 +499,7 @@ func (a *app) closeControlSessionsForDeviceExcept(controllerDeviceID, reason, ex
 	}
 	a.controlMu.Unlock()
 	for _, conn := range sessions {
+		conn.cancelControlSession()
 		conn.cancelAllControlStreams()
 		a.detachTerminalViewersForControlSession(conn.id, reason)
 		conn.writeEncryptedClose("trust_revoked", reason)

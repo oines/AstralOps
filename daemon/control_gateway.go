@@ -91,6 +91,14 @@ func (a *app) executeControlRequest(req ControlRequest) (ControlResponse, error)
 }
 
 func (a *app) executeControlRequestWithConnection(req ControlRequest, conn *controlWSConn) (ControlResponse, error) {
+	ctx := context.Background()
+	if conn != nil {
+		ctx = conn.requestContext()
+	}
+	return a.executeControlRequestWithContext(ctx, req, conn)
+}
+
+func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlRequest, conn *controlWSConn) (ControlResponse, error) {
 	requiredCapability := controlActionCapability(req.Action)
 	if requiredCapability == "" {
 		return ControlResponse{RequestID: req.RequestID}, newActionError(http.StatusNotFound, "control_action_unknown", "control action not found")
@@ -106,7 +114,7 @@ func (a *app) executeControlRequestWithConnection(req ControlRequest, conn *cont
 		return ControlResponse{RequestID: req.RequestID}, newActionError(http.StatusForbidden, "capability_denied", "controller is not allowed to use capability")
 	}
 
-	result, err := a.dispatchControlAction(req, conn, grant)
+	result, err := a.dispatchControlAction(ctx, req, conn, grant)
 	if err != nil {
 		return ControlResponse{RequestID: req.RequestID}, err
 	}
@@ -148,7 +156,7 @@ func controlActionCapability(action string) string {
 	}
 }
 
-func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, grant TrustGrant) (any, error) {
+func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, conn *controlWSConn, grant TrustGrant) (any, error) {
 	switch req.Action {
 	case ControlActionSessionView:
 		var params struct {
@@ -351,31 +359,31 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, gra
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.readControlWorkspaceFiles(context.Background(), params)
+		return a.readControlWorkspaceFiles(ctx, params)
 	case ControlActionWorkspaceFilesWrite:
 		var params workspaceFilesWriteParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.writeControlWorkspaceFile(context.Background(), params)
+		return a.writeControlWorkspaceFile(ctx, params)
 	case ControlActionWorkspaceFilesApplyPatch:
 		var params workspaceFilesApplyPatchParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.applyControlWorkspacePatch(context.Background(), params)
+		return a.applyControlWorkspacePatch(ctx, params)
 	case ControlActionWorkspaceFilesDelete:
 		var params workspaceFilesDeleteParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.deleteControlWorkspacePath(context.Background(), params)
+		return a.deleteControlWorkspacePath(ctx, params)
 	case ControlActionWorkspaceFilesMove:
 		var params workspaceFilesMoveParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.moveControlWorkspacePath(context.Background(), params)
+		return a.moveControlWorkspacePath(ctx, params)
 	case ControlActionWorkspaceFilesStream:
 		if conn == nil {
 			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "workspace.files.stream requires an encrypted control connection")
@@ -384,7 +392,7 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, gra
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.prepareControlWorkspaceFileStream(context.Background(), params)
+		return a.prepareControlWorkspaceFileStream(ctx, params)
 	case ControlActionWorkspaceFilesStreamCancel:
 		if conn == nil {
 			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "workspace.files.stream.cancel requires an encrypted control connection")
@@ -403,13 +411,13 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, gra
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.executeControlWorkspaceCommand(context.Background(), params, grant)
+		return a.executeControlWorkspaceCommand(ctx, params, grant)
 	case ControlActionTerminalOpen:
 		var params terminalOpenParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.terminalManager().open(context.Background(), req.ControllerDeviceID, params)
+		return a.terminalManager().open(ctx, req.ControllerDeviceID, params)
 	case ControlActionTerminalAttach:
 		var params terminalAttachParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
@@ -427,19 +435,19 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, gra
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.terminalManager().input(context.Background(), req.ControllerDeviceID, params)
+		return a.terminalManager().input(ctx, req.ControllerDeviceID, params)
 	case ControlActionTerminalResize:
 		var params terminalResizeParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.terminalManager().resize(context.Background(), req.ControllerDeviceID, params)
+		return a.terminalManager().resize(ctx, req.ControllerDeviceID, params)
 	case ControlActionTerminalClose:
 		var params terminalCloseParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.terminalManager().close(context.Background(), req.ControllerDeviceID, params)
+		return a.terminalManager().close(ctx, req.ControllerDeviceID, params)
 	case ControlActionHostTrustList:
 		return hostTrustListResult{Grants: a.store.listTrustGrants()}, nil
 	case ControlActionHostTrustRevoke:

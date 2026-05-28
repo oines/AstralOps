@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestControlGatewayReadsWorkspaceFileWithoutHostRoot(t *testing.T) {
@@ -765,6 +766,45 @@ func TestControlGatewayWorkspaceExecTruncatesLargeOutput(t *testing.T) {
 	}
 	if result.StderrTruncated || result.OutputTruncated || result.OutputBytesLimit != workspaceExecOutputMaxBytes {
 		t.Fatalf("exec truncation metadata = %#v", result)
+	}
+}
+
+func TestControlGatewayWorkspaceExecUsesControlConnectionContext(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("connection cancellation exec test uses POSIX shell tools")
+	}
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceExec)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	conn := &controlWSConn{ctx: ctx}
+	start := time.Now()
+	response, err := app.executeControlRequestWithConnection(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceExec,
+		Action:             ControlActionWorkspaceExec,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"command":      "sleep 2; printf ran > should-not-run.txt",
+			"timeout_ms":   5000,
+		},
+	}, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(workspaceExecResult)
+	if !ok {
+		t.Fatalf("exec result = %#v, want workspaceExecResult", response.Result)
+	}
+	if result.ExitCode == 0 {
+		t.Fatalf("exec result = %#v, want cancellation failure", result)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("workspace.exec ignored cancelled control connection context")
+	}
+	if _, statErr := os.Stat(filepath.Join(workspace.LocalCWD, "should-not-run.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("cancelled control connection command created marker, stat err = %v", statErr)
 	}
 }
 
