@@ -114,7 +114,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	capabilities := []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceFilesWrite, CapabilityWorkspaceExec, CapabilityAttachmentIngest, CapabilityMediaStream}
+	capabilities := []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceFilesWrite, CapabilityWorkspaceExec, CapabilityAttachmentIngest, CapabilityMediaStream, CapabilityHostManage}
 	runTerminal := terminalAvailableOnHost()
 	if runTerminal {
 		t.Setenv("SHELL", terminalManagerTestShell(t))
@@ -139,6 +139,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 		WorkspaceWriteSmoke: true,
 		ExecCommand:         "echo smoke",
 		Terminal:            runTerminal,
+		TrustList:           true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +147,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if result.Target != hostServer.URL || result.HostDeviceID != hostApp.store.deviceIdentity.DeviceID {
 		t.Fatalf("smoke result target = %#v", result)
 	}
-	wantSteps := []string{"workspaces", "workspace_files_read", "attachment_ingest", "workspace_files_stream", "workspace_files_write", "workspace_files_apply_patch", "workspace_files_move", "workspace_files_delete", "media_stream", "workspace_exec"}
+	wantSteps := []string{"workspaces", "workspace_files_read", "attachment_ingest", "workspace_files_stream", "workspace_files_write", "workspace_files_apply_patch", "workspace_files_move", "workspace_files_delete", "media_stream", "host_trust_list", "workspace_exec"}
 	if runTerminal {
 		wantSteps = append(wantSteps, "terminal_open", "terminal_attach", "terminal_input", "terminal_output", "terminal_close", "terminal_closed")
 	}
@@ -189,6 +190,10 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	}
 	if stringValue(mediaStep.Summary["resume_token"]) == "" {
 		t.Fatalf("media_stream summary = %#v, want resume token", mediaStep.Summary)
+	}
+	trustStep, _ := smokeStepByName(result, "host_trust_list")
+	if int(numberValue(trustStep.Summary["count"])) == 0 {
+		t.Fatalf("host_trust_list summary = %#v, want at least one grant", trustStep.Summary)
 	}
 	patchStep, _ := smokeStepByName(result, "workspace_files_apply_patch")
 	if int(numberValue(patchStep.Summary["applied_edits"])) != 1 || int(numberValue(patchStep.Summary["structured_patch_count"])) == 0 {

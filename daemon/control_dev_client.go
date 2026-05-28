@@ -32,7 +32,7 @@ func runControlDevClient(args []string) bool {
 
 func runControlDevClientCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: control-client <identity|known-hosts|discover|pair|workspaces|request|smoke>")
+		return fmt.Errorf("usage: control-client <identity|known-hosts|discover|pair|workspaces|trust-list|request|smoke>")
 	}
 	st, err := loadStore(defaultDataDir())
 	if err != nil {
@@ -101,6 +101,37 @@ func runControlDevClientCommand(args []string) error {
 			return err
 		}
 		return writePrettyJSON(os.Stdout, response)
+	case "trust-list":
+		fs := flag.NewFlagSet("control-client trust-list", flag.ContinueOnError)
+		host := fs.String("host", "", "remote Host base URL")
+		discover := fs.Bool("discover", false, "discover a known Host on LAN before connecting")
+		hostDeviceID := fs.String("host-device-id", "", "known Host device id for LAN discovery")
+		discoveryPort := fs.Int("discovery-port", defaultRemoteControlDiscoveryPort, "LAN discovery UDP port")
+		discoveryTimeout := fs.Duration("discovery-timeout", 3*time.Second, "LAN discovery timeout")
+		lanTimeout := fs.Duration("lan-timeout", 2*time.Second, "LAN host validation and handshake timeout")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		target, err := controlClientResolveTarget(st, controlClientTargetOptions{
+			Host:             *host,
+			Discover:         *discover,
+			HostDeviceID:     *hostDeviceID,
+			DiscoveryPort:    *discoveryPort,
+			DiscoveryTimeout: *discoveryTimeout,
+			LANTimeout:       *lanTimeout,
+		})
+		if err != nil {
+			return err
+		}
+		response, err := controlClientRequestToTarget(target, st, ControlRequest{
+			RequestID:  "dev_trust_list",
+			Capability: CapabilityHostManage,
+			Action:     ControlActionHostTrustList,
+		})
+		if err != nil {
+			return err
+		}
+		return writePrettyJSON(os.Stdout, response)
 	case "request":
 		fs := flag.NewFlagSet("control-client request", flag.ContinueOnError)
 		host := fs.String("host", "", "remote Host base URL")
@@ -164,7 +195,8 @@ func runControlDevClientCommand(args []string) error {
 		mediaID := fs.String("media-id", "", "optional transcript media id for media.stream")
 		mediaChunkSize := fs.Int("media-chunk-size", 64*1024, "media.stream chunk size")
 		execCommand := fs.String("exec-command", "", "optional workspace.exec command to run")
-		terminal := fs.Bool("terminal", false, "open and close a Host-owned terminal session")
+		terminal := fs.Bool("terminal", false, "exercise Host-owned PTY open/attach/input/output/close")
+		trustList := fs.Bool("trust-list", false, "verify host.trust.list over the encrypted control channel")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -190,6 +222,7 @@ func runControlDevClientCommand(args []string) error {
 			MediaChunkSize:      *mediaChunkSize,
 			ExecCommand:         *execCommand,
 			Terminal:            *terminal,
+			TrustList:           *trustList,
 		})
 		if err != nil {
 			return err
@@ -230,6 +263,7 @@ type controlClientSmokeOptions struct {
 	MediaChunkSize      int
 	ExecCommand         string
 	Terminal            bool
+	TrustList           bool
 }
 
 type controlClientSmokeResult struct {
@@ -370,6 +404,17 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 		step, err := controlClientSmokeMediaStream(st, target, opts.SessionID, opts.MediaEventSeq, opts.MediaID, opts.MediaChunkSize)
 		result.Steps = append(result.Steps, step)
 		if err != nil {
+			return result, err
+		}
+	}
+
+	if opts.TrustList {
+		trustList, err := controlClientSmokeRequest(st, target, "host_trust_list", CapabilityHostManage, ControlActionHostTrustList, nil)
+		result.Steps = append(result.Steps, controlClientSmokeStepFromResponse("host_trust_list", CapabilityHostManage, ControlActionHostTrustList, trustList, controlClientHostTrustListSmokeSummary(trustList)))
+		if err != nil {
+			return result, err
+		}
+		if err := controlClientSmokeResponseError("host_trust_list", trustList); err != nil {
 			return result, err
 		}
 	}
@@ -1169,6 +1214,12 @@ func controlClientMediaStreamSmokeSummary(response ControlResponse) map[string]a
 		"stream_id":    stringValue(result["stream_id"]),
 		"resume_token": stringValue(result["resume_token"]),
 	}
+}
+
+func controlClientHostTrustListSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	grants, _ := result["grants"].([]any)
+	return map[string]any{"count": len(grants)}
 }
 
 func controlClientTerminalSmokeSummary(response ControlResponse) map[string]any {
