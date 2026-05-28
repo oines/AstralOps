@@ -872,13 +872,15 @@ terminal.input
 terminal.resize
 terminal.close
 terminal.output stream over E2EE control channel
+bounded terminal.input payload
+bounded terminal.output frame size
 single active writer
 multi viewer
 opened/attached/detached/closed lifecycle events only
 trust revocation releases active writer lock
 ```
 
-这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.attach` 必须发生在已完成握手的 encrypted control WebSocket 上，因为 PTY 输出只能回到这条 E2EE channel。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。PTY 输出不进入 JSONL，只有 opened、attached、detached、closed lifecycle event 会落盘。
+这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.attach` 必须发生在已完成握手的 encrypted control WebSocket 上，因为 PTY 输出只能回到这条 E2EE channel。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。`terminal.input` 是按键/粘贴输入，不是无限上传通道，必须有单次 payload 上限；PTY 输出 frame 也必须由 Host 拆成有界 E2EE frame。PTY 输出不进入 JSONL，只有 opened、attached、detached、closed lifecycle event 会落盘。
 
 断线行为：
 

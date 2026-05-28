@@ -105,6 +105,29 @@ func TestControlGatewayTerminalInputRequiresInputCapability(t *testing.T) {
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }
 
+func TestControlGatewayTerminalInputRejectsLargePayload(t *testing.T) {
+	t.Setenv("SHELL", terminalManagerTestShell(t))
+
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityTerminalOpen, CapabilityTerminalInput)
+
+	open := openTerminalForTest(t, app, "device_mobile", workspace.ID)
+	t.Cleanup(func() {
+		_, _ = app.terminalManager().close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
+	})
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityTerminalInput,
+		Action:             ControlActionTerminalInput,
+		Params: map[string]any{
+			"terminal_id": open.TerminalID,
+			"data":        strings.Repeat("x", terminalInputMaxBytes+1),
+		},
+	})
+	assertActionError(t, err, http.StatusRequestEntityTooLarge, "terminal_input_too_large")
+}
+
 func TestControlGatewayTerminalAttachRequiresControlConnection(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 
@@ -123,6 +146,37 @@ func TestControlGatewayTerminalAttachRequiresControlConnection(t *testing.T) {
 		Params:             map[string]any{"terminal_id": open.TerminalID},
 	})
 	assertActionError(t, err, http.StatusBadRequest, "control_connection_required")
+}
+
+func TestTerminalOutputIsSplitIntoBoundedFrames(t *testing.T) {
+	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh", "device_mobile")
+	viewer := &terminalViewer{
+		connectionID:       "conn_terminal",
+		controllerDeviceID: "device_mobile",
+		frames:             make(chan terminalStreamFrame, 4),
+	}
+	if _, replaced, err := session.attachViewer(viewer); err != nil || replaced != nil {
+		t.Fatalf("attach viewer replaced=%v err=%v", replaced, err)
+	}
+
+	session.appendOutput(strings.Repeat("a", terminalOutputFrameMaxBytes*2+1))
+
+	wantSizes := []int{terminalOutputFrameMaxBytes, terminalOutputFrameMaxBytes, 1}
+	for index, wantSize := range wantSizes {
+		select {
+		case frame := <-viewer.frames:
+			if frame.frameType != terminalFrameOutput || len(frame.Data) != wantSize || frame.OutputSeq != int64(index+1) {
+				t.Fatalf("frame %d = %#v len %d, want len %d seq %d", index, frame, len(frame.Data), wantSize, index+1)
+			}
+		default:
+			t.Fatalf("missing output frame %d", index)
+		}
+	}
+	select {
+	case frame := <-viewer.frames:
+		t.Fatalf("unexpected extra frame = %#v", frame)
+	default:
+	}
 }
 
 func TestTerminalManagerKeepsSingleActiveWriter(t *testing.T) {

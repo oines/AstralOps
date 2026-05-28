@@ -1832,7 +1832,11 @@ func TestControlWebSocketWorkspaceFileStreamReportsGrownFile(t *testing.T) {
 	if streamID == "" {
 		t.Fatalf("stream result = %#v, want stream id", plain.Response.Result)
 	}
-	if err := os.WriteFile(path, []byte(secret+"b"), 0o600); err != nil {
+	nextPath := filepath.Join(workspace.LocalCWD, "growing-next.txt")
+	if err := os.WriteFile(nextPath, []byte(secret+"b"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(nextPath, path); err != nil {
 		t.Fatal(err)
 	}
 

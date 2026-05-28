@@ -20,6 +20,8 @@ const (
 	defaultTerminalCols             = 100
 	defaultTerminalRows             = 28
 	terminalViewerBuffer            = 256
+	terminalInputMaxBytes           = 64 * 1024
+	terminalOutputFrameMaxBytes     = 64 * 1024
 	defaultTerminalRetentionTimeout = 2 * time.Minute
 )
 
@@ -273,6 +275,9 @@ func (m *terminalManager) detach(controllerDeviceID string, conn *controlWSConn,
 }
 
 func (m *terminalManager) input(ctx context.Context, controllerDeviceID string, params terminalInputParams) (terminalAckResult, error) {
+	if len(params.Data) > terminalInputMaxBytes {
+		return terminalAckResult{}, newActionError(http.StatusRequestEntityTooLarge, "terminal_input_too_large", "terminal input is too large")
+	}
 	session, err := m.writerSession(controllerDeviceID, params.TerminalID)
 	if err != nil {
 		return terminalAckResult{}, err
@@ -488,13 +493,19 @@ func (s *terminalSession) appendOutput(data string) {
 	if data == "" {
 		return
 	}
+	chunks := terminalOutputChunks(data)
 	s.mu.Lock()
-	s.outputSeq++
 	s.updatedAt = time.Now().UTC()
-	frame := s.streamFrameLocked(terminalFrameOutput, data, "")
+	frames := make([]terminalStreamFrame, 0, len(chunks))
+	for _, chunk := range chunks {
+		s.outputSeq++
+		frames = append(frames, s.streamFrameLocked(terminalFrameOutput, chunk, ""))
+	}
 	viewers := s.viewersSnapshotLocked()
 	s.mu.Unlock()
-	s.sendToViewers(frame, viewers)
+	for _, frame := range frames {
+		s.sendToViewers(frame, viewers)
+	}
 }
 
 func (s *terminalSession) attachViewer(viewer *terminalViewer) (terminalAttachResult, *terminalViewer, error) {
@@ -805,6 +816,21 @@ func terminalSize(cols, rows uint16) (uint16, uint16) {
 		rows = defaultTerminalRows
 	}
 	return cols, rows
+}
+
+func terminalOutputChunks(data string) []string {
+	if len(data) <= terminalOutputFrameMaxBytes {
+		return []string{data}
+	}
+	chunks := make([]string, 0, len(data)/terminalOutputFrameMaxBytes+1)
+	for len(data) > terminalOutputFrameMaxBytes {
+		chunks = append(chunks, data[:terminalOutputFrameMaxBytes])
+		data = data[terminalOutputFrameMaxBytes:]
+	}
+	if data != "" {
+		chunks = append(chunks, data)
+	}
+	return chunks
 }
 
 func localTerminalCWD(ws Workspace, requested string) (string, error) {
