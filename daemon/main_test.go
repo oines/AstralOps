@@ -4699,6 +4699,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 		t.Fatal(err)
 	}
 	waitForKind(t, app.store, session.ID, "turn.completed")
+	waitForKind(t, app.store, session.ID, "control.notification")
 
 	gotKinds := eventKinds(app.store.queryEvents(workspace.ID, session.ID, 0))
 	wantKinds := []string{"message.user", "turn.started", "session.native", "message.delta", "turn.completed", "control.notification"}
@@ -5338,6 +5339,7 @@ func TestCodexLocalRuntimeStreamsFakeAppServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForKind(t, app.store, session.ID, "turn.completed")
+	waitForKind(t, app.store, session.ID, "control.notification")
 
 	gotKinds := eventKinds(app.store.queryEvents(workspace.ID, session.ID, 0))
 	wantKinds := []string{

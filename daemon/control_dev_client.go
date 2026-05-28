@@ -31,7 +31,7 @@ func runControlDevClient(args []string) bool {
 
 func runControlDevClientCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: control-client <identity|known-hosts|discover|pair|workspaces|request>")
+		return fmt.Errorf("usage: control-client <identity|known-hosts|discover|pair|workspaces|request|smoke>")
 	}
 	st, err := loadStore(defaultDataDir())
 	if err != nil {
@@ -143,6 +143,39 @@ func runControlDevClientCommand(args []string) error {
 			return err
 		}
 		return writePrettyJSON(os.Stdout, response)
+	case "smoke":
+		fs := flag.NewFlagSet("control-client smoke", flag.ContinueOnError)
+		host := fs.String("host", "", "remote Host base URL")
+		discover := fs.Bool("discover", false, "discover a known Host on LAN before connecting")
+		hostDeviceID := fs.String("host-device-id", "", "known Host device id for LAN discovery")
+		discoveryPort := fs.Int("discovery-port", defaultRemoteControlDiscoveryPort, "LAN discovery UDP port")
+		discoveryTimeout := fs.Duration("discovery-timeout", 3*time.Second, "LAN discovery timeout")
+		lanTimeout := fs.Duration("lan-timeout", 2*time.Second, "LAN host validation and handshake timeout")
+		workspaceID := fs.String("workspace-id", "", "workspace id for workspace/terminal checks")
+		path := fs.String("path", ".", "workspace path to read when --workspace-id is set")
+		execCommand := fs.String("exec-command", "", "optional workspace.exec command to run")
+		terminal := fs.Bool("terminal", false, "open and close a Host-owned terminal session")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		result, err := runControlClientSmoke(st, controlClientSmokeOptions{
+			Target: controlClientTargetOptions{
+				Host:             *host,
+				Discover:         *discover,
+				HostDeviceID:     *hostDeviceID,
+				DiscoveryPort:    *discoveryPort,
+				DiscoveryTimeout: *discoveryTimeout,
+				LANTimeout:       *lanTimeout,
+			},
+			WorkspaceID: *workspaceID,
+			Path:        *path,
+			ExecCommand: *execCommand,
+			Terminal:    *terminal,
+		})
+		if err != nil {
+			return err
+		}
+		return writePrettyJSON(os.Stdout, result)
 	default:
 		return fmt.Errorf("unknown control-client command %q", args[0])
 	}
@@ -161,6 +194,29 @@ type controlClientTarget struct {
 	BaseURL  string
 	HostInfo HostInfo
 	Timeout  time.Duration
+}
+
+type controlClientSmokeOptions struct {
+	Target      controlClientTargetOptions
+	WorkspaceID string
+	Path        string
+	ExecCommand string
+	Terminal    bool
+}
+
+type controlClientSmokeResult struct {
+	Target       string                   `json:"target"`
+	HostDeviceID string                   `json:"host_device_id"`
+	Steps        []controlClientSmokeStep `json:"steps"`
+}
+
+type controlClientSmokeStep struct {
+	Name       string         `json:"name"`
+	Capability string         `json:"capability"`
+	Action     string         `json:"action"`
+	OK         bool           `json:"ok"`
+	Error      *ControlError  `json:"error,omitempty"`
+	Summary    map[string]any `json:"summary,omitempty"`
 }
 
 func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (controlClientTarget, error) {
@@ -200,6 +256,155 @@ func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (con
 		return controlClientTarget{}, err
 	}
 	return controlClientTarget{BaseURL: candidate.BaseURL, HostInfo: hostInfo, Timeout: opts.LANTimeout}, nil
+}
+
+func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlClientSmokeResult, error) {
+	opts.WorkspaceID = strings.TrimSpace(opts.WorkspaceID)
+	if opts.Path == "" {
+		opts.Path = "."
+	}
+	if opts.WorkspaceID == "" && strings.TrimSpace(opts.Path) != "." {
+		return controlClientSmokeResult{}, fmt.Errorf("--workspace-id is required for --path")
+	}
+	if opts.WorkspaceID == "" && (strings.TrimSpace(opts.ExecCommand) != "" || opts.Terminal) {
+		return controlClientSmokeResult{}, fmt.Errorf("--workspace-id is required for --exec-command or --terminal")
+	}
+	target, err := controlClientResolveTarget(st, opts.Target)
+	if err != nil {
+		return controlClientSmokeResult{}, err
+	}
+	result := controlClientSmokeResult{
+		Target:       target.BaseURL,
+		HostDeviceID: target.HostInfo.Identity.DeviceID,
+	}
+
+	workspaces, err := controlClientSmokeRequest(st, target, "workspaces", CapabilityCoreRead, ControlActionWorkspaces, nil)
+	result.Steps = append(result.Steps, controlClientSmokeStepFromResponse("workspaces", CapabilityCoreRead, ControlActionWorkspaces, workspaces, controlClientWorkspacesSmokeSummary(workspaces)))
+	if err != nil {
+		return result, err
+	}
+	if err := controlClientSmokeResponseError("workspaces", workspaces); err != nil {
+		return result, err
+	}
+
+	if opts.WorkspaceID != "" {
+		params := map[string]any{"workspace_id": opts.WorkspaceID, "path": opts.Path}
+		files, err := controlClientSmokeRequest(st, target, "workspace_files_read", CapabilityWorkspaceFilesRead, ControlActionWorkspaceFilesRead, params)
+		result.Steps = append(result.Steps, controlClientSmokeStepFromResponse("workspace_files_read", CapabilityWorkspaceFilesRead, ControlActionWorkspaceFilesRead, files, controlClientWorkspaceFilesSmokeSummary(files)))
+		if err != nil {
+			return result, err
+		}
+		if err := controlClientSmokeResponseError("workspace_files_read", files); err != nil {
+			return result, err
+		}
+	}
+
+	if opts.WorkspaceID != "" && strings.TrimSpace(opts.ExecCommand) != "" {
+		params := map[string]any{"workspace_id": opts.WorkspaceID, "command": opts.ExecCommand}
+		exec, err := controlClientSmokeRequest(st, target, "workspace_exec", CapabilityWorkspaceExec, ControlActionWorkspaceExec, params)
+		result.Steps = append(result.Steps, controlClientSmokeStepFromResponse("workspace_exec", CapabilityWorkspaceExec, ControlActionWorkspaceExec, exec, controlClientWorkspaceExecSmokeSummary(exec)))
+		if err != nil {
+			return result, err
+		}
+		if err := controlClientSmokeResponseError("workspace_exec", exec); err != nil {
+			return result, err
+		}
+		if exitCode := int(numberValue(mapValue(exec.Result)["exit_code"])); exitCode != 0 {
+			return result, fmt.Errorf("smoke step workspace_exec failed: exit_code=%d", exitCode)
+		}
+	}
+
+	if opts.WorkspaceID != "" && opts.Terminal {
+		openParams := map[string]any{"workspace_id": opts.WorkspaceID, "cols": 80, "rows": 24}
+		open, err := controlClientSmokeRequest(st, target, "terminal_open", CapabilityTerminalOpen, ControlActionTerminalOpen, openParams)
+		result.Steps = append(result.Steps, controlClientSmokeStepFromResponse("terminal_open", CapabilityTerminalOpen, ControlActionTerminalOpen, open, controlClientTerminalSmokeSummary(open)))
+		if err != nil {
+			return result, err
+		}
+		if err := controlClientSmokeResponseError("terminal_open", open); err != nil {
+			return result, err
+		}
+		terminalID := stringValue(mapValue(open.Result)["terminal_id"])
+		if terminalID == "" {
+			return result, fmt.Errorf("smoke step terminal_open failed: terminal_id missing")
+		}
+		closeParams := map[string]any{"terminal_id": terminalID}
+		close, err := controlClientSmokeRequest(st, target, "terminal_close", CapabilityTerminalInput, ControlActionTerminalClose, closeParams)
+		result.Steps = append(result.Steps, controlClientSmokeStepFromResponse("terminal_close", CapabilityTerminalInput, ControlActionTerminalClose, close, controlClientTerminalSmokeSummary(close)))
+		if err != nil {
+			return result, err
+		}
+		if err := controlClientSmokeResponseError("terminal_close", close); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+func controlClientSmokeRequest(st *store, target controlClientTarget, requestID, capability, action string, params map[string]any) (ControlResponse, error) {
+	return controlClientRequestToTarget(target, st, ControlRequest{
+		RequestID:  "smoke_" + requestID,
+		Capability: capability,
+		Action:     action,
+		Params:     params,
+	})
+}
+
+func controlClientSmokeStepFromResponse(name, capability, action string, response ControlResponse, summary map[string]any) controlClientSmokeStep {
+	step := controlClientSmokeStep{
+		Name:       name,
+		Capability: capability,
+		Action:     action,
+		OK:         response.OK,
+		Error:      response.Error,
+		Summary:    summary,
+	}
+	if len(step.Summary) == 0 {
+		step.Summary = nil
+	}
+	return step
+}
+
+func controlClientSmokeResponseError(step string, response ControlResponse) error {
+	if response.OK {
+		return nil
+	}
+	if response.Error == nil {
+		return fmt.Errorf("smoke step %s failed", step)
+	}
+	return fmt.Errorf("smoke step %s failed: %s", step, response.Error.Message)
+}
+
+func controlClientWorkspacesSmokeSummary(response ControlResponse) map[string]any {
+	items, _ := response.Result.([]any)
+	return map[string]any{"count": len(items)}
+}
+
+func controlClientWorkspaceFilesSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	return map[string]any{
+		"workspace_id": stringValue(result["workspace_id"]),
+		"path":         stringValue(result["path"]),
+		"kind":         stringValue(result["kind"]),
+		"target":       stringValue(result["target"]),
+	}
+}
+
+func controlClientWorkspaceExecSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	return map[string]any{
+		"workspace_id": stringValue(result["workspace_id"]),
+		"exit_code":    int(numberValue(result["exit_code"])),
+		"duration_ms":  int(numberValue(result["duration_ms"])),
+	}
+}
+
+func controlClientTerminalSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	return map[string]any{
+		"terminal_id": stringValue(result["terminal_id"]),
+		"status":      stringValue(result["status"]),
+	}
 }
 
 func selectKnownLanCandidate(st *store, candidates []LanHostCandidate, hostDeviceID string) (LanHostCandidate, KnownHost, error) {

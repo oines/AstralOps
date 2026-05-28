@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -87,4 +88,82 @@ func TestValidateKnownLanHostRejectsIdentityMismatch(t *testing.T) {
 	if err := validateKnownLanHost(candidate, knownHost, hostInfo); err == nil {
 		t.Fatal("identity mismatch was accepted")
 	}
+}
+
+func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
+	hostApp, workspace := newRemoteControlHandlerTestApp(t)
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
+	defer hostServer.Close()
+
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities := []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceExec}
+	runTerminal := terminalAvailableOnHost()
+	if runTerminal {
+		t.Setenv("SHELL", terminalManagerTestShell(t))
+		capabilities = append(capabilities, CapabilityTerminalOpen, CapabilityTerminalInput)
+	}
+	if _, err := controlClientPair(hostServer.URL, controllerStore, capabilities); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := runControlClientSmoke(controllerStore, controlClientSmokeOptions{
+		Target:      controlClientTargetOptions{Host: hostServer.URL},
+		WorkspaceID: workspace.ID,
+		Path:        ".",
+		ExecCommand: "echo smoke",
+		Terminal:    runTerminal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Target != hostServer.URL || result.HostDeviceID != hostApp.store.deviceIdentity.DeviceID {
+		t.Fatalf("smoke result target = %#v", result)
+	}
+	wantSteps := []string{"workspaces", "workspace_files_read", "workspace_exec"}
+	if runTerminal {
+		wantSteps = append(wantSteps, "terminal_open", "terminal_close")
+	}
+	for _, name := range wantSteps {
+		step, ok := smokeStepByName(result, name)
+		if !ok {
+			t.Fatalf("missing smoke step %q in %#v", name, result.Steps)
+		}
+		if !step.OK {
+			t.Fatalf("smoke step %q = %#v, want ok", name, step)
+		}
+	}
+	execStep, _ := smokeStepByName(result, "workspace_exec")
+	if int(numberValue(execStep.Summary["exit_code"])) != 0 {
+		t.Fatalf("workspace_exec summary = %#v, want exit_code 0", execStep.Summary)
+	}
+	if runTerminal && countKind(hostApp.store.queryEvents(workspace.ID, "", 0), "control.terminal.closed") != 1 {
+		t.Fatalf("host events = %#v, want terminal close event", eventKinds(hostApp.store.queryEvents(workspace.ID, "", 0)))
+	}
+}
+
+func TestControlClientSmokeRequiresWorkspaceForOptionalChecks(t *testing.T) {
+	st, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runControlClientSmoke(st, controlClientSmokeOptions{Path: "README.md"})
+	if err == nil || !strings.Contains(err.Error(), "--workspace-id") {
+		t.Fatalf("err = %v, want workspace requirement for path", err)
+	}
+	_, err = runControlClientSmoke(st, controlClientSmokeOptions{ExecCommand: "echo smoke"})
+	if err == nil || !strings.Contains(err.Error(), "--workspace-id") {
+		t.Fatalf("err = %v, want workspace requirement", err)
+	}
+}
+
+func smokeStepByName(result controlClientSmokeResult, name string) (controlClientSmokeStep, bool) {
+	for _, step := range result.Steps {
+		if step.Name == name {
+			return step, true
+		}
+	}
+	return controlClientSmokeStep{}, false
 }

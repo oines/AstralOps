@@ -219,7 +219,11 @@ discover 只返回 `LanHostCandidate`，例如 device id、public key fingerprin
 ```text
 go run ./daemon control-client known-hosts
 go run ./daemon control-client workspaces --discover --host-device-id <host_device_id>
+go run ./daemon control-client smoke --discover --host-device-id <host_device_id>
+go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --workspace-id <workspace_id> --path . --exec-command "pwd" --terminal
 ```
+
+`control-client smoke` 只走 `/v1/control/ws` 的 E2EE request/response，不访问本地 workspace/session/settings/events HTTP API。默认只验证 `core.read.workspaces`；传入 `--workspace-id` 后会验证 `workspace.files.read`，可选 `--exec-command` 验证 `workspace.exec`，可选 `--terminal` 打开并关闭 Host-owned PTY。
 
 UDP discovery 只用于发现候选地址，不能授予信任。Controller 收到 LAN response 后，必须用本地 trust store 或云端 device registry 校验 `device_id` 和 public key fingerprint。真正连接成功的条件仍然是：
 
