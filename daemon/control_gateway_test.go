@@ -115,6 +115,54 @@ func TestControlGatewayReadsSessionView(t *testing.T) {
 	}
 }
 
+func TestControlGatewayReadsEventsWindow(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+	first, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "one"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "answer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = app.store.appendEvent(AstralEvent{WorkspaceID: "other_workspace", SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "filtered"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := app.executeControlRequest(ControlRequest{
+		RequestID:          "req_events",
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionEvents,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"session_id":   session.ID,
+			"after_seq":    first.Seq,
+			"before_seq":   third.Seq + 1,
+			"limit":        2,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK || response.RequestID != "req_events" {
+		t.Fatalf("response = %#v, want ok with request id", response)
+	}
+	events, ok := response.Result.([]AstralEvent)
+	if !ok {
+		t.Fatalf("events result = %#v, want []AstralEvent", response.Result)
+	}
+	if len(events) != 2 || events[0].Seq != second.Seq || events[1].Seq != third.Seq {
+		t.Fatalf("events = %#v, want second and third event in seq order", events)
+	}
+}
+
 func TestControlGatewayStartsSessionInput(t *testing.T) {
 	runtime := &recordingRuntime{}
 	app, _, session := newControlGatewayTestApp(t, AgentCodex, runtime)

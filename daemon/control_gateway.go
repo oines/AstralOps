@@ -28,6 +28,7 @@ const (
 	ControlActionSessionView                = "core.read.session_view"
 	ControlActionSessions                   = "core.read.sessions"
 	ControlActionWorkspaces                 = "core.read.workspaces"
+	ControlActionEvents                     = "core.read.events"
 	ControlActionSessionInput               = "core.control.session_input"
 	ControlActionInterrupt                  = "core.control.interrupt"
 	ControlActionQueueCancel                = "core.control.queue.cancel"
@@ -112,7 +113,7 @@ func (a *app) executeControlRequestWithConnection(req ControlRequest, conn *cont
 
 func controlActionCapability(action string) string {
 	switch action {
-	case ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces:
+	case ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionEvents:
 		return CapabilityCoreRead
 	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionSessionFork, ControlActionSessionDelete:
 		return CapabilityCoreControl
@@ -169,6 +170,18 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, gra
 		return a.store.listSessions(params.WorkspaceID), nil
 	case ControlActionWorkspaces:
 		return a.store.listWorkspaces(), nil
+	case ControlActionEvents:
+		var params struct {
+			WorkspaceID string `json:"workspace_id"`
+			SessionID   string `json:"session_id"`
+			AfterSeq    int64  `json:"after_seq"`
+			BeforeSeq   int64  `json:"before_seq"`
+			Limit       int    `json:"limit"`
+		}
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.store.queryEventsWindow(params.WorkspaceID, params.SessionID, params.AfterSeq, params.BeforeSeq, params.Limit), nil
 	case ControlActionSessionInput:
 		var params struct {
 			SessionID       string            `json:"session_id"`

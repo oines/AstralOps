@@ -107,6 +107,8 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	}
 	mediaBody := []byte("media-stream-smoke-secret-0123456789")
 	media := addControlMediaFixture(t, hostApp, workspace, session, mediaBody)
+	eventSecret := "event-smoke-secret-0123456789"
+	hostApp.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": eventSecret}})
 	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
 	defer hostServer.Close()
 
@@ -139,6 +141,8 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 		WorkspaceWriteSmoke: true,
 		Sessions:            true,
 		SessionView:         true,
+		Events:              true,
+		EventsLimit:         10,
 		ExecCommand:         "echo smoke",
 		Terminal:            runTerminal,
 		TrustList:           true,
@@ -149,7 +153,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if result.Target != hostServer.URL || result.HostDeviceID != hostApp.store.deviceIdentity.DeviceID {
 		t.Fatalf("smoke result target = %#v", result)
 	}
-	wantSteps := []string{"workspaces", "workspace_files_read", "sessions", "session_view", "attachment_ingest", "workspace_files_stream", "workspace_files_write", "workspace_files_apply_patch", "workspace_files_move", "workspace_files_delete", "media_stream", "host_trust_list", "workspace_exec"}
+	wantSteps := []string{"workspaces", "workspace_files_read", "sessions", "session_view", "events", "attachment_ingest", "workspace_files_stream", "workspace_files_write", "workspace_files_apply_patch", "workspace_files_move", "workspace_files_delete", "media_stream", "host_trust_list", "workspace_exec"}
 	if runTerminal {
 		wantSteps = append(wantSteps, "terminal_open", "terminal_attach", "terminal_input", "terminal_output", "terminal_close", "terminal_closed")
 	}
@@ -177,6 +181,10 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	sessionViewStep, _ := smokeStepByName(result, "session_view")
 	if stringValue(sessionViewStep.Summary["session_id"]) != session.ID || stringValue(sessionViewStep.Summary["workspace_id"]) != workspace.ID {
 		t.Fatalf("session_view summary = %#v, want Host session projection", sessionViewStep.Summary)
+	}
+	eventsStep, _ := smokeStepByName(result, "events")
+	if int(numberValue(eventsStep.Summary["count"])) == 0 || int64(numberValue(eventsStep.Summary["last_seq"])) == 0 || stringValue(eventsStep.Summary["last_kind"]) == "" {
+		t.Fatalf("events summary = %#v, want Host event window summary", eventsStep.Summary)
 	}
 	attachmentStep, _ := smokeStepByName(result, "attachment_ingest")
 	attachmentID := stringValue(attachmentStep.Summary["attachment_id"])
@@ -238,6 +246,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if strings.Contains(wireText, string(streamBody)) ||
 		strings.Contains(wireText, string(attachmentBody)) ||
 		strings.Contains(wireText, string(mediaBody)) ||
+		strings.Contains(wireText, eventSecret) ||
 		strings.Contains(wireText, "astralops smoke before") ||
 		strings.Contains(wireText, "astralops smoke after") ||
 		strings.Contains(wireText, "terminal-smoke-") ||

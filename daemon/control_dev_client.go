@@ -32,7 +32,7 @@ func runControlDevClient(args []string) bool {
 
 func runControlDevClientCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: control-client <identity|known-hosts|discover|pair|workspaces|sessions|session-view|trust-list|request|smoke>")
+		return fmt.Errorf("usage: control-client <identity|known-hosts|discover|pair|workspaces|sessions|session-view|events|trust-list|request|smoke>")
 	}
 	st, err := loadStore(defaultDataDir())
 	if err != nil {
@@ -170,6 +170,49 @@ func runControlDevClientCommand(args []string) error {
 			return err
 		}
 		return writePrettyJSON(os.Stdout, response)
+	case "events":
+		fs := flag.NewFlagSet("control-client events", flag.ContinueOnError)
+		host := fs.String("host", "", "remote Host base URL")
+		discover := fs.Bool("discover", false, "discover a known Host on LAN before connecting")
+		hostDeviceID := fs.String("host-device-id", "", "known Host device id for LAN discovery")
+		discoveryPort := fs.Int("discovery-port", defaultRemoteControlDiscoveryPort, "LAN discovery UDP port")
+		discoveryTimeout := fs.Duration("discovery-timeout", 3*time.Second, "LAN discovery timeout")
+		lanTimeout := fs.Duration("lan-timeout", 2*time.Second, "LAN host validation and handshake timeout")
+		workspaceID := fs.String("workspace-id", "", "optional workspace id filter")
+		sessionID := fs.String("session-id", "", "optional session id filter")
+		afterSeq := fs.Int64("after-seq", 0, "only return events after this seq")
+		beforeSeq := fs.Int64("before-seq", 0, "only return events before this seq")
+		limit := fs.Int("limit", 50, "maximum events to return; 0 returns all matching events")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		target, err := controlClientResolveTarget(st, controlClientTargetOptions{
+			Host:             *host,
+			Discover:         *discover,
+			HostDeviceID:     *hostDeviceID,
+			DiscoveryPort:    *discoveryPort,
+			DiscoveryTimeout: *discoveryTimeout,
+			LANTimeout:       *lanTimeout,
+		})
+		if err != nil {
+			return err
+		}
+		response, err := controlClientRequestToTarget(target, st, ControlRequest{
+			RequestID:  "dev_events",
+			Capability: CapabilityCoreRead,
+			Action:     ControlActionEvents,
+			Params: map[string]any{
+				"workspace_id": *workspaceID,
+				"session_id":   *sessionID,
+				"after_seq":    *afterSeq,
+				"before_seq":   *beforeSeq,
+				"limit":        *limit,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		return writePrettyJSON(os.Stdout, response)
 	case "trust-list":
 		fs := flag.NewFlagSet("control-client trust-list", flag.ContinueOnError)
 		host := fs.String("host", "", "remote Host base URL")
@@ -260,6 +303,8 @@ func runControlDevClientCommand(args []string) error {
 		workspaceWriteSmoke := fs.Bool("workspace-write-smoke", false, "exercise workspace.files.write/apply_patch/move/delete in a temporary Host workspace path")
 		sessions := fs.Bool("sessions", false, "verify core.read.sessions over the encrypted control channel")
 		sessionView := fs.Bool("session-view", false, "verify core.read.session_view for --session-id over the encrypted control channel")
+		events := fs.Bool("events", false, "verify core.read.events over the encrypted control channel")
+		eventsLimit := fs.Int("events-limit", 10, "maximum events returned by --events smoke")
 		attachmentPath := fs.String("attachment-path", "", "optional local Controller file to upload with chunked attachment.ingest")
 		attachmentChunkSize := fs.Int("attachment-chunk-size", 64*1024, "attachment ingest chunk size")
 		mediaEventSeq := fs.Int64("media-event-seq", 0, "optional transcript event seq for media.stream")
@@ -288,6 +333,8 @@ func runControlDevClientCommand(args []string) error {
 			WorkspaceWriteSmoke: *workspaceWriteSmoke,
 			Sessions:            *sessions,
 			SessionView:         *sessionView,
+			Events:              *events,
+			EventsLimit:         *eventsLimit,
 			AttachmentPath:      *attachmentPath,
 			AttachmentChunkSize: *attachmentChunkSize,
 			MediaEventSeq:       *mediaEventSeq,
@@ -331,6 +378,8 @@ type controlClientSmokeOptions struct {
 	WorkspaceWriteSmoke bool
 	Sessions            bool
 	SessionView         bool
+	Events              bool
+	EventsLimit         int
 	AttachmentPath      string
 	AttachmentChunkSize int
 	MediaEventSeq       int64
@@ -472,6 +521,22 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 			return result, err
 		}
 		if err := controlClientSmokeResponseError("session_view", view); err != nil {
+			return result, err
+		}
+	}
+
+	if opts.Events {
+		params := map[string]any{
+			"workspace_id": opts.WorkspaceID,
+			"session_id":   opts.SessionID,
+			"limit":        opts.EventsLimit,
+		}
+		events, err := controlClientSmokeRequest(st, target, "events", CapabilityCoreRead, ControlActionEvents, params)
+		result.Steps = append(result.Steps, controlClientSmokeStepFromResponse("events", CapabilityCoreRead, ControlActionEvents, events, controlClientEventsSmokeSummary(events)))
+		if err != nil {
+			return result, err
+		}
+		if err := controlClientSmokeResponseError("events", events); err != nil {
 			return result, err
 		}
 	}
@@ -1234,6 +1299,20 @@ func controlClientSessionViewSmokeSummary(response ControlResponse) map[string]a
 		"agent":        stringValue(session["agent"]),
 		"event_count":  len(events),
 	}
+}
+
+func controlClientEventsSmokeSummary(response ControlResponse) map[string]any {
+	events, _ := response.Result.([]any)
+	summary := map[string]any{"count": len(events)}
+	if len(events) == 0 {
+		return summary
+	}
+	first := mapValue(events[0])
+	last := mapValue(events[len(events)-1])
+	summary["first_seq"] = int64(numberValue(first["seq"]))
+	summary["last_seq"] = int64(numberValue(last["seq"]))
+	summary["last_kind"] = stringValue(last["kind"])
+	return summary
 }
 
 func controlClientWorkspaceFilesSmokeSummary(response ControlResponse) map[string]any {
