@@ -751,8 +751,6 @@ export function App(): React.JSX.Element {
       />
 
       <WorkspaceModal
-        defaultAgent={health?.agents.claude.available ? "claude" : "codex"}
-        health={health}
         open={workspaceOpen}
         onChooseDirectory={handleChooseDirectory}
         onClose={() => setWorkspaceOpen(false)}

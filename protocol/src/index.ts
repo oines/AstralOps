@@ -354,7 +354,7 @@ export type QueuedInputView = {
 export type CreateWorkspaceRequest = {
   name: string;
   target: WorkspaceTarget;
-  agent: AgentKind;
+  agent?: AgentKind;
   local_cwd?: string;
   ssh?: {
     endpoint: string;

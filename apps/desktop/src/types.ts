@@ -12,7 +12,6 @@ export type ConnectionState = "booting" | "connected" | "reconnecting" | "failed
 export type WorkspaceDraft = {
   name: string;
   target: "local" | "ssh";
-  agent: "claude" | "codex";
   local_cwd: string;
   ssh_endpoint: string;
   ssh_port: number;
