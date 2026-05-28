@@ -153,17 +153,23 @@ func claudeResultContextUsageEvent(session Session, raw map[string]any) (AstralE
 	totalTokens := inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens
 	contextWindow := numberValue(modelTotals["contextWindow"])
 	normalized := map[string]any{
-		"source":                      "claude",
-		"native_session_id":           firstString(raw["session_id"], session.NativeSessionID),
-		"model":                       model,
-		"usage":                       usage,
-		"model_usage":                 modelUsage,
-		"total_tokens":                totalTokens,
-		"input_tokens":                inputTokens,
-		"output_tokens":               outputTokens,
-		"cached_input_tokens":         cacheReadTokens,
-		"cache_creation_input_tokens": cacheCreationTokens,
-		"model_context_window":        contextWindow,
+		"source":                                 "claude",
+		"scope":                                  "aggregate",
+		"native_session_id":                      firstString(raw["session_id"], session.NativeSessionID),
+		"model":                                  model,
+		"usage":                                  usage,
+		"model_usage":                            modelUsage,
+		"total_tokens":                           totalTokens,
+		"cumulative_total_tokens":                totalTokens,
+		"cumulative_input_tokens":                inputTokens,
+		"cumulative_output_tokens":               outputTokens,
+		"cumulative_cached_input_tokens":         cacheReadTokens,
+		"cumulative_cache_creation_input_tokens": cacheCreationTokens,
+		"input_tokens":                           inputTokens,
+		"output_tokens":                          outputTokens,
+		"cached_input_tokens":                    cacheReadTokens,
+		"cache_creation_input_tokens":            cacheCreationTokens,
+		"model_context_window":                   contextWindow,
 	}
 	if percent := contextUsedPercent(normalized); percent > 0 {
 		normalized["used_percent"] = percent
@@ -404,12 +410,44 @@ func normalizeClaudeStreamEvent(session Session, raw map[string]any) []AstralEve
 			"id":     stringValue(message["id"]),
 			"model":  stringValue(message["model"]),
 		}, raw)}
+	case "message_delta":
+		if contextEvent, ok := claudeStreamContextUsageEvent(session, raw); ok {
+			return []AstralEvent{contextEvent}
+		}
 	}
 	return []AstralEvent{baseClaudeEvent(session, "control.raw", map[string]any{
 		"source":     "claude",
 		"type":       "stream_event",
 		"event_type": eventType,
 	}, raw)}
+}
+
+func claudeStreamContextUsageEvent(session Session, raw map[string]any) (AstralEvent, bool) {
+	event := mapValue(raw["event"])
+	usage := claudeUsageMap(event["usage"])
+	if len(usage) == 0 {
+		return AstralEvent{}, false
+	}
+	inputTokens := numberValue(usage["input_tokens"])
+	outputTokens := numberValue(usage["output_tokens"])
+	cacheReadTokens := numberValue(usage["cache_read_input_tokens"])
+	cacheCreationTokens := numberValue(usage["cache_creation_input_tokens"])
+	totalTokens := inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens
+	if totalTokens <= 0 {
+		return AstralEvent{}, false
+	}
+	normalized := map[string]any{
+		"source":                      "claude",
+		"scope":                       "current",
+		"native_session_id":           firstString(raw["session_id"], session.NativeSessionID),
+		"usage":                       usage,
+		"total_tokens":                totalTokens,
+		"input_tokens":                inputTokens,
+		"output_tokens":               outputTokens,
+		"cached_input_tokens":         cacheReadTokens,
+		"cache_creation_input_tokens": cacheCreationTokens,
+	}
+	return baseClaudeEvent(session, "control.context", normalized, raw), true
 }
 
 func normalizeClaudeToolUse(session Session, block map[string]any, raw map[string]any) AstralEvent {

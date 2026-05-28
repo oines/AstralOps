@@ -735,8 +735,14 @@ func (a *app) handleSessionInput(w http.ResponseWriter, sessionID, input string,
 		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "agent runtime is not implemented"})
 		return
 	}
+	if ss.Status == "running" && a.handleRunningInput(w, ss, ws, runtime, input, options) {
+		return
+	}
 	if err := runtime.StartTurn(ss, ws, input, options); err != nil {
 		if errors.Is(err, ErrSessionRunning) {
+			if a.handleRunningInput(w, ss, ws, runtime, input, options) {
+				return
+			}
 			turn := a.enqueueTurn(ss, input, options)
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "queued": true, "queue_id": turn.ID})
 			return
@@ -746,6 +752,32 @@ func (a *app) handleSessionInput(w http.ResponseWriter, sessionID, input string,
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *app) handleRunningInput(w http.ResponseWriter, ss Session, ws Workspace, runtime AgentRuntime, input string, options TurnOptions) bool {
+	steerer, ok := runtime.(TurnSteerer)
+	if !ok {
+		return false
+	}
+	if steerErr := steerer.Steer(ss.ID, input, options); steerErr == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "steered": true})
+		return true
+	} else if errors.Is(steerErr, ErrSessionIdle) {
+		if retryErr := runtime.StartTurn(ss, ws, input, options); retryErr == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+			return true
+		} else if errors.Is(retryErr, ErrSessionRunning) {
+			return false
+		} else {
+			a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": retryErr.Error()}})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": retryErr.Error()})
+			return true
+		}
+	} else {
+		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": steerErr.Error()}})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": steerErr.Error()})
+		return true
+	}
 }
 
 func (a *app) handleSessionInterrupt(w http.ResponseWriter, sessionID string) {

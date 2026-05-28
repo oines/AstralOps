@@ -144,7 +144,7 @@ Controller Device <==== E2EE Control Channel ====> Desktop Host
 私钥只留在设备本地。
 云端只保存 public key 和 trust metadata。
 Controller 与 Host 通过云端信令建立临时加密会话。
-Core API 消息、event subscription payload、PTY stream frame 都走这个加密会话。
+Core API 消息、event subscription payload、附件/媒体数据帧、PTY stream frame 都走这个加密会话。
 云端和 relay 不能解密业务 payload。
 ```
 
@@ -339,6 +339,10 @@ core.read
 core.control
 session.edit
 interaction.respond
+attachment.ingest
+media.read
+media.download
+media.stream
 workspace.files.read
 workspace.files.write
 workspace.exec
@@ -361,6 +365,18 @@ session.edit
 
 interaction.respond
   回复 Ask，批准/拒绝 plan，批准/拒绝 command/file/permission request。
+
+attachment.ingest
+  Controller 把本地选择或粘贴的文件通过 E2EE 数据帧发送给 Host。Host 写入自己的 upload store，并返回 Host-owned attachment handle。Controller 不能把自己的本机 path 直接交给远端 Host 当可读路径。
+
+media.read
+  读取 transcript 中由 event_seq + media_id 引用的 Host-owned 媒体资源。Controller 只能拿到 Host 通过能力检查后返回的媒体内容或预览数据。
+
+media.download
+  请求 Host 以下载语义返回媒体资源，文件名、MIME type、大小等元数据由 Host/Core 决定。
+
+media.stream
+  面向大文件、生成中图片、未来视频或渐进式预览的媒体流。数据帧必须和 PTY 一样走 E2EE channel，relay 只转发密文。
 
 workspace.files.read
   通过 Host 浏览文件。SSH workspace 中，由 Host 发起 SSH 读取。
@@ -391,6 +407,65 @@ UI 可以展示更简单的模式：
 ```
 
 但 Host 内部应该按细粒度 capability 执行权限判断。
+
+## 附件和媒体资源
+
+附件和 transcript 媒体是 Host-owned resource，不是跨设备共享路径。
+
+当前本地实现中，`message.user.normalized.attachments` 和 `message.media.normalized` 可以包含 `path` 或 `saved_path`。这些路径只表示 Host 本机上的执行/读取引用：
+
+```text
+Host local upload path
+Host local generated media path
+Host runtime-readable path
+```
+
+远程 Controller，包括 Mobile，不能把这些路径当作自己可以访问的文件路径。远程 UI 只能使用：
+
+```text
+event_seq
+media_id
+name
+mime_type
+size
+kind
+status
+```
+
+读取媒体必须通过 Host/Core：
+
+```text
+Controller
+  -> media.read(event_seq, media_id)
+  -> E2EE data channel
+  -> Host media gateway
+  -> Host local file
+```
+
+手机或另一台 Desktop 发送附件时，流程必须是：
+
+```text
+Controller selects file / paste image
+  -> attachment.ingest metadata
+  -> encrypted upload stream
+  -> Host upload store
+  -> Host returns attachment_id/media_id
+  -> core.control send input with Host-owned attachment handle
+```
+
+禁止的模型：
+
+```text
+Controller path 直接传给 Host runtime
+云端保存明文附件
+relay 解密或缓存明文媒体
+把 media URL 做成云端可见静态资源
+移动端直接访问 Desktop/SSH 文件路径
+```
+
+对于 SSH workspace，附件仍然先进入 Desktop Host。是否需要 staging 到 SSH remote，由 Host/Core/runtime adapter 决定；Controller 不接触 SSH key，也不直接写 SSH remote。
+
+本地 HTTP media endpoint 只是 LocalCoreClient 的实现细节。远控时必须通过 RemoteEncryptedControlChannel 暴露为 `media.read` / `media.download` / `media.stream` capability。
 
 ## PTY 架构
 
@@ -560,13 +635,30 @@ RemoteCoreClient
 RemoteEncryptedControlChannel
 encrypted request/response frames
 encrypted event subscription frames
+encrypted attachment/media frames
 encrypted terminal stream frames
 reconnect and resume semantics
 ```
 
 云端 signaling 负责协商连接。Relay 只转发加密帧。
 
-### Phase 5 - PTY Attach Manager
+### Phase 5 - Attachment and Media Gateway
+
+把附件和 transcript 媒体收口到 Host gateway：
+
+```text
+attachment.ingest
+media.read
+media.download
+media.stream
+event_seq + media_id reference validation
+Host-local upload store
+E2EE data frames
+```
+
+Local Desktop 可以继续用本地 HTTP URL 渲染媒体，但 RemoteCoreClient 和 Mobile 必须只依赖 capability 和 encrypted media frames。
+
+### Phase 6 - PTY Attach Manager
 
 把当前“一条 WebSocket 对应一个 PTY”的语义升级成 Host-owned terminal session：
 
@@ -582,7 +674,7 @@ single active writer
 multi viewer
 ```
 
-### Phase 6 - Mobile Controller
+### Phase 7 - Mobile Controller
 
 Mobile 用同一套远控协议构建完整 Controller UI：
 
@@ -612,6 +704,8 @@ Mobile 不包含 Host daemon 和 runtime。
 把 JSONL 换成 SQLite
 让 Controller 设备直接访问 SSH key 或 Host 文件
 把 PTY 字节输出塞进 AstralEvent JSONL
+把附件或媒体明文上传到云端/relay
+把 Host 本地 path 当作远程 Controller 可访问资源
 ```
 
 ## 核心不变量
@@ -624,4 +718,5 @@ Relay 是不透明 packet forwarder。
 Desktop Host 是执行权威。
 Controller 设备是完整远程 UI。
 业务 payload 在 Controller 和 Host 之间端到端加密。
+附件、媒体、PTY 都是 Host-owned resource stream，不是云端同步数据。
 ```

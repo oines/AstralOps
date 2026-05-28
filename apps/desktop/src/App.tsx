@@ -163,17 +163,20 @@ export function App(): React.JSX.Element {
     [activeSessionView],
   );
   const queuedCount = queuedInputs.length;
+  const runningInputMode = activeAgent === "claude" || activeAgent === "codex" ? "interject" : "queue";
   const composerPlaceholder = !activeWorkspace
     ? "创建 workspace 后开始"
     : !activeSession
       ? "点项目旁边 + 新建 session"
       : !workspaceInteractive
         ? "SSH 已断开，先连接工作区"
-      : sessionRunning
-        ? queuedCount > 0
-          ? `继续输入；前面还有 ${queuedCount} 条已排队`
-          : "继续输入；会在当前任务后接上"
-        : "要求后续变更";
+        : sessionRunning
+          ? queuedCount > 0
+            ? `继续输入；前面还有 ${queuedCount} 条已排队`
+            : runningInputMode === "interject"
+              ? "继续输入；会打断当前任务并接上"
+              : "继续输入；会在当前任务后接上"
+          : "要求后续变更";
   const activeAgentInfo = activeAgent ? health?.agents[activeAgent] : undefined;
   const modelOptions = useMemo(() => activeAgentInfo?.models ?? [], [activeAgentInfo]);
   const currentModel = activeAgentInfo?.current_model;
@@ -717,6 +720,7 @@ export function App(): React.JSX.Element {
           queuedInputs={workspaceInteractive ? queuedInputs : []}
           runMode={runMode}
           running={workspaceInteractive ? sessionRunning : false}
+          runningInputMode={runningInputMode}
           onChooseAttachments={handleChooseFiles}
           onIngestFiles={handleIngestFiles}
           onPasteImage={handlePasteImage}

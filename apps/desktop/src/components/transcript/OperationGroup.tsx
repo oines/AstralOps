@@ -1,11 +1,12 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronRight, Copy, FileCode2, TerminalSquare } from "lucide-react";
+import { ChevronRight, Copy, FileCode2, FileText, TerminalSquare } from "lucide-react";
 import type { AstralEvent } from "../../types";
 import {
   buildCommandItems,
   type CommandItem,
   type FileDiff,
+  type FileReadItem,
   type TranscriptOperationGroup,
   type TranscriptOperationStep,
   type TurnGroup,
@@ -18,11 +19,7 @@ type OperationGroupProps = {
 };
 
 export function OperationGroup({ group, renderDetail, turnStatus }: OperationGroupProps): React.JSX.Element | null {
-  const [open, setOpen] = useState(turnStatus === "running");
-
-  useEffect(() => {
-    setOpen(turnStatus === "running");
-  }, [turnStatus]);
+  const [open, setOpen] = useState(false);
 
   if (group.steps.length === 0 || group.summary === "") return null;
 
@@ -63,7 +60,28 @@ function renderOperationStep(
 ): React.ReactNode {
   if (step.type === "command") return <CommandList events={step.events} key={step.id} />;
   if (step.type === "fileChanges") return <FileChangesGroup files={step.files} key={step.id} />;
+  if (step.type === "fileReads") return <FileReadsRow files={step.files} key={step.id} />;
   return <React.Fragment key={step.id}>{renderDetail(step.event)}</React.Fragment>;
+}
+
+function FileReadsRow({
+  files,
+}: {
+  files: FileReadItem[];
+}): React.JSX.Element | null {
+  if (files.length === 0) return null;
+
+  return (
+    <div className="grid min-w-0 gap-1">
+      {files.map((file) => (
+        <div className="flex min-w-0 max-w-full items-center gap-2 text-[13px] font-medium leading-6 text-[#a0a3a7]" key={file.id}>
+          <FileText className="shrink-0" size={15} strokeWidth={1.8} />
+          <span className="shrink-0">{file.status === "running" ? "正在读取" : "已读取"}</span>
+          <span className="min-w-0 truncate font-mono text-[13px]">{file.path}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function FileChangesGroup({ files }: { files: FileDiff[] }): React.JSX.Element | null {

@@ -27,6 +27,7 @@ type claudeRun struct {
 	done              chan struct{}
 	mu                sync.Mutex
 	pausedForApproval bool
+	skipQueueAfterRun bool
 }
 
 func newClaudeLocalRuntime(a *app) *claudeLocalRuntime {
@@ -93,7 +94,7 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 	r.mu.Unlock()
 
 	r.app.store.updateSessionStatus(session.ID, "running")
-	if !options.Internal {
+	if !options.Internal && !options.SuppressUserMessage {
 		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
 	}
 	started := map[string]any{"status": "running"}
@@ -153,22 +154,50 @@ func (r *claudeLocalRuntime) Steer(sessionID string, input string, options TurnO
 	if !ok {
 		return ErrSessionIdle
 	}
+
+	session, ok := r.app.store.getSession(sessionID)
+	if !ok {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	workspace, ok := r.app.store.getWorkspace(session.WorkspaceID)
+	if !ok {
+		return fmt.Errorf("workspace %s not found", session.WorkspaceID)
+	}
+
 	run.mu.Lock()
-	defer run.mu.Unlock()
-	if run.stdin == nil {
-		return ErrSessionIdle
+	run.skipQueueAfterRun = true
+	if run.stdin != nil {
+		_ = run.stdin.Close()
+		run.stdin = nil
 	}
-	if err := writeClaudeUserInput(run.stdin, input, options.Attachments); err != nil {
-		return err
+	cancel := run.cancel
+	done := run.done
+	run.mu.Unlock()
+
+	startOptions := options
+	if !options.Internal && !options.SuppressUserMessage {
+		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
+		startOptions.SuppressUserMessage = true
 	}
-	session, _ := r.app.store.getSession(sessionID)
-	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.steer", Normalized: map[string]any{"status": "sent"}})
-	return nil
+	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.steer", Normalized: map[string]any{"status": "interrupting"}})
+	r.app.store.updateSessionStatus(sessionID, "idle")
+	r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle", "reason": "steer", "hidden": true}})
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("timed out interrupting Claude turn before steering")
+	}
+	if updated, ok := r.app.store.getSession(sessionID); ok {
+		session = updated
+	}
+	return r.StartTurn(session, workspace, input, startOptions)
 }
 
 func (run *claudeRun) pauseForApproval() {
 	run.mu.Lock()
 	run.pausedForApproval = true
+	run.skipQueueAfterRun = true
 	if run.stdin != nil {
 		_ = run.stdin.Close()
 		run.stdin = nil
@@ -187,11 +216,16 @@ type claudeRemoteOptions struct {
 
 func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd, path, input string, options TurnOptions, run *claudeRun, remote claudeRemoteOptions) {
 	defer func() {
+		run.mu.Lock()
+		startQueued := !run.skipQueueAfterRun
+		run.mu.Unlock()
 		r.mu.Lock()
 		delete(r.running, session.ID)
 		r.mu.Unlock()
 		close(run.done)
-		go r.app.startNextQueuedTurn(session.ID)
+		if startQueued {
+			go r.app.startNextQueuedTurn(session.ID)
+		}
 	}()
 
 	args, argErr := r.claudeArgs(session, options, remote)

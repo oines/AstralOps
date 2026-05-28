@@ -424,6 +424,343 @@ func TestHistoricalContextBackfillCorrectsPersistedCodexCumulativeUsage(t *testi
 	}
 }
 
+func TestHistoricalContextBackfillPrefersClaudeStreamUsageOverAggregateResult(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local Project", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, workspace.Agent)
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "control.raw",
+		Raw: map[string]any{
+			"type":       "stream_event",
+			"session_id": "native_claude",
+			"event": map[string]any{
+				"type": "message_delta",
+				"usage": map[string]any{
+					"input_tokens":                12000,
+					"output_tokens":               100,
+					"cache_read_input_tokens":     18000,
+					"cache_creation_input_tokens": 0,
+					"server_tool_use":             map[string]any{},
+					"service_tier":                "standard",
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "control.raw",
+		Raw: map[string]any{
+			"type":       "result",
+			"session_id": "native_claude",
+			"modelUsage": map[string]any{
+				"claude-test": map[string]any{
+					"inputTokens":              400000,
+					"outputTokens":             58200,
+					"cacheReadInputTokens":     180000,
+					"cacheCreationInputTokens": 20000,
+					"contextWindow":            200000,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), projections: newSessionProjectionCache()}
+	app.rebuildSessionProjections()
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if got := countKind(events, "control.context"); got != 1 {
+		t.Fatalf("control.context count = %d, want one current-window correction", got)
+	}
+	context := app.sessionProjections().latestContext(session.ID)
+	if got := stringValue(context["scope"]); got != "current" {
+		t.Fatalf("projected scope = %q, want current", got)
+	}
+	if got := numberValue(context["total_tokens"]); got != 30100 {
+		t.Fatalf("projected total_tokens = %v, want stream message_delta usage", got)
+	}
+	if got := numberValue(context["cumulative_total_tokens"]); got != 658200 {
+		t.Fatalf("projected cumulative_total_tokens = %v, want aggregate result total", got)
+	}
+	if got := numberValue(context["model_context_window"]); got != 200000 {
+		t.Fatalf("projected model_context_window = %v, want 200000", got)
+	}
+	if got := numberValue(context["used_percent"]); got != 15 {
+		t.Fatalf("projected used_percent = %v, want current-window percent", got)
+	}
+}
+
+func TestHistoricalContextBackfillCorrectsPersistedClaudeAggregateUsage(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local Project", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, workspace.Agent)
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "control.raw",
+		Raw: map[string]any{
+			"type":       "stream_event",
+			"session_id": "native_claude",
+			"event": map[string]any{
+				"type": "message_delta",
+				"usage": map[string]any{
+					"input_tokens":                9000,
+					"output_tokens":               200,
+					"cache_read_input_tokens":     20800,
+					"cache_creation_input_tokens": 0,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resultRaw := map[string]any{
+		"type":       "result",
+		"session_id": "native_claude",
+		"modelUsage": map[string]any{
+			"claude-test": map[string]any{
+				"inputTokens":              400000,
+				"outputTokens":             58200,
+				"cacheReadInputTokens":     180000,
+				"cacheCreationInputTokens": 20000,
+				"contextWindow":            200000,
+			},
+		},
+	}
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "control.context",
+		Normalized: map[string]any{
+			"source":               "claude",
+			"total_tokens":         658200,
+			"input_tokens":         400000,
+			"output_tokens":        58200,
+			"model_context_window": 200000,
+			"used_percent":         329,
+			"usage":                map[string]any{},
+			"model_usage":          mapValue(resultRaw["modelUsage"]),
+		},
+		Raw: resultRaw,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), projections: newSessionProjectionCache()}
+	app.rebuildSessionProjections()
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if got := countKind(events, "control.context"); got != 2 {
+		t.Fatalf("control.context count = %d, want legacy event plus correction", got)
+	}
+	context := app.sessionProjections().latestContext(session.ID)
+	if got := stringValue(context["scope"]); got != "current" {
+		t.Fatalf("projected scope = %q, want current", got)
+	}
+	if got := numberValue(context["total_tokens"]); got != 30000 {
+		t.Fatalf("projected total_tokens = %v, want stream message_delta usage", got)
+	}
+	if got := numberValue(context["cumulative_total_tokens"]); got != 658200 {
+		t.Fatalf("projected cumulative_total_tokens = %v, want legacy aggregate total", got)
+	}
+	if got := numberValue(context["used_percent"]); got != 15 {
+		t.Fatalf("projected used_percent = %v, want corrected current-window percent", got)
+	}
+}
+
+func TestSessionProjectionKeepsClaudeCurrentContextOverAggregateResult(t *testing.T) {
+	cache := newSessionProjectionCache()
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "control.context",
+		Normalized: map[string]any{
+			"source":       "claude",
+			"scope":        "current",
+			"total_tokens": 30000,
+		},
+	})
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "control.context",
+		Normalized: map[string]any{
+			"source":                  "claude",
+			"scope":                   "aggregate",
+			"total_tokens":            658200,
+			"cumulative_total_tokens": 658200,
+			"model_context_window":    200000,
+		},
+	})
+	context := cache.latestContext("sess_claude")
+	if got := stringValue(context["scope"]); got != "current" {
+		t.Fatalf("projected scope = %q, want current", got)
+	}
+	if got := numberValue(context["total_tokens"]); got != 30000 {
+		t.Fatalf("projected total_tokens = %v, want current usage", got)
+	}
+	if got := numberValue(context["cumulative_total_tokens"]); got != 658200 {
+		t.Fatalf("projected cumulative_total_tokens = %v, want aggregate metadata", got)
+	}
+	if got := numberValue(context["model_context_window"]); got != 200000 {
+		t.Fatalf("projected model_context_window = %v, want aggregate metadata", got)
+	}
+	if got := numberValue(context["used_percent"]); got != 15 {
+		t.Fatalf("projected used_percent = %v, want current-window percent", got)
+	}
+}
+
+func TestSessionProjectionInvalidatesContextOnCompact(t *testing.T) {
+	cache := newSessionProjectionCache()
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "control.context",
+		Normalized: map[string]any{
+			"source":               "claude",
+			"scope":                "current",
+			"total_tokens":         30000,
+			"model_context_window": 200000,
+		},
+	})
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "memory.compacted",
+		Normalized: map[string]any{
+			"source": "claude",
+		},
+	})
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "control.context",
+		Normalized: map[string]any{
+			"source":               "astralops",
+			"total_tokens":         30000,
+			"model_context_window": 200000,
+		},
+	})
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "control.context",
+		Normalized: map[string]any{
+			"source":                  "claude",
+			"scope":                   "aggregate",
+			"total_tokens":            658200,
+			"cumulative_total_tokens": 658200,
+			"model_context_window":    200000,
+		},
+	})
+	if context := cache.latestContext("sess_claude"); len(context) > 0 {
+		t.Fatalf("projected context = %#v, want compacted session to ignore aggregate-only usage", context)
+	}
+	cache.apply(AstralEvent{
+		SessionID: "sess_claude",
+		Agent:     AgentClaude,
+		Kind:      "control.context",
+		Normalized: map[string]any{
+			"source":       "claude",
+			"scope":        "current",
+			"total_tokens": 12000,
+		},
+	})
+	context := cache.latestContext("sess_claude")
+	if got := numberValue(context["total_tokens"]); got != 12000 {
+		t.Fatalf("projected total_tokens = %v, want post-compact current usage", got)
+	}
+}
+
+func TestHistoricalContextBackfillDoesNotRevivePreCompactClaudeUsage(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local Project", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, workspace.Agent)
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "control.raw",
+		Raw: map[string]any{
+			"type":       "stream_event",
+			"session_id": "native_claude",
+			"event": map[string]any{
+				"type": "message_delta",
+				"usage": map[string]any{
+					"input_tokens":                9000,
+					"output_tokens":               200,
+					"cache_read_input_tokens":     20800,
+					"cache_creation_input_tokens": 0,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentClaude,
+		Kind:        "memory.compacted",
+		Normalized: map[string]any{
+			"source": "claude",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub(), projections: newSessionProjectionCache()}
+	app.rebuildSessionProjections()
+	if err := app.backfillHistoricalContextEvents(); err != nil {
+		t.Fatal(err)
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if got := countKind(events, "control.context"); got != 0 {
+		t.Fatalf("control.context count = %d, want no pre-compact context backfill", got)
+	}
+	if context := app.sessionProjections().latestContext(session.ID); len(context) > 0 {
+		t.Fatalf("projected context = %#v, want no context after compact until fresh usage arrives", context)
+	}
+}
+
 func TestHistoricalApprovalBackfillRestoresClaudeEditPermission(t *testing.T) {
 	dir := t.TempDir()
 	st, err := loadStore(dir)
@@ -4398,22 +4735,29 @@ sleep 30
 	waitForClaudeRunDone(t, run)
 }
 
-func TestClaudeLocalRuntimeSteersViaStreamInput(t *testing.T) {
+func TestClaudeLocalRuntimeSteerInterruptsAndResumes(t *testing.T) {
 	inputsPath := filepath.Join(t.TempDir(), "claude-inputs.jsonl")
 	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
-IFS= read -r first
-printf '%s\n' "$first" >> "$ASTRALOPS_TEST_CLAUDE_INPUTS"
-IFS= read -r second
-printf '%s\n' "$second" >> "$ASTRALOPS_TEST_CLAUDE_INPUTS"
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"steered"}]}}'
-`))
+	printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+	IFS= read -r input
+	printf '%s\n' "$input" >> "$ASTRALOPS_TEST_CLAUDE_INPUTS"
+	case "$input" in
+	*"first"*)
+		printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}'
+		exec sleep 30
+		;;
+	*)
+		printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"steered"}]}}'
+		;;
+	esac
+	`))
 	t.Setenv("ASTRALOPS_TEST_CLAUDE_INPUTS", inputsPath)
 
 	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "first", TurnOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	waitForKind(t, app.store, session.ID, "session.native")
+	waitForKind(t, app.store, session.ID, "message.delta")
+	run := claudeRunForTest(t, app, session.ID)
 	steerer, ok := app.runtimes[AgentClaude].(TurnSteerer)
 	if !ok {
 		t.Fatal("claude runtime does not implement TurnSteerer")
@@ -4429,33 +4773,93 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 	}
 	text := string(inputs)
 	if !strings.Contains(text, `"text":"first"`) || !strings.Contains(text, `"text":"mid task guidance"`) {
-		t.Fatalf("claude stream inputs did not include initial and steer messages:\n%s", text)
+		t.Fatalf("claude inputs did not include initial and steered messages:\n%s", text)
+	}
+	waitForClaudeRunDone(t, run)
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if !containsEventKind(events, "turn.cancelled") {
+		t.Fatalf("events = %#v, want cancelled turn before steered turn", events)
 	}
 }
 
-func TestSessionInputQueuesWhileRuntimeIsBusy(t *testing.T) {
+func TestClaudeSessionInputSteersWhileRuntimeIsBusy(t *testing.T) {
+	inputsPath := filepath.Join(t.TempDir(), "claude-inputs.jsonl")
 	app, session, _ := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
-sleep 0.2
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'
-`))
+	printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+	IFS= read -r input
+	printf '%s\n' "$input" >> "$ASTRALOPS_TEST_CLAUDE_INPUTS"
+	case "$input" in
+	*"first"*)
+		printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}'
+		exec sleep 30
+		;;
+	*)
+		printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'
+		;;
+	esac
+	`))
+	t.Setenv("ASTRALOPS_TEST_CLAUDE_INPUTS", inputsPath)
 
 	first := httptest.NewRecorder()
 	app.handleSessionInput(first, session.ID, "first", TurnOptions{})
 	if first.Code != http.StatusOK {
 		t.Fatalf("first status = %d, want 200", first.Code)
 	}
+	waitForKind(t, app.store, session.ID, "message.delta")
 
 	second := httptest.NewRecorder()
 	app.handleSessionInput(second, session.ID, "second", TurnOptions{})
-	if second.Code != http.StatusOK {
-		t.Fatalf("second status = %d, want 200 queued", second.Code)
+	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"steered":true`) {
+		t.Fatalf("second response = %d %s, want 200 steered", second.Code, second.Body.String())
 	}
 
-	waitForKind(t, app.store, session.ID, "queue.queued")
-	waitForKind(t, app.store, session.ID, "queue.dequeued")
 	waitForKindCount(t, app.store, session.ID, "message.user", 2)
-	waitForKindCount(t, app.store, session.ID, "turn.completed", 2)
+	waitForKind(t, app.store, session.ID, "turn.completed")
+	events := app.store.queryEvents("", session.ID, 0)
+	if containsEventKind(events, "queue.queued") {
+		t.Fatalf("events = %#v, want running Claude input to steer instead of queue", events)
+	}
+	inputs, err := os.ReadFile(inputsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(inputs); !strings.Contains(text, `"text":"first"`) || !strings.Contains(text, `"text":"second"`) {
+		t.Fatalf("claude inputs = %s, want first and second prompts", text)
+	}
+}
+
+func TestCodexSessionInputSteersWhileRuntimeIsBusy(t *testing.T) {
+	app, session, _ := newTestCodexApp(t, fakeCodexScript(t))
+	methodsPath := filepath.Join(t.TempDir(), "codex-methods.log")
+	t.Setenv("ASTRALOPS_TEST_CODEX_METHODS", methodsPath)
+
+	first := httptest.NewRecorder()
+	app.handleSessionInput(first, session.ID, "first", TurnOptions{})
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", first.Code)
+	}
+	waitForKind(t, app.store, session.ID, "turn.started")
+
+	second := httptest.NewRecorder()
+	app.handleSessionInput(second, session.ID, "second", TurnOptions{})
+	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"steered":true`) {
+		t.Fatalf("second response = %d %s, want 200 steered", second.Code, second.Body.String())
+	}
+
+	waitForKindCount(t, app.store, session.ID, "message.user", 2)
+	waitForKind(t, app.store, session.ID, "control.steer")
+	waitForKind(t, app.store, session.ID, "turn.completed")
+	events := app.store.queryEvents("", session.ID, 0)
+	if containsEventKind(events, "queue.queued") {
+		t.Fatalf("events = %#v, want running Codex input to steer instead of queue", events)
+	}
+	methods, err := os.ReadFile(methodsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(methods), "turn/steer") {
+		t.Fatalf("codex runtime did not send turn/steer; methods:\n%s", methods)
+	}
 }
 
 func TestCancelQueuedTurnEmitsCancelled(t *testing.T) {

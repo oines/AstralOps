@@ -28,26 +28,36 @@ export function useContextUsage(
 
   return useMemo(() => {
     const latest = latestContextUsage(events);
-    if (latest) return latest;
+    if (latest) return { ...latest, modelContextWindow: latest.modelContextWindow ?? modelContextWindow };
     return modelContextWindow ? { modelContextWindow } : undefined;
   }, [events, modelContextWindow]);
 }
 
 function latestContextUsage(events: AstralEvent[]): ContextUsage | undefined {
+  let inheritedModelContextWindow: number | undefined;
+  let aggregateFallback: ContextUsage | undefined;
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index];
+    if (event.kind === "memory.compacted") return undefined;
     if (event.kind !== "control.context") continue;
     const value = event.normalized as Record<string, unknown>;
+    const eventWindow = numberValue(value.model_context_window);
+    inheritedModelContextWindow ??= eventWindow;
     const totalTokens = numberValue(value.total_tokens);
-    const modelContextWindow = numberValue(value.model_context_window);
+    const modelContextWindow = eventWindow ?? inheritedModelContextWindow;
     const usedPercent = numberValue(value.used_percent) || (totalTokens && modelContextWindow ? Math.max(1, Math.round((totalTokens / modelContextWindow) * 100)) : undefined);
-    return {
+    const usage = {
       totalTokens,
       modelContextWindow,
       usedPercent,
     };
+    if (value.scope === "aggregate") {
+      aggregateFallback ??= usage;
+      continue;
+    }
+    return usage;
   }
-  return undefined;
+  return aggregateFallback;
 }
 
 function selectedModelContextWindow(models: ModelOption[], modelValue: string, slotValue: string, currentModel?: string): number | undefined {

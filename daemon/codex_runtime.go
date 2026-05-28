@@ -86,7 +86,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 	}
 
 	r.app.store.updateSessionStatus(session.ID, "running")
-	if !options.Internal {
+	if !options.Internal && !options.SuppressUserMessage {
 		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
 	}
 
@@ -306,7 +306,7 @@ func (r *codexLocalRuntime) Steer(sessionID string, input string, options TurnOp
 	if client == nil || !client.isRunning() {
 		return ErrSessionIdle
 	}
-	return client.steer(input)
+	return client.steer(input, options)
 }
 
 func (r *codexLocalRuntime) RespondApproval(approvalID string, response map[string]any) error {
@@ -361,27 +361,9 @@ func (c *codexClient) startTurn(input string, options TurnOptions) {
 		return
 	}
 
-	turnInput := []map[string]any{{
-		"type":          "text",
-		"text":          inputWithAttachmentManifest(input, options.Attachments),
-		"text_elements": []any{},
-	}}
-	for _, attachment := range options.Attachments {
-		if !isNativeImageAttachment(attachment) || attachment.Path == "" {
-			continue
-		}
-		item := map[string]any{
-			"type": "localImage",
-			"path": attachment.Path,
-		}
-		if attachment.Detail != "" {
-			item["detail"] = attachment.Detail
-		}
-		turnInput = append(turnInput, item)
-	}
 	params := map[string]any{
 		"threadId": c.getThreadID(),
-		"input":    turnInput,
+		"input":    codexInputItems(input, options.Attachments),
 	}
 	applyCodexTurnOptions(params, options, c.cwd, c.defaultModel(), c.defaultReasoningEffort())
 	c.mu.Lock()
@@ -780,26 +762,47 @@ func (c *codexClient) stop(reason string) {
 	}
 }
 
-func (c *codexClient) steer(input string) error {
+func (c *codexClient) steer(input string, options TurnOptions) error {
 	threadID := c.getThreadID()
 	turnID := c.getActiveTurn()
 	if threadID == "" || turnID == "" {
 		return ErrSessionIdle
 	}
+	if !options.Internal && !options.SuppressUserMessage {
+		c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
+	}
 	_, err := c.request("turn/steer", map[string]any{
 		"threadId":       threadID,
 		"expectedTurnId": turnID,
-		"input": []map[string]any{{
-			"type":          "text",
-			"text":          input,
-			"text_elements": []any{},
-		}},
+		"input":          codexInputItems(input, options.Attachments),
 	}, codexRequestTimeout)
 	if err != nil {
 		return err
 	}
 	c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.steer", Normalized: map[string]any{"status": "sent", "turn_id": turnID}})
 	return nil
+}
+
+func codexInputItems(input string, attachments []InputAttachment) []map[string]any {
+	items := []map[string]any{{
+		"type":          "text",
+		"text":          inputWithAttachmentManifest(input, attachments),
+		"text_elements": []any{},
+	}}
+	for _, attachment := range attachments {
+		if !isNativeImageAttachment(attachment) || attachment.Path == "" {
+			continue
+		}
+		item := map[string]any{
+			"type": "localImage",
+			"path": attachment.Path,
+		}
+		if attachment.Detail != "" {
+			item["detail"] = attachment.Detail
+		}
+		items = append(items, item)
+	}
+	return items
 }
 
 func (c *codexClient) scan(stdout io.Reader) {

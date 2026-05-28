@@ -36,6 +36,7 @@ Ask/user input form
 MCP elicitation form/url
 prompt queued / dequeued / cancelled
 last user message edit / turn replacement
+transcript media / attachments
 rate limit
 compact boundary
 projection hydrated / pushed
@@ -71,6 +72,7 @@ When adding or changing event normalization/rendering, first capture real local 
 If an event is not covered by a fixture, preserve it only as hidden control.raw for debug/replay. Do not create generic visible UI for it, and do not map it into a semantic event until a real fixture proves the shape.
 Do not add "best guess" UI branches for event names that have not been observed locally.
 turn.replaced is an AstralOps/Core-generated semantic event, not a Claude/Codex raw mapping. It marks a replaced transcript seq range after editing and resending the last user message. Normal transcript, pending interaction projection, and interaction responses must treat events in that seq range as stale/hidden.
+message.user attachments and message.media are first-class transcript media surfaces. UI clients render media from AstralEvent.normalized only. Local filesystem paths in normalized media are Host-private references for Core/runtime/media serving; clients must not treat them as directly readable remote paths. Remote controllers must fetch media through Host/Core media capabilities using event_seq + media_id over the encrypted control/data channel.
 ```
 
 Architecture and fallback rule:
@@ -181,6 +183,7 @@ mcpServer/startupStatus/updated starting/ready -> control.status
 mcpServer/startupStatus/updated failed -> control.warning
 error/configWarning/deprecationNotice/model reroute -> control.*
 ServerRequest: command approval, file approval, permissions approval, tool user input, MCP elicitation, dynamic tool call
+item/started/completed ImageGeneration from real local fixture -> message.media
 ```
 
 Interaction UI semantics:
@@ -200,5 +203,5 @@ Codex not yet covered:
 ```text
 thread/archived, thread/unarchived, thread/closed, skills/changed, thread/name/updated, hook/started, hook/completed, item/autoApprovalReview/started, item/autoApprovalReview/completed, rawResponseItem/completed, item/commandExecution/terminalInteraction, item/mcpToolCall/progress, mcpServer/oauthLogin/completed, account/updated, app/list/updated, fs/changed, fuzzyFileSearch/sessionUpdated, fuzzyFileSearch/sessionCompleted, realtime events, Windows sandbox/login notifications.
 ServerRequest account/chatgptAuthTokens/refresh is not handled.
-ThreadItem UserMessage, HookPrompt, ImageView, ImageGeneration, EnteredReviewMode, ExitedReviewMode need real local fixtures before semantic UI mapping.
+ThreadItem UserMessage, HookPrompt, ImageView, EnteredReviewMode, ExitedReviewMode need real local fixtures before semantic UI mapping.
 ```

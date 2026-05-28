@@ -4,6 +4,7 @@ import "sync"
 
 type sessionProjection struct {
 	LatestContext       map[string]any
+	ContextCompacted    bool
 	ClaudeSlashCommands []string
 }
 
@@ -51,8 +52,14 @@ func (c *sessionProjectionCache) apply(ev AstralEvent) {
 	switch ev.Kind {
 	case "control.context":
 		if value := mapValue(ev.Normalized); len(value) > 0 {
-			projection.LatestContext = copyStringAny(value)
+			projection.LatestContext = mergeProjectedContext(projection.LatestContext, value, projection.ContextCompacted)
+			if !(projection.ContextCompacted && compactedContextShouldStayInvalid(value)) {
+				projection.ContextCompacted = false
+			}
 		}
+	case "memory.compacted":
+		projection.LatestContext = nil
+		projection.ContextCompacted = true
 	case "session.native":
 		if ev.Agent == AgentClaude {
 			if commands := claudeSlashCommandNames(mapValue(ev.Raw)); len(commands) > 0 {
@@ -61,6 +68,69 @@ func (c *sessionProjectionCache) apply(ev AstralEvent) {
 		}
 	}
 	c.sessions[ev.SessionID] = projection
+}
+
+func mergeProjectedContext(existing map[string]any, next map[string]any, compacted bool) map[string]any {
+	if len(next) == 0 {
+		return existing
+	}
+	if compacted && compactedContextShouldStayInvalid(next) {
+		return existing
+	}
+	if len(existing) == 0 {
+		return copyStringAny(next)
+	}
+	scope := stringValue(next["scope"])
+	existingScope := stringValue(existing["scope"])
+	if scope == "aggregate" && existingScope == "current" {
+		merged := copyStringAny(existing)
+		copyContextFields(merged, next, []string{
+			"model",
+			"model_context_window",
+			"model_usage",
+			"cumulative_total_tokens",
+			"cumulative_input_tokens",
+			"cumulative_output_tokens",
+			"cumulative_cached_input_tokens",
+			"cumulative_cache_creation_input_tokens",
+		})
+		refreshProjectedContextPercent(merged)
+		return merged
+	}
+	if scope == "current" {
+		merged := copyStringAny(next)
+		copyContextFields(merged, existing, []string{
+			"model",
+			"model_context_window",
+			"model_usage",
+			"cumulative_total_tokens",
+			"cumulative_input_tokens",
+			"cumulative_output_tokens",
+			"cumulative_cached_input_tokens",
+			"cumulative_cache_creation_input_tokens",
+		})
+		refreshProjectedContextPercent(merged)
+		return merged
+	}
+	return copyStringAny(next)
+}
+
+func compactedContextShouldStayInvalid(value map[string]any) bool {
+	return stringValue(value["scope"]) == "aggregate" || stringValue(value["source"]) == "astralops"
+}
+
+func copyContextFields(target map[string]any, source map[string]any, keys []string) {
+	for _, key := range keys {
+		if target[key] == nil && source[key] != nil {
+			target[key] = source[key]
+		}
+	}
+}
+
+func refreshProjectedContextPercent(value map[string]any) {
+	if percent := contextUsedPercent(value); percent > 0 {
+		value["used_percent"] = percent
+	}
 }
 
 func (c *sessionProjectionCache) latestContext(sessionID string) map[string]any {

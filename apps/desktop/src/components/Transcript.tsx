@@ -44,6 +44,7 @@ import {
   isHookEvent,
   isScalar,
   isTodoToolEvent,
+  isTranscriptUserEvent,
   isTranscriptPlanEvent,
   jsonPreview,
   planItems,
@@ -431,7 +432,7 @@ const TurnBlock = React.memo(function TurnBlock({
   const detailSummary = summarizeDetails(group.details);
   const endTime = group.end?.ts ?? group.start?.ts ?? "";
   const collapsedAssistantSeqs = !expanded && isDone ? visibleCollapsedAssistantSeqs(group.timeline) : null;
-  const operationGroups = expanded ? buildOperationGroups(group.timeline) : [];
+  const operationGroups = expanded ? buildOperationGroups(group.timeline, group.status) : [];
   const forkableSeq = group.status === "completed" ? finalForkableAssistantSeq(group.timeline) : null;
 
   useEffect(() => {
@@ -453,6 +454,19 @@ const TurnBlock = React.memo(function TurnBlock({
 
   for (let index = 0; index < group.timeline.length; index += 1) {
     const event = group.timeline[index];
+    if (isTranscriptUserEvent(event) || event.kind === "queue.steered") {
+      flushOperations();
+      timeline.push(
+        <UserMessage
+          canEdit={editableUserMessage?.event_seq === event.seq && textValue(event.normalized as Record<string, unknown>, "text") === editableUserMessage.text}
+          event={event}
+          key={event.seq}
+          mediaUrl={mediaUrl}
+          onEdit={onEditUserMessage}
+        />,
+      );
+      continue;
+    }
     if (isAssistantContentEvent(event)) {
       flushOperations();
       if (!collapsedAssistantSeqs || collapsedAssistantSeqs.has(event.seq)) {
@@ -644,6 +658,7 @@ function DetailEvent({
   }
   if (event.kind.startsWith("control.warning")) return <Notice tone="muted" text={textValue(value, "message") || "运行警告"} />;
   if (event.kind === "control.interrupt") return <MetaLine icon={<CheckCircle2 size={16} strokeWidth={1.8} />} text="已请求中断" time={event.ts} />;
+  if (event.kind === "control.steer") return <MetaLine icon={<CheckCircle2 size={16} strokeWidth={1.8} />} text="已引导对话" time={event.ts} />;
   if (event.kind.startsWith("control.model")) return <MetaLine icon={<Bot size={16} strokeWidth={1.8} />} text="模型状态已更新" time={event.ts} />;
   if (event.kind.startsWith("queue.")) return <QueueEventBlock event={event} />;
   if (event.kind.startsWith("memory.compacted")) return <MetaLine icon={<Check size={16} />} text="上下文已压缩" time={event.ts} />;

@@ -23,6 +23,7 @@ type ComposerProps = {
   queuedInputs: QueuedComposerInput[];
   runMode: RunMode;
   running: boolean;
+  runningInputMode: "interject" | "queue";
   onChooseAttachments: () => Promise<SessionInputAttachment[]>;
   onIngestFiles: (paths: string[]) => Promise<SessionInputAttachment[]>;
   onPasteImage: () => Promise<SessionInputAttachment | null>;
@@ -72,6 +73,7 @@ export function Composer({
   queuedInputs,
   runMode,
   running,
+  runningInputMode,
   onChooseAttachments,
   onIngestFiles,
   onPasteImage,
@@ -434,8 +436,8 @@ export function Composer({
               type="button"
               disabled={disabled || sending || (!input.trim() && attachments.length === 0)}
               onClick={() => void submit()}
-              aria-label={running ? "排队发送" : "发送"}
-              title={running ? "当前任务结束后发送" : "发送"}
+              aria-label={running ? (runningInputMode === "interject" ? "插入当前任务" : "排队发送") : "发送"}
+              title={running ? (runningInputMode === "interject" ? "打断当前任务并发送" : "当前任务结束后发送") : "发送"}
             >
               <ArrowUp size={20} />
             </button>
@@ -476,7 +478,7 @@ function contextUsagePercent(usage: ContextUsage): number {
 }
 
 function contextUsageLabel(usage: ContextUsage, percent: number): string {
-  const roundedPercent = Math.round(clamp(percent, 0, 100));
+  const roundedPercent = Math.round(Math.max(0, percent));
   if (typeof usage.totalTokens === "number" && typeof usage.modelContextWindow === "number") {
     return `${formatTokenCount(usage.totalTokens)} / ${formatTokenCount(usage.modelContextWindow)} (${roundedPercent}%)`;
   }
@@ -523,7 +525,7 @@ function QueuedInputShelf({
               onClick={() => void onSteer(item.sessionId, item.id)}
             >
               <CornerDownRight size={14} strokeWidth={2} />
-              <span>引导</span>
+              <span>插入</span>
             </button>
           ) : null}
           <button
