@@ -480,6 +480,57 @@ func TestControlWebSocketWorkspaceFileReadResponseIsEncrypted(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketWorkspacePatchRequestResponseIsEncrypted(t *testing.T) {
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceFilesWrite)
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "secret.txt"), []byte("old-wire-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "workspace_patch",
+			Capability: CapabilityWorkspaceFilesWrite,
+			Action:     ControlActionWorkspaceFilesApplyPatch,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"path":         "secret.txt",
+				"edits": []map[string]any{
+					{
+						"old_string": "old-wire-secret",
+						"new_string": "new-wire-secret",
+					},
+				},
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), "old-wire-secret") || strings.Contains(string(sealedRequest), "new-wire-secret") {
+		t.Fatalf("sealed workspace patch request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), "old-wire-secret") || strings.Contains(string(sealedResponse), "new-wire-secret") {
+		t.Fatalf("sealed workspace patch response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("plain response = %#v, want ok workspace patch response", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["path"]) != "secret.txt" || numberValue(result["applied_edits"]) != 1 {
+		t.Fatalf("workspace patch response metadata = %#v", result)
+	}
+	body, err := os.ReadFile(filepath.Join(workspace.LocalCWD, "secret.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "new-wire-secret\n" {
+		t.Fatalf("patched body = %q, want encrypted patch output", string(body))
+	}
+}
+
 func TestControlWebSocketRejectsControllerDeviceMismatch(t *testing.T) {
 	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
 	server := startControlChannelTestServer(t, app)

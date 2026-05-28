@@ -1081,6 +1081,7 @@ Local Desktop 可以继续用本地 HTTP URL 渲染媒体，但 RemoteCoreClient
 已落地:
 workspace.files.read
 workspace.files.write
+workspace.files.apply_patch
 workspace.exec
 local workspace root confinement
 SSH workspace Host-initiated read/write/exec
@@ -1090,12 +1091,13 @@ no Host local absolute root in workspace.files.read response
 待落地:
 workspace.files.delete
 workspace.files.move
-workspace.files.apply_patch
 workspace file streaming for large files
 command approval policy integration
 ```
 
-`workspace.files.read` v1 用于目录列表和中小文件读取；文件内容以 base64 放在 encrypted control response 中。`workspace.files.write` v1 只创建或覆盖单个文件，复杂 diff/edit/delete/move 后续单独扩展，避免把文件管理语义一次性塞进一个过宽 action。
+`workspace.files.read` v1 用于目录列表和中小文件读取；文件内容以 base64 放在 encrypted control response 中。`workspace.files.write` v1 只创建或覆盖单个文件。
+
+`workspace.files.apply_patch` v1 是 Host 侧精确文本编辑能力：Controller 提交 `old_string`/`new_string` edits，Host 在 workspace root 内读取目标文件，要求默认单次匹配唯一；只有显式 `replace_all` 才允许替换多处。它不解析完整 unified diff，不 shell out 到 `patch`，也不做跨端文件同步。这样先满足远控编辑需要，同时把 delete/move/大文件流式读写作为独立 action 后续扩展，避免把文件管理语义一次性塞进一个过宽 action。
 
 ### Phase 9 - PTY Attach Manager
 

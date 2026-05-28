@@ -25,30 +25,31 @@ const (
 )
 
 const (
-	ControlActionSessionView            = "core.read.session_view"
-	ControlActionSessions               = "core.read.sessions"
-	ControlActionWorkspaces             = "core.read.workspaces"
-	ControlActionSessionInput           = "core.control.session_input"
-	ControlActionInterrupt              = "core.control.interrupt"
-	ControlActionInteractionRespond     = "interaction.respond"
-	ControlActionSessionEdit            = "session.edit"
-	ControlActionAttachmentIngest       = "attachment.ingest"
-	ControlActionAttachmentIngestStart  = "attachment.ingest.start"
-	ControlActionAttachmentIngestChunk  = "attachment.ingest.chunk"
-	ControlActionAttachmentIngestFinish = "attachment.ingest.finish"
-	ControlActionMediaRead              = "media.read"
-	ControlActionMediaDownload          = "media.download"
-	ControlActionMediaStream            = "media.stream"
-	ControlActionMediaStreamCancel      = "media.stream.cancel"
-	ControlActionWorkspaceFilesRead     = "workspace.files.read"
-	ControlActionWorkspaceFilesWrite    = "workspace.files.write"
-	ControlActionWorkspaceExec          = "workspace.exec"
-	ControlActionTerminalOpen           = "terminal.open"
-	ControlActionTerminalAttach         = "terminal.attach"
-	ControlActionTerminalDetach         = "terminal.detach"
-	ControlActionTerminalInput          = "terminal.input"
-	ControlActionTerminalResize         = "terminal.resize"
-	ControlActionTerminalClose          = "terminal.close"
+	ControlActionSessionView              = "core.read.session_view"
+	ControlActionSessions                 = "core.read.sessions"
+	ControlActionWorkspaces               = "core.read.workspaces"
+	ControlActionSessionInput             = "core.control.session_input"
+	ControlActionInterrupt                = "core.control.interrupt"
+	ControlActionInteractionRespond       = "interaction.respond"
+	ControlActionSessionEdit              = "session.edit"
+	ControlActionAttachmentIngest         = "attachment.ingest"
+	ControlActionAttachmentIngestStart    = "attachment.ingest.start"
+	ControlActionAttachmentIngestChunk    = "attachment.ingest.chunk"
+	ControlActionAttachmentIngestFinish   = "attachment.ingest.finish"
+	ControlActionMediaRead                = "media.read"
+	ControlActionMediaDownload            = "media.download"
+	ControlActionMediaStream              = "media.stream"
+	ControlActionMediaStreamCancel        = "media.stream.cancel"
+	ControlActionWorkspaceFilesRead       = "workspace.files.read"
+	ControlActionWorkspaceFilesWrite      = "workspace.files.write"
+	ControlActionWorkspaceFilesApplyPatch = "workspace.files.apply_patch"
+	ControlActionWorkspaceExec            = "workspace.exec"
+	ControlActionTerminalOpen             = "terminal.open"
+	ControlActionTerminalAttach           = "terminal.attach"
+	ControlActionTerminalDetach           = "terminal.detach"
+	ControlActionTerminalInput            = "terminal.input"
+	ControlActionTerminalResize           = "terminal.resize"
+	ControlActionTerminalClose            = "terminal.close"
 )
 
 type ControlRequest struct {
@@ -119,7 +120,7 @@ func controlActionCapability(action string) string {
 		return CapabilityMediaStream
 	case ControlActionWorkspaceFilesRead:
 		return CapabilityWorkspaceFilesRead
-	case ControlActionWorkspaceFilesWrite:
+	case ControlActionWorkspaceFilesWrite, ControlActionWorkspaceFilesApplyPatch:
 		return CapabilityWorkspaceFilesWrite
 	case ControlActionWorkspaceExec:
 		return CapabilityWorkspaceExec
@@ -284,6 +285,12 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn) (an
 			return nil, err
 		}
 		return a.writeControlWorkspaceFile(context.Background(), params)
+	case ControlActionWorkspaceFilesApplyPatch:
+		var params workspaceFilesApplyPatchParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.applyControlWorkspacePatch(context.Background(), params)
 	case ControlActionWorkspaceExec:
 		var params workspaceExecParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

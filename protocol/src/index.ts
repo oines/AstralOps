@@ -526,6 +526,18 @@ export type WorkspaceFilesWriteParams = {
   create_parents?: boolean;
 };
 
+export type WorkspaceFileTextEdit = {
+  old_string: string;
+  new_string: string;
+  replace_all?: boolean;
+};
+
+export type WorkspaceFilesApplyPatchParams = {
+  workspace_id: string;
+  path: string;
+  edits: WorkspaceFileTextEdit[];
+};
+
 export type WorkspaceExecParams = {
   workspace_id: string;
   command: string;
@@ -561,6 +573,11 @@ export type WorkspaceFilesWriteResult = {
   path: string;
   kind: "file" | string;
   size: number;
+};
+
+export type WorkspaceFilesApplyPatchResult = WorkspaceFilesWriteResult & {
+  applied_edits: number;
+  structured_patch?: Array<Record<string, unknown>>;
 };
 
 export type WorkspaceExecResult = {
@@ -611,6 +628,7 @@ export type ControlAction =
   | "media.stream.cancel"
   | "workspace.files.read"
   | "workspace.files.write"
+  | "workspace.files.apply_patch"
   | "workspace.exec"
   | "terminal.open"
   | "terminal.attach"

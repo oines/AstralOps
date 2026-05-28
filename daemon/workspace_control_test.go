@@ -118,6 +118,97 @@ func TestControlGatewayWritesWorkspaceFile(t *testing.T) {
 	}
 }
 
+func TestControlGatewayAppliesWorkspacePatch(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "note.txt"), []byte("before\nold line\nafter\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesApplyPatch,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "note.txt",
+			"edits": []map[string]any{
+				{
+					"old_string": "old line\n",
+					"new_string": "new line\n",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(workspaceFilesApplyPatchResult)
+	if !ok {
+		t.Fatalf("patch result = %#v, want workspaceFilesApplyPatchResult", response.Result)
+	}
+	if result.Path != "note.txt" || result.Size != int64(len("before\nnew line\nafter\n")) || result.AppliedEdits != 1 || len(result.StructuredPatch) == 0 {
+		t.Fatalf("patch result = %#v", result)
+	}
+	body, err := os.ReadFile(filepath.Join(workspace.LocalCWD, "note.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "before\nnew line\nafter\n" {
+		t.Fatalf("patched body = %q", string(body))
+	}
+}
+
+func TestControlGatewayRejectsAmbiguousWorkspacePatch(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "note.txt"), []byte("same\nsame\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesApplyPatch,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "note.txt",
+			"edits": []map[string]any{
+				{
+					"old_string": "same",
+					"new_string": "changed",
+				},
+			},
+		},
+	})
+	assertActionError(t, err, http.StatusConflict, "workspace_patch_old_string_ambiguous")
+}
+
+func TestControlGatewayWorkspacePatchRequiresWriteCapability(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "note.txt"), []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesRead)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesApplyPatch,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "note.txt",
+			"edits": []map[string]any{
+				{
+					"old_string": "old",
+					"new_string": "new",
+				},
+			},
+		},
+	})
+	assertActionError(t, err, http.StatusForbidden, "capability_denied")
+}
+
 func TestControlGatewayRejectsWorkspacePathEscape(t *testing.T) {
 	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)

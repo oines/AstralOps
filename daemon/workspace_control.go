@@ -37,6 +37,18 @@ type workspaceFilesWriteParams struct {
 	CreateParents *bool  `json:"create_parents,omitempty"`
 }
 
+type workspaceFilesApplyPatchParams struct {
+	WorkspaceID string                  `json:"workspace_id"`
+	Path        string                  `json:"path"`
+	Edits       []workspaceFileTextEdit `json:"edits"`
+}
+
+type workspaceFileTextEdit struct {
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all,omitempty"`
+}
+
 type workspaceExecParams struct {
 	WorkspaceID string `json:"workspace_id"`
 	Command     string `json:"command"`
@@ -72,6 +84,16 @@ type workspaceFilesWriteResult struct {
 	Path        string `json:"path"`
 	Kind        string `json:"kind"`
 	Size        int64  `json:"size"`
+}
+
+type workspaceFilesApplyPatchResult struct {
+	WorkspaceID     string           `json:"workspace_id"`
+	Target          string           `json:"target"`
+	Path            string           `json:"path"`
+	Kind            string           `json:"kind"`
+	Size            int64            `json:"size"`
+	AppliedEdits    int              `json:"applied_edits"`
+	StructuredPatch []map[string]any `json:"structured_patch,omitempty"`
 }
 
 type workspaceExecResult struct {
@@ -126,6 +148,23 @@ func (a *app) writeControlWorkspaceFile(ctx context.Context, params workspaceFil
 		return a.writeRemoteControlWorkspaceFile(ctx, ws, params, body)
 	}
 	return a.writeLocalControlWorkspaceFile(ws, params, body)
+}
+
+func (a *app) applyControlWorkspacePatch(ctx context.Context, params workspaceFilesApplyPatchParams) (workspaceFilesApplyPatchResult, error) {
+	ws, err := a.controlWorkspace(params.WorkspaceID)
+	if err != nil {
+		return workspaceFilesApplyPatchResult{}, err
+	}
+	if strings.TrimSpace(params.Path) == "" {
+		return workspaceFilesApplyPatchResult{}, newActionError(http.StatusBadRequest, "workspace_file_path_required", "path required")
+	}
+	if len(params.Edits) == 0 {
+		return workspaceFilesApplyPatchResult{}, newActionError(http.StatusBadRequest, "workspace_patch_required", "edits required")
+	}
+	if ws.Target == "ssh" {
+		return a.applyRemoteControlWorkspacePatch(ctx, ws, params)
+	}
+	return a.applyLocalControlWorkspacePatch(ws, params)
 }
 
 func (a *app) executeControlWorkspaceCommand(ctx context.Context, params workspaceExecParams) (workspaceExecResult, error) {
@@ -310,6 +349,76 @@ func (a *app) writeRemoteControlWorkspaceFile(ctx context.Context, ws Workspace,
 	}, nil
 }
 
+func (a *app) applyLocalControlWorkspacePatch(ws Workspace, params workspaceFilesApplyPatchParams) (workspaceFilesApplyPatchResult, error) {
+	root := filepath.Clean(ws.LocalCWD)
+	target, rel, err := resolveWorkspacePath(root, params.Path)
+	if err != nil {
+		return workspaceFilesApplyPatchResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	info, err := os.Stat(target)
+	if err != nil || info.IsDir() {
+		return workspaceFilesApplyPatchResult{}, newActionError(http.StatusNotFound, "workspace_file_not_found", "workspace file not found")
+	}
+	body, err := readWorkspaceFileBytes(target, info, 0)
+	if err != nil {
+		return workspaceFilesApplyPatchResult{}, err
+	}
+	next, applied, err := applyWorkspaceTextEdits(string(body), params.Edits)
+	if err != nil {
+		return workspaceFilesApplyPatchResult{}, err
+	}
+	if err := os.WriteFile(target, []byte(next), 0o600); err != nil {
+		return workspaceFilesApplyPatchResult{}, newActionError(http.StatusBadRequest, "workspace_file_write_failed", err.Error())
+	}
+	return workspaceFilesApplyPatchResult{
+		WorkspaceID:     ws.ID,
+		Target:          ws.Target,
+		Path:            rel,
+		Kind:            "file",
+		Size:            int64(len(next)),
+		AppliedEdits:    applied,
+		StructuredPatch: simpleStructuredPatch(string(body), next),
+	}, nil
+}
+
+func (a *app) applyRemoteControlWorkspacePatch(ctx context.Context, ws Workspace, params workspaceFilesApplyPatchParams) (workspaceFilesApplyPatchResult, error) {
+	if a.ssh == nil {
+		return workspaceFilesApplyPatchResult{}, newActionError(http.StatusNotImplemented, "ssh_unavailable", "ssh manager unavailable")
+	}
+	root := remotePathClean(ws.SSH.RemoteCWD)
+	target, rel, err := resolveRemoteWorkspacePath(root, params.Path)
+	if err != nil {
+		return workspaceFilesApplyPatchResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	var out map[string]any
+	if err := a.ssh.call(ctx, ws, "read", map[string]any{"path": target}, &out); err != nil {
+		return workspaceFilesApplyPatchResult{}, newActionError(http.StatusBadRequest, "workspace_file_read_failed", err.Error())
+	}
+	body, err := remoteReadBytes(out)
+	if err != nil {
+		return workspaceFilesApplyPatchResult{}, newActionError(http.StatusBadRequest, "workspace_file_read_failed", err.Error())
+	}
+	if int64(len(body)) > workspaceFileHardMaxBytes {
+		return workspaceFilesApplyPatchResult{}, newActionError(http.StatusRequestEntityTooLarge, "workspace_file_too_large", "workspace file is too large for workspace.files.apply_patch")
+	}
+	next, applied, err := applyWorkspaceTextEdits(string(body), params.Edits)
+	if err != nil {
+		return workspaceFilesApplyPatchResult{}, err
+	}
+	if err := a.ssh.call(ctx, ws, "write", remoteWriteParams(target, []byte(next)), nil); err != nil {
+		return workspaceFilesApplyPatchResult{}, newActionError(http.StatusBadRequest, "workspace_file_write_failed", err.Error())
+	}
+	return workspaceFilesApplyPatchResult{
+		WorkspaceID:     ws.ID,
+		Target:          ws.Target,
+		Path:            rel,
+		Kind:            "file",
+		Size:            int64(len(next)),
+		AppliedEdits:    applied,
+		StructuredPatch: simpleStructuredPatch(string(body), next),
+	}, nil
+}
+
 func executeLocalControlWorkspaceCommand(parent context.Context, ws Workspace, command, requestedCWD string, timeout time.Duration) (workspaceExecResult, error) {
 	root := filepath.Clean(ws.LocalCWD)
 	cwd, rel, err := resolveWorkspacePath(root, requestedCWD)
@@ -482,6 +591,38 @@ func workspaceWriteBody(params workspaceFilesWriteParams) ([]byte, error) {
 		return body, nil
 	}
 	return []byte(params.Content), nil
+}
+
+func applyWorkspaceTextEdits(content string, edits []workspaceFileTextEdit) (string, int, error) {
+	if strings.ContainsRune(content, 0) {
+		return "", 0, newActionError(http.StatusBadRequest, "workspace_patch_binary_file", "workspace.files.apply_patch only supports text files")
+	}
+	next := content
+	applied := 0
+	for _, edit := range edits {
+		oldString := edit.OldString
+		if oldString == "" {
+			return "", 0, newActionError(http.StatusBadRequest, "workspace_patch_old_string_required", "edits[].old_string required")
+		}
+		count := strings.Count(next, oldString)
+		if count == 0 {
+			return "", 0, newActionError(http.StatusConflict, "workspace_patch_old_string_not_found", "old_string not found")
+		}
+		if !edit.ReplaceAll && count != 1 {
+			return "", 0, newActionError(http.StatusConflict, "workspace_patch_old_string_ambiguous", "old_string is not unique")
+		}
+		if edit.ReplaceAll {
+			next = strings.ReplaceAll(next, oldString, edit.NewString)
+			applied += count
+		} else {
+			next = strings.Replace(next, oldString, edit.NewString, 1)
+			applied++
+		}
+		if strings.ContainsRune(next, 0) {
+			return "", 0, newActionError(http.StatusBadRequest, "workspace_patch_binary_result", "workspace.files.apply_patch produced binary content")
+		}
+	}
+	return next, applied, nil
 }
 
 func allowCreateParents(value *bool) bool {
