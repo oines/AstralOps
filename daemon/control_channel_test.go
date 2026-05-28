@@ -848,6 +848,61 @@ func TestControlWebSocketWorkspaceFileReadResponseIsEncrypted(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketWorkspaceFileWriteRequestResponseIsEncrypted(t *testing.T) {
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceFilesWrite)
+	secret := "sealed-workspace-write-secret"
+	encoded := base64.StdEncoding.EncodeToString([]byte(secret))
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "workspace_file_write",
+			Capability: CapabilityWorkspaceFilesWrite,
+			Action:     ControlActionWorkspaceFilesWrite,
+			Params: map[string]any{
+				"workspace_id":   workspace.ID,
+				"path":           "nested/out.txt",
+				"content_base64": encoded,
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionWorkspaceFilesWrite) || strings.Contains(string(sealedRequest), "nested/out.txt") || strings.Contains(string(sealedRequest), encoded) || strings.Contains(string(sealedRequest), workspace.ID) {
+		t.Fatalf("sealed workspace file write request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), "nested/out.txt") || strings.Contains(string(sealedResponse), secret) || strings.Contains(string(sealedResponse), workspace.LocalCWD) {
+		t.Fatalf("sealed workspace file write response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("plain response = %#v, want ok workspace file write response", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["workspace_id"]) != workspace.ID || stringValue(result["path"]) != "nested/out.txt" || stringValue(result["kind"]) != "file" {
+		t.Fatalf("workspace file write response metadata = %#v", result)
+	}
+	if int64(numberValue(result["size"])) != int64(len(secret)) {
+		t.Fatalf("workspace file write size = %#v, want %d", result["size"], len(secret))
+	}
+	body, err := os.ReadFile(filepath.Join(workspace.LocalCWD, "nested", "out.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != secret {
+		t.Fatalf("written body = %q, want encrypted write output", string(body))
+	}
+	wire, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), workspace.LocalCWD) || strings.Contains(string(wire), secret) {
+		t.Fatalf("workspace file write response leaked Host root or content: %s", string(wire))
+	}
+}
+
 func TestControlWebSocketWorkspacePatchRequestResponseIsEncrypted(t *testing.T) {
 	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceFilesWrite)
 	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "secret.txt"), []byte("old-wire-secret\n"), 0o600); err != nil {
@@ -896,6 +951,90 @@ func TestControlWebSocketWorkspacePatchRequestResponseIsEncrypted(t *testing.T) 
 	}
 	if string(body) != "new-wire-secret\n" {
 		t.Fatalf("patched body = %q, want encrypted patch output", string(body))
+	}
+}
+
+func TestControlWebSocketWorkspaceFileMoveDeleteRequestResponseIsEncrypted(t *testing.T) {
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceFilesWrite)
+	secret := "sealed-workspace-move-secret"
+	source := filepath.Join(workspace.LocalCWD, "from-secret.txt")
+	target := filepath.Join(workspace.LocalCWD, "nested", "to-secret.txt")
+	if err := os.WriteFile(source, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedMoveRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "workspace_file_move",
+			Capability: CapabilityWorkspaceFilesWrite,
+			Action:     ControlActionWorkspaceFilesMove,
+			Params: map[string]any{
+				"workspace_id":     workspace.ID,
+				"path":             "from-secret.txt",
+				"destination_path": "nested/to-secret.txt",
+				"create_parents":   true,
+			},
+		},
+	})
+	if strings.Contains(string(sealedMoveRequest), ControlActionWorkspaceFilesMove) || strings.Contains(string(sealedMoveRequest), "from-secret.txt") || strings.Contains(string(sealedMoveRequest), "nested/to-secret.txt") || strings.Contains(string(sealedMoveRequest), workspace.ID) {
+		t.Fatalf("sealed workspace file move request leaked payload: %s", string(sealedMoveRequest))
+	}
+
+	movePlain, sealedMoveResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedMoveResponse), "from-secret.txt") || strings.Contains(string(sealedMoveResponse), "nested/to-secret.txt") || strings.Contains(string(sealedMoveResponse), workspace.LocalCWD) {
+		t.Fatalf("sealed workspace file move response leaked payload: %s", string(sealedMoveResponse))
+	}
+	if movePlain.Type != "response" || movePlain.Response == nil || !movePlain.Response.OK {
+		t.Fatalf("move response = %#v, want ok workspace file move response", movePlain)
+	}
+	moveResult := mapValue(movePlain.Response.Result)
+	if stringValue(moveResult["from_path"]) != "from-secret.txt" || stringValue(moveResult["to_path"]) != "nested/to-secret.txt" || stringValue(moveResult["kind"]) != "file" {
+		t.Fatalf("workspace file move response metadata = %#v", moveResult)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("moved source stat err = %v, want not exist", err)
+	}
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != secret {
+		t.Fatalf("moved body = %q, want encrypted move output", string(body))
+	}
+
+	sealedDeleteRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "workspace_file_delete",
+			Capability: CapabilityWorkspaceFilesWrite,
+			Action:     ControlActionWorkspaceFilesDelete,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"path":         "nested/to-secret.txt",
+			},
+		},
+	})
+	if strings.Contains(string(sealedDeleteRequest), ControlActionWorkspaceFilesDelete) || strings.Contains(string(sealedDeleteRequest), "nested/to-secret.txt") || strings.Contains(string(sealedDeleteRequest), workspace.ID) {
+		t.Fatalf("sealed workspace file delete request leaked payload: %s", string(sealedDeleteRequest))
+	}
+
+	deletePlain, sealedDeleteResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedDeleteResponse), "nested/to-secret.txt") || strings.Contains(string(sealedDeleteResponse), workspace.LocalCWD) {
+		t.Fatalf("sealed workspace file delete response leaked payload: %s", string(sealedDeleteResponse))
+	}
+	if deletePlain.Type != "response" || deletePlain.Response == nil || !deletePlain.Response.OK {
+		t.Fatalf("delete response = %#v, want ok workspace file delete response", deletePlain)
+	}
+	deleteResult := mapValue(deletePlain.Response.Result)
+	if stringValue(deleteResult["path"]) != "nested/to-secret.txt" || stringValue(deleteResult["kind"]) != "file" || !boolValue(deleteResult["removed"]) {
+		t.Fatalf("workspace file delete response metadata = %#v", deleteResult)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("deleted target stat err = %v, want not exist", err)
 	}
 }
 
