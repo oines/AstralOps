@@ -100,6 +100,85 @@ func TestControlGatewayMediaDownloadMarksDownloadResponse(t *testing.T) {
 	}
 }
 
+func TestControlGatewayMediaReferenceRequiresMatchingSessionEventAndMediaID(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	otherSession := app.store.createSession(workspace, AgentCodex)
+	media := addControlMessageMediaFixture(t, app, workspace, session, "generated_media_1", []byte("generated-media-secret"))
+	trustControlDevice(t, app, "device_mobile", CapabilityMediaRead)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityMediaRead,
+		Action:             ControlActionMediaRead,
+		Params: map[string]any{
+			"session_id": session.ID,
+			"event_seq":  media.eventSeq,
+			"media_id":   media.mediaID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(mediaReadResult)
+	if !ok {
+		t.Fatalf("media result = %#v, want mediaReadResult", response.Result)
+	}
+	if result.SessionID != session.ID || result.EventSeq != media.eventSeq || result.MediaID != media.mediaID || result.Kind != "image" {
+		t.Fatalf("media result reference = %#v, want message.media fixture reference", result)
+	}
+	body, err := base64.StdEncoding.DecodeString(result.ContentBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "generated-media-secret" {
+		t.Fatalf("media body = %q, want message.media fixture body", string(body))
+	}
+
+	for _, tc := range []struct {
+		name   string
+		params map[string]any
+		code   string
+	}{
+		{
+			name: "wrong session",
+			params: map[string]any{
+				"session_id": otherSession.ID,
+				"event_seq":  media.eventSeq,
+				"media_id":   media.mediaID,
+			},
+			code: "media_event_not_found",
+		},
+		{
+			name: "wrong event",
+			params: map[string]any{
+				"session_id": session.ID,
+				"event_seq":  media.eventSeq + 1,
+				"media_id":   media.mediaID,
+			},
+			code: "media_event_not_found",
+		},
+		{
+			name: "wrong media",
+			params: map[string]any{
+				"session_id": session.ID,
+				"event_seq":  media.eventSeq,
+				"media_id":   "other_media",
+			},
+			code: "media_not_found",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := app.executeControlRequest(ControlRequest{
+				ControllerDeviceID: "device_mobile",
+				Capability:         CapabilityMediaRead,
+				Action:             ControlActionMediaRead,
+				Params:             tc.params,
+			})
+			assertActionError(t, err, http.StatusNotFound, tc.code)
+		})
+	}
+}
+
 func TestControlGatewayMediaStreamRequiresEncryptedConnection(t *testing.T) {
 	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	media := addControlMediaFixture(t, app, workspace, session, []byte("stream-body"))
@@ -246,6 +325,33 @@ func addControlMediaFixture(t *testing.T, app *app, workspace Workspace, session
 	events := app.store.queryEvents(workspace.ID, session.ID, 0)
 	if len(events) == 0 {
 		t.Fatal("media fixture event was not persisted")
+	}
+	return controlMediaFixture{eventSeq: events[len(events)-1].Seq, mediaID: mediaID, path: path}
+}
+
+func addControlMessageMediaFixture(t *testing.T, app *app, workspace Workspace, session Session, mediaID string, body []byte) controlMediaFixture {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "generated.png")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app.emit(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       session.Agent,
+		Kind:        "message.media",
+		Normalized: map[string]any{
+			"media_id":  mediaID,
+			"kind":      "image",
+			"path":      path,
+			"name":      "generated.png",
+			"mime_type": "image/png",
+		},
+	})
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if len(events) == 0 {
+		t.Fatal("message media fixture event was not persisted")
 	}
 	return controlMediaFixture{eventSeq: events[len(events)-1].Seq, mediaID: mediaID, path: path}
 }
