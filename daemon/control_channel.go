@@ -50,6 +50,7 @@ type controlPlainFrame struct {
 	Request  *ControlRequest      `json:"request,omitempty"`
 	Response *ControlResponse     `json:"response,omitempty"`
 	Terminal *terminalStreamFrame `json:"terminal,omitempty"`
+	Media    *mediaStreamFrame    `json:"media,omitempty"`
 	Reason   string               `json:"reason,omitempty"`
 	Code     string               `json:"code,omitempty"`
 }
@@ -213,7 +214,11 @@ func (c *controlWSConn) serve() {
 				c.writePlain(controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_request", "missing request")})
 				continue
 			}
-			c.writePlain(controlPlainFrame{Type: "response", Response: c.handleRequest(*plain.Request)})
+			response, after := c.handleRequest(*plain.Request)
+			c.writePlain(controlPlainFrame{Type: "response", Response: response})
+			if after != nil {
+				go after()
+			}
 		case "close":
 			return
 		default:
@@ -222,16 +227,33 @@ func (c *controlWSConn) serve() {
 	}
 }
 
-func (c *controlWSConn) handleRequest(req ControlRequest) *ControlResponse {
+func (c *controlWSConn) handleRequest(req ControlRequest) (*ControlResponse, func()) {
 	if strings.TrimSpace(req.ControllerDeviceID) != "" && req.ControllerDeviceID != c.controllerDeviceID {
-		return controlResponseError(req.RequestID, http.StatusForbidden, "controller_device_mismatch", "request controller_device_id does not match control session")
+		return controlResponseError(req.RequestID, http.StatusForbidden, "controller_device_mismatch", "request controller_device_id does not match control session"), nil
 	}
 	req.ControllerDeviceID = c.controllerDeviceID
 	response, err := c.app.executeControlRequestWithConnection(req, c)
 	if err == nil {
-		return &response
+		return &response, c.afterControlResponse(req, response)
 	}
-	return controlResponseFromError(req.RequestID, err)
+	return controlResponseFromError(req.RequestID, err), nil
+}
+
+func (c *controlWSConn) afterControlResponse(req ControlRequest, response ControlResponse) func() {
+	if !response.OK || req.Action != ControlActionMediaStream {
+		return nil
+	}
+	result, ok := response.Result.(mediaStreamResult)
+	if !ok {
+		return nil
+	}
+	var params mediaStreamParams
+	if err := decodeControlParams(req.Params, &params); err != nil {
+		return nil
+	}
+	return func() {
+		c.app.streamControlMedia(params, result, c, req.RequestID)
+	}
 }
 
 func (c *controlWSConn) openSealedMessage(body []byte) (controlPlainFrame, error) {

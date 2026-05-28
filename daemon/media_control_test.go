@@ -99,6 +99,42 @@ func TestControlGatewayMediaDownloadMarksDownloadResponse(t *testing.T) {
 	}
 }
 
+func TestControlGatewayMediaStreamRequiresEncryptedConnection(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	media := addControlMediaFixture(t, app, workspace, session, []byte("stream-body"))
+	trustControlDevice(t, app, "device_mobile", CapabilityMediaStream)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityMediaStream,
+		Action:             ControlActionMediaStream,
+		Params: map[string]any{
+			"session_id": session.ID,
+			"event_seq":  media.eventSeq,
+			"media_id":   media.mediaID,
+		},
+	})
+	assertActionError(t, err, http.StatusBadRequest, "control_connection_required")
+}
+
+func TestControlGatewayMediaStreamRequiresCapability(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	media := addControlMediaFixture(t, app, workspace, session, []byte("stream-body"))
+	trustControlDevice(t, app, "device_mobile", CapabilityMediaRead)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityMediaStream,
+		Action:             ControlActionMediaStream,
+		Params: map[string]any{
+			"session_id": session.ID,
+			"event_seq":  media.eventSeq,
+			"media_id":   media.mediaID,
+		},
+	})
+	assertActionError(t, err, http.StatusForbidden, "capability_denied")
+}
+
 type controlMediaFixture struct {
 	eventSeq int64
 	mediaID  string

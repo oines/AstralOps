@@ -242,6 +242,72 @@ func TestControlWebSocketMediaReadResponseIsEncrypted(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketMediaStreamChunksAreEncrypted(t *testing.T) {
+	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityMediaStream)
+	secret := []byte("sealed-media-stream-secret")
+	media := addControlMediaFixture(t, app, workspace, session, secret)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "media_stream",
+			Capability: CapabilityMediaStream,
+			Action:     ControlActionMediaStream,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"event_seq":  media.eventSeq,
+				"media_id":   media.mediaID,
+				"chunk_size": 7,
+			},
+		},
+	})
+
+	plain, sealed := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealed), string(secret)) {
+		t.Fatalf("sealed media stream response leaked payload: %s", string(sealed))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("plain response = %#v, want ok media stream response", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	streamID := stringValue(result["stream_id"])
+	if streamID == "" || stringValue(result["content_base64"]) != "" {
+		t.Fatalf("stream result = %#v, want stream metadata without content", result)
+	}
+
+	var streamed []byte
+	for {
+		frame, sealed := readEncryptedControlFrameWithBody(t, client, cipher)
+		if strings.Contains(string(sealed), string(secret)) {
+			t.Fatalf("sealed media stream frame leaked payload: %s", string(sealed))
+		}
+		if frame.Media == nil || frame.Media.StreamID != streamID {
+			t.Fatalf("stream frame = %#v, want media frame for stream %q", frame, streamID)
+		}
+		switch frame.Type {
+		case mediaStreamFrameChunk:
+			body, err := base64.StdEncoding.DecodeString(frame.Media.DataBase64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			streamed = append(streamed, body...)
+		case mediaStreamFrameComplete:
+			if !frame.Media.Final {
+				t.Fatalf("completion frame = %#v, want final", frame.Media)
+			}
+			if string(streamed) != string(secret) {
+				t.Fatalf("streamed media = %q, want %q", string(streamed), string(secret))
+			}
+			return
+		default:
+			t.Fatalf("stream frame type = %q", frame.Type)
+		}
+	}
+}
+
 func TestControlWebSocketWorkspaceFileReadResponseIsEncrypted(t *testing.T) {
 	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceFilesRead)
 	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "secret.txt"), []byte("sealed-workspace-secret"), 0o600); err != nil {

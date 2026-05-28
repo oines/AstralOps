@@ -397,6 +397,11 @@ export type MediaReadParams = {
 
 export type MediaDownloadParams = MediaReadParams;
 
+export type MediaStreamParams = MediaReadParams & {
+  offset?: number;
+  chunk_size?: number;
+};
+
 export type AttachmentIngestParams = {
   session_id: string;
   name: string;
@@ -421,6 +426,37 @@ export type MediaReadResult = {
   size?: number;
   content_base64: string;
   download?: boolean;
+};
+
+export type MediaStreamResult = {
+  stream_id: string;
+  session_id: string;
+  event_seq: number;
+  media_id: string;
+  kind: "image" | "file" | string;
+  name: string;
+  mime_type?: string;
+  size?: number;
+  offset: number;
+  chunk_size: number;
+};
+
+export type MediaStreamFrame = {
+  stream_id: string;
+  request_id?: string;
+  session_id: string;
+  event_seq: number;
+  media_id: string;
+  kind?: "image" | "file" | string;
+  name?: string;
+  mime_type?: string;
+  size?: number;
+  seq: number;
+  offset: number;
+  data_base64?: string;
+  final?: boolean;
+  error_code?: string;
+  error_message?: string;
 };
 
 export type WorkspaceFilesReadParams = {
@@ -516,6 +552,7 @@ export type ControlAction =
   | "attachment.ingest"
   | "media.read"
   | "media.download"
+  | "media.stream"
   | "workspace.files.read"
   | "workspace.files.write"
   | "workspace.exec"
@@ -707,6 +744,18 @@ export type ControlPlainFrame =
   | {
       type: "terminal.closed";
       terminal: TerminalStreamFrame;
+    }
+  | {
+      type: "media.chunk";
+      media: MediaStreamFrame;
+    }
+  | {
+      type: "media.completed";
+      media: MediaStreamFrame;
+    }
+  | {
+      type: "media.error";
+      media: MediaStreamFrame;
     }
   | {
       type: "close";

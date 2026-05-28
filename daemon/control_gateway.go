@@ -35,6 +35,7 @@ const (
 	ControlActionAttachmentIngest    = "attachment.ingest"
 	ControlActionMediaRead           = "media.read"
 	ControlActionMediaDownload       = "media.download"
+	ControlActionMediaStream         = "media.stream"
 	ControlActionWorkspaceFilesRead  = "workspace.files.read"
 	ControlActionWorkspaceFilesWrite = "workspace.files.write"
 	ControlActionWorkspaceExec       = "workspace.exec"
@@ -110,6 +111,8 @@ func controlActionCapability(action string) string {
 		return CapabilityMediaRead
 	case ControlActionMediaDownload:
 		return CapabilityMediaDownload
+	case ControlActionMediaStream:
+		return CapabilityMediaStream
 	case ControlActionWorkspaceFilesRead:
 		return CapabilityWorkspaceFilesRead
 	case ControlActionWorkspaceFilesWrite:
@@ -225,6 +228,15 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn) (an
 			return nil, err
 		}
 		return a.readControlMedia(params, true)
+	case ControlActionMediaStream:
+		if conn == nil {
+			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "media.stream requires an encrypted control connection")
+		}
+		var params mediaStreamParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.prepareControlMediaStream(params)
 	case ControlActionWorkspaceFilesRead:
 		var params workspaceFilesReadParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

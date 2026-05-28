@@ -637,7 +637,7 @@ media.download
   请求 Host 以下载语义返回媒体资源，文件名、MIME type、大小等元数据由 Host/Core 决定。
 
 media.stream
-  面向大文件、生成中图片、未来视频或渐进式预览的媒体流。数据帧必须和 PTY 一样走 E2EE channel，relay 只转发密文。
+  面向大文件、生成中图片、未来视频或渐进式预览的媒体流。数据帧和 PTY 一样走 E2EE channel，relay 只转发密文。
 
 workspace.files.read
   通过 Host 浏览目录或读取文件内容。SSH workspace 中，由 Host 发起 SSH 读取。v1 返回目录列表或中小文件的 base64 内容；大文件后续走 stream。
@@ -750,7 +750,7 @@ Controller selects file / paste image
   -> core.control send input with Host-owned attachment handle
 ```
 
-`attachment.ingest` v1 使用 encrypted control request 承载 `content_base64`，用于中小附件的基础闭环；大文件和连续媒体仍然走后续 `media.stream` / chunked E2EE data frames。远程 `core.control.session_input` 只接受 Host-owned attachment handle，不接受 Controller 本地路径。
+`attachment.ingest` v1 使用 encrypted control request 承载 `content_base64`，用于中小附件的基础闭环；大文件上传后续需要独立的 chunked ingest。远程 `core.control.session_input` 只接受 Host-owned attachment handle，不接受 Controller 本地路径。
 
 禁止的模型：
 
@@ -1046,13 +1046,15 @@ Host-local upload store for remote attachment ingest
 Host-owned attachment handles for remote session input
 media.read
 media.download
+media.stream
+chunked E2EE media frames
 event_seq + media_id reference validation
 E2EE response frames
 Host path never exposed in control response
 
 待落地:
-media.stream
-chunked E2EE data frames
+chunked attachment ingest for large uploads
+stream cancellation/resume policy
 ```
 
 Local Desktop 可以继续用本地 HTTP URL 渲染媒体，但 RemoteCoreClient 和 Mobile 必须只依赖 capability 和 encrypted media frames。
