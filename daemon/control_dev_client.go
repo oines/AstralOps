@@ -367,9 +367,10 @@ type controlClientTargetOptions struct {
 }
 
 type controlClientTarget struct {
-	BaseURL  string
-	HostInfo HostInfo
-	Timeout  time.Duration
+	BaseURL      string
+	HostInfo     HostInfo
+	Timeout      time.Duration
+	FallbackHost string
 }
 
 type controlClientSmokeOptions struct {
@@ -440,7 +441,7 @@ func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (con
 	if err := validateKnownLanHost(candidate, knownHost, hostInfo); err != nil {
 		return controlClientFallbackTarget(opts.Host, err)
 	}
-	return controlClientTarget{BaseURL: candidate.BaseURL, HostInfo: hostInfo, Timeout: opts.LANTimeout}, nil
+	return controlClientTarget{BaseURL: candidate.BaseURL, HostInfo: hostInfo, Timeout: opts.LANTimeout, FallbackHost: strings.TrimSpace(opts.Host)}, nil
 }
 
 func controlClientExplicitTarget(host string) (controlClientTarget, error) {
@@ -641,7 +642,7 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 	if chunkSize > 0 {
 		params["chunk_size"] = chunkSize
 	}
-	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
 	if err != nil {
 		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "connect_failed", Message: err.Error()}}
 		return step, err
@@ -658,7 +659,7 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
 		return step, err
 	}
-	plain, err := controlClientReadWithTimeout(socket, cipher, target.Timeout)
+	plain, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
 	if err != nil {
 		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "read_failed", Message: err.Error()}}
 		return step, err
@@ -683,7 +684,7 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 	var bytesRead int64
 	chunks := 0
 	for {
-		frame, err := controlClientReadWithTimeout(socket, cipher, target.Timeout)
+		frame, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
 		if err != nil {
 			step.OK = false
 			step.Error = &ControlError{Code: "stream_read_failed", Message: err.Error()}
@@ -737,7 +738,7 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 	if chunkSize > 0 {
 		params["chunk_size"] = chunkSize
 	}
-	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
 	if err != nil {
 		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "connect_failed", Message: err.Error()}}
 		return step, err
@@ -754,7 +755,7 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
 		return step, err
 	}
-	plain, err := controlClientReadWithTimeout(socket, cipher, target.Timeout)
+	plain, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
 	if err != nil {
 		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "read_failed", Message: err.Error()}}
 		return step, err
@@ -779,7 +780,7 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 	var bytesRead int64
 	chunks := 0
 	for {
-		frame, err := controlClientReadWithTimeout(socket, cipher, target.Timeout)
+		frame, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
 		if err != nil {
 			step.OK = false
 			step.Error = &ControlError{Code: "stream_read_failed", Message: err.Error()}
@@ -891,7 +892,7 @@ func controlClientSmokeWorkspaceWriteFlow(st *store, target controlClientTarget,
 }
 
 func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, workspaceID string) ([]controlClientSmokeStep, error) {
-	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
 	if err != nil {
 		return []controlClientSmokeStep{{Name: "terminal_open", Capability: CapabilityTerminalOpen, Action: ControlActionTerminalOpen, Error: &ControlError{Code: "connect_failed", Message: err.Error()}}}, err
 	}
@@ -906,7 +907,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 		}
 	}()
 
-	open, err := controlClientRoundTrip(socket, cipher, target.Timeout, st, ControlRequest{
+	open, err := controlClientRoundTrip(socket, cipher, activeTarget.Timeout, st, ControlRequest{
 		RequestID:  "smoke_terminal_open",
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalOpen,
@@ -927,7 +928,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 		return steps, err
 	}
 
-	attach, err := controlClientTerminalResponseRoundTrip(socket, cipher, target.Timeout, st, ControlRequest{
+	attach, err := controlClientTerminalResponseRoundTrip(socket, cipher, activeTarget.Timeout, st, ControlRequest{
 		RequestID:  "smoke_terminal_attach",
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalAttach,
@@ -962,7 +963,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 	outputBytes := 0
 	sawMarker := false
 	for i := 0; i < 40 && (inputResponse == nil || !sawMarker); i++ {
-		frame, err := controlClientReadWithTimeout(socket, cipher, target.Timeout)
+		frame, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
 		if err != nil {
 			step := controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "terminal_read_failed", Message: err.Error()}}
 			steps = appendTerminalInputStep(steps, inputResponse)
@@ -1023,7 +1024,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 	}
 	steps = append(steps, outputStep)
 
-	closeSteps, err := controlClientSmokeTerminalClose(socket, cipher, target.Timeout, st, terminalID)
+	closeSteps, err := controlClientSmokeTerminalClose(socket, cipher, activeTarget.Timeout, st, terminalID)
 	steps = append(steps, closeSteps...)
 	if err != nil {
 		return steps, err
@@ -1140,14 +1141,14 @@ func controlClientSmokeRequest(st *store, target controlClientTarget, requestID,
 func controlClientSmokeEventSubscription(st *store, target controlClientTarget, workspaceID, sessionID string, replayLimit int) (controlClientSmokeStep, error) {
 	name := "event_subscription"
 	step := controlClientSmokeStep{Name: name, Capability: CapabilityCoreRead, Action: ControlActionEventsSubscribe}
-	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
 	if err != nil {
 		step.Error = &ControlError{Code: "connect_failed", Message: err.Error()}
 		return step, err
 	}
 	defer socket.Close()
 
-	response, err := controlClientRoundTrip(socket, cipher, target.Timeout, st, ControlRequest{
+	response, err := controlClientRoundTrip(socket, cipher, activeTarget.Timeout, st, ControlRequest{
 		RequestID:  "smoke_event_subscription",
 		Capability: CapabilityCoreRead,
 		Action:     ControlActionEventsSubscribe,
@@ -1172,7 +1173,7 @@ func controlClientSmokeEventSubscription(st *store, target controlClientTarget, 
 		return step, err
 	}
 
-	plain, err := controlClientReadWithTimeout(socket, cipher, target.Timeout)
+	plain, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
 	if err != nil {
 		step.Error = &ControlError{Code: "event_subscription_read_failed", Message: err.Error()}
 		return step, err
@@ -1211,14 +1212,14 @@ func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, s
 		return step, err
 	}
 
-	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
 	if err != nil {
 		step.Error = &ControlError{Code: "connect_failed", Message: err.Error()}
 		return step, err
 	}
 	defer socket.Close()
 
-	start, err := controlClientRoundTrip(socket, cipher, target.Timeout, st, ControlRequest{
+	start, err := controlClientRoundTrip(socket, cipher, activeTarget.Timeout, st, ControlRequest{
 		RequestID:  "smoke_attachment_start",
 		Capability: CapabilityAttachmentIngest,
 		Action:     ControlActionAttachmentIngestStart,
@@ -1259,7 +1260,7 @@ func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, s
 		if n > 0 {
 			seq++
 			chunk := buffer[:n]
-			response, err := controlClientRoundTrip(socket, cipher, target.Timeout, st, ControlRequest{
+			response, err := controlClientRoundTrip(socket, cipher, activeTarget.Timeout, st, ControlRequest{
 				RequestID:  fmt.Sprintf("smoke_attachment_chunk_%d", seq),
 				Capability: CapabilityAttachmentIngest,
 				Action:     ControlActionAttachmentIngestChunk,
@@ -1291,7 +1292,7 @@ func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, s
 		return step, readErr
 	}
 
-	finish, err := controlClientRoundTrip(socket, cipher, target.Timeout, st, ControlRequest{
+	finish, err := controlClientRoundTrip(socket, cipher, activeTarget.Timeout, st, ControlRequest{
 		RequestID:  "smoke_attachment_finish",
 		Capability: CapabilityAttachmentIngest,
 		Action:     ControlActionAttachmentIngestFinish,
@@ -1625,13 +1626,13 @@ func controlClientRequest(host string, st *store, req ControlRequest) (ControlRe
 }
 
 func controlClientRequestToTarget(target controlClientTarget, st *store, req ControlRequest) (ControlResponse, error) {
-	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
 	if err != nil {
 		return ControlResponse{}, err
 	}
 	defer socket.Close()
 
-	return controlClientRoundTrip(socket, cipher, target.Timeout, st, req)
+	return controlClientRoundTrip(socket, cipher, activeTarget.Timeout, st, req)
 }
 
 func controlClientRoundTrip(socket *websocket.Conn, cipher *controlCipher, timeout time.Duration, st *store, req ControlRequest) (ControlResponse, error) {
@@ -1675,6 +1676,28 @@ func controlClientHostInfoWithClient(host string, client *http.Client) (HostInfo
 
 func controlClientDial(host string, st *store, hostInfo HostInfo) (*websocket.Conn, *controlCipher, error) {
 	return controlClientDialWithTimeout(host, st, hostInfo, 0)
+}
+
+func controlClientDialTarget(target controlClientTarget, st *store) (*websocket.Conn, *controlCipher, controlClientTarget, error) {
+	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	if err == nil {
+		return socket, cipher, target, nil
+	}
+	if strings.TrimSpace(target.FallbackHost) == "" {
+		return nil, nil, target, err
+	}
+	fallback, fallbackErr := controlClientExplicitTarget(target.FallbackHost)
+	if fallbackErr != nil {
+		return nil, nil, target, fmt.Errorf("LAN control channel failed: %v; fallback host failed: %w", err, fallbackErr)
+	}
+	if fallback.HostInfo.Identity.DeviceID != target.HostInfo.Identity.DeviceID || fallback.HostInfo.Identity.PublicKey != target.HostInfo.Identity.PublicKey {
+		return nil, nil, target, fmt.Errorf("LAN control channel failed: %v; fallback host identity mismatch for %s", err, target.HostInfo.Identity.DeviceID)
+	}
+	socket, cipher, fallbackDialErr := controlClientDialWithTimeout(fallback.BaseURL, st, fallback.HostInfo, fallback.Timeout)
+	if fallbackDialErr != nil {
+		return nil, nil, target, fmt.Errorf("LAN control channel failed: %v; fallback control channel failed: %w", err, fallbackDialErr)
+	}
+	return socket, cipher, fallback, nil
 }
 
 func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, timeout time.Duration) (*websocket.Conn, *controlCipher, error) {

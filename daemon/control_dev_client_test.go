@@ -122,6 +122,42 @@ func TestControlClientResolveTargetFallsBackToExplicitHostWhenLanMissing(t *test
 	}
 }
 
+func TestControlClientRequestFallsBackWhenLanControlDialFails(t *testing.T) {
+	hostApp, _ := newRemoteControlHandlerTestApp(t)
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, false))
+	defer hostServer.Close()
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = hostApp.store.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:             controllerStore.deviceIdentity.DeviceID,
+		ControllerPublicKey:            controllerStore.deviceIdentity.PublicKey,
+		ControllerPublicKeyFingerprint: controllerStore.deviceIdentity.PublicKeyFingerprint,
+		Capabilities:                   []string{CapabilityCoreRead},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := controlClientRequestToTarget(controlClientTarget{
+		BaseURL:      "http://127.0.0.1:9",
+		HostInfo:     hostApp.store.hostInfo(),
+		Timeout:      time.Millisecond,
+		FallbackHost: hostServer.URL,
+	}, controllerStore, ControlRequest{
+		RequestID:  "req_workspaces",
+		Capability: CapabilityCoreRead,
+		Action:     ControlActionWorkspaces,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK || response.RequestID != "req_workspaces" {
+		t.Fatalf("response = %#v, want fallback workspaces response", response)
+	}
+}
+
 func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	hostApp, workspace := newRemoteControlHandlerTestApp(t)
 	session := hostApp.store.createSession(workspace, workspace.Agent)

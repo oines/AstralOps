@@ -83,6 +83,7 @@ Do not add speculative fallback logic, broad catch-all mappings, or redundant de
 Every behavior mapping, permission response, state transition, and UI surface must be backed by a real Claude/Codex fixture, source-backed protocol shape, or an explicit rule in this file.
 If a real issue points to an architectural mismatch, stop and identify the architectural fix or refactor boundary for user confirmation instead of layering another patch on top of the mismatch.
 For any active goal or implementation task, if the chosen path starts looking like a dead end, disproportionally complex, or misaligned with the product goal, pause before continuing and reassess whether this route is still worth doing. Compare it against simpler technical choices and the intended architecture, state the route judgment, then continue only when the chosen route is still justified.
+Route judgment is part of the task, not optional commentary: when uncertainty or complexity appears, explicitly name the product goal, the simpler alternative, and why continuing or changing course fits the architecture before making more infrastructure edits.
 Do not keep drilling into a complex approach merely because work has already started. Prefer changing course early when a simpler, better-scoped infrastructure choice fits the architecture.
 Prefer deleting or narrowing unsupported branches over preserving "just in case" behavior.
 Temporary compatibility code is allowed only when tied to a specific observed version/shape and documented with the fixture or source evidence that requires it.
