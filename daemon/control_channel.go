@@ -460,6 +460,8 @@ func (a *app) closeControlSessionsForDeviceExcept(controllerDeviceID, reason, ex
 	}
 	a.controlMu.Unlock()
 	for _, conn := range sessions {
+		conn.cancelAllControlStreams()
+		a.detachTerminalViewersForControlSession(conn.id, reason)
 		conn.writeEncryptedClose("trust_revoked", reason)
 		_ = conn.socket.Close()
 	}

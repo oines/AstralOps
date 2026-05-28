@@ -2171,6 +2171,44 @@ func TestControlWebSocketRevokeClosesActiveSession(t *testing.T) {
 	}
 }
 
+func TestCloseControlSessionsForDeviceImmediatelyCleansControlStreams(t *testing.T) {
+	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, ack := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+	conn := controlSessionForAck(t, app, ack)
+
+	mediaCtx, cancelMedia := context.WithCancel(context.Background())
+	eventCtx, cancelEvent := context.WithCancel(context.Background())
+	workspaceCtx, cancelWorkspace := context.WithCancel(context.Background())
+	conn.registerMediaStream("media_stream_revoke_cleanup", cancelMedia)
+	conn.registerEventSubscription("event_stream_revoke_cleanup", cancelEvent)
+	conn.registerWorkspaceFileStream("workspace_stream_revoke_cleanup", cancelWorkspace)
+
+	if closed := app.closeControlSessionsForDevice("dev_controller", "trust_revoked"); closed != 1 {
+		t.Fatalf("closed sessions = %d, want 1", closed)
+	}
+	for name, ctx := range map[string]context.Context{
+		"media":     mediaCtx,
+		"event":     eventCtx,
+		"workspace": workspaceCtx,
+	} {
+		select {
+		case <-ctx.Done():
+		default:
+			t.Fatalf("%s stream was not cancelled synchronously on trust revoke", name)
+		}
+	}
+
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Type != "close" || plain.Code != "trust_revoked" {
+		t.Fatalf("close frame = %#v, want trust_revoked", plain)
+	}
+	if got := app.activeControlSessionCountForDevice("dev_controller"); got != 0 {
+		t.Fatalf("active sessions = %d, want 0 after revoke cleanup", got)
+	}
+}
+
 func TestControlWebSocketHostTrustListIsEncrypted(t *testing.T) {
 	app, _, _, adminPublicKey, adminPrivateKey := newControlChannelTestApp(t, CapabilityHostManage)
 	readerPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
