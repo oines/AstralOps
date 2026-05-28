@@ -762,6 +762,44 @@ func TestControlWebSocketSessionInputIsEncrypted(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketInterruptIsEncrypted(t *testing.T) {
+	app, _, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreControl)
+	runtime := app.runtimes[AgentCodex].(*recordingRuntime)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "session_interrupt",
+			Capability: CapabilityCoreControl,
+			Action:     ControlActionInterrupt,
+			Params:     map[string]any{"session_id": session.ID},
+		},
+	})
+	wireRequest := string(sealedRequest)
+	for _, secret := range []string{ControlActionInterrupt, session.ID} {
+		if strings.Contains(wireRequest, secret) {
+			t.Fatalf("sealed interrupt request leaked %q: %s", secret, wireRequest)
+		}
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), session.ID) {
+		t.Fatalf("sealed interrupt response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "session_interrupt" {
+		t.Fatalf("interrupt response = %#v, want ok response", plain)
+	}
+	if !boolValue(mapValue(plain.Response.Result)["ok"]) {
+		t.Fatalf("interrupt result = %#v, want ok", plain.Response.Result)
+	}
+	if len(runtime.interrupts) != 1 || runtime.interrupts[0] != session.ID {
+		t.Fatalf("runtime interrupts = %#v, want encrypted interrupt delivered to Host runtime", runtime.interrupts)
+	}
+}
+
 func TestControlWebSocketInteractionRespondIsEncrypted(t *testing.T) {
 	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityInteractionRespond)
 	runtime := app.runtimes[AgentCodex].(*recordingRuntime)
