@@ -183,7 +183,7 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, gra
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.store.queryEventsWindow(params.WorkspaceID, params.SessionID, params.AfterSeq, params.BeforeSeq, params.Limit), nil
+		return sanitizeControlEvents(a.store.queryEventsWindow(params.WorkspaceID, params.SessionID, params.AfterSeq, params.BeforeSeq, params.Limit)), nil
 	case ControlActionEventsSubscribe:
 		if conn == nil {
 			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "core.subscribe.events requires an encrypted control connection")

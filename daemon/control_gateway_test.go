@@ -163,6 +163,113 @@ func TestControlGatewayReadsEventsWindow(t *testing.T) {
 	}
 }
 
+func TestControlGatewayEventsHideHostPrivateMediaPaths(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+	hostPath := "/host/private/clip.png"
+	userEvent, err := app.store.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       session.Agent,
+		Kind:        "message.user",
+		Normalized: map[string]any{
+			"text": "with attachment",
+			"attachments": []map[string]any{{
+				"id":         "att_1",
+				"media_id":   "att_1",
+				"kind":       "image",
+				"path":       hostPath,
+				"saved_path": hostPath + ".saved",
+				"name":       "clip.png",
+				"mime_type":  "image/png",
+				"size":       12,
+			}},
+		},
+		Raw: map[string]any{"path": hostPath, "secret": "raw"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaEvent, err := app.store.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       session.Agent,
+		Kind:        "message.media",
+		Normalized: map[string]any{
+			"media_id": "media_1",
+			"kind":     "image",
+			"path":     hostPath,
+			"filePath": hostPath,
+			"name":     "generated.png",
+		},
+		Raw: map[string]any{"path": hostPath, "secret": "raw-media"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionEvents,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"session_id":   session.ID,
+			"after_seq":    userEvent.Seq - 1,
+			"limit":        10,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, ok := response.Result.([]AstralEvent)
+	if !ok || len(events) != 2 || events[0].Seq != userEvent.Seq || events[1].Seq != mediaEvent.Seq {
+		t.Fatalf("events result = %#v, want sanitized media events", response.Result)
+	}
+	if events[0].Raw != nil || events[1].Raw != nil {
+		t.Fatalf("remote events leaked raw payloads: %#v", events)
+	}
+	attachment := mapValue(arrayValue(mapValue(events[0].Normalized)["attachments"])[0])
+	if stringValue(attachment["path"]) != "" || stringValue(attachment["saved_path"]) != "" || stringValue(attachment["id"]) != "att_1" || stringValue(attachment["media_id"]) != "att_1" {
+		t.Fatalf("sanitized attachment = %#v", attachment)
+	}
+	media := mapValue(events[1].Normalized)
+	if stringValue(media["path"]) != "" || stringValue(media["filePath"]) != "" || stringValue(media["media_id"]) != "media_1" {
+		t.Fatalf("sanitized media = %#v", media)
+	}
+	var storedUser AstralEvent
+	for _, event := range app.store.queryEvents(workspace.ID, session.ID, 0) {
+		if event.Seq == userEvent.Seq {
+			storedUser = event
+			break
+		}
+	}
+	storedAttachments := attachmentsFromNormalized(mapValue(storedUser.Normalized)["attachments"])
+	if len(storedAttachments) != 1 || storedAttachments[0].Path != hostPath || storedUser.Raw == nil {
+		t.Fatalf("stored event was mutated: %#v", storedUser)
+	}
+}
+
+func TestControlEventFrameHidesHostPrivateMediaPaths(t *testing.T) {
+	frame := controlEventFrame("stream_1", "request_1", AstralEvent{
+		Seq:  7,
+		Kind: "message.media",
+		Normalized: map[string]any{
+			"media_id": "media_1",
+			"path":     "/host/private/generated.png",
+			"name":     "generated.png",
+		},
+		Raw: map[string]any{"path": "/host/private/generated.png"},
+	})
+	if frame.Event.Raw != nil {
+		t.Fatalf("event frame leaked raw payload: %#v", frame.Event.Raw)
+	}
+	media := mapValue(frame.Event.Normalized)
+	if stringValue(media["path"]) != "" || stringValue(media["media_id"]) != "media_1" {
+		t.Fatalf("event frame media = %#v", media)
+	}
+}
+
 func TestControlGatewayStartsSessionInput(t *testing.T) {
 	runtime := &recordingRuntime{}
 	app, _, session := newControlGatewayTestApp(t, AgentCodex, runtime)

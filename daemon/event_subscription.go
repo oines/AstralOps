@@ -114,7 +114,7 @@ func controlEventFrame(streamID, requestID string, event AstralEvent) *eventStre
 		StreamID:  streamID,
 		RequestID: requestID,
 		Seq:       event.Seq,
-		Event:     event,
+		Event:     sanitizeControlEvent(event),
 	}
 }
 
