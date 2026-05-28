@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestControlGatewayIngestsAttachmentWithoutHostPath(t *testing.T) {
@@ -258,6 +259,69 @@ func TestControlGatewayChunkedAttachmentRejectsBadOffset(t *testing.T) {
 		},
 	})
 	assertActionError(t, err, http.StatusBadRequest, "attachment_chunk_offset_invalid")
+}
+
+func TestControlGatewayChunkedAttachmentExpiresStaleUpload(t *testing.T) {
+	app, _, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityAttachmentIngest)
+
+	start, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityAttachmentIngest,
+		Action:             ControlActionAttachmentIngestStart,
+		Params: map[string]any{
+			"session_id": session.ID,
+			"name":       "stale-upload.txt",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadID := start.Result.(attachmentIngestStartResult).UploadID
+
+	_, err = app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityAttachmentIngest,
+		Action:             ControlActionAttachmentIngestChunk,
+		Params: map[string]any{
+			"session_id":  session.ID,
+			"upload_id":   uploadID,
+			"seq":         1,
+			"offset":      0,
+			"data_base64": base64.StdEncoding.EncodeToString([]byte("partial")),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	upload, err := app.loadControlAttachmentUpload(session.ID, uploadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleAt := time.Now().UTC().Add(-controlAttachmentUploadTTL - time.Minute).Format(time.RFC3339Nano)
+	upload.CreatedAt = staleAt
+	upload.UpdatedAt = staleAt
+	if err := app.writeControlAttachmentUpload(upload); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityAttachmentIngest,
+		Action:             ControlActionAttachmentIngestFinish,
+		Params: map[string]any{
+			"session_id": session.ID,
+			"upload_id":  uploadID,
+		},
+	})
+	assertActionError(t, err, http.StatusGone, "attachment_upload_expired")
+	if _, err := os.Stat(app.controlAttachmentUploadMetadataPath(session.ID, uploadID)); !os.IsNotExist(err) {
+		t.Fatalf("upload metadata still exists or stat failed unexpectedly: %v", err)
+	}
+	if _, err := os.Stat(app.controlAttachmentUploadPartPath(session.ID, uploadID)); !os.IsNotExist(err) {
+		t.Fatalf("upload part still exists or stat failed unexpectedly: %v", err)
+	}
 }
 
 func TestControlGatewayRejectsControllerAttachmentPaths(t *testing.T) {

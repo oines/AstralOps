@@ -808,6 +808,8 @@ attachment.ingest.finish(upload_id) -> Host-owned attachment handle
 
 chunked ingest 仍然走 encrypted control request/response，不开放明文 HTTP upload URL。Host 用 seq/offset 校验顺序写入自己的 upload store，finish 后才返回可用于 `core.control.session_input` 的 attachment handle。远程 `core.control.session_input` 只接受 Host-owned attachment handle，不接受 Controller 本地路径。
 
+未完成的 chunked upload 是 Host-local 临时状态，不是可持久引用。Host 可以让长期未完成的 upload 过期；过期 upload 再次被 `chunk/finish` 触达时必须返回 `attachment_upload_expired` 并清理临时 metadata/part file。Controller 收到过期错误后只能重新 `attachment.ingest.start`，不能复用旧 `upload_id`。
+
 禁止的模型：
 
 ```text

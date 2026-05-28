@@ -24,6 +24,7 @@ const (
 	controlAttachmentFileSubdir     = "file"
 	controlAttachmentUploadPart     = "upload.part"
 	controlAttachmentIDByteCount    = 18
+	controlAttachmentUploadTTL      = 24 * time.Hour
 )
 
 type InputAttachment struct {
@@ -482,11 +483,36 @@ func (a *app) loadControlAttachmentUpload(sessionID, uploadID string) (storedCon
 	if upload.SessionID != sessionID || upload.UploadID != uploadID || upload.AttachmentID == "" {
 		return storedControlAttachmentUpload{}, newActionError(http.StatusNotFound, "attachment_upload_not_found", "attachment upload not found")
 	}
+	if controlAttachmentUploadExpired(upload, time.Now().UTC()) {
+		a.cleanupControlAttachmentUpload(sessionID, uploadID)
+		return storedControlAttachmentUpload{}, newActionError(http.StatusGone, "attachment_upload_expired", "attachment upload expired")
+	}
 	return upload, nil
 }
 
 func (a *app) writeControlAttachmentUpload(upload storedControlAttachmentUpload) error {
 	return writeJSONFile(a.controlAttachmentUploadMetadataPath(upload.SessionID, upload.UploadID), upload, 0o600)
+}
+
+func (a *app) cleanupControlAttachmentUpload(sessionID, uploadID string) {
+	_ = os.Remove(a.controlAttachmentUploadMetadataPath(sessionID, uploadID))
+	_ = os.Remove(a.controlAttachmentUploadPartPath(sessionID, uploadID))
+	_ = os.Remove(a.controlAttachmentDir(sessionID, uploadID))
+}
+
+func controlAttachmentUploadExpired(upload storedControlAttachmentUpload, now time.Time) bool {
+	updatedAt := strings.TrimSpace(upload.UpdatedAt)
+	if updatedAt == "" {
+		updatedAt = strings.TrimSpace(upload.CreatedAt)
+	}
+	if updatedAt == "" {
+		return false
+	}
+	timestamp, err := time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return false
+	}
+	return now.Sub(timestamp) > controlAttachmentUploadTTL
 }
 
 func controlAttachmentHandleFromInput(attachment InputAttachment) controlAttachmentHandle {
