@@ -1,4 +1,4 @@
-import type { AgentKind, AstralEvent, CreateWorkspaceRequest, HealthResponse, ModelInfo, PendingInteractionView, QueuedInputView, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, Workspace, WorkspaceConnection } from "@astralops/protocol";
+import type { AgentKind, AppSettings, AppSettingsPatch, AstralEvent, ClearMediaCacheResponse, CreateWorkspaceRequest, HealthResponse, ModelInfo, PendingInteractionView, QueuedInputView, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, Workspace, WorkspaceConnection } from "@astralops/protocol";
 
 export type DaemonInfo = {
   host: string;
@@ -49,4 +49,4 @@ export type WorkspaceCommandResponse = {
   duration_ms: number;
 };
 
-export type { AgentKind, AstralEvent, CreateWorkspaceRequest, HealthResponse, ModelInfo, QueuedInputView, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, Workspace, WorkspaceConnection };
+export type { AgentKind, AppSettings, AppSettingsPatch, AstralEvent, ClearMediaCacheResponse, CreateWorkspaceRequest, HealthResponse, ModelInfo, QueuedInputView, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, Workspace, WorkspaceConnection };

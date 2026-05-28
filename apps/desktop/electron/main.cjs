@@ -639,6 +639,26 @@ ipcMain.handle("astral:open-workspace", async (_event, opener, workspace) => {
   }
 });
 
+ipcMain.handle("astral:open-logs-directory", async () => {
+  try {
+    const logsDir = path.join(dataDir(), "logs");
+    await fs.promises.mkdir(logsDir, { recursive: true, mode: 0o700 });
+    const error = await shell.openPath(logsDir);
+    if (error) return { ok: false, error };
+    return { ok: true };
+  } catch (openError) {
+    return { ok: false, error: openError instanceof Error ? openError.message : String(openError) };
+  }
+});
+
+ipcMain.handle("astral:set-theme-source", async (_event, theme) => {
+  if (!["system", "light", "dark"].includes(theme)) {
+    return { ok: false, error: "invalid theme source" };
+  }
+  nativeTheme.themeSource = theme;
+  return { ok: true };
+});
+
 ipcMain.handle("astral:show-notification", async (_event, payload) => {
   if (!payload || typeof payload !== "object") return { shown: false };
   if (!mainWindow || (mainWindow.isFocused() && payload.deliver_when_focused !== true)) return { shown: false };

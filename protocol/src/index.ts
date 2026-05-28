@@ -419,6 +419,49 @@ export type SessionCommandResponse = {
   queue_id?: string;
 };
 
+export type AppSettings = {
+  version: number;
+  general: {
+    restore_on_launch: boolean;
+  };
+  appearance: {
+    theme: "system" | "light" | "dark";
+    mac_sidebar_effect: boolean;
+    preview_theme: "light" | "dark" | "system";
+  };
+  session: {
+    default_agent: "remember" | AgentKind;
+    default_permission_mode: "default" | "auto" | "bypassPermissions";
+    default_reasoning_effort: "default" | "low" | "medium" | "high" | "xhigh" | "max";
+  };
+  workspace: {
+    default_opener: "vscode" | "finder" | "terminal";
+    ssh_auto_reconnect: boolean;
+  };
+  notifications: {
+    task_complete: boolean;
+    requires_action: boolean;
+    quiet_when_focused: boolean;
+  };
+  updates: {
+    auto_check: boolean;
+  };
+};
+
+export type AppSettingsPatch = {
+  general?: Partial<AppSettings["general"]>;
+  appearance?: Partial<AppSettings["appearance"]>;
+  session?: Partial<AppSettings["session"]>;
+  workspace?: Partial<AppSettings["workspace"]>;
+  notifications?: Partial<AppSettings["notifications"]>;
+  updates?: Partial<AppSettings["updates"]>;
+};
+
+export type ClearMediaCacheResponse = {
+  ok: boolean;
+  removed_bytes: number;
+};
+
 export type HealthResponse = {
   ok: boolean;
   version: string;

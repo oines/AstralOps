@@ -3,8 +3,10 @@ import { ChevronDown, Code2, Folder, TerminalSquare } from "lucide-react";
 import type { Workspace } from "../types";
 
 type WorkspaceOpenerMenuProps = {
+  defaultOpener: WorkspaceOpenerId;
   rightPanelOpen: boolean;
   workspace: Workspace | null;
+  onDefaultOpenerChange: (opener: WorkspaceOpenerId) => void;
   onError: (message: string) => void;
 };
 
@@ -14,9 +16,9 @@ const DEFAULT_OPENERS: WorkspaceOpenerInfo[] = [
   { id: "terminal", label: "Terminal", available: true },
 ];
 
-export function WorkspaceOpenerMenu({ rightPanelOpen, workspace, onError }: WorkspaceOpenerMenuProps): React.JSX.Element {
+export function WorkspaceOpenerMenu({ defaultOpener, rightPanelOpen, workspace, onDefaultOpenerChange, onError }: WorkspaceOpenerMenuProps): React.JSX.Element {
   const [openers, setOpeners] = useState<WorkspaceOpenerInfo[]>(DEFAULT_OPENERS);
-  const [selectedId, setSelectedId] = useState<WorkspaceOpenerId>("vscode");
+  const [selectedId, setSelectedId] = useState<WorkspaceOpenerId>(defaultOpener);
   const [menuOpen, setMenuOpen] = useState(false);
   const [openingId, setOpeningId] = useState<WorkspaceOpenerId | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -32,6 +34,14 @@ export function WorkspaceOpenerMenu({ rightPanelOpen, workspace, onError }: Work
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (openers.some((opener) => opener.id === defaultOpener)) {
+      setSelectedId(defaultOpener);
+      return;
+    }
+    setSelectedId(openers[0]?.id ?? "vscode");
+  }, [defaultOpener, openers]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -74,6 +84,7 @@ export function WorkspaceOpenerMenu({ rightPanelOpen, workspace, onError }: Work
           return;
         }
         setSelectedId(opener.id);
+        onDefaultOpenerChange(opener.id);
         setMenuOpen(false);
       } catch (openError) {
         onError(openError instanceof Error ? openError.message : String(openError));
@@ -81,7 +92,7 @@ export function WorkspaceOpenerMenu({ rightPanelOpen, workspace, onError }: Work
         setOpeningId(null);
       }
     },
-    [onError, workspace],
+    [onDefaultOpenerChange, onError, workspace],
   );
 
   return (

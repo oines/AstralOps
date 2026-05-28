@@ -1,10 +1,12 @@
 import { Bot, Check, ChevronRight, Folder, Link2, LoaderCircle, Plus, Settings, TerminalSquare, Trash2, Unlink2 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AgentKind, Session, Workspace, WorkspaceConnection } from "../types";
 
 type SidebarProps = {
   activeSessionId: string;
   collapsed: boolean;
+  defaultSessionAgent: AgentKind;
   nativeVibrancy: boolean;
   sessions: Session[];
   sessionStates: Record<string, string>;
@@ -27,6 +29,7 @@ type SidebarProps = {
 export function Sidebar({
   activeSessionId,
   collapsed,
+  defaultSessionAgent,
   nativeVibrancy,
   sessions,
   sessionStates,
@@ -154,6 +157,7 @@ export function Sidebar({
               now={now}
               workspace={workspace}
               workspaceConnection={workspaceConnections[workspace.id]}
+              defaultSessionAgent={defaultSessionAgent}
               onCreateSession={async (agent) => {
                 setMenuWorkspaceId("");
                 await onCreateSession(workspace.id, agent);
@@ -209,6 +213,7 @@ export function Sidebar({
 type WorkspaceRowProps = {
   collapsed: boolean;
   confirmDelete: boolean;
+  defaultSessionAgent: AgentKind;
   name: string;
   connection?: WorkspaceConnection;
   target: Workspace["target"];
@@ -226,6 +231,7 @@ type WorkspaceBlockProps = {
   activeSessionId: string;
   collapsed: boolean;
   confirmDelete: { type: "workspace" | "session"; id: string } | null;
+  defaultSessionAgent: AgentKind;
   menuOpen: boolean;
   sessions: Session[];
   sessionStates: Record<string, string>;
@@ -247,6 +253,7 @@ function WorkspaceBlock({
   activeSessionId,
   collapsed,
   confirmDelete,
+  defaultSessionAgent,
   menuOpen,
   onCreateSession,
   onConnectWorkspace,
@@ -268,6 +275,7 @@ function WorkspaceBlock({
       <WorkspaceRow
         collapsed={collapsed}
         confirmDelete={confirmDelete?.type === "workspace" && confirmDelete.id === workspace.id}
+        defaultSessionAgent={defaultSessionAgent}
         menuOpen={menuOpen}
         name={workspace.name}
         connection={workspaceConnection}
@@ -311,6 +319,7 @@ function WorkspaceRow({
   collapsed,
   confirmDelete,
   connection,
+  defaultSessionAgent,
   menuOpen,
   name,
   onCreateSession,
@@ -326,6 +335,15 @@ function WorkspaceRow({
   const connecting = connection?.status === "connecting" || connection?.status === "reconnecting";
   const connected = connection?.status === "connected";
   const canCreateSession = target !== "ssh" || connected;
+  const agentOptions: Array<{ agent: AgentKind; icon: LucideIcon; label: string }> = defaultSessionAgent === "codex"
+    ? [
+        { agent: "codex", icon: TerminalSquare, label: "Codex" },
+        { agent: "claude", icon: Bot, label: "Claude Code" },
+      ]
+    : [
+        { agent: "claude", icon: Bot, label: "Claude Code" },
+        { agent: "codex", icon: TerminalSquare, label: "Codex" },
+      ];
   const rowGridClass = target === "ssh"
     ? "grid-cols-[14px_17px_minmax(0,1fr)_26px_26px_26px]"
     : "grid-cols-[14px_17px_minmax(0,1fr)_26px_26px]";
@@ -417,22 +435,23 @@ function WorkspaceRow({
           data-sidebar-menu
           onClick={(event) => event.stopPropagation()}
         >
-          <button
-            className="flex h-8 w-full items-center gap-2 rounded-lg px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5"
-            type="button"
-            onClick={() => void onCreateSession("claude")}
-          >
-            <Bot size={16} strokeWidth={1.8} />
-            Claude Code
-          </button>
-          <button
-            className="flex h-8 w-full items-center gap-2 rounded-lg px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5"
-            type="button"
-            onClick={() => void onCreateSession("codex")}
-          >
-            <TerminalSquare size={16} strokeWidth={1.8} />
-            Codex
-          </button>
+          {agentOptions.map((option) => {
+            const Icon = option.icon;
+            const active = option.agent === defaultSessionAgent;
+            return (
+              <button
+                className={`flex h-8 w-full items-center gap-2 rounded-lg px-3 text-left text-[13px] font-medium transition-colors duration-150 ease-out ${
+                  active ? "bg-black/[0.055] text-[#202124]" : "text-[#202124] hover:bg-black/5"
+                }`}
+                key={option.agent}
+                type="button"
+                onClick={() => void onCreateSession(option.agent)}
+              >
+                <Icon size={16} strokeWidth={1.8} />
+                {option.label}
+              </button>
+            );
+          })}
         </div>
       ) : null}
     </div>

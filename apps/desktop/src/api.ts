@@ -1,5 +1,8 @@
 import type {
   AstralEvent,
+  AppSettings,
+  AppSettingsPatch,
+  ClearMediaCacheResponse,
   CreateWorkspaceRequest,
   EditLastUserMessageRequest,
   FileListResponse,
@@ -60,6 +63,9 @@ export interface TerminalClient {
 export interface CoreClient {
   readonly terminal: TerminalClient;
   health(): Promise<HealthResponse>;
+  settings(): Promise<AppSettings>;
+  patchSettings(patch: AppSettingsPatch): Promise<AppSettings>;
+  clearMediaCache(): Promise<ClearMediaCacheResponse>;
   listWorkspaces(): Promise<Workspace[]>;
   createWorkspace(input: CreateWorkspaceRequest): Promise<Workspace>;
   workspaceConnection(id: string): Promise<WorkspaceConnection>;
@@ -91,7 +97,7 @@ export interface CoreClient {
 }
 
 export interface ControlChannel {
-  request<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown, auth?: boolean): Promise<T>;
+  request<T>(method: "GET" | "PATCH" | "POST" | "DELETE", path: string, body?: unknown, auth?: boolean): Promise<T>;
   subscribeEvents(afterSeq: number, handlers: EventSubscriptionHandlers): EventSubscription;
   openSocket(path: string): WebSocket;
 }
@@ -109,7 +115,7 @@ export class LocalHttpControlChannel implements ControlChannel {
     this.token = info.token;
   }
 
-  async request<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown, auth = true): Promise<T> {
+  async request<T>(method: "GET" | "PATCH" | "POST" | "DELETE", path: string, body?: unknown, auth = true): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method,
       headers: {
@@ -162,6 +168,16 @@ export class LocalHttpControlChannel implements ControlChannel {
   private async parse<T>(res: Response): Promise<T> {
     if (!res.ok) {
       const text = await res.text();
+      try {
+        const payload = JSON.parse(text) as { error?: unknown };
+        if (typeof payload.error === "string" && payload.error) {
+          throw new Error(payload.error);
+        }
+      } catch (parseOrPayloadError) {
+        if (parseOrPayloadError instanceof Error && parseOrPayloadError.name !== "SyntaxError") {
+          throw parseOrPayloadError;
+        }
+      }
       throw new Error(text || `${res.status} ${res.statusText}`);
     }
     return (await res.json()) as T;
@@ -177,6 +193,18 @@ export class LocalCoreClient implements CoreClient {
 
   health(): Promise<HealthResponse> {
     return this.channel.request("GET", "/v1/health", undefined, false);
+  }
+
+  settings(): Promise<AppSettings> {
+    return this.channel.request("GET", "/v1/settings");
+  }
+
+  patchSettings(patch: AppSettingsPatch): Promise<AppSettings> {
+    return this.channel.request("PATCH", "/v1/settings", patch);
+  }
+
+  clearMediaCache(): Promise<ClearMediaCacheResponse> {
+    return this.channel.request("POST", "/v1/settings/actions/clear-media-cache", {});
   }
 
   listWorkspaces(): Promise<Workspace[]> {

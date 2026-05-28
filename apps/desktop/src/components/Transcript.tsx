@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { AstralEvent, Session, Workspace } from "../types";
+import type { AstralEvent, Session } from "../types";
 import {
   buildOperationGroups,
   compactStreamingEvents,
@@ -71,7 +71,6 @@ import type { MediaUrlResolver } from "./transcript/mediaTypes";
 
 type TranscriptProps = {
   activeSession: Session | null;
-  activeWorkspace: Workspace | null;
   composerHeight: number;
   editableUserMessage?: { event_seq: number; text: string } | null;
   events: AstralEvent[];
@@ -96,7 +95,6 @@ type TranscriptItem =
 
 export function Transcript({
   activeSession,
-  activeWorkspace,
   composerHeight,
   editableUserMessage = null,
   events,
@@ -266,7 +264,7 @@ export function Transcript({
         onWheel={handleWheel}
       >
         {groups.length === 0 ? (
-          <EmptyState activeSession={activeSession} activeWorkspace={activeWorkspace} />
+          <EmptyState />
         ) : (
           <div className="mx-auto w-[760px] max-w-[calc(100%-72px)] py-5">
             <div className="relative min-w-0" style={{ height: rowVirtualizer.getTotalSize() }}>
@@ -331,24 +329,8 @@ function transcriptItemContainsSeq(item: TranscriptItem, seq: number): boolean {
   return candidates.some((event) => event.seq === seq);
 }
 
-function EmptyState({
-  activeSession,
-  activeWorkspace,
-}: {
-  activeSession: Session | null;
-  activeWorkspace: Workspace | null;
-}): React.JSX.Element {
-  if (!activeWorkspace || !activeSession) {
-    return <div className="h-full" />;
-  }
-
-  return (
-    <div className="flex h-full items-center justify-center px-8 text-center">
-      <div className="text-[15px] font-medium leading-7 text-[#a0a3a7]">
-        要让 {activeSession.agent === "claude" ? "Claude Code" : "Codex"} 做什么？
-      </div>
-    </div>
-  );
+function EmptyState(): React.JSX.Element {
+  return <div className="h-full" />;
 }
 
 function LoadOlderRow({ loading, onLoadOlder }: { loading: boolean; onLoadOlder?: () => void }): React.JSX.Element {

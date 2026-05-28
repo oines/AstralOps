@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld("astral", {
   ingestClipboardImage: (sessionId) => ipcRenderer.invoke("astral:ingest-clipboard-image", sessionId),
   getWorkspaceOpeners: () => ipcRenderer.invoke("astral:get-workspace-openers"),
   openWorkspace: (opener, workspace) => ipcRenderer.invoke("astral:open-workspace", opener, workspace),
+  openLogsDirectory: () => ipcRenderer.invoke("astral:open-logs-directory"),
+  setThemeSource: (theme) => ipcRenderer.invoke("astral:set-theme-source", theme),
   showNotification: (payload) => ipcRenderer.invoke("astral:show-notification", payload),
   onOpenSession: (callback) => {
     const listener = (_event, sessionId) => callback(sessionId);

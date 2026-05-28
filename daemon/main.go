@@ -24,6 +24,7 @@ var version = "dev"
 
 type app struct {
 	store             *store
+	settings          *settingsStore
 	token             string
 	addr              string
 	hub               *eventHub
@@ -57,6 +58,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	settings, err := loadSettingsStore(dataDir)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	token := randomToken()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -67,6 +72,7 @@ func main() {
 
 	a := &app{
 		store:       st,
+		settings:    settings,
 		token:       token,
 		addr:        localTCPHostPort(ln.Addr().String()),
 		hub:         newEventHub(),
@@ -95,6 +101,8 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", a.handleHealth)
+	mux.HandleFunc("/v1/settings", a.auth(a.handleSettings))
+	mux.HandleFunc("/v1/settings/", a.auth(a.handleSettingsAction))
 	mux.HandleFunc("/v1/workspaces", a.auth(a.handleWorkspaces))
 	mux.HandleFunc("/v1/workspaces/", a.auth(a.handleWorkspaceAction))
 	mux.HandleFunc("/v1/codex-exec/", a.auth(a.handleCodexExecServerWS))
@@ -114,7 +122,7 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, PATCH, POST, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

@@ -71,8 +71,13 @@ func newSSHManager(a *app) *sshManager {
 }
 
 func (m *sshManager) restorePersistedConnections(ctx context.Context) {
+	autoReconnect := m.app.currentSettings().Workspace.SSHAutoReconnect
 	for _, ws := range m.app.store.listWorkspaces() {
 		if ws.Target != "ssh" {
+			continue
+		}
+		if !autoReconnect {
+			m.seedState(ws, initialSSHConnection(ws, connectionDisconnected))
 			continue
 		}
 		last, ok := m.app.store.latestWorkspaceConnection(ws.ID)
