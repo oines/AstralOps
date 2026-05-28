@@ -1517,6 +1517,96 @@ func TestControlWebSocketRemoteWorkspaceFileStreamUsesProxyReadRange(t *testing.
 	}
 }
 
+func TestControlWebSocketRemoteWorkspaceFileWriteUsesProxyOverEncryptedChannel(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentCodex,
+		SSH:    &SSHConfig{Endpoint: "root@example.test", RemoteCWD: "/remote/project"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteStore := t.TempDir()
+	proxy, cleanup := newMutableClaudeRemoteProxy(t, workspace, remoteStore)
+	defer cleanup()
+	controllerPublicKey, controllerPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:  "dev_controller",
+		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
+		Capabilities:        []string{CapabilityWorkspaceFilesWrite},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{
+		store:    st,
+		hub:      newEventHub(),
+		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
+	}
+	app.ssh = &sshManager{
+		app: app,
+		by: map[string]*sshTarget{
+			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
+		},
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	secret := "remote-write-secret"
+	encoded := base64.StdEncoding.EncodeToString([]byte(secret))
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "remote_workspace_file_write",
+			Capability: CapabilityWorkspaceFilesWrite,
+			Action:     ControlActionWorkspaceFilesWrite,
+			Params: map[string]any{
+				"workspace_id":   workspace.ID,
+				"path":           "nested/out.txt",
+				"content_base64": encoded,
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionWorkspaceFilesWrite) || strings.Contains(string(sealedRequest), workspace.ID) || strings.Contains(string(sealedRequest), "nested/out.txt") || strings.Contains(string(sealedRequest), encoded) || strings.Contains(string(sealedRequest), secret) || strings.Contains(string(sealedRequest), "/remote/project") {
+		t.Fatalf("sealed remote workspace write request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), "nested/out.txt") || strings.Contains(string(sealedResponse), encoded) || strings.Contains(string(sealedResponse), secret) || strings.Contains(string(sealedResponse), "/remote/project") {
+		t.Fatalf("sealed remote workspace write response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("remote write response = %#v, want ok", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["workspace_id"]) != workspace.ID || stringValue(result["target"]) != "ssh" || stringValue(result["path"]) != "nested/out.txt" || stringValue(result["kind"]) != "file" {
+		t.Fatalf("remote write result = %#v", result)
+	}
+	if int64(numberValue(result["size"])) != int64(len(secret)) {
+		t.Fatalf("remote write size = %#v, want %d", result["size"], len(secret))
+	}
+	wire, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), "/remote/project") || strings.Contains(string(wire), secret) || strings.Contains(string(wire), encoded) {
+		t.Fatalf("remote write result leaked remote path or content: %s", string(wire))
+	}
+	if got := readRemoteFixtureFile(t, remoteStore, "/remote/project/nested/out.txt"); got != secret {
+		t.Fatalf("remote written body = %q, want %q", got, secret)
+	}
+}
+
 func TestControlWebSocketRejectsControllerDeviceMismatch(t *testing.T) {
 	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
 	server := startControlChannelTestServer(t, app)
