@@ -295,6 +295,45 @@ export type SessionView = {
   editable_user_message?: EditableUserMessageView | null;
 };
 
+export type EventWindowParams = {
+  workspace_id?: string;
+  session_id?: string;
+  after_seq?: number;
+  before_seq?: number;
+  limit?: number;
+};
+
+export type EventSubscriptionParams = {
+  workspace_id?: string;
+  session_id?: string;
+  after_seq?: number;
+  replay_limit?: number;
+};
+
+export type EventSubscriptionResult = {
+  stream_id: string;
+  workspace_id?: string;
+  session_id?: string;
+  after_seq?: number;
+  replay_limit?: number;
+};
+
+export type EventSubscriptionCancelParams = {
+  stream_id: string;
+};
+
+export type EventSubscriptionCancelResult = {
+  stream_id: string;
+  cancelled: boolean;
+};
+
+export type EventStreamFrame = {
+  stream_id: string;
+  request_id?: string;
+  seq: number;
+  event: AstralEvent;
+};
+
 export type EditableUserMessageView = {
   event_seq: number;
   text: string;
@@ -717,6 +756,9 @@ export type ControlAction =
   | "core.read.session_view"
   | "core.read.sessions"
   | "core.read.workspaces"
+  | "core.read.events"
+  | "core.subscribe.events"
+  | "core.unsubscribe.events"
   | "core.control.session_input"
   | "core.control.interrupt"
   | "core.control.queue.cancel"
@@ -942,6 +984,10 @@ export type ControlPlainFrame =
   | {
       type: "response";
       response: ControlResponse;
+    }
+  | {
+      type: "event";
+      event: EventStreamFrame;
     }
   | {
       type: "terminal.output";
