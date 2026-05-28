@@ -328,6 +328,9 @@ func (a *app) readLocalControlWorkspaceFiles(ws Workspace, params workspaceFiles
 	if err != nil {
 		return workspaceFilesReadResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
 	}
+	if err := ensureLocalControlWorkspaceExistingPath(root, target); err != nil {
+		return workspaceFilesReadResult{}, err
+	}
 	info, err := os.Stat(target)
 	if err != nil {
 		return workspaceFilesReadResult{}, newActionError(http.StatusNotFound, "workspace_file_not_found", "workspace file not found")
@@ -450,6 +453,9 @@ func (a *app) writeLocalControlWorkspaceFile(ws Workspace, params workspaceFiles
 	if err != nil {
 		return workspaceFilesWriteResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
 	}
+	if err := ensureLocalControlWorkspaceWritePath(root, target); err != nil {
+		return workspaceFilesWriteResult{}, err
+	}
 	if allowCreateParents(params.CreateParents) {
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return workspaceFilesWriteResult{}, newActionError(http.StatusBadRequest, "workspace_file_write_failed", err.Error())
@@ -493,6 +499,9 @@ func (a *app) applyLocalControlWorkspacePatch(ws Workspace, params workspaceFile
 	target, rel, err := resolveWorkspacePath(root, params.Path)
 	if err != nil {
 		return workspaceFilesApplyPatchResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	if err := ensureLocalControlWorkspaceExistingPath(root, target); err != nil {
+		return workspaceFilesApplyPatchResult{}, err
 	}
 	info, err := os.Stat(target)
 	if err != nil || info.IsDir() {
@@ -567,6 +576,9 @@ func (a *app) deleteLocalControlWorkspacePath(ws Workspace, params workspaceFile
 	if rel == "" {
 		return workspaceFilesDeleteResult{}, newActionError(http.StatusBadRequest, "workspace_root_path_forbidden", "workspace root cannot be deleted")
 	}
+	if err := ensureLocalControlWorkspaceParentPath(root, target); err != nil {
+		return workspaceFilesDeleteResult{}, err
+	}
 	info, err := os.Lstat(target)
 	if err != nil {
 		if os.IsNotExist(err) && params.Force {
@@ -628,6 +640,12 @@ func (a *app) moveLocalControlWorkspacePath(ws Workspace, params workspaceFilesM
 	}
 	if fromRel == "" || toRel == "" {
 		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_root_path_forbidden", "workspace root cannot be moved")
+	}
+	if err := ensureLocalControlWorkspaceParentPath(root, source); err != nil {
+		return workspaceFilesMoveResult{}, err
+	}
+	if err := ensureLocalControlWorkspaceParentPath(root, destination); err != nil {
+		return workspaceFilesMoveResult{}, err
 	}
 	if source == destination {
 		return workspaceFilesMoveResult{}, newActionError(http.StatusConflict, "workspace_move_same_path", "source and destination are the same path")
@@ -691,6 +709,9 @@ func (a *app) prepareLocalControlWorkspaceFileStream(ws Workspace, params worksp
 	target, rel, err := resolveWorkspacePath(root, params.Path)
 	if err != nil {
 		return workspaceFileStreamResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	if err := ensureLocalControlWorkspaceExistingPath(root, target); err != nil {
+		return workspaceFileStreamResult{}, err
 	}
 	info, err := os.Stat(target)
 	if err != nil {
@@ -767,6 +788,10 @@ func (a *app) streamLocalControlWorkspaceFile(ctx context.Context, ws Workspace,
 	root := filepath.Clean(ws.LocalCWD)
 	target, _, err := resolveWorkspacePath(root, result.Path)
 	if err != nil {
+		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "workspace_path_invalid", err.Error())})
+		return
+	}
+	if err := ensureLocalControlWorkspaceExistingPath(root, target); err != nil {
 		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "workspace_path_invalid", err.Error())})
 		return
 	}
@@ -872,6 +897,9 @@ func executeLocalControlWorkspaceCommand(parent context.Context, ws Workspace, c
 	cwd, rel, err := resolveWorkspacePath(root, requestedCWD)
 	if err != nil {
 		return workspaceExecResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	if err := ensureLocalControlWorkspaceExistingPath(root, cwd); err != nil {
+		return workspaceExecResult{}, err
 	}
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(parent, timeout)
@@ -1114,6 +1142,57 @@ func prepareWorkspaceMoveDestination(destination string, overwrite bool) error {
 		return newActionError(http.StatusBadRequest, "workspace_file_move_failed", err.Error())
 	}
 	return nil
+}
+
+func ensureLocalControlWorkspaceExistingPath(root, target string) error {
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return workspacePathInvalidError(err)
+	}
+	realTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return workspacePathInvalidError(err)
+	}
+	if !localPathIsSameOrDescendant(filepath.Clean(realRoot), filepath.Clean(realTarget)) {
+		return workspacePathInvalidError(errors.New("path escapes workspace through symlink"))
+	}
+	return nil
+}
+
+func ensureLocalControlWorkspaceWritePath(root, target string) error {
+	if err := ensureLocalControlWorkspaceParentPath(root, target); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(target); err == nil {
+		return ensureLocalControlWorkspaceExistingPath(root, target)
+	} else if !os.IsNotExist(err) {
+		return workspacePathInvalidError(err)
+	}
+	return nil
+}
+
+func ensureLocalControlWorkspaceParentPath(root, target string) error {
+	return ensureLocalControlWorkspaceAncestorPath(root, filepath.Dir(target))
+}
+
+func ensureLocalControlWorkspaceAncestorPath(root, path string) error {
+	candidate := filepath.Clean(path)
+	for {
+		if _, err := os.Lstat(candidate); err == nil {
+			return ensureLocalControlWorkspaceExistingPath(root, candidate)
+		} else if !os.IsNotExist(err) {
+			return workspacePathInvalidError(err)
+		}
+		next := filepath.Dir(candidate)
+		if next == candidate {
+			return workspacePathInvalidError(errors.New("workspace ancestor does not exist"))
+		}
+		candidate = next
+	}
+}
+
+func workspacePathInvalidError(err error) error {
+	return newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
 }
 
 func localPathIsSameOrDescendant(root, target string) bool {

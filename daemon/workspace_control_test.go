@@ -491,6 +491,129 @@ func TestControlGatewayRejectsWorkspacePathEscape(t *testing.T) {
 	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
 }
 
+func TestControlGatewayRejectsWorkspaceReadSymlinkEscape(t *testing.T) {
+	requireWorkspaceSymlink(t)
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("outside secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(workspace.LocalCWD, "secret-link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesRead)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesRead,
+		Action:             ControlActionWorkspaceFilesRead,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "secret-link.txt",
+		},
+	})
+	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
+}
+
+func TestControlGatewayRejectsWorkspaceStreamSymlinkEscape(t *testing.T) {
+	requireWorkspaceSymlink(t)
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	outside := filepath.Join(t.TempDir(), "secret.bin")
+	if err := os.WriteFile(outside, []byte("outside stream secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(workspace.LocalCWD, "secret-stream.bin")); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesRead)
+
+	_, err := app.executeControlRequestWithConnection(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesRead,
+		Action:             ControlActionWorkspaceFilesStream,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "secret-stream.bin",
+		},
+	}, &controlWSConn{})
+	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
+}
+
+func TestControlGatewayRejectsWorkspaceWriteThroughSymlinkParent(t *testing.T) {
+	requireWorkspaceSymlink(t)
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(workspace.LocalCWD, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesWrite,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "escape/out.txt",
+			"content":      "nope",
+		},
+	})
+	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
+	if _, statErr := os.Stat(filepath.Join(outside, "out.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("symlink escape write created outside file, stat err = %v", statErr)
+	}
+}
+
+func TestControlGatewayRejectsWorkspaceDeleteThroughSymlinkParent(t *testing.T) {
+	requireWorkspaceSymlink(t)
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(workspace.LocalCWD, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesDelete,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "escape/secret.txt",
+		},
+	})
+	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
+	if got, readErr := os.ReadFile(outsideFile); readErr != nil || string(got) != "keep" {
+		t.Fatalf("outside file = %q, err = %v; want untouched", string(got), readErr)
+	}
+}
+
+func TestControlGatewayRejectsWorkspaceExecCWDThroughSymlink(t *testing.T) {
+	requireWorkspaceSymlink(t)
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(workspace.LocalCWD, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceExec)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceExec,
+		Action:             ControlActionWorkspaceExec,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"command":      "pwd",
+			"cwd":          "escape",
+		},
+	})
+	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
+}
+
 func TestControlGatewayExecutesWorkspaceCommand(t *testing.T) {
 	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "note.txt"), []byte("exec body"), 0o600); err != nil {
@@ -590,4 +713,11 @@ func TestControlGatewayWorkspaceExecRequiresCapability(t *testing.T) {
 		},
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
+}
+
+func requireWorkspaceSymlink(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("workspace symlink boundary tests require symlink support")
+	}
 }
