@@ -473,6 +473,132 @@ func TestControlWebSocketMediaStreamResumesFromOffset(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketSessionForkOverEncryptedChannel(t *testing.T) {
+	runtime := &recordingForkRuntime{}
+	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreControl)
+	app.runtimes[AgentCodex] = runtime
+	session.NativeThreadID = "source-thread"
+	app.store.mu.Lock()
+	app.store.sessions[session.ID] = session
+	app.store.mu.Unlock()
+
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "one"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-1", "status": "running"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "answer", "item_id": "item-1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn-1", "status": "idle"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "two"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-2", "status": "running"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "later", "item_id": "item-2"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn-2", "status": "idle"}})
+	targetSeq := int64(0)
+	for _, event := range app.store.queryEvents("", session.ID, 0) {
+		if event.Kind == "message.assistant" && stringValue(mapValue(event.Normalized)["text"]) == "answer" {
+			targetSeq = event.Seq
+			break
+		}
+	}
+	if targetSeq == 0 {
+		t.Fatal("missing fork target")
+	}
+
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "session_fork",
+			Capability: CapabilityCoreControl,
+			Action:     ControlActionSessionFork,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"event_seq":  targetSeq,
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionSessionFork) || strings.Contains(string(sealedRequest), session.ID) {
+		t.Fatalf("sealed session fork request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "session_fork" {
+		t.Fatalf("fork response = %#v, want ok response", plain)
+	}
+	fork := mapValue(mapValue(plain.Response.Result)["session"])
+	forkID := stringValue(fork["id"])
+	if forkID == "" || stringValue(fork["forked_from_session_id"]) != session.ID || int64(numberValue(fork["forked_from_event_seq"])) != targetSeq || stringValue(fork["forked_from_native_anchor"]) != "turn-1" {
+		t.Fatalf("fork session = %#v", fork)
+	}
+	if runtime.source.ID != session.ID || runtime.fork.ID != forkID || runtime.workspace.ID != workspace.ID {
+		t.Fatalf("fork runtime call = source %#v fork %#v workspace %#v", runtime.source, runtime.fork, runtime.workspace)
+	}
+	if runtime.rollbackTurns != 1 {
+		t.Fatalf("rollbackTurns = %d, want 1", runtime.rollbackTurns)
+	}
+	if !containsEventKind(app.store.queryEvents("", forkID, 0), "session.started") {
+		t.Fatalf("fork events = %#v, want session.started", eventKinds(app.store.queryEvents("", forkID, 0)))
+	}
+}
+
+func TestControlWebSocketSessionDeleteOverEncryptedChannel(t *testing.T) {
+	app, _, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead, CapabilityCoreControl)
+	turn := app.enqueueTurn(session, "queued prompt", TurnOptions{})
+	runtime := app.runtimes[AgentCodex].(*recordingRuntime)
+
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "session_delete",
+			Capability: CapabilityCoreControl,
+			Action:     ControlActionSessionDelete,
+			Params:     map[string]any{"session_id": session.ID},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionSessionDelete) || strings.Contains(string(sealedRequest), session.ID) {
+		t.Fatalf("sealed session delete request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "session_delete" {
+		t.Fatalf("delete response = %#v, want ok response", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if !boolValue(result["ok"]) || stringValue(result["session_id"]) != session.ID {
+		t.Fatalf("delete result = %#v", result)
+	}
+	if _, ok := app.store.getSession(session.ID); ok {
+		t.Fatal("session still exists after delete")
+	}
+	if _, ok := app.peekQueuedTurn(session.ID, turn.ID); ok {
+		t.Fatal("queued input still exists after session delete")
+	}
+	if len(runtime.interrupts) != 1 || runtime.interrupts[0] != session.ID {
+		t.Fatalf("runtime interrupts = %#v, want deleted session interrupted", runtime.interrupts)
+	}
+	if !containsEventKind(app.store.queryEvents("", session.ID, 0), "session.deleted") {
+		t.Fatalf("events = %#v, want session.deleted", eventKinds(app.store.queryEvents("", session.ID, 0)))
+	}
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "session_view_after_delete",
+			Capability: CapabilityCoreRead,
+			Action:     ControlActionSessionView,
+			Params:     map[string]any{"session_id": session.ID},
+		},
+	})
+	plain = readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || plain.Response.OK || plain.Response.Error == nil || plain.Response.Error.Code != "session_not_found" {
+		t.Fatalf("view after delete response = %#v, want session_not_found", plain)
+	}
+}
+
 func TestControlWebSocketChunkedAttachmentIngestIsEncrypted(t *testing.T) {
 	app, _, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityAttachmentIngest)
 	server := startControlChannelTestServer(t, app)
