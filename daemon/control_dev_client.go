@@ -157,6 +157,7 @@ func runControlDevClientCommand(args []string) error {
 		path := fs.String("path", ".", "workspace path to read when --workspace-id is set")
 		streamPath := fs.String("stream-path", "", "optional workspace path to read via workspace.files.stream")
 		streamChunkSize := fs.Int("stream-chunk-size", 64*1024, "workspace.files.stream chunk size")
+		workspaceWriteSmoke := fs.Bool("workspace-write-smoke", false, "exercise workspace.files.write/apply_patch/move/delete in a temporary Host workspace path")
 		attachmentPath := fs.String("attachment-path", "", "optional local Controller file to upload with chunked attachment.ingest")
 		attachmentChunkSize := fs.Int("attachment-chunk-size", 64*1024, "attachment ingest chunk size")
 		mediaEventSeq := fs.Int64("media-event-seq", 0, "optional transcript event seq for media.stream")
@@ -181,6 +182,7 @@ func runControlDevClientCommand(args []string) error {
 			Path:                *path,
 			StreamPath:          *streamPath,
 			StreamChunkSize:     *streamChunkSize,
+			WorkspaceWriteSmoke: *workspaceWriteSmoke,
 			AttachmentPath:      *attachmentPath,
 			AttachmentChunkSize: *attachmentChunkSize,
 			MediaEventSeq:       *mediaEventSeq,
@@ -220,6 +222,7 @@ type controlClientSmokeOptions struct {
 	Path                string
 	StreamPath          string
 	StreamChunkSize     int
+	WorkspaceWriteSmoke bool
 	AttachmentPath      string
 	AttachmentChunkSize int
 	MediaEventSeq       int64
@@ -295,8 +298,8 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 	if opts.WorkspaceID == "" && strings.TrimSpace(opts.StreamPath) != "" {
 		return controlClientSmokeResult{}, fmt.Errorf("--workspace-id is required for --stream-path")
 	}
-	if opts.WorkspaceID == "" && (strings.TrimSpace(opts.ExecCommand) != "" || opts.Terminal) {
-		return controlClientSmokeResult{}, fmt.Errorf("--workspace-id is required for --exec-command or --terminal")
+	if opts.WorkspaceID == "" && (strings.TrimSpace(opts.ExecCommand) != "" || opts.Terminal || opts.WorkspaceWriteSmoke) {
+		return controlClientSmokeResult{}, fmt.Errorf("--workspace-id is required for --exec-command, --terminal, or --workspace-write-smoke")
 	}
 	if opts.SessionID == "" && strings.TrimSpace(opts.AttachmentPath) != "" {
 		return controlClientSmokeResult{}, fmt.Errorf("--session-id is required for --attachment-path")
@@ -350,6 +353,14 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 	if opts.WorkspaceID != "" && strings.TrimSpace(opts.StreamPath) != "" {
 		step, err := controlClientSmokeWorkspaceFileStream(st, target, opts.WorkspaceID, opts.StreamPath, opts.StreamChunkSize)
 		result.Steps = append(result.Steps, step)
+		if err != nil {
+			return result, err
+		}
+	}
+
+	if opts.WorkspaceID != "" && opts.WorkspaceWriteSmoke {
+		steps, err := controlClientSmokeWorkspaceWriteFlow(st, target, opts.WorkspaceID)
+		result.Steps = append(result.Steps, steps...)
 		if err != nil {
 			return result, err
 		}
@@ -593,6 +604,73 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 	}
 }
 
+func controlClientSmokeWorkspaceWriteFlow(st *store, target controlClientTarget, workspaceID string) ([]controlClientSmokeStep, error) {
+	dir := ".astralops-control-smoke/" + randomID(8)
+	writePath := dir + "/note.txt"
+	movePath := dir + "/moved.txt"
+	initialBody := []byte("astralops smoke before\n")
+
+	write, err := controlClientSmokeRequest(st, target, "workspace_files_write", CapabilityWorkspaceFilesWrite, ControlActionWorkspaceFilesWrite, map[string]any{
+		"workspace_id":   workspaceID,
+		"path":           writePath,
+		"content_base64": base64.StdEncoding.EncodeToString(initialBody),
+		"create_parents": true,
+	})
+	steps := []controlClientSmokeStep{
+		controlClientSmokeStepFromResponse("workspace_files_write", CapabilityWorkspaceFilesWrite, ControlActionWorkspaceFilesWrite, write, controlClientWorkspaceFilesWriteSmokeSummary(write)),
+	}
+	if err != nil {
+		return steps, err
+	}
+	if err := controlClientSmokeResponseError("workspace_files_write", write); err != nil {
+		return steps, err
+	}
+
+	patch, err := controlClientSmokeRequest(st, target, "workspace_files_apply_patch", CapabilityWorkspaceFilesWrite, ControlActionWorkspaceFilesApplyPatch, map[string]any{
+		"workspace_id": workspaceID,
+		"path":         writePath,
+		"edits": []map[string]any{{
+			"old_string": "before\n",
+			"new_string": "after\n",
+		}},
+	})
+	steps = append(steps, controlClientSmokeStepFromResponse("workspace_files_apply_patch", CapabilityWorkspaceFilesWrite, ControlActionWorkspaceFilesApplyPatch, patch, controlClientWorkspaceFilesApplyPatchSmokeSummary(patch)))
+	if err != nil {
+		return steps, err
+	}
+	if err := controlClientSmokeResponseError("workspace_files_apply_patch", patch); err != nil {
+		return steps, err
+	}
+
+	move, err := controlClientSmokeRequest(st, target, "workspace_files_move", CapabilityWorkspaceFilesWrite, ControlActionWorkspaceFilesMove, map[string]any{
+		"workspace_id":     workspaceID,
+		"path":             writePath,
+		"destination_path": movePath,
+		"create_parents":   true,
+	})
+	steps = append(steps, controlClientSmokeStepFromResponse("workspace_files_move", CapabilityWorkspaceFilesWrite, ControlActionWorkspaceFilesMove, move, controlClientWorkspaceFilesMoveSmokeSummary(move)))
+	if err != nil {
+		return steps, err
+	}
+	if err := controlClientSmokeResponseError("workspace_files_move", move); err != nil {
+		return steps, err
+	}
+
+	deleteResponse, err := controlClientSmokeRequest(st, target, "workspace_files_delete", CapabilityWorkspaceFilesWrite, ControlActionWorkspaceFilesDelete, map[string]any{
+		"workspace_id": workspaceID,
+		"path":         dir,
+		"recursive":    true,
+	})
+	steps = append(steps, controlClientSmokeStepFromResponse("workspace_files_delete", CapabilityWorkspaceFilesWrite, ControlActionWorkspaceFilesDelete, deleteResponse, controlClientWorkspaceFilesDeleteSmokeSummary(deleteResponse)))
+	if err != nil {
+		return steps, err
+	}
+	if err := controlClientSmokeResponseError("workspace_files_delete", deleteResponse); err != nil {
+		return steps, err
+	}
+	return steps, nil
+}
+
 func controlClientSmokeRequest(st *store, target controlClientTarget, requestID, capability, action string, params map[string]any) (ControlResponse, error) {
 	return controlClientRequestToTarget(target, st, ControlRequest{
 		RequestID:  "smoke_" + requestID,
@@ -782,6 +860,54 @@ func controlClientWorkspaceFilesSmokeSummary(response ControlResponse) map[strin
 		"path":         stringValue(result["path"]),
 		"kind":         stringValue(result["kind"]),
 		"target":       stringValue(result["target"]),
+	}
+}
+
+func controlClientWorkspaceFilesWriteSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	return map[string]any{
+		"workspace_id": stringValue(result["workspace_id"]),
+		"path":         stringValue(result["path"]),
+		"kind":         stringValue(result["kind"]),
+		"target":       stringValue(result["target"]),
+		"size":         int64(numberValue(result["size"])),
+	}
+}
+
+func controlClientWorkspaceFilesApplyPatchSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	structuredPatch, _ := result["structured_patch"].([]any)
+	return map[string]any{
+		"workspace_id":           stringValue(result["workspace_id"]),
+		"path":                   stringValue(result["path"]),
+		"kind":                   stringValue(result["kind"]),
+		"target":                 stringValue(result["target"]),
+		"size":                   int64(numberValue(result["size"])),
+		"applied_edits":          int(numberValue(result["applied_edits"])),
+		"structured_patch_count": len(structuredPatch),
+	}
+}
+
+func controlClientWorkspaceFilesMoveSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	return map[string]any{
+		"workspace_id": stringValue(result["workspace_id"]),
+		"from_path":    stringValue(result["from_path"]),
+		"to_path":      stringValue(result["to_path"]),
+		"kind":         stringValue(result["kind"]),
+		"target":       stringValue(result["target"]),
+		"size":         int64(numberValue(result["size"])),
+	}
+}
+
+func controlClientWorkspaceFilesDeleteSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	return map[string]any{
+		"workspace_id": stringValue(result["workspace_id"]),
+		"path":         stringValue(result["path"]),
+		"kind":         stringValue(result["kind"]),
+		"target":       stringValue(result["target"]),
+		"removed":      boolValue(result["removed"]),
 	}
 }
 

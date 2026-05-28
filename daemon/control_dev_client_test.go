@@ -114,7 +114,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	capabilities := []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceExec, CapabilityAttachmentIngest, CapabilityMediaStream}
+	capabilities := []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceFilesWrite, CapabilityWorkspaceExec, CapabilityAttachmentIngest, CapabilityMediaStream}
 	runTerminal := terminalAvailableOnHost()
 	if runTerminal {
 		t.Setenv("SHELL", terminalManagerTestShell(t))
@@ -136,6 +136,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 		MediaEventSeq:       media.eventSeq,
 		MediaID:             media.mediaID,
 		MediaChunkSize:      8,
+		WorkspaceWriteSmoke: true,
 		ExecCommand:         "echo smoke",
 		Terminal:            runTerminal,
 	})
@@ -145,7 +146,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if result.Target != hostServer.URL || result.HostDeviceID != hostApp.store.deviceIdentity.DeviceID {
 		t.Fatalf("smoke result target = %#v", result)
 	}
-	wantSteps := []string{"workspaces", "workspace_files_read", "attachment_ingest", "workspace_files_stream", "media_stream", "workspace_exec"}
+	wantSteps := []string{"workspaces", "workspace_files_read", "attachment_ingest", "workspace_files_stream", "workspace_files_write", "workspace_files_apply_patch", "workspace_files_move", "workspace_files_delete", "media_stream", "workspace_exec"}
 	if runTerminal {
 		wantSteps = append(wantSteps, "terminal_open", "terminal_close")
 	}
@@ -189,12 +190,33 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if stringValue(mediaStep.Summary["resume_token"]) == "" {
 		t.Fatalf("media_stream summary = %#v, want resume token", mediaStep.Summary)
 	}
+	patchStep, _ := smokeStepByName(result, "workspace_files_apply_patch")
+	if int(numberValue(patchStep.Summary["applied_edits"])) != 1 || int(numberValue(patchStep.Summary["structured_patch_count"])) == 0 {
+		t.Fatalf("workspace_files_apply_patch summary = %#v, want one applied edit and structured patch", patchStep.Summary)
+	}
+	moveStep, _ := smokeStepByName(result, "workspace_files_move")
+	if stringValue(moveStep.Summary["from_path"]) == "" || stringValue(moveStep.Summary["to_path"]) == "" || stringValue(moveStep.Summary["from_path"]) == stringValue(moveStep.Summary["to_path"]) {
+		t.Fatalf("workspace_files_move summary = %#v, want distinct source/destination", moveStep.Summary)
+	}
+	deleteStep, _ := smokeStepByName(result, "workspace_files_delete")
+	if !boolValue(deleteStep.Summary["removed"]) || stringValue(deleteStep.Summary["path"]) == "" {
+		t.Fatalf("workspace_files_delete summary = %#v, want removed temp path", deleteStep.Summary)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.LocalCWD, stringValue(deleteStep.Summary["path"]))); !os.IsNotExist(err) {
+		t.Fatalf("workspace write smoke temp path stat err = %v, want not exist", err)
+	}
 	wire, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(wire), string(streamBody)) || strings.Contains(string(wire), string(attachmentBody)) || strings.Contains(string(wire), string(mediaBody)) || strings.Contains(string(wire), media.path) {
-		t.Fatalf("smoke result leaked streamed file content, attached file content, media content, or Host path: %s", string(wire))
+	wireText := string(wire)
+	if strings.Contains(wireText, string(streamBody)) ||
+		strings.Contains(wireText, string(attachmentBody)) ||
+		strings.Contains(wireText, string(mediaBody)) ||
+		strings.Contains(wireText, "astralops smoke before") ||
+		strings.Contains(wireText, "astralops smoke after") ||
+		strings.Contains(wireText, media.path) {
+		t.Fatalf("smoke result leaked streamed file content, attached file content, media content, workspace write content, or Host path: %s", string(wire))
 	}
 	if runTerminal && countKind(hostApp.store.queryEvents(workspace.ID, "", 0), "control.terminal.closed") != 1 {
 		t.Fatalf("host events = %#v, want terminal close event", eventKinds(hostApp.store.queryEvents(workspace.ID, "", 0)))
@@ -217,6 +239,10 @@ func TestControlClientSmokeRequiresWorkspaceForOptionalChecks(t *testing.T) {
 	_, err = runControlClientSmoke(st, controlClientSmokeOptions{ExecCommand: "echo smoke"})
 	if err == nil || !strings.Contains(err.Error(), "--workspace-id") {
 		t.Fatalf("err = %v, want workspace requirement", err)
+	}
+	_, err = runControlClientSmoke(st, controlClientSmokeOptions{WorkspaceWriteSmoke: true})
+	if err == nil || !strings.Contains(err.Error(), "--workspace-id") {
+		t.Fatalf("err = %v, want workspace requirement for write smoke", err)
 	}
 	_, err = runControlClientSmoke(st, controlClientSmokeOptions{AttachmentPath: "upload.txt"})
 	if err == nil || !strings.Contains(err.Error(), "--session-id") {

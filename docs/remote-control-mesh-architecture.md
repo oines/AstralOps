@@ -220,12 +220,12 @@ discover 只返回 `LanHostCandidate`，例如 device id、public key fingerprin
 go run ./daemon control-client known-hosts
 go run ./daemon control-client workspaces --discover --host-device-id <host_device_id>
 go run ./daemon control-client smoke --discover --host-device-id <host_device_id>
-go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --workspace-id <workspace_id> --path . --stream-path large.log --exec-command "pwd" --terminal
+go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --workspace-id <workspace_id> --path . --stream-path large.log --workspace-write-smoke --exec-command "pwd" --terminal
 go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --session-id <session_id> --attachment-path ./clip.png
 go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --session-id <session_id> --media-event-seq <event_seq> --media-id <media_id>
 ```
 
-`control-client smoke` 只走 `/v1/control/ws` 的 E2EE request/response，不访问本地 workspace/session/settings/events HTTP API。默认只验证 `core.read.workspaces`；传入 `--workspace-id` 后会验证 `workspace.files.read`，可选 `--stream-path` 验证 `workspace.files.stream` 的 chunked E2EE frames，可选 `--exec-command` 验证 `workspace.exec`，可选 `--terminal` 打开并关闭 Host-owned PTY。传入 `--session-id --attachment-path` 后会验证 `attachment.ingest.start/chunk/finish`，Controller 文件会通过 E2EE channel 分片上传到 Host-owned attachment store。传入 `--session-id --media-event-seq --media-id` 后会验证 transcript media reference 的 `media.stream` E2EE frames，并返回 resume_token/bytes/chunks 等摘要。stream/attachment/media smoke 只输出摘要，不打印文件内容或 Host path。
+`control-client smoke` 只走 `/v1/control/ws` 的 E2EE request/response，不访问本地 workspace/session/settings/events HTTP API。默认只验证 `core.read.workspaces`；传入 `--workspace-id` 后会验证 `workspace.files.read`，可选 `--stream-path` 验证 `workspace.files.stream` 的 chunked E2EE frames，可选 `--workspace-write-smoke` 在 Host workspace 临时目录中验证 `workspace.files.write/apply_patch/move/delete` 并清理，可选 `--exec-command` 验证 `workspace.exec`，可选 `--terminal` 打开并关闭 Host-owned PTY。传入 `--session-id --attachment-path` 后会验证 `attachment.ingest.start/chunk/finish`，Controller 文件会通过 E2EE channel 分片上传到 Host-owned attachment store。传入 `--session-id --media-event-seq --media-id` 后会验证 transcript media reference 的 `media.stream` E2EE frames，并返回 resume_token/bytes/chunks 等摘要。stream/attachment/media/workspace-write smoke 只输出摘要，不打印文件内容或 Host path。
 
 UDP discovery 只用于发现候选地址，不能授予信任。Controller 收到 LAN response 后，必须用本地 trust store 或云端 device registry 校验 `device_id` 和 public key fingerprint。真正连接成功的条件仍然是：
 
