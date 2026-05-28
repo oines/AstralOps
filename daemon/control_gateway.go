@@ -33,6 +33,8 @@ const (
 	ControlActionInteractionRespond = "interaction.respond"
 	ControlActionSessionEdit        = "session.edit"
 	ControlActionTerminalOpen       = "terminal.open"
+	ControlActionTerminalAttach     = "terminal.attach"
+	ControlActionTerminalDetach     = "terminal.detach"
 	ControlActionTerminalInput      = "terminal.input"
 	ControlActionTerminalResize     = "terminal.resize"
 	ControlActionTerminalClose      = "terminal.close"
@@ -60,6 +62,10 @@ type ControlError struct {
 }
 
 func (a *app) executeControlRequest(req ControlRequest) (ControlResponse, error) {
+	return a.executeControlRequestWithConnection(req, nil)
+}
+
+func (a *app) executeControlRequestWithConnection(req ControlRequest, conn *controlWSConn) (ControlResponse, error) {
 	requiredCapability := controlActionCapability(req.Action)
 	if requiredCapability == "" {
 		return ControlResponse{RequestID: req.RequestID}, newActionError(http.StatusNotFound, "control_action_unknown", "control action not found")
@@ -75,7 +81,7 @@ func (a *app) executeControlRequest(req ControlRequest) (ControlResponse, error)
 		return ControlResponse{RequestID: req.RequestID}, newActionError(http.StatusForbidden, "capability_denied", "controller is not allowed to use capability")
 	}
 
-	result, err := a.dispatchControlAction(req)
+	result, err := a.dispatchControlAction(req, conn)
 	if err != nil {
 		return ControlResponse{RequestID: req.RequestID}, err
 	}
@@ -92,7 +98,7 @@ func controlActionCapability(action string) string {
 		return CapabilityInteractionRespond
 	case ControlActionSessionEdit:
 		return CapabilitySessionEdit
-	case ControlActionTerminalOpen:
+	case ControlActionTerminalOpen, ControlActionTerminalAttach, ControlActionTerminalDetach:
 		return CapabilityTerminalOpen
 	case ControlActionTerminalInput, ControlActionTerminalResize, ControlActionTerminalClose:
 		return CapabilityTerminalInput
@@ -101,7 +107,7 @@ func controlActionCapability(action string) string {
 	}
 }
 
-func (a *app) dispatchControlAction(req ControlRequest) (any, error) {
+func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn) (any, error) {
 	switch req.Action {
 	case ControlActionSessionView:
 		var params struct {
@@ -185,6 +191,18 @@ func (a *app) dispatchControlAction(req ControlRequest) (any, error) {
 			return nil, err
 		}
 		return a.terminalManager().open(context.Background(), req.ControllerDeviceID, params)
+	case ControlActionTerminalAttach:
+		var params terminalAttachParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.terminalManager().attach(req.ControllerDeviceID, conn, params)
+	case ControlActionTerminalDetach:
+		var params terminalDetachParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.terminalManager().detach(req.ControllerDeviceID, conn, params)
 	case ControlActionTerminalInput:
 		var params terminalInputParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

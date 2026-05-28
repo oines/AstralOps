@@ -15,8 +15,11 @@ import (
 const (
 	terminalStatusOpen   = "open"
 	terminalStatusClosed = "closed"
+	terminalFrameOutput  = "terminal.output"
+	terminalFrameClosed  = "terminal.closed"
 	defaultTerminalCols  = 100
 	defaultTerminalRows  = 28
+	terminalViewerBuffer = 256
 )
 
 type terminalManager struct {
@@ -39,6 +42,7 @@ type terminalSession struct {
 	outputSeq      int64
 	createdAt      time.Time
 	updatedAt      time.Time
+	viewers        map[string]*terminalViewer
 
 	localCmd *exec.Cmd
 	localPTY *os.File
@@ -59,6 +63,14 @@ type terminalOpenParams struct {
 type terminalInputParams struct {
 	TerminalID string `json:"terminal_id"`
 	Data       string `json:"data,omitempty"`
+}
+
+type terminalAttachParams struct {
+	TerminalID string `json:"terminal_id"`
+}
+
+type terminalDetachParams struct {
+	TerminalID string `json:"terminal_id"`
 }
 
 type terminalResizeParams struct {
@@ -86,6 +98,36 @@ type terminalAckResult struct {
 	TerminalID string `json:"terminal_id"`
 	Status     string `json:"status"`
 	OutputSeq  int64  `json:"output_seq"`
+}
+
+type terminalAttachResult struct {
+	TerminalID     string `json:"terminal_id"`
+	WorkspaceID    string `json:"workspace_id"`
+	Target         string `json:"target"`
+	Status         string `json:"status"`
+	ViewerDeviceID string `json:"viewer_device_id"`
+	ConnectionID   string `json:"connection_id"`
+	WriterDeviceID string `json:"writer_device_id,omitempty"`
+	OutputSeq      int64  `json:"output_seq"`
+}
+
+type terminalStreamFrame struct {
+	frameType   string `json:"-"`
+	TerminalID  string `json:"terminal_id"`
+	WorkspaceID string `json:"workspace_id"`
+	Target      string `json:"target"`
+	Status      string `json:"status"`
+	OutputSeq   int64  `json:"output_seq"`
+	Data        string `json:"data,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+type terminalViewer struct {
+	closeOnce          sync.Once
+	connectionID       string
+	controllerDeviceID string
+	conn               *controlWSConn
+	frames             chan terminalStreamFrame
 }
 
 func (a *app) terminalManager() *terminalManager {
@@ -172,6 +214,54 @@ func (m *terminalManager) openSSH(ctx context.Context, controllerDeviceID string
 	return session.openResult(), nil
 }
 
+func (m *terminalManager) attach(controllerDeviceID string, conn *controlWSConn, params terminalAttachParams) (terminalAttachResult, error) {
+	if conn == nil || conn.id == "" {
+		return terminalAttachResult{}, newActionError(http.StatusBadRequest, "control_connection_required", "terminal.attach requires an encrypted control connection")
+	}
+	session, ok := m.session(params.TerminalID)
+	if !ok {
+		return terminalAttachResult{}, newActionError(http.StatusNotFound, "terminal_not_found", "terminal not found")
+	}
+	viewer := newTerminalViewer(conn)
+	result, replaced, err := session.attachViewer(viewer)
+	if err != nil {
+		viewer.close()
+		return terminalAttachResult{}, err
+	}
+	if replaced != nil {
+		replaced.close()
+	}
+	go viewer.run()
+	m.app.emit(AstralEvent{
+		WorkspaceID: session.workspaceID,
+		Agent:       session.agent,
+		Kind:        "control.terminal.attached",
+		Normalized:  session.viewerLifecycle(controllerDeviceID, conn.id, "attached"),
+	})
+	return result, nil
+}
+
+func (m *terminalManager) detach(controllerDeviceID string, conn *controlWSConn, params terminalDetachParams) (terminalAttachResult, error) {
+	if conn == nil || conn.id == "" {
+		return terminalAttachResult{}, newActionError(http.StatusBadRequest, "control_connection_required", "terminal.detach requires an encrypted control connection")
+	}
+	session, ok := m.session(params.TerminalID)
+	if !ok {
+		return terminalAttachResult{}, newActionError(http.StatusNotFound, "terminal_not_found", "terminal not found")
+	}
+	result, removed := session.detachViewer(conn.id)
+	if removed != nil {
+		removed.close()
+		m.app.emit(AstralEvent{
+			WorkspaceID: session.workspaceID,
+			Agent:       session.agent,
+			Kind:        "control.terminal.detached",
+			Normalized:  session.viewerLifecycle(controllerDeviceID, conn.id, "detached"),
+		})
+	}
+	return result, nil
+}
+
 func (m *terminalManager) input(ctx context.Context, controllerDeviceID string, params terminalInputParams) (terminalAckResult, error) {
 	session, err := m.writerSession(controllerDeviceID, params.TerminalID)
 	if err != nil {
@@ -245,6 +335,39 @@ func (m *terminalManager) register(session *terminalSession) {
 	m.sessions[session.id] = session
 }
 
+func (m *terminalManager) detachConnection(connectionID, reason string) {
+	m.mu.Lock()
+	sessions := make([]*terminalSession, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		sessions = append(sessions, session)
+	}
+	m.mu.Unlock()
+
+	for _, session := range sessions {
+		result, removed := session.detachViewer(connectionID)
+		if removed == nil {
+			continue
+		}
+		removed.close()
+		m.app.emit(AstralEvent{
+			WorkspaceID: session.workspaceID,
+			Agent:       session.agent,
+			Kind:        "control.terminal.detached",
+			Normalized:  session.viewerLifecycle(result.ViewerDeviceID, connectionID, reason),
+		})
+	}
+}
+
+func (a *app) detachTerminalViewersForControlSession(connectionID, reason string) {
+	a.terminalMu.Lock()
+	manager := a.terminals
+	a.terminalMu.Unlock()
+	if manager == nil {
+		return
+	}
+	manager.detachConnection(connectionID, reason)
+}
+
 func (m *terminalManager) session(id string) (*terminalSession, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -281,6 +404,7 @@ func newTerminalSession(workspaceID string, agent AgentKind, target, cwd, shell,
 		status:         terminalStatusOpen,
 		createdAt:      now,
 		updatedAt:      now,
+		viewers:        map[string]*terminalViewer{},
 	}
 }
 
@@ -295,7 +419,7 @@ func (s *terminalSession) readLocalOutput(app *app) {
 		}
 		n, err := ptmx.Read(buf)
 		if n > 0 {
-			s.appendOutput(n)
+			s.appendOutput(string(buf[:n]))
 		}
 		if err != nil {
 			s.markClosed(app, "exited")
@@ -308,7 +432,7 @@ func (s *terminalSession) readSSHOutput(app *app, events <-chan proxyEvent) {
 	for event := range events {
 		switch event.Event {
 		case "output":
-			s.appendOutput(len(stringValue(event.Result["data"])))
+			s.appendOutput(stringValue(event.Result["data"]))
 		case "exit":
 			s.markClosed(app, "exited")
 			return
@@ -317,14 +441,91 @@ func (s *terminalSession) readSSHOutput(app *app, events <-chan proxyEvent) {
 	s.markClosed(app, "exited")
 }
 
-func (s *terminalSession) appendOutput(n int) {
-	if n <= 0 {
+func (s *terminalSession) appendOutput(data string) {
+	if data == "" {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.outputSeq++
 	s.updatedAt = time.Now().UTC()
+	frame := s.streamFrameLocked(terminalFrameOutput, data, "")
+	viewers := s.viewersSnapshotLocked()
+	s.mu.Unlock()
+	s.sendToViewers(frame, viewers)
+}
+
+func (s *terminalSession) attachViewer(viewer *terminalViewer) (terminalAttachResult, *terminalViewer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status != terminalStatusOpen {
+		return terminalAttachResult{}, nil, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
+	}
+	replaced := s.viewers[viewer.connectionID]
+	s.viewers[viewer.connectionID] = viewer
+	return s.attachResultLocked(viewer.connectionID, viewer.controllerDeviceID), replaced, nil
+}
+
+func (s *terminalSession) detachViewer(connectionID string) (terminalAttachResult, *terminalViewer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	viewer := s.viewers[connectionID]
+	viewerDeviceID := ""
+	if viewer != nil {
+		viewerDeviceID = viewer.controllerDeviceID
+		delete(s.viewers, connectionID)
+	}
+	return s.attachResultLocked(connectionID, viewerDeviceID), viewer
+}
+
+func (s *terminalSession) sendToViewers(frame terminalStreamFrame, viewers []*terminalViewer) {
+	for _, viewer := range viewers {
+		if viewer.enqueue(frame) {
+			continue
+		}
+		if _, removed := s.detachViewer(viewer.connectionID); removed != nil {
+			removed.close()
+		}
+	}
+}
+
+func (s *terminalSession) viewersSnapshotLocked() []*terminalViewer {
+	viewers := make([]*terminalViewer, 0, len(s.viewers))
+	for _, viewer := range s.viewers {
+		viewers = append(viewers, viewer)
+	}
+	return viewers
+}
+
+func (s *terminalSession) takeViewersLocked() []*terminalViewer {
+	viewers := s.viewersSnapshotLocked()
+	s.viewers = map[string]*terminalViewer{}
+	return viewers
+}
+
+func (s *terminalSession) streamFrameLocked(frameType, data, reason string) terminalStreamFrame {
+	return terminalStreamFrame{
+		frameType:   frameType,
+		TerminalID:  s.id,
+		WorkspaceID: s.workspaceID,
+		Target:      s.target,
+		Status:      s.status,
+		OutputSeq:   s.outputSeq,
+		Data:        data,
+		Reason:      reason,
+	}
+}
+
+func (s *terminalSession) attachResultLocked(connectionID, viewerDeviceID string) terminalAttachResult {
+	return terminalAttachResult{
+		TerminalID:     s.id,
+		WorkspaceID:    s.workspaceID,
+		Target:         s.target,
+		Status:         s.status,
+		ViewerDeviceID: viewerDeviceID,
+		ConnectionID:   connectionID,
+		WriterDeviceID: s.writerDeviceID,
+		OutputSeq:      s.outputSeq,
+	}
 }
 
 func (s *terminalSession) close(ctx context.Context, app *app, reason string) {
@@ -341,6 +542,8 @@ func (s *terminalSession) close(ctx context.Context, app *app, reason string) {
 		s.sshTerminalOpen = false
 		s.status = terminalStatusClosed
 		s.updatedAt = time.Now().UTC()
+		closedFrame := s.streamFrameLocked(terminalFrameClosed, "", reason)
+		viewers := s.takeViewersLocked()
 		s.mu.Unlock()
 
 		if sshOpen && sshWorkspace != nil && app.ssh != nil {
@@ -358,6 +561,7 @@ func (s *terminalSession) close(ctx context.Context, app *app, reason string) {
 		if localCmd != nil && localCmd.Process != nil {
 			_, _ = localCmd.Process.Wait()
 		}
+		closeViewersAfterFrame(closedFrame, viewers)
 		app.emit(AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: s.lifecycle(reason)})
 	})
 }
@@ -374,6 +578,8 @@ func (s *terminalSession) markClosed(app *app, reason string) {
 		s.status = terminalStatusClosed
 		s.updatedAt = time.Now().UTC()
 		s.sshUnsubscribe = nil
+		closedFrame := s.streamFrameLocked(terminalFrameClosed, "", reason)
+		viewers := s.takeViewersLocked()
 		s.mu.Unlock()
 		if sshUnsubscribe != nil {
 			sshUnsubscribe()
@@ -384,6 +590,7 @@ func (s *terminalSession) markClosed(app *app, reason string) {
 		if localCmd != nil && localCmd.Process != nil {
 			_, _ = localCmd.Process.Wait()
 		}
+		closeViewersAfterFrame(closedFrame, viewers)
 		app.emit(AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: s.lifecycle(reason)})
 	})
 }
@@ -421,6 +628,61 @@ func (s *terminalSession) lifecycle(reason string) map[string]any {
 		"status":           s.status,
 		"writer_device_id": s.writerDeviceID,
 		"reason":           reason,
+	}
+}
+
+func (s *terminalSession) viewerLifecycle(viewerDeviceID, connectionID, reason string) map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return map[string]any{
+		"terminal_id":      s.id,
+		"workspace_id":     s.workspaceID,
+		"agent":            s.agent,
+		"target":           s.target,
+		"cwd":              s.cwd,
+		"status":           s.status,
+		"writer_device_id": s.writerDeviceID,
+		"viewer_device_id": viewerDeviceID,
+		"connection_id":    connectionID,
+		"output_seq":       s.outputSeq,
+		"reason":           reason,
+	}
+}
+
+func newTerminalViewer(conn *controlWSConn) *terminalViewer {
+	return &terminalViewer{
+		connectionID:       conn.id,
+		controllerDeviceID: conn.controllerDeviceID,
+		conn:               conn,
+		frames:             make(chan terminalStreamFrame, terminalViewerBuffer),
+	}
+}
+
+func (v *terminalViewer) run() {
+	for frame := range v.frames {
+		v.conn.writePlain(controlPlainFrame{Type: frame.frameType, Terminal: &frame})
+	}
+}
+
+func (v *terminalViewer) enqueue(frame terminalStreamFrame) bool {
+	select {
+	case v.frames <- frame:
+		return true
+	default:
+		return false
+	}
+}
+
+func (v *terminalViewer) close() {
+	v.closeOnce.Do(func() {
+		close(v.frames)
+	})
+}
+
+func closeViewersAfterFrame(frame terminalStreamFrame, viewers []*terminalViewer) {
+	for _, viewer := range viewers {
+		_ = viewer.enqueue(frame)
+		viewer.close()
 	}
 }
 

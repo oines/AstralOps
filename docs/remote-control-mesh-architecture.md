@@ -802,14 +802,18 @@ terminal.close
 
 ```text
 terminal.open
+terminal.attach
+terminal.detach
 terminal.input
 terminal.resize
 terminal.close
+terminal.output stream over E2EE control channel
 single active writer
-opened/closed lifecycle events only
+multi viewer
+opened/attached/detached/closed lifecycle events only
 ```
 
-这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。PTY 输出 stream、attach/detach、多 viewer 和 retention timeout 是下一步。
+这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.attach` 必须发生在已完成握手的 encrypted control WebSocket 上，因为 PTY 输出只能回到这条 E2EE channel。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。PTY 输出不进入 JSONL，只有 opened、attached、detached、closed lifecycle event 会落盘。retention timeout 是下一步。
 
 断线行为：
 
@@ -1050,18 +1054,18 @@ Local Desktop 可以继续用本地 HTTP URL 渲染媒体，但 RemoteCoreClient
 ```text
 已落地:
 terminal.open
+terminal.attach
+terminal.detach
 terminal.input
 terminal.resize
 terminal.close
+terminal.output stream
 single active writer
+multi viewer
 lifecycle event only, no ANSI output JSONL storage
 
 待落地:
-terminal.attach
-terminal.detach
-terminal.output stream
 retention timeout
-multi viewer
 ```
 
 ### Phase 9 - Mobile Controller

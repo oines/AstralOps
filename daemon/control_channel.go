@@ -46,11 +46,12 @@ type controlHelloAckFrame struct {
 }
 
 type controlPlainFrame struct {
-	Type     string           `json:"type"`
-	Request  *ControlRequest  `json:"request,omitempty"`
-	Response *ControlResponse `json:"response,omitempty"`
-	Reason   string           `json:"reason,omitempty"`
-	Code     string           `json:"code,omitempty"`
+	Type     string               `json:"type"`
+	Request  *ControlRequest      `json:"request,omitempty"`
+	Response *ControlResponse     `json:"response,omitempty"`
+	Terminal *terminalStreamFrame `json:"terminal,omitempty"`
+	Reason   string               `json:"reason,omitempty"`
+	Code     string               `json:"code,omitempty"`
 }
 
 type controlSealedFrame struct {
@@ -226,7 +227,7 @@ func (c *controlWSConn) handleRequest(req ControlRequest) *ControlResponse {
 		return controlResponseError(req.RequestID, http.StatusForbidden, "controller_device_mismatch", "request controller_device_id does not match control session")
 	}
 	req.ControllerDeviceID = c.controllerDeviceID
-	response, err := c.app.executeControlRequest(req)
+	response, err := c.app.executeControlRequestWithConnection(req, c)
 	if err == nil {
 		return &response
 	}
@@ -265,6 +266,7 @@ func (c *controlWSConn) writeUnsealedClose(code, reason string) {
 }
 
 func (c *controlWSConn) shutdown() {
+	c.app.detachTerminalViewersForControlSession(c.id, "connection_closed")
 	c.app.unregisterControlSession(c.id)
 	_ = c.socket.Close()
 }

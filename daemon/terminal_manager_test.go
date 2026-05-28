@@ -103,6 +103,26 @@ func TestControlGatewayTerminalInputRequiresInputCapability(t *testing.T) {
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }
 
+func TestControlGatewayTerminalAttachRequiresControlConnection(t *testing.T) {
+	t.Setenv("SHELL", terminalManagerTestShell(t))
+
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityTerminalOpen)
+
+	open := openTerminalForTest(t, app, "device_mobile", workspace.ID)
+	t.Cleanup(func() {
+		_, _ = app.terminalManager().close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
+	})
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityTerminalOpen,
+		Action:             ControlActionTerminalAttach,
+		Params:             map[string]any{"terminal_id": open.TerminalID},
+	})
+	assertActionError(t, err, http.StatusBadRequest, "control_connection_required")
+}
+
 func TestTerminalManagerKeepsSingleActiveWriter(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 

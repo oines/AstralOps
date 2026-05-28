@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -140,15 +141,27 @@ func writeEncryptedControlFrame(t *testing.T, client *websocket.Conn, cipher *co
 
 func readEncryptedControlFrame(t *testing.T, client *websocket.Conn, cipher *controlCipher) controlPlainFrame {
 	t.Helper()
+	plain, _ := readEncryptedControlFrameWithBody(t, client, cipher)
+	return plain
+}
+
+func readEncryptedControlFrameWithBody(t *testing.T, client *websocket.Conn, cipher *controlCipher) (controlPlainFrame, []byte) {
+	t.Helper()
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	defer client.SetReadDeadline(time.Time{})
+	_, body, err := client.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
 	var sealed controlSealedFrame
-	if err := client.ReadJSON(&sealed); err != nil {
+	if err := json.Unmarshal(body, &sealed); err != nil {
 		t.Fatal(err)
 	}
 	plain, err := cipher.open(sealed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return plain
+	return plain, body
 }
 
 func TestControlWebSocketEncryptedRequestResponse(t *testing.T) {
@@ -269,5 +282,132 @@ func TestControlWebSocketRevokeClosesActiveSession(t *testing.T) {
 	}
 	if got := app.activeControlSessionCountForDevice("dev_controller"); got != 0 {
 		t.Fatalf("active sessions = %d, want 0 after revoke", got)
+	}
+}
+
+func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *testing.T) {
+	t.Setenv("SHELL", terminalManagerTestShell(t))
+
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityTerminalOpen, CapabilityTerminalInput)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "terminal_open",
+			Capability: CapabilityTerminalOpen,
+			Action:     ControlActionTerminalOpen,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"cols":         80,
+				"rows":         24,
+			},
+		},
+	})
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("open response = %#v, want ok", plain)
+	}
+	terminalID := stringValue(mapValue(plain.Response.Result)["terminal_id"])
+	if terminalID == "" {
+		t.Fatalf("open result = %#v, want terminal id", plain.Response.Result)
+	}
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "terminal_attach",
+			Capability: CapabilityTerminalOpen,
+			Action:     ControlActionTerminalAttach,
+			Params:     map[string]any{"terminal_id": terminalID},
+		},
+	})
+	plain = readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("attach response = %#v, want ok", plain)
+	}
+
+	secret := "stream-secret-" + randomID(8)
+	sealedInput := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "terminal_input",
+			Capability: CapabilityTerminalInput,
+			Action:     ControlActionTerminalInput,
+			Params: map[string]any{
+				"terminal_id": terminalID,
+				"data":        "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
+			},
+		},
+	})
+	if strings.Contains(string(sealedInput), secret) {
+		t.Fatalf("sealed terminal input leaked payload: %s", string(sealedInput))
+	}
+
+	sawInputResponse := false
+	sawOutput := false
+	for i := 0; i < 20 && (!sawInputResponse || !sawOutput); i++ {
+		plain, sealed := readEncryptedControlFrameWithBody(t, client, cipher)
+		if strings.Contains(string(sealed), secret) {
+			t.Fatalf("sealed terminal stream leaked payload: %s", string(sealed))
+		}
+		switch plain.Type {
+		case "response":
+			if plain.Response != nil && plain.Response.RequestID == "terminal_input" && plain.Response.OK {
+				sawInputResponse = true
+			}
+		case terminalFrameOutput:
+			if plain.Terminal == nil || plain.Terminal.TerminalID != terminalID {
+				t.Fatalf("terminal output frame = %#v, want terminal %s", plain, terminalID)
+			}
+			if strings.Contains(plain.Terminal.Data, secret) {
+				sawOutput = true
+			}
+		}
+	}
+	if !sawInputResponse || !sawOutput {
+		t.Fatalf("saw input response=%v output=%v, want both", sawInputResponse, sawOutput)
+	}
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "terminal_close",
+			Capability: CapabilityTerminalInput,
+			Action:     ControlActionTerminalClose,
+			Params:     map[string]any{"terminal_id": terminalID},
+		},
+	})
+	sawCloseResponse := false
+	sawClosedFrame := false
+	for i := 0; i < 20 && (!sawCloseResponse || !sawClosedFrame); i++ {
+		plain := readEncryptedControlFrame(t, client, cipher)
+		switch plain.Type {
+		case "response":
+			if plain.Response != nil && plain.Response.RequestID == "terminal_close" && plain.Response.OK {
+				sawCloseResponse = true
+			}
+		case terminalFrameClosed:
+			if plain.Terminal != nil && plain.Terminal.TerminalID == terminalID && plain.Terminal.Status == terminalStatusClosed {
+				sawClosedFrame = true
+			}
+		}
+	}
+	if !sawCloseResponse || !sawClosedFrame {
+		t.Fatalf("saw close response=%v closed frame=%v, want both", sawCloseResponse, sawClosedFrame)
+	}
+
+	events := app.store.queryEvents(workspace.ID, "", 0)
+	body, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), secret) {
+		t.Fatalf("terminal output leaked into JSONL events: %s", string(body))
+	}
+	if countKind(events, "control.terminal.opened") != 1 || countKind(events, "control.terminal.attached") != 1 || countKind(events, "control.terminal.closed") != 1 {
+		t.Fatalf("terminal lifecycle events = %#v", eventKinds(events))
 	}
 }

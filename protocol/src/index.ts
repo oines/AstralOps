@@ -410,6 +410,8 @@ export type ControlAction =
   | "interaction.respond"
   | "session.edit"
   | "terminal.open"
+  | "terminal.attach"
+  | "terminal.detach"
   | "terminal.input"
   | "terminal.resize"
   | "terminal.close"
@@ -425,6 +427,14 @@ export type TerminalOpenParams = {
 export type TerminalInputParams = {
   terminal_id: string;
   data?: string;
+};
+
+export type TerminalAttachParams = {
+  terminal_id: string;
+};
+
+export type TerminalDetachParams = {
+  terminal_id: string;
 };
 
 export type TerminalResizeParams = {
@@ -452,6 +462,27 @@ export type TerminalAckResult = {
   terminal_id: string;
   status: "open" | "closed";
   output_seq: number;
+};
+
+export type TerminalAttachResult = {
+  terminal_id: string;
+  workspace_id: string;
+  target: WorkspaceTarget;
+  status: "open" | "closed";
+  viewer_device_id: string;
+  connection_id: string;
+  writer_device_id?: string;
+  output_seq: number;
+};
+
+export type TerminalStreamFrame = {
+  terminal_id: string;
+  workspace_id: string;
+  target: WorkspaceTarget;
+  status: "open" | "closed";
+  output_seq: number;
+  data?: string;
+  reason?: string;
 };
 
 export type ControlRequest = {
@@ -558,6 +589,14 @@ export type ControlPlainFrame =
   | {
       type: "response";
       response: ControlResponse;
+    }
+  | {
+      type: "terminal.output";
+      terminal: TerminalStreamFrame;
+    }
+  | {
+      type: "terminal.closed";
+      terminal: TerminalStreamFrame;
     }
   | {
       type: "close";
