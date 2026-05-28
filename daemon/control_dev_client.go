@@ -305,6 +305,8 @@ func runControlDevClientCommand(args []string) error {
 		sessionView := fs.Bool("session-view", false, "verify core.read.session_view for --session-id over the encrypted control channel")
 		events := fs.Bool("events", false, "verify core.read.events over the encrypted control channel")
 		eventsLimit := fs.Int("events-limit", 10, "maximum events returned by --events smoke")
+		eventSubscription := fs.Bool("event-subscription", false, "verify core.subscribe.events replay frames over the encrypted control channel")
+		eventReplayLimit := fs.Int("event-replay-limit", 1, "maximum replayed events returned by --event-subscription smoke")
 		attachmentPath := fs.String("attachment-path", "", "optional local Controller file to upload with chunked attachment.ingest")
 		attachmentChunkSize := fs.Int("attachment-chunk-size", 64*1024, "attachment ingest chunk size")
 		mediaEventSeq := fs.Int64("media-event-seq", 0, "optional transcript event seq for media.stream")
@@ -335,6 +337,8 @@ func runControlDevClientCommand(args []string) error {
 			SessionView:         *sessionView,
 			Events:              *events,
 			EventsLimit:         *eventsLimit,
+			EventSubscription:   *eventSubscription,
+			EventReplayLimit:    *eventReplayLimit,
 			AttachmentPath:      *attachmentPath,
 			AttachmentChunkSize: *attachmentChunkSize,
 			MediaEventSeq:       *mediaEventSeq,
@@ -380,6 +384,8 @@ type controlClientSmokeOptions struct {
 	SessionView         bool
 	Events              bool
 	EventsLimit         int
+	EventSubscription   bool
+	EventReplayLimit    int
 	AttachmentPath      string
 	AttachmentChunkSize int
 	MediaEventSeq       int64
@@ -537,6 +543,14 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 			return result, err
 		}
 		if err := controlClientSmokeResponseError("events", events); err != nil {
+			return result, err
+		}
+	}
+
+	if opts.EventSubscription {
+		step, err := controlClientSmokeEventSubscription(st, target, opts.WorkspaceID, opts.SessionID, opts.EventReplayLimit)
+		result.Steps = append(result.Steps, step)
+		if err != nil {
 			return result, err
 		}
 	}
@@ -1111,6 +1125,59 @@ func controlClientSmokeRequest(st *store, target controlClientTarget, requestID,
 	})
 }
 
+func controlClientSmokeEventSubscription(st *store, target controlClientTarget, workspaceID, sessionID string, replayLimit int) (controlClientSmokeStep, error) {
+	name := "event_subscription"
+	step := controlClientSmokeStep{Name: name, Capability: CapabilityCoreRead, Action: ControlActionEventsSubscribe}
+	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	if err != nil {
+		step.Error = &ControlError{Code: "connect_failed", Message: err.Error()}
+		return step, err
+	}
+	defer socket.Close()
+
+	response, err := controlClientRoundTrip(socket, cipher, target.Timeout, st, ControlRequest{
+		RequestID:  "smoke_event_subscription",
+		Capability: CapabilityCoreRead,
+		Action:     ControlActionEventsSubscribe,
+		Params: map[string]any{
+			"workspace_id": workspaceID,
+			"session_id":   sessionID,
+			"replay_limit": replayLimit,
+		},
+	})
+	step = controlClientSmokeStepFromResponse(name, CapabilityCoreRead, ControlActionEventsSubscribe, response, controlClientEventSubscriptionSmokeSummary(response))
+	if err != nil {
+		step.Error = &ControlError{Code: "event_subscription_failed", Message: err.Error()}
+		return step, err
+	}
+	if err := controlClientSmokeResponseError(name, response); err != nil {
+		return step, err
+	}
+	streamID := stringValue(mapValue(response.Result)["stream_id"])
+	if streamID == "" {
+		err := fmt.Errorf("smoke step %s failed: stream_id missing", name)
+		step.Error = &ControlError{Code: "event_subscription_stream_id_missing", Message: err.Error()}
+		return step, err
+	}
+
+	plain, err := controlClientReadWithTimeout(socket, cipher, target.Timeout)
+	if err != nil {
+		step.Error = &ControlError{Code: "event_subscription_read_failed", Message: err.Error()}
+		return step, err
+	}
+	if plain.Type != eventStreamFrameEvent || plain.Event == nil || plain.Event.StreamID != streamID {
+		err := fmt.Errorf("unexpected event subscription frame")
+		step.Error = &ControlError{Code: "unexpected_event_subscription_frame", Message: err.Error()}
+		return step, err
+	}
+	if step.Summary == nil {
+		step.Summary = map[string]any{}
+	}
+	step.Summary["event_seq"] = plain.Event.Seq
+	step.Summary["event_kind"] = plain.Event.Event.Kind
+	return step, nil
+}
+
 func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, sessionID, path string, chunkSize int) (controlClientSmokeStep, error) {
 	name := "attachment_ingest"
 	step := controlClientSmokeStep{Name: name, Capability: CapabilityAttachmentIngest, Action: "attachment.ingest.start/chunk/finish"}
@@ -1313,6 +1380,17 @@ func controlClientEventsSmokeSummary(response ControlResponse) map[string]any {
 	summary["last_seq"] = int64(numberValue(last["seq"]))
 	summary["last_kind"] = stringValue(last["kind"])
 	return summary
+}
+
+func controlClientEventSubscriptionSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	return map[string]any{
+		"stream_id":    stringValue(result["stream_id"]),
+		"workspace_id": stringValue(result["workspace_id"]),
+		"session_id":   stringValue(result["session_id"]),
+		"after_seq":    int64(numberValue(result["after_seq"])),
+		"replay_limit": int(numberValue(result["replay_limit"])),
+	}
 }
 
 func controlClientWorkspaceFilesSmokeSummary(response ControlResponse) map[string]any {

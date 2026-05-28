@@ -225,13 +225,13 @@ go run ./daemon control-client events --discover --host-device-id <host_device_i
 go run ./daemon control-client trust-list --discover --host-device-id <host_device_id>
 go run ./daemon control-client smoke --discover --host-device-id <host_device_id>
 go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --trust-list
-go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --workspace-id <workspace_id> --session-id <session_id> --sessions --session-view --events
+go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --workspace-id <workspace_id> --session-id <session_id> --sessions --session-view --events --event-subscription
 go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --workspace-id <workspace_id> --path . --stream-path large.log --workspace-write-smoke --exec-command "pwd" --terminal
 go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --session-id <session_id> --attachment-path ./clip.png
 go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --session-id <session_id> --media-event-seq <event_seq> --media-id <media_id>
 ```
 
-`control-client smoke` 只走 `/v1/control/ws` 的 E2EE request/response，不访问本地 workspace/session/settings/events HTTP API。默认只验证 `core.read.workspaces`；可选 `--sessions` 验证 `core.read.sessions`，可选 `--session-view` 验证指定 `--session-id` 的 `core.read.session_view`，可选 `--events` 验证 `core.read.events` 的窗口读取，返回结果仍只走 E2EE control channel；可选 `--trust-list` 验证 `host.trust.list` 的非破坏性 Host management 查询；传入 `--workspace-id` 后会验证 `workspace.files.read`，可选 `--stream-path` 验证 `workspace.files.stream` 的 chunked E2EE frames，可选 `--workspace-write-smoke` 在 Host workspace 临时目录中验证 `workspace.files.write/apply_patch/move/delete` 并清理，可选 `--exec-command` 验证 `workspace.exec`，可选 `--terminal` 验证 Host-owned PTY 的 `terminal.open/attach/input/output/close` E2EE 链路。传入 `--session-id --attachment-path` 后会验证 `attachment.ingest.start/chunk/finish`，Controller 文件会通过 E2EE channel 分片上传到 Host-owned attachment store。传入 `--session-id --media-event-seq --media-id` 后会验证 transcript media reference 的 `media.stream` E2EE frames，并返回 resume_token/bytes/chunks 等摘要。stream/attachment/media/workspace-write/terminal/trust/session/events smoke 只输出摘要，不打印文件内容、事件正文、PTY 输出内容或 Host path。
+`control-client smoke` 只走 `/v1/control/ws` 的 E2EE request/response，不访问本地 workspace/session/settings/events HTTP API。默认只验证 `core.read.workspaces`；可选 `--sessions` 验证 `core.read.sessions`，可选 `--session-view` 验证指定 `--session-id` 的 `core.read.session_view`，可选 `--events` 验证 `core.read.events` 的窗口读取，可选 `--event-subscription` 验证 `core.subscribe.events` replay event frame；两者都只走 E2EE control channel。可选 `--trust-list` 验证 `host.trust.list` 的非破坏性 Host management 查询；传入 `--workspace-id` 后会验证 `workspace.files.read`，可选 `--stream-path` 验证 `workspace.files.stream` 的 chunked E2EE frames，可选 `--workspace-write-smoke` 在 Host workspace 临时目录中验证 `workspace.files.write/apply_patch/move/delete` 并清理，可选 `--exec-command` 验证 `workspace.exec`，可选 `--terminal` 验证 Host-owned PTY 的 `terminal.open/attach/input/output/close` E2EE 链路。传入 `--session-id --attachment-path` 后会验证 `attachment.ingest.start/chunk/finish`，Controller 文件会通过 E2EE channel 分片上传到 Host-owned attachment store。传入 `--session-id --media-event-seq --media-id` 后会验证 transcript media reference 的 `media.stream` E2EE frames，并返回 resume_token/bytes/chunks 等摘要。stream/attachment/media/workspace-write/terminal/trust/session/events/event-subscription smoke 只输出摘要，不打印文件内容、事件正文、PTY 输出内容或 Host path。
 
 UDP discovery 只用于发现候选地址，不能授予信任。Controller 收到 LAN response 后，必须用本地 trust store 或云端 device registry 校验 `device_id` 和 public key fingerprint。真正连接成功的条件仍然是：
 
@@ -1047,6 +1047,8 @@ encrypted attachment/media frames
 encrypted terminal stream frames
 reconnect and resume semantics
 ```
+
+`core.subscribe.events` v1 是最小事件订阅协议：Controller 先用 `core.read.events` 按 `after_seq` 拉取窗口，再在同一条 E2EE WebSocket 上订阅 Host event frame。为了避免读窗口和订阅之间的竞态，订阅请求可以带 `after_seq + replay_limit`，Host 会先发送符合过滤条件的 replay frame，再发送后续 live frame。`core.unsubscribe.events(stream_id)` 取消订阅；连接断开、设备踢出信任或 control session 关闭时，Host 必须清理该连接上的 event subscription。
 
 当前 daemon 的最小控制通道入口：
 

@@ -143,6 +143,8 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 		SessionView:         true,
 		Events:              true,
 		EventsLimit:         10,
+		EventSubscription:   true,
+		EventReplayLimit:    1,
 		ExecCommand:         "echo smoke",
 		Terminal:            runTerminal,
 		TrustList:           true,
@@ -153,7 +155,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if result.Target != hostServer.URL || result.HostDeviceID != hostApp.store.deviceIdentity.DeviceID {
 		t.Fatalf("smoke result target = %#v", result)
 	}
-	wantSteps := []string{"workspaces", "workspace_files_read", "sessions", "session_view", "events", "attachment_ingest", "workspace_files_stream", "workspace_files_write", "workspace_files_apply_patch", "workspace_files_move", "workspace_files_delete", "media_stream", "host_trust_list", "workspace_exec"}
+	wantSteps := []string{"workspaces", "workspace_files_read", "sessions", "session_view", "events", "event_subscription", "attachment_ingest", "workspace_files_stream", "workspace_files_write", "workspace_files_apply_patch", "workspace_files_move", "workspace_files_delete", "media_stream", "host_trust_list", "workspace_exec"}
 	if runTerminal {
 		wantSteps = append(wantSteps, "terminal_open", "terminal_attach", "terminal_input", "terminal_output", "terminal_close", "terminal_closed")
 	}
@@ -185,6 +187,10 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	eventsStep, _ := smokeStepByName(result, "events")
 	if int(numberValue(eventsStep.Summary["count"])) == 0 || int64(numberValue(eventsStep.Summary["last_seq"])) == 0 || stringValue(eventsStep.Summary["last_kind"]) == "" {
 		t.Fatalf("events summary = %#v, want Host event window summary", eventsStep.Summary)
+	}
+	eventSubscriptionStep, _ := smokeStepByName(result, "event_subscription")
+	if stringValue(eventSubscriptionStep.Summary["stream_id"]) == "" || int64(numberValue(eventSubscriptionStep.Summary["event_seq"])) == 0 || stringValue(eventSubscriptionStep.Summary["event_kind"]) == "" {
+		t.Fatalf("event_subscription summary = %#v, want encrypted event frame summary", eventSubscriptionStep.Summary)
 	}
 	attachmentStep, _ := smokeStepByName(result, "attachment_ingest")
 	attachmentID := stringValue(attachmentStep.Summary["attachment_id"])

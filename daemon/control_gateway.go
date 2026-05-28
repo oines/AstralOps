@@ -29,6 +29,8 @@ const (
 	ControlActionSessions                   = "core.read.sessions"
 	ControlActionWorkspaces                 = "core.read.workspaces"
 	ControlActionEvents                     = "core.read.events"
+	ControlActionEventsSubscribe            = "core.subscribe.events"
+	ControlActionEventsUnsubscribe          = "core.unsubscribe.events"
 	ControlActionSessionInput               = "core.control.session_input"
 	ControlActionInterrupt                  = "core.control.interrupt"
 	ControlActionQueueCancel                = "core.control.queue.cancel"
@@ -113,7 +115,7 @@ func (a *app) executeControlRequestWithConnection(req ControlRequest, conn *cont
 
 func controlActionCapability(action string) string {
 	switch action {
-	case ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionEvents:
+	case ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
 		return CapabilityCoreRead
 	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionSessionFork, ControlActionSessionDelete:
 		return CapabilityCoreControl
@@ -182,6 +184,28 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, gra
 			return nil, err
 		}
 		return a.store.queryEventsWindow(params.WorkspaceID, params.SessionID, params.AfterSeq, params.BeforeSeq, params.Limit), nil
+	case ControlActionEventsSubscribe:
+		if conn == nil {
+			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "core.subscribe.events requires an encrypted control connection")
+		}
+		var params eventSubscriptionParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.prepareControlEventSubscription(params)
+	case ControlActionEventsUnsubscribe:
+		if conn == nil {
+			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "core.unsubscribe.events requires an encrypted control connection")
+		}
+		var params eventSubscriptionCancelParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		streamID := strings.TrimSpace(params.StreamID)
+		if streamID == "" {
+			return nil, newActionError(http.StatusBadRequest, "event_subscription_id_required", "stream_id required")
+		}
+		return eventSubscriptionCancelResult{StreamID: streamID, Cancelled: conn.cancelEventSubscription(streamID)}, nil
 	case ControlActionSessionInput:
 		var params struct {
 			SessionID       string            `json:"session_id"`

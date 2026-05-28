@@ -50,6 +50,7 @@ type controlPlainFrame struct {
 	Type          string                    `json:"type"`
 	Request       *ControlRequest           `json:"request,omitempty"`
 	Response      *ControlResponse          `json:"response,omitempty"`
+	Event         *eventStreamFrame         `json:"event,omitempty"`
 	Terminal      *terminalStreamFrame      `json:"terminal,omitempty"`
 	Media         *mediaStreamFrame         `json:"media,omitempty"`
 	WorkspaceFile *workspaceFileStreamFrame `json:"workspace_file,omitempty"`
@@ -248,6 +249,17 @@ func (c *controlWSConn) afterControlResponse(req ControlRequest, response Contro
 		return nil
 	}
 	switch req.Action {
+	case ControlActionEventsSubscribe:
+		result, ok := response.Result.(eventSubscriptionResult)
+		if !ok {
+			return nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		c.registerEventSubscription(result.StreamID, cancel)
+		return func() {
+			defer c.unregisterEventSubscription(result.StreamID)
+			c.app.streamControlEvents(ctx, result, c, req.RequestID)
+		}
 	case ControlActionMediaStream:
 		result, ok := response.Result.(mediaStreamResult)
 		if !ok {
@@ -291,6 +303,10 @@ func (c *controlWSConn) registerMediaStream(streamID string, cancel context.Canc
 	c.registerControlStream(streamID, cancel)
 }
 
+func (c *controlWSConn) registerEventSubscription(streamID string, cancel context.CancelFunc) {
+	c.registerControlStream(streamID, cancel)
+}
+
 func (c *controlWSConn) registerWorkspaceFileStream(streamID string, cancel context.CancelFunc) {
 	c.registerControlStream(streamID, cancel)
 }
@@ -309,6 +325,10 @@ func (c *controlWSConn) registerControlStream(streamID string, cancel context.Ca
 }
 
 func (c *controlWSConn) cancelMediaStream(streamID string) bool {
+	return c.cancelControlStream(streamID)
+}
+
+func (c *controlWSConn) cancelEventSubscription(streamID string) bool {
 	return c.cancelControlStream(streamID)
 }
 
@@ -334,6 +354,10 @@ func (c *controlWSConn) cancelControlStream(streamID string) bool {
 }
 
 func (c *controlWSConn) unregisterMediaStream(streamID string) {
+	c.unregisterControlStream(streamID)
+}
+
+func (c *controlWSConn) unregisterEventSubscription(streamID string) {
 	c.unregisterControlStream(streamID)
 }
 

@@ -599,6 +599,70 @@ func TestControlWebSocketSessionDeleteOverEncryptedChannel(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketEventSubscriptionStreamsEncryptedEvents(t *testing.T) {
+	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
+	secret := "sealed-event-subscription-secret"
+	saved, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": secret}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "event_subscription",
+			Capability: CapabilityCoreRead,
+			Action:     ControlActionEventsSubscribe,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"session_id":   session.ID,
+				"replay_limit": 1,
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionEventsSubscribe) || strings.Contains(string(sealedRequest), session.ID) {
+		t.Fatalf("sealed event subscription request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "event_subscription" {
+		t.Fatalf("subscribe response = %#v, want ok response", plain)
+	}
+	streamID := stringValue(mapValue(plain.Response.Result)["stream_id"])
+	if streamID == "" {
+		t.Fatalf("subscribe result = %#v, want stream id", plain.Response.Result)
+	}
+
+	plain, sealedEvent := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedEvent), secret) {
+		t.Fatalf("sealed event frame leaked payload: %s", string(sealedEvent))
+	}
+	if plain.Type != eventStreamFrameEvent || plain.Event == nil || plain.Event.StreamID != streamID || plain.Event.Seq != saved.Seq {
+		t.Fatalf("event frame = %#v, want replayed event frame", plain)
+	}
+	text := stringValue(mapValue(plain.Event.Event.Normalized)["text"])
+	if plain.Event.Event.Kind != "message.user" || text != secret {
+		t.Fatalf("event payload = %#v, want decrypted event", plain.Event.Event)
+	}
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "event_unsubscribe",
+			Capability: CapabilityCoreRead,
+			Action:     ControlActionEventsUnsubscribe,
+			Params:     map[string]any{"stream_id": streamID},
+		},
+	})
+	plain = readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK || !boolValue(mapValue(plain.Response.Result)["cancelled"]) {
+		t.Fatalf("unsubscribe response = %#v, want cancelled", plain)
+	}
+}
+
 func TestControlWebSocketChunkedAttachmentIngestIsEncrypted(t *testing.T) {
 	app, _, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityAttachmentIngest)
 	server := startControlChannelTestServer(t, app)
