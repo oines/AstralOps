@@ -648,6 +648,19 @@ func TestControlWebSocketEventSubscriptionStreamsEncryptedEvents(t *testing.T) {
 		t.Fatalf("event payload = %#v, want decrypted event", plain.Event.Event)
 	}
 
+	liveSecret := "sealed-event-subscription-live-secret"
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.status", Normalized: map[string]any{"status": "running", "message": liveSecret}})
+	plain, sealedEvent = readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedEvent), liveSecret) {
+		t.Fatalf("sealed live event frame leaked payload: %s", string(sealedEvent))
+	}
+	if plain.Type != eventStreamFrameEvent || plain.Event == nil || plain.Event.StreamID != streamID || plain.Event.Event.Kind != "control.status" {
+		t.Fatalf("live event frame = %#v, want control.status event frame", plain)
+	}
+	if stringValue(mapValue(plain.Event.Event.Normalized)["message"]) != liveSecret {
+		t.Fatalf("live event payload = %#v, want decrypted live event", plain.Event.Event)
+	}
+
 	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
 		Type: "request",
 		Request: &ControlRequest{
