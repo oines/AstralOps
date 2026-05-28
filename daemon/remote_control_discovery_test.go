@@ -63,6 +63,31 @@ func TestRemoteControlCandidateFromDiscoveryPacket(t *testing.T) {
 	}
 }
 
+func TestRemoteControlCandidateIgnoresDiscoveryBaseURL(t *testing.T) {
+	body, err := json.Marshal(remoteControlDiscoveryPacket{
+		Type:    remoteControlDiscoveryResponseType,
+		Version: controlProtocolVersion,
+		Candidate: &LanHostCandidate{
+			DeviceID:             "dev_host",
+			PublicKeyFingerprint: "sha256:HOST",
+			Host:                 "10.0.0.10",
+			Port:                 43900,
+			BaseURL:              "http://203.0.113.10:9999",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	candidate, ok := remoteControlCandidateFromDiscoveryPacket(body)
+	if !ok {
+		t.Fatal("candidate was not parsed")
+	}
+	if candidate.BaseURL != "http://10.0.0.10:43900" {
+		t.Fatalf("candidate BaseURL = %q, want derived LAN address", candidate.BaseURL)
+	}
+}
+
 func TestRemoteControlCandidateRejectsIncompleteDiscoveryPacket(t *testing.T) {
 	body, err := json.Marshal(remoteControlDiscoveryPacket{
 		Type:    remoteControlDiscoveryResponseType,
@@ -78,6 +103,25 @@ func TestRemoteControlCandidateRejectsIncompleteDiscoveryPacket(t *testing.T) {
 	}
 	if _, ok := remoteControlCandidateFromDiscoveryPacket(body); ok {
 		t.Fatal("candidate parsed without public_key_fingerprint")
+	}
+}
+
+func TestRemoteControlCandidateRejectsNonIPv4Host(t *testing.T) {
+	body, err := json.Marshal(remoteControlDiscoveryPacket{
+		Type:    remoteControlDiscoveryResponseType,
+		Version: controlProtocolVersion,
+		Candidate: &LanHostCandidate{
+			DeviceID:             "dev_host",
+			PublicKeyFingerprint: "sha256:HOST",
+			Host:                 "example.test",
+			Port:                 43900,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := remoteControlCandidateFromDiscoveryPacket(body); ok {
+		t.Fatal("candidate parsed with non-IPv4 host")
 	}
 }
 

@@ -181,12 +181,15 @@ func remoteControlCandidateFromDiscoveryPacket(body []byte) (LanHostCandidate, b
 	if candidate.DeviceID == "" || candidate.PublicKeyFingerprint == "" || candidate.Host == "" || candidate.Port <= 0 {
 		return LanHostCandidate{}, false
 	}
+	hostIP := net.ParseIP(candidate.Host).To4()
+	if hostIP == nil {
+		return LanHostCandidate{}, false
+	}
+	candidate.Host = hostIP.String()
 	if len(candidate.Addresses) == 0 {
 		candidate.Addresses = []string{candidate.Host}
 	}
-	if candidate.BaseURL == "" {
-		candidate.BaseURL = "http://" + net.JoinHostPort(candidate.Host, strconv.Itoa(candidate.Port))
-	}
+	candidate.BaseURL = "http://" + net.JoinHostPort(candidate.Host, strconv.Itoa(candidate.Port))
 	return candidate, true
 }
 
