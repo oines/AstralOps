@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -410,4 +411,149 @@ func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *test
 	if countKind(events, "control.terminal.opened") != 1 || countKind(events, "control.terminal.attached") != 1 || countKind(events, "control.terminal.closed") != 1 {
 		t.Fatalf("terminal lifecycle events = %#v", eventKinds(events))
 	}
+}
+
+func TestControlWebSocketTerminalReconnectAttachWithinRetention(t *testing.T) {
+	t.Setenv("SHELL", terminalManagerTestShell(t))
+
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityTerminalOpen, CapabilityTerminalInput)
+	app.terminalManager().retentionTimeout = 500 * time.Millisecond
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "terminal_open",
+			Capability: CapabilityTerminalOpen,
+			Action:     ControlActionTerminalOpen,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"cols":         80,
+				"rows":         24,
+			},
+		},
+	})
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("open response = %#v, want ok", plain)
+	}
+	terminalID := stringValue(mapValue(plain.Response.Result)["terminal_id"])
+	if terminalID == "" {
+		t.Fatalf("open result = %#v, want terminal id", plain.Response.Result)
+	}
+	t.Cleanup(func() {
+		_, _ = app.terminalManager().close(context.Background(), "dev_controller", terminalCloseParams{TerminalID: terminalID})
+	})
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "terminal_attach",
+			Capability: CapabilityTerminalOpen,
+			Action:     ControlActionTerminalAttach,
+			Params:     map[string]any{"terminal_id": terminalID},
+		},
+	})
+	plain = readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("attach response = %#v, want ok", plain)
+	}
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{Type: "close"})
+	_ = client.Close()
+	waitForEventKindCount(t, app, workspace.ID, "control.terminal.detached", 1)
+
+	reconnected, reconnectedCipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer reconnected.Close()
+	writeEncryptedControlFrame(t, reconnected, reconnectedCipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "terminal_reattach",
+			Capability: CapabilityTerminalOpen,
+			Action:     ControlActionTerminalAttach,
+			Params:     map[string]any{"terminal_id": terminalID},
+		},
+	})
+	plain = readEncryptedControlFrame(t, reconnected, reconnectedCipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("reattach response = %#v, want ok", plain)
+	}
+
+	secret := "reattach-secret-" + randomID(8)
+	writeEncryptedControlFrame(t, reconnected, reconnectedCipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "terminal_input_after_reattach",
+			Capability: CapabilityTerminalInput,
+			Action:     ControlActionTerminalInput,
+			Params: map[string]any{
+				"terminal_id": terminalID,
+				"data":        "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
+			},
+		},
+	})
+	sawOutput := false
+	for i := 0; i < 20 && !sawOutput; i++ {
+		plain := readEncryptedControlFrame(t, reconnected, reconnectedCipher)
+		if plain.Type == terminalFrameOutput && plain.Terminal != nil && strings.Contains(plain.Terminal.Data, secret) {
+			sawOutput = true
+		}
+	}
+	if !sawOutput {
+		t.Fatal("reattached terminal did not stream output")
+	}
+}
+
+func TestTerminalRetentionTimeoutClosesUnattachedSession(t *testing.T) {
+	t.Setenv("SHELL", terminalManagerTestShell(t))
+
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	manager := app.terminalManager()
+	manager.retentionTimeout = 50 * time.Millisecond
+	trustControlDevice(t, app, "device_mobile", CapabilityTerminalOpen, CapabilityTerminalInput)
+
+	open := openTerminalForTest(t, app, "device_mobile", workspace.ID)
+	waitForTerminalClosedReason(t, app, workspace.ID, open.TerminalID, "retention_timeout")
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityTerminalInput,
+		Action:             ControlActionTerminalInput,
+		Params: map[string]any{
+			"terminal_id": open.TerminalID,
+			"data":        "echo too-late\n",
+		},
+	})
+	assertActionError(t, err, http.StatusGone, "terminal_closed")
+}
+
+func waitForEventKindCount(t *testing.T, app *app, workspaceID, kind string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := countKind(app.store.queryEvents(workspaceID, "", 0), kind); got >= want {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%s count did not reach %d; events = %#v", kind, want, eventKinds(app.store.queryEvents(workspaceID, "", 0)))
+}
+
+func waitForTerminalClosedReason(t *testing.T, app *app, workspaceID, terminalID, reason string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, event := range app.store.queryEvents(workspaceID, "", 0) {
+			if event.Kind != "control.terminal.closed" {
+				continue
+			}
+			normalized := mapValue(event.Normalized)
+			if stringValue(normalized["terminal_id"]) == terminalID && stringValue(normalized["reason"]) == reason {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("terminal %s did not close with reason %s; events = %#v", terminalID, reason, app.store.queryEvents(workspaceID, "", 0))
 }

@@ -813,7 +813,7 @@ multi viewer
 opened/attached/detached/closed lifecycle events only
 ```
 
-这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.attach` 必须发生在已完成握手的 encrypted control WebSocket 上，因为 PTY 输出只能回到这条 E2EE channel。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。PTY 输出不进入 JSONL，只有 opened、attached、detached、closed lifecycle event 会落盘。retention timeout 是下一步。
+这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.attach` 必须发生在已完成握手的 encrypted control WebSocket 上，因为 PTY 输出只能回到这条 E2EE channel。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。PTY 输出不进入 JSONL，只有 opened、attached、detached、closed lifecycle event 会落盘。
 
 断线行为：
 
@@ -822,6 +822,8 @@ Host 可以在短时间 retention window 内保留 PTY session。
 Controller 重连后可以重新 attach。
 多个 viewer 可以 attach。
 默认只有一个 Controller 拥有 active input。
+没有 viewer 的 terminal session 会启动 retention timeout。
+retention 到期后 Host 关闭 PTY 并记录 closed(reason=retention_timeout)。
 ```
 
 ## 代码形态
@@ -1062,10 +1064,11 @@ terminal.close
 terminal.output stream
 single active writer
 multi viewer
+retention timeout
 lifecycle event only, no ANSI output JSONL storage
 
 待落地:
-retention timeout
+跨进程持久 terminal session 恢复
 ```
 
 ### Phase 9 - Mobile Controller

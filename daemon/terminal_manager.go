@@ -13,19 +13,21 @@ import (
 )
 
 const (
-	terminalStatusOpen   = "open"
-	terminalStatusClosed = "closed"
-	terminalFrameOutput  = "terminal.output"
-	terminalFrameClosed  = "terminal.closed"
-	defaultTerminalCols  = 100
-	defaultTerminalRows  = 28
-	terminalViewerBuffer = 256
+	terminalStatusOpen              = "open"
+	terminalStatusClosed            = "closed"
+	terminalFrameOutput             = "terminal.output"
+	terminalFrameClosed             = "terminal.closed"
+	defaultTerminalCols             = 100
+	defaultTerminalRows             = 28
+	terminalViewerBuffer            = 256
+	defaultTerminalRetentionTimeout = 2 * time.Minute
 )
 
 type terminalManager struct {
-	app      *app
-	mu       sync.Mutex
-	sessions map[string]*terminalSession
+	app              *app
+	mu               sync.Mutex
+	sessions         map[string]*terminalSession
+	retentionTimeout time.Duration
 }
 
 type terminalSession struct {
@@ -43,6 +45,8 @@ type terminalSession struct {
 	createdAt      time.Time
 	updatedAt      time.Time
 	viewers        map[string]*terminalViewer
+	retentionTimer *time.Timer
+	retentionUntil time.Time
 
 	localCmd *exec.Cmd
 	localPTY *os.File
@@ -124,17 +128,19 @@ type terminalStreamFrame struct {
 
 type terminalViewer struct {
 	closeOnce          sync.Once
+	mu                 sync.Mutex
 	connectionID       string
 	controllerDeviceID string
 	conn               *controlWSConn
 	frames             chan terminalStreamFrame
+	closed             bool
 }
 
 func (a *app) terminalManager() *terminalManager {
 	a.terminalMu.Lock()
 	defer a.terminalMu.Unlock()
 	if a.terminals == nil {
-		a.terminals = &terminalManager{app: a, sessions: map[string]*terminalSession{}}
+		a.terminals = &terminalManager{app: a, sessions: map[string]*terminalSession{}, retentionTimeout: defaultTerminalRetentionTimeout}
 	}
 	return a.terminals
 }
@@ -178,6 +184,7 @@ func (m *terminalManager) openLocal(_ context.Context, controllerDeviceID string
 	session.localCmd = cmd
 	session.localPTY = ptmx
 	m.register(session)
+	session.scheduleRetention(m.app, m.retentionTimeout)
 	m.app.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: session.lifecycle("opened")})
 	go session.readLocalOutput(m.app)
 	return session.openResult(), nil
@@ -209,6 +216,7 @@ func (m *terminalManager) openSSH(ctx context.Context, controllerDeviceID string
 	session.sshTerminalOpen = true
 	session.shell = stringValue(started["shell"])
 	m.register(session)
+	session.scheduleRetention(m.app, m.retentionTimeout)
 	m.app.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: session.lifecycle("opened")})
 	go session.readSSHOutput(m.app, events)
 	return session.openResult(), nil
@@ -252,6 +260,7 @@ func (m *terminalManager) detach(controllerDeviceID string, conn *controlWSConn,
 	result, removed := session.detachViewer(conn.id)
 	if removed != nil {
 		removed.close()
+		session.scheduleRetention(m.app, m.retentionTimeout)
 		m.app.emit(AstralEvent{
 			WorkspaceID: session.workspaceID,
 			Agent:       session.agent,
@@ -349,6 +358,7 @@ func (m *terminalManager) detachConnection(connectionID, reason string) {
 			continue
 		}
 		removed.close()
+		session.scheduleRetention(m.app, m.retentionTimeout)
 		m.app.emit(AstralEvent{
 			WorkspaceID: session.workspaceID,
 			Agent:       session.agent,
@@ -460,6 +470,7 @@ func (s *terminalSession) attachViewer(viewer *terminalViewer) (terminalAttachRe
 	if s.status != terminalStatusOpen {
 		return terminalAttachResult{}, nil, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
 	}
+	s.cancelRetentionLocked()
 	replaced := s.viewers[viewer.connectionID]
 	s.viewers[viewer.connectionID] = viewer
 	return s.attachResultLocked(viewer.connectionID, viewer.controllerDeviceID), replaced, nil
@@ -528,6 +539,44 @@ func (s *terminalSession) attachResultLocked(connectionID, viewerDeviceID string
 	}
 }
 
+func (s *terminalSession) scheduleRetention(app *app, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status != terminalStatusOpen || len(s.viewers) > 0 {
+		return
+	}
+	s.cancelRetentionLocked()
+	s.retentionUntil = time.Now().UTC().Add(timeout)
+	s.retentionTimer = time.AfterFunc(timeout, func() {
+		s.closeIfRetentionExpired(app)
+	})
+}
+
+func (s *terminalSession) cancelRetentionLocked() {
+	if s.retentionTimer != nil {
+		s.retentionTimer.Stop()
+		s.retentionTimer = nil
+	}
+	s.retentionUntil = time.Time{}
+}
+
+func (s *terminalSession) closeIfRetentionExpired(app *app) {
+	now := time.Now().UTC()
+	s.mu.Lock()
+	expired := s.status == terminalStatusOpen && len(s.viewers) == 0 && !s.retentionUntil.IsZero() && !now.Before(s.retentionUntil)
+	if expired {
+		s.retentionTimer = nil
+		s.retentionUntil = time.Time{}
+	}
+	s.mu.Unlock()
+	if expired {
+		s.close(context.Background(), app, "retention_timeout")
+	}
+}
+
 func (s *terminalSession) close(ctx context.Context, app *app, reason string) {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
@@ -542,6 +591,7 @@ func (s *terminalSession) close(ctx context.Context, app *app, reason string) {
 		s.sshTerminalOpen = false
 		s.status = terminalStatusClosed
 		s.updatedAt = time.Now().UTC()
+		s.cancelRetentionLocked()
 		closedFrame := s.streamFrameLocked(terminalFrameClosed, "", reason)
 		viewers := s.takeViewersLocked()
 		s.mu.Unlock()
@@ -578,6 +628,7 @@ func (s *terminalSession) markClosed(app *app, reason string) {
 		s.status = terminalStatusClosed
 		s.updatedAt = time.Now().UTC()
 		s.sshUnsubscribe = nil
+		s.cancelRetentionLocked()
 		closedFrame := s.streamFrameLocked(terminalFrameClosed, "", reason)
 		viewers := s.takeViewersLocked()
 		s.mu.Unlock()
@@ -619,7 +670,7 @@ func (s *terminalSession) ack() terminalAckResult {
 func (s *terminalSession) lifecycle(reason string) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return map[string]any{
+	value := map[string]any{
 		"terminal_id":      s.id,
 		"workspace_id":     s.workspaceID,
 		"agent":            s.agent,
@@ -629,12 +680,16 @@ func (s *terminalSession) lifecycle(reason string) map[string]any {
 		"writer_device_id": s.writerDeviceID,
 		"reason":           reason,
 	}
+	if !s.retentionUntil.IsZero() {
+		value["retention_until"] = s.retentionUntil.Format(time.RFC3339Nano)
+	}
+	return value
 }
 
 func (s *terminalSession) viewerLifecycle(viewerDeviceID, connectionID, reason string) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return map[string]any{
+	value := map[string]any{
 		"terminal_id":      s.id,
 		"workspace_id":     s.workspaceID,
 		"agent":            s.agent,
@@ -647,6 +702,10 @@ func (s *terminalSession) viewerLifecycle(viewerDeviceID, connectionID, reason s
 		"output_seq":       s.outputSeq,
 		"reason":           reason,
 	}
+	if !s.retentionUntil.IsZero() {
+		value["retention_until"] = s.retentionUntil.Format(time.RFC3339Nano)
+	}
+	return value
 }
 
 func newTerminalViewer(conn *controlWSConn) *terminalViewer {
@@ -665,6 +724,11 @@ func (v *terminalViewer) run() {
 }
 
 func (v *terminalViewer) enqueue(frame terminalStreamFrame) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed {
+		return false
+	}
 	select {
 	case v.frames <- frame:
 		return true
@@ -675,6 +739,9 @@ func (v *terminalViewer) enqueue(frame terminalStreamFrame) bool {
 
 func (v *terminalViewer) close() {
 	v.closeOnce.Do(func() {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		v.closed = true
 		close(v.frames)
 	})
 }
