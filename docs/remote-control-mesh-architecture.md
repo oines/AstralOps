@@ -1164,7 +1164,7 @@ async workspace.exec approval interaction, if product needs per-command confirma
 
 `workspace.files.read` v1 用于目录列表和中小文件读取；文件内容以 base64 放在 encrypted control response 中。`workspace.files.write` action v1 只创建或覆盖单个文件，并且同步 request payload 必须有明确大小上限；大文件写入应后续扩展独立 chunked write 能力，而不是把单个 encrypted request 做成无限大上传。精确编辑、删除、移动和大文件读取分别使用独立 action，避免把文件管理语义塞进一个过宽 action。
 
-`workspace.files.apply_patch` v1 是 Host 侧精确文本编辑能力：Controller 提交 `old_string`/`new_string` edits，Host 在 workspace root 内读取目标文件，要求默认单次匹配唯一；只有显式 `replace_all` 才允许替换多处。它不解析完整 unified diff，不 shell out 到 `patch`，也不做跨端文件同步。这样先满足远控编辑需要，同时把 delete/move/大文件流式读写作为独立 action 后续扩展，避免把文件管理语义一次性塞进一个过宽 action。
+`workspace.files.apply_patch` v1 是 Host 侧精确文本编辑能力：Controller 提交 `old_string`/`new_string` edits，Host 在 workspace root 内读取目标文件，要求默认单次匹配唯一；只有显式 `replace_all` 才允许替换多处。patch 输入和结果也必须受同步文件写入大小边界约束，不能用小 old_string 替换成超大 new_string 来绕过 `workspace.files.write` 上限。它不解析完整 unified diff，不 shell out 到 `patch`，也不做跨端文件同步。这样先满足远控编辑需要，同时把 delete/move/大文件流式读写作为独立 action 后续扩展，避免把文件管理语义一次性塞进一个过宽 action。
 
 `workspace.files.delete` 和 `workspace.files.move` v1 是独立 Host 侧文件管理 action，复用 `workspace.files.write` capability。它们只接受 workspace root 内的路径，不能删除或移动 workspace root 本身；删除目录必须显式 `recursive=true`；移动默认不覆盖已有目标，只有显式 `overwrite=true` 才允许覆盖非目录目标。SSH workspace 中由 Host 通过 proxy helper 发起 `remove`/`move`，Controller 不接触远端路径之外的本机文件系统能力。
 

@@ -1104,10 +1104,15 @@ func applyWorkspaceTextEdits(content string, edits []workspaceFileTextEdit) (str
 	}
 	next := content
 	applied := 0
+	editPayloadBytes := 0
 	for _, edit := range edits {
 		oldString := edit.OldString
 		if oldString == "" {
 			return "", 0, newActionError(http.StatusBadRequest, "workspace_patch_old_string_required", "edits[].old_string required")
+		}
+		editPayloadBytes += len(oldString) + len(edit.NewString)
+		if editPayloadBytes > workspaceFileWriteMaxBytes {
+			return "", 0, newActionError(http.StatusRequestEntityTooLarge, "workspace_file_too_large", "workspace.files.apply_patch payload is too large")
 		}
 		count := strings.Count(next, oldString)
 		if count == 0 {
@@ -1115,6 +1120,14 @@ func applyWorkspaceTextEdits(content string, edits []workspaceFileTextEdit) (str
 		}
 		if !edit.ReplaceAll && count != 1 {
 			return "", 0, newActionError(http.StatusConflict, "workspace_patch_old_string_ambiguous", "old_string is not unique")
+		}
+		replacements := count
+		if !edit.ReplaceAll {
+			replacements = 1
+		}
+		nextSize := int64(len(next)) + int64(replacements)*int64(len(edit.NewString)-len(oldString))
+		if nextSize > int64(workspaceFileWriteMaxBytes) {
+			return "", 0, newActionError(http.StatusRequestEntityTooLarge, "workspace_file_too_large", "workspace.files.apply_patch result is too large")
 		}
 		if edit.ReplaceAll {
 			next = strings.ReplaceAll(next, oldString, edit.NewString)
@@ -1125,6 +1138,9 @@ func applyWorkspaceTextEdits(content string, edits []workspaceFileTextEdit) (str
 		}
 		if strings.ContainsRune(next, 0) {
 			return "", 0, newActionError(http.StatusBadRequest, "workspace_patch_binary_result", "workspace.files.apply_patch produced binary content")
+		}
+		if len(next) > workspaceFileWriteMaxBytes {
+			return "", 0, newActionError(http.StatusRequestEntityTooLarge, "workspace_file_too_large", "workspace.files.apply_patch result is too large")
 		}
 	}
 	return next, applied, nil

@@ -206,6 +206,74 @@ func TestControlGatewayRejectsAmbiguousWorkspacePatch(t *testing.T) {
 	assertActionError(t, err, http.StatusConflict, "workspace_patch_old_string_ambiguous")
 }
 
+func TestControlGatewayRejectsLargeWorkspacePatchPayload(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	path := filepath.Join(workspace.LocalCWD, "note.txt")
+	if err := os.WriteFile(path, []byte("small\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesApplyPatch,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "note.txt",
+			"edits": []map[string]any{
+				{
+					"old_string": "small\n",
+					"new_string": strings.Repeat("x", workspaceFileWriteMaxBytes+1),
+				},
+			},
+		},
+	})
+	assertActionError(t, err, http.StatusRequestEntityTooLarge, "workspace_file_too_large")
+	body, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(body) != "small\n" {
+		t.Fatalf("patch wrote oversized result: size %d", len(body))
+	}
+}
+
+func TestControlGatewayRejectsLargeWorkspacePatchResult(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	path := filepath.Join(workspace.LocalCWD, "note.txt")
+	original := strings.Repeat("x", workspaceFileWriteMaxBytes/2+1)
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesApplyPatch,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "note.txt",
+			"edits": []map[string]any{
+				{
+					"old_string":  "x",
+					"new_string":  "xx",
+					"replace_all": true,
+				},
+			},
+		},
+	})
+	assertActionError(t, err, http.StatusRequestEntityTooLarge, "workspace_file_too_large")
+	body, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(body) != original {
+		t.Fatalf("patch wrote oversized result: size %d", len(body))
+	}
+}
+
 func TestControlGatewayWorkspacePatchRequiresWriteCapability(t *testing.T) {
 	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "note.txt"), []byte("old\n"), 0o600); err != nil {
