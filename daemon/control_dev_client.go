@@ -32,7 +32,7 @@ func runControlDevClient(args []string) bool {
 
 func runControlDevClientCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: control-client <identity|known-hosts|discover|pair|workspaces|trust-list|request|smoke>")
+		return fmt.Errorf("usage: control-client <identity|known-hosts|discover|pair|workspaces|sessions|session-view|trust-list|request|smoke>")
 	}
 	st, err := loadStore(defaultDataDir())
 	if err != nil {
@@ -96,6 +96,75 @@ func runControlDevClientCommand(args []string) error {
 			RequestID:  "dev_workspaces",
 			Capability: CapabilityCoreRead,
 			Action:     ControlActionWorkspaces,
+		})
+		if err != nil {
+			return err
+		}
+		return writePrettyJSON(os.Stdout, response)
+	case "sessions":
+		fs := flag.NewFlagSet("control-client sessions", flag.ContinueOnError)
+		host := fs.String("host", "", "remote Host base URL")
+		discover := fs.Bool("discover", false, "discover a known Host on LAN before connecting")
+		hostDeviceID := fs.String("host-device-id", "", "known Host device id for LAN discovery")
+		discoveryPort := fs.Int("discovery-port", defaultRemoteControlDiscoveryPort, "LAN discovery UDP port")
+		discoveryTimeout := fs.Duration("discovery-timeout", 3*time.Second, "LAN discovery timeout")
+		lanTimeout := fs.Duration("lan-timeout", 2*time.Second, "LAN host validation and handshake timeout")
+		workspaceID := fs.String("workspace-id", "", "optional workspace id filter")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		target, err := controlClientResolveTarget(st, controlClientTargetOptions{
+			Host:             *host,
+			Discover:         *discover,
+			HostDeviceID:     *hostDeviceID,
+			DiscoveryPort:    *discoveryPort,
+			DiscoveryTimeout: *discoveryTimeout,
+			LANTimeout:       *lanTimeout,
+		})
+		if err != nil {
+			return err
+		}
+		response, err := controlClientRequestToTarget(target, st, ControlRequest{
+			RequestID:  "dev_sessions",
+			Capability: CapabilityCoreRead,
+			Action:     ControlActionSessions,
+			Params:     map[string]any{"workspace_id": *workspaceID},
+		})
+		if err != nil {
+			return err
+		}
+		return writePrettyJSON(os.Stdout, response)
+	case "session-view":
+		fs := flag.NewFlagSet("control-client session-view", flag.ContinueOnError)
+		host := fs.String("host", "", "remote Host base URL")
+		discover := fs.Bool("discover", false, "discover a known Host on LAN before connecting")
+		hostDeviceID := fs.String("host-device-id", "", "known Host device id for LAN discovery")
+		discoveryPort := fs.Int("discovery-port", defaultRemoteControlDiscoveryPort, "LAN discovery UDP port")
+		discoveryTimeout := fs.Duration("discovery-timeout", 3*time.Second, "LAN discovery timeout")
+		lanTimeout := fs.Duration("lan-timeout", 2*time.Second, "LAN host validation and handshake timeout")
+		sessionID := fs.String("session-id", "", "session id to read")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*sessionID) == "" {
+			return fmt.Errorf("--session-id is required")
+		}
+		target, err := controlClientResolveTarget(st, controlClientTargetOptions{
+			Host:             *host,
+			Discover:         *discover,
+			HostDeviceID:     *hostDeviceID,
+			DiscoveryPort:    *discoveryPort,
+			DiscoveryTimeout: *discoveryTimeout,
+			LANTimeout:       *lanTimeout,
+		})
+		if err != nil {
+			return err
+		}
+		response, err := controlClientRequestToTarget(target, st, ControlRequest{
+			RequestID:  "dev_session_view",
+			Capability: CapabilityCoreRead,
+			Action:     ControlActionSessionView,
+			Params:     map[string]any{"session_id": *sessionID},
 		})
 		if err != nil {
 			return err
@@ -189,6 +258,8 @@ func runControlDevClientCommand(args []string) error {
 		streamPath := fs.String("stream-path", "", "optional workspace path to read via workspace.files.stream")
 		streamChunkSize := fs.Int("stream-chunk-size", 64*1024, "workspace.files.stream chunk size")
 		workspaceWriteSmoke := fs.Bool("workspace-write-smoke", false, "exercise workspace.files.write/apply_patch/move/delete in a temporary Host workspace path")
+		sessions := fs.Bool("sessions", false, "verify core.read.sessions over the encrypted control channel")
+		sessionView := fs.Bool("session-view", false, "verify core.read.session_view for --session-id over the encrypted control channel")
 		attachmentPath := fs.String("attachment-path", "", "optional local Controller file to upload with chunked attachment.ingest")
 		attachmentChunkSize := fs.Int("attachment-chunk-size", 64*1024, "attachment ingest chunk size")
 		mediaEventSeq := fs.Int64("media-event-seq", 0, "optional transcript event seq for media.stream")
@@ -215,6 +286,8 @@ func runControlDevClientCommand(args []string) error {
 			StreamPath:          *streamPath,
 			StreamChunkSize:     *streamChunkSize,
 			WorkspaceWriteSmoke: *workspaceWriteSmoke,
+			Sessions:            *sessions,
+			SessionView:         *sessionView,
 			AttachmentPath:      *attachmentPath,
 			AttachmentChunkSize: *attachmentChunkSize,
 			MediaEventSeq:       *mediaEventSeq,
@@ -256,6 +329,8 @@ type controlClientSmokeOptions struct {
 	StreamPath          string
 	StreamChunkSize     int
 	WorkspaceWriteSmoke bool
+	Sessions            bool
+	SessionView         bool
 	AttachmentPath      string
 	AttachmentChunkSize int
 	MediaEventSeq       int64
@@ -338,6 +413,9 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 	if opts.SessionID == "" && strings.TrimSpace(opts.AttachmentPath) != "" {
 		return controlClientSmokeResult{}, fmt.Errorf("--session-id is required for --attachment-path")
 	}
+	if opts.SessionView && opts.SessionID == "" {
+		return controlClientSmokeResult{}, fmt.Errorf("--session-id is required for --session-view")
+	}
 	opts.MediaID = strings.TrimSpace(opts.MediaID)
 	mediaRequested := opts.MediaEventSeq != 0 || opts.MediaID != ""
 	if mediaRequested && opts.SessionID == "" {
@@ -372,6 +450,28 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 			return result, err
 		}
 		if err := controlClientSmokeResponseError("workspace_files_read", files); err != nil {
+			return result, err
+		}
+	}
+
+	if opts.Sessions {
+		sessions, err := controlClientSmokeRequest(st, target, "sessions", CapabilityCoreRead, ControlActionSessions, map[string]any{"workspace_id": opts.WorkspaceID})
+		result.Steps = append(result.Steps, controlClientSmokeStepFromResponse("sessions", CapabilityCoreRead, ControlActionSessions, sessions, controlClientSessionsSmokeSummary(sessions)))
+		if err != nil {
+			return result, err
+		}
+		if err := controlClientSmokeResponseError("sessions", sessions); err != nil {
+			return result, err
+		}
+	}
+
+	if opts.SessionView {
+		view, err := controlClientSmokeRequest(st, target, "session_view", CapabilityCoreRead, ControlActionSessionView, map[string]any{"session_id": opts.SessionID})
+		result.Steps = append(result.Steps, controlClientSmokeStepFromResponse("session_view", CapabilityCoreRead, ControlActionSessionView, view, controlClientSessionViewSmokeSummary(view)))
+		if err != nil {
+			return result, err
+		}
+		if err := controlClientSmokeResponseError("session_view", view); err != nil {
 			return result, err
 		}
 	}
@@ -1117,6 +1217,23 @@ func controlClientSmokeResponseError(step string, response ControlResponse) erro
 func controlClientWorkspacesSmokeSummary(response ControlResponse) map[string]any {
 	items, _ := response.Result.([]any)
 	return map[string]any{"count": len(items)}
+}
+
+func controlClientSessionsSmokeSummary(response ControlResponse) map[string]any {
+	items, _ := response.Result.([]any)
+	return map[string]any{"count": len(items)}
+}
+
+func controlClientSessionViewSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	session := mapValue(result["session"])
+	events, _ := result["events"].([]any)
+	return map[string]any{
+		"session_id":   stringValue(session["id"]),
+		"workspace_id": stringValue(session["workspace_id"]),
+		"agent":        stringValue(session["agent"]),
+		"event_count":  len(events),
+	}
 }
 
 func controlClientWorkspaceFilesSmokeSummary(response ControlResponse) map[string]any {

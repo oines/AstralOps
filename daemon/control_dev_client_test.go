@@ -137,6 +137,8 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 		MediaID:             media.mediaID,
 		MediaChunkSize:      8,
 		WorkspaceWriteSmoke: true,
+		Sessions:            true,
+		SessionView:         true,
 		ExecCommand:         "echo smoke",
 		Terminal:            runTerminal,
 		TrustList:           true,
@@ -147,7 +149,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if result.Target != hostServer.URL || result.HostDeviceID != hostApp.store.deviceIdentity.DeviceID {
 		t.Fatalf("smoke result target = %#v", result)
 	}
-	wantSteps := []string{"workspaces", "workspace_files_read", "attachment_ingest", "workspace_files_stream", "workspace_files_write", "workspace_files_apply_patch", "workspace_files_move", "workspace_files_delete", "media_stream", "host_trust_list", "workspace_exec"}
+	wantSteps := []string{"workspaces", "workspace_files_read", "sessions", "session_view", "attachment_ingest", "workspace_files_stream", "workspace_files_write", "workspace_files_apply_patch", "workspace_files_move", "workspace_files_delete", "media_stream", "host_trust_list", "workspace_exec"}
 	if runTerminal {
 		wantSteps = append(wantSteps, "terminal_open", "terminal_attach", "terminal_input", "terminal_output", "terminal_close", "terminal_closed")
 	}
@@ -167,6 +169,14 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	streamStep, _ := smokeStepByName(result, "workspace_files_stream")
 	if int64(numberValue(streamStep.Summary["bytes"])) != int64(len(streamBody)) || int(numberValue(streamStep.Summary["chunks"])) < 2 {
 		t.Fatalf("workspace_files_stream summary = %#v, want streamed bytes and multiple chunks", streamStep.Summary)
+	}
+	sessionsStep, _ := smokeStepByName(result, "sessions")
+	if int(numberValue(sessionsStep.Summary["count"])) == 0 {
+		t.Fatalf("sessions summary = %#v, want at least one session", sessionsStep.Summary)
+	}
+	sessionViewStep, _ := smokeStepByName(result, "session_view")
+	if stringValue(sessionViewStep.Summary["session_id"]) != session.ID || stringValue(sessionViewStep.Summary["workspace_id"]) != workspace.ID {
+		t.Fatalf("session_view summary = %#v, want Host session projection", sessionViewStep.Summary)
 	}
 	attachmentStep, _ := smokeStepByName(result, "attachment_ingest")
 	attachmentID := stringValue(attachmentStep.Summary["attachment_id"])
@@ -263,6 +273,10 @@ func TestControlClientSmokeRequiresWorkspaceForOptionalChecks(t *testing.T) {
 	_, err = runControlClientSmoke(st, controlClientSmokeOptions{AttachmentPath: "upload.txt"})
 	if err == nil || !strings.Contains(err.Error(), "--session-id") {
 		t.Fatalf("err = %v, want session requirement for attachment path", err)
+	}
+	_, err = runControlClientSmoke(st, controlClientSmokeOptions{SessionView: true})
+	if err == nil || !strings.Contains(err.Error(), "--session-id") {
+		t.Fatalf("err = %v, want session requirement for session view", err)
 	}
 	_, err = runControlClientSmoke(st, controlClientSmokeOptions{MediaEventSeq: 1, MediaID: "att_1"})
 	if err == nil || !strings.Contains(err.Error(), "--session-id") {
