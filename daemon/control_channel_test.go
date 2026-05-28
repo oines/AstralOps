@@ -762,6 +762,198 @@ func TestControlWebSocketSessionInputIsEncrypted(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketInteractionRespondIsEncrypted(t *testing.T) {
+	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityInteractionRespond)
+	runtime := app.runtimes[AgentCodex].(*recordingRuntime)
+	approvalID := "approval_sealed_interaction"
+	secretCommand := "printf sealed-interaction-secret"
+	if _, err := app.store.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       AgentCodex,
+		Kind:        "approval.requested",
+		Normalized: map[string]any{
+			"approval_id": approvalID,
+			"kind":        "command",
+			"command":     secretCommand,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	decisionSecret := "sealed-interaction-decision-secret"
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "interaction_respond",
+			Capability: CapabilityInteractionRespond,
+			Action:     ControlActionInteractionRespond,
+			Params: map[string]any{
+				"interaction_id": approvalID,
+				"response":       map[string]any{"decision": "accept", "note": decisionSecret},
+			},
+		},
+	})
+	wireRequest := string(sealedRequest)
+	for _, secret := range []string{ControlActionInteractionRespond, approvalID, decisionSecret} {
+		if strings.Contains(wireRequest, secret) {
+			t.Fatalf("sealed interaction response request leaked %q: %s", secret, wireRequest)
+		}
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), approvalID) || strings.Contains(string(sealedResponse), decisionSecret) {
+		t.Fatalf("sealed interaction response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "interaction_respond" {
+		t.Fatalf("interaction response = %#v, want ok response", plain)
+	}
+	if len(runtime.approvalResponses) != 1 || stringValue(runtime.approvalResponses[0]["approval_id"]) != approvalID {
+		t.Fatalf("runtime approval responses = %#v", runtime.approvalResponses)
+	}
+	runtimeResponse := mapValue(runtime.approvalResponses[0]["response"])
+	if stringValue(runtimeResponse["decision"]) != "accept" || stringValue(runtimeResponse["note"]) != decisionSecret {
+		t.Fatalf("runtime approval response = %#v", runtimeResponse)
+	}
+	if !containsEventKind(app.store.queryEvents(workspace.ID, session.ID, 0), "approval.responded") {
+		t.Fatalf("events = %#v, want approval.responded", eventKinds(app.store.queryEvents(workspace.ID, session.ID, 0)))
+	}
+}
+
+func TestControlWebSocketSessionEditIsEncrypted(t *testing.T) {
+	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilitySessionEdit)
+	runtime := &recordingEditRuntime{}
+	app.runtimes[AgentCodex] = runtime
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: map[string]any{"text": "old sealed prompt"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn_1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.assistant", Normalized: map[string]any{"text": "old sealed answer"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn_1"}})
+	view, ok := app.buildSessionView(session.ID)
+	if !ok || view.EditableUserMessage == nil {
+		t.Fatal("missing editable user message")
+	}
+	replacement := "sealed-session-edit-secret"
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "session_edit",
+			Capability: CapabilitySessionEdit,
+			Action:     ControlActionSessionEdit,
+			Params: map[string]any{
+				"session_id":       session.ID,
+				"event_seq":        view.EditableUserMessage.EventSeq,
+				"input":            replacement,
+				"model":            "gpt-edit-test",
+				"reasoning_effort": "low",
+				"permission_mode":  "auto",
+			},
+		},
+	})
+	wireRequest := string(sealedRequest)
+	for _, secret := range []string{ControlActionSessionEdit, session.ID, replacement, "gpt-edit-test", "permission_mode"} {
+		if strings.Contains(wireRequest, secret) {
+			t.Fatalf("sealed session edit request leaked %q: %s", secret, wireRequest)
+		}
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), session.ID) || strings.Contains(string(sealedResponse), replacement) {
+		t.Fatalf("sealed session edit response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "session_edit" {
+		t.Fatalf("session edit response = %#v, want ok response", plain)
+	}
+	if runtime.editCalls != 1 || runtime.editedInput != replacement || runtime.editOptions.Model != "gpt-edit-test" || runtime.editOptions.ReasoningEffort != "low" || runtime.editOptions.PermissionMode != "auto" {
+		t.Fatalf("runtime edit = calls %d input %q options %#v", runtime.editCalls, runtime.editedInput, runtime.editOptions)
+	}
+	if !containsEventKind(app.store.queryEvents(workspace.ID, session.ID, 0), "turn.replaced") {
+		t.Fatalf("events = %#v, want turn.replaced", eventKinds(app.store.queryEvents(workspace.ID, session.ID, 0)))
+	}
+}
+
+func TestControlWebSocketQueueControlIsEncrypted(t *testing.T) {
+	runtime := &recordingSteerRuntime{}
+	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreControl)
+	app.runtimes[AgentCodex] = runtime
+	cancelTurn := app.enqueueTurn(session, "sealed queued cancel prompt", TurnOptions{})
+	steerTurn := app.enqueueTurn(session, "sealed queued steer prompt", TurnOptions{})
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedCancel := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "queue_cancel",
+			Capability: CapabilityCoreControl,
+			Action:     ControlActionQueueCancel,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"queue_id":   cancelTurn.ID,
+			},
+		},
+	})
+	wireCancel := string(sealedCancel)
+	for _, secret := range []string{ControlActionQueueCancel, session.ID, cancelTurn.ID} {
+		if strings.Contains(wireCancel, secret) {
+			t.Fatalf("sealed queue cancel request leaked %q: %s", secret, wireCancel)
+		}
+	}
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), cancelTurn.ID) || strings.Contains(string(sealedResponse), session.ID) {
+		t.Fatalf("sealed queue cancel response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "queue_cancel" || !boolValue(mapValue(plain.Response.Result)["ok"]) {
+		t.Fatalf("queue cancel response = %#v, want ok", plain)
+	}
+	if _, ok := app.peekQueuedTurn(session.ID, cancelTurn.ID); ok {
+		t.Fatal("queued input still exists after encrypted queue cancel")
+	}
+
+	sealedSteer := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "queue_steer",
+			Capability: CapabilityCoreControl,
+			Action:     ControlActionQueueSteer,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"queue_id":   steerTurn.ID,
+			},
+		},
+	})
+	wireSteer := string(sealedSteer)
+	for _, secret := range []string{ControlActionQueueSteer, session.ID, steerTurn.ID} {
+		if strings.Contains(wireSteer, secret) {
+			t.Fatalf("sealed queue steer request leaked %q: %s", secret, wireSteer)
+		}
+	}
+	plain, sealedResponse = readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), steerTurn.ID) || strings.Contains(string(sealedResponse), session.ID) {
+		t.Fatalf("sealed queue steer response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "queue_steer" || !boolValue(mapValue(plain.Response.Result)["ok"]) {
+		t.Fatalf("queue steer response = %#v, want ok", plain)
+	}
+	if _, ok := app.peekQueuedTurn(session.ID, steerTurn.ID); ok {
+		t.Fatal("queued input still exists after encrypted queue steer")
+	}
+	if len(runtime.steered) != 1 || runtime.steered[0] != "sealed queued steer prompt" {
+		t.Fatalf("steered = %#v, want queued steer prompt", runtime.steered)
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if !containsEventKind(events, "queue.cancelled") || !containsEventKind(events, "queue.steered") {
+		t.Fatalf("events = %#v, want queue.cancelled and queue.steered", eventKinds(events))
+	}
+}
+
 func TestControlWebSocketEventSubscriptionStreamsEncryptedEvents(t *testing.T) {
 	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
 	secret := "sealed-event-subscription-secret"
