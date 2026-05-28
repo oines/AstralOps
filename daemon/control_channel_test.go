@@ -1886,6 +1886,95 @@ func TestControlWebSocketRemoteWorkspaceFileWriteUsesProxyOverEncryptedChannel(t
 	}
 }
 
+func TestControlWebSocketRemoteWorkspacePatchUsesProxyOverEncryptedChannel(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentCodex,
+		SSH:    &SSHConfig{Endpoint: "root@example.test", RemoteCWD: "/remote/project"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteStore := t.TempDir()
+	writeRemoteFixtureFile(t, remoteStore, "/remote/project/secret.txt", "before\nremote-old-secret\nafter\n")
+	proxy, cleanup := newMutableClaudeRemoteProxy(t, workspace, remoteStore)
+	defer cleanup()
+	controllerPublicKey, controllerPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:  "dev_controller",
+		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
+		Capabilities:        []string{CapabilityWorkspaceFilesWrite},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{
+		store:    st,
+		hub:      newEventHub(),
+		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
+	}
+	app.ssh = &sshManager{
+		app: app,
+		by: map[string]*sshTarget{
+			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
+		},
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	oldSecret := "remote-old-secret"
+	newSecret := "remote-new-secret"
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "remote_workspace_patch",
+			Capability: CapabilityWorkspaceFilesWrite,
+			Action:     ControlActionWorkspaceFilesApplyPatch,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"path":         "secret.txt",
+				"edits": []map[string]any{
+					{
+						"old_string": oldSecret,
+						"new_string": newSecret,
+					},
+				},
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionWorkspaceFilesApplyPatch) || strings.Contains(string(sealedRequest), workspace.ID) || strings.Contains(string(sealedRequest), "secret.txt") || strings.Contains(string(sealedRequest), oldSecret) || strings.Contains(string(sealedRequest), newSecret) || strings.Contains(string(sealedRequest), "/remote/project") {
+		t.Fatalf("sealed remote workspace patch request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), "secret.txt") || strings.Contains(string(sealedResponse), oldSecret) || strings.Contains(string(sealedResponse), newSecret) || strings.Contains(string(sealedResponse), "/remote/project") {
+		t.Fatalf("sealed remote workspace patch response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("remote patch response = %#v, want ok", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["workspace_id"]) != workspace.ID || stringValue(result["target"]) != "ssh" || stringValue(result["path"]) != "secret.txt" || stringValue(result["kind"]) != "file" {
+		t.Fatalf("remote patch result metadata = %#v", result)
+	}
+	if int(numberValue(result["applied_edits"])) != 1 || int64(numberValue(result["size"])) != int64(len("before\nremote-new-secret\nafter\n")) {
+		t.Fatalf("remote patch result = %#v", result)
+	}
+	if got := readRemoteFixtureFile(t, remoteStore, "/remote/project/secret.txt"); got != "before\nremote-new-secret\nafter\n" {
+		t.Fatalf("remote patched body = %q", got)
+	}
+}
+
 func TestControlWebSocketRemoteWorkspaceExecUsesProxyOverEncryptedChannel(t *testing.T) {
 	dir := t.TempDir()
 	st, err := loadStore(dir)
