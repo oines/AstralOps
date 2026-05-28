@@ -2313,6 +2313,107 @@ func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *test
 	}
 }
 
+func TestControlWebSocketTerminalResizeAndDetachAreEncrypted(t *testing.T) {
+	t.Setenv("SHELL", terminalManagerTestShell(t))
+
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityTerminalOpen, CapabilityTerminalInput)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "terminal_open",
+			Capability: CapabilityTerminalOpen,
+			Action:     ControlActionTerminalOpen,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"cols":         80,
+				"rows":         24,
+			},
+		},
+	})
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("open response = %#v, want ok", plain)
+	}
+	terminalID := stringValue(mapValue(plain.Response.Result)["terminal_id"])
+	if terminalID == "" {
+		t.Fatalf("open result = %#v, want terminal id", plain.Response.Result)
+	}
+	defer func() {
+		_, _ = app.terminalManager().close(context.Background(), "dev_controller", terminalCloseParams{TerminalID: terminalID})
+	}()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "terminal_attach",
+			Capability: CapabilityTerminalOpen,
+			Action:     ControlActionTerminalAttach,
+			Params:     map[string]any{"terminal_id": terminalID},
+		},
+	})
+	plain = readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("attach response = %#v, want ok", plain)
+	}
+
+	sealedResize := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "terminal_resize",
+			Capability: CapabilityTerminalInput,
+			Action:     ControlActionTerminalResize,
+			Params: map[string]any{
+				"terminal_id": terminalID,
+				"cols":        120,
+				"rows":        32,
+			},
+		},
+	})
+	if strings.Contains(string(sealedResize), ControlActionTerminalResize) || strings.Contains(string(sealedResize), terminalID) {
+		t.Fatalf("sealed terminal resize request leaked payload: %s", string(sealedResize))
+	}
+	plain, sealedResizeResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResizeResponse), terminalID) {
+		t.Fatalf("sealed terminal resize response leaked payload: %s", string(sealedResizeResponse))
+	}
+	if plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "terminal_resize" {
+		t.Fatalf("resize response = %#v, want ok", plain)
+	}
+	resize := mapValue(plain.Response.Result)
+	if stringValue(resize["terminal_id"]) != terminalID || stringValue(resize["status"]) != terminalStatusOpen {
+		t.Fatalf("resize result = %#v", resize)
+	}
+
+	sealedDetach := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "terminal_detach",
+			Capability: CapabilityTerminalOpen,
+			Action:     ControlActionTerminalDetach,
+			Params:     map[string]any{"terminal_id": terminalID},
+		},
+	})
+	if strings.Contains(string(sealedDetach), ControlActionTerminalDetach) || strings.Contains(string(sealedDetach), terminalID) {
+		t.Fatalf("sealed terminal detach request leaked payload: %s", string(sealedDetach))
+	}
+	plain, sealedDetachResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedDetachResponse), terminalID) {
+		t.Fatalf("sealed terminal detach response leaked payload: %s", string(sealedDetachResponse))
+	}
+	if plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "terminal_detach" {
+		t.Fatalf("detach response = %#v, want ok", plain)
+	}
+	detach := mapValue(plain.Response.Result)
+	if stringValue(detach["terminal_id"]) != terminalID || stringValue(detach["connection_id"]) == "" {
+		t.Fatalf("detach result = %#v", detach)
+	}
+	waitForEventKindCount(t, app, workspace.ID, "control.terminal.detached", 1)
+}
+
 func TestControlWebSocketTerminalReconnectAttachWithinRetention(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 
