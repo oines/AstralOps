@@ -713,6 +713,55 @@ func TestControlWebSocketSessionDeleteOverEncryptedChannel(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketSessionInputIsEncrypted(t *testing.T) {
+	app, _, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreControl)
+	runtime := app.runtimes[AgentCodex].(*recordingRuntime)
+	prompt := "sealed-session-input-secret"
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "session_input",
+			Capability: CapabilityCoreControl,
+			Action:     ControlActionSessionInput,
+			Params: map[string]any{
+				"session_id":       session.ID,
+				"input":            prompt,
+				"model":            "gpt-test",
+				"reasoning_effort": "low",
+				"permission_mode":  "auto",
+			},
+		},
+	})
+	wireRequest := string(sealedRequest)
+	for _, secret := range []string{ControlActionSessionInput, session.ID, prompt, "gpt-test", "permission_mode"} {
+		if strings.Contains(wireRequest, secret) {
+			t.Fatalf("sealed session input request leaked %q: %s", secret, wireRequest)
+		}
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), "start") || strings.Contains(string(sealedResponse), session.ID) {
+		t.Fatalf("sealed session input response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "session_input" {
+		t.Fatalf("session input response = %#v, want ok response", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["mode"]) != "start" || boolValue(result["queued"]) || boolValue(result["steered"]) {
+		t.Fatalf("session input result = %#v, want start mode", result)
+	}
+	if len(runtime.inputs) != 1 || runtime.inputs[0] != prompt {
+		t.Fatalf("runtime inputs = %#v, want encrypted prompt delivered to Host runtime", runtime.inputs)
+	}
+	if runtime.options[0].Model != "gpt-test" || runtime.options[0].ReasoningEffort != "low" || runtime.options[0].PermissionMode != "auto" {
+		t.Fatalf("runtime options = %#v", runtime.options[0])
+	}
+}
+
 func TestControlWebSocketEventSubscriptionStreamsEncryptedEvents(t *testing.T) {
 	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
 	secret := "sealed-event-subscription-secret"
