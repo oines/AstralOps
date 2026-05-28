@@ -664,6 +664,7 @@ export type WorkspaceExecResult = {
   target: WorkspaceTarget;
   command: string;
   cwd: string;
+  approval_policy: "trusted" | "require_approval" | "disabled" | string;
   exit_code: number;
   stdout: string;
   stderr: string;
@@ -846,6 +847,7 @@ export type TrustGrant = {
   scope: "full" | string;
   status: "trusted" | "revoked" | string;
   capabilities: ControlCapability[];
+  workspace_exec_policy?: "trusted" | "require_approval" | "disabled" | string;
   created_at: string;
   updated_at: string;
   revoked_at?: string;
@@ -858,6 +860,7 @@ export type TrustDeviceRequest = {
   controller_public_key_fingerprint?: string;
   scope?: "full" | string;
   capabilities?: ControlCapability[];
+  workspace_exec_policy?: "trusted" | "require_approval" | "disabled" | string;
 };
 
 export type ControlProtocolVersion = "astralops-control-v1" | string;

@@ -180,16 +180,17 @@ type workspaceFileStreamFrame struct {
 }
 
 type workspaceExecResult struct {
-	WorkspaceID string `json:"workspace_id"`
-	Target      string `json:"target"`
-	Command     string `json:"command"`
-	CWD         string `json:"cwd"`
-	ExitCode    int    `json:"exit_code"`
-	Stdout      string `json:"stdout"`
-	Stderr      string `json:"stderr"`
-	Output      string `json:"output,omitempty"`
-	DurationMS  int64  `json:"duration_ms"`
-	Failure     string `json:"failure,omitempty"`
+	WorkspaceID    string `json:"workspace_id"`
+	Target         string `json:"target"`
+	Command        string `json:"command"`
+	CWD            string `json:"cwd"`
+	ApprovalPolicy string `json:"approval_policy"`
+	ExitCode       int    `json:"exit_code"`
+	Stdout         string `json:"stdout"`
+	Stderr         string `json:"stderr"`
+	Output         string `json:"output,omitempty"`
+	DurationMS     int64  `json:"duration_ms"`
+	Failure        string `json:"failure,omitempty"`
 }
 
 func (a *app) controlWorkspace(workspaceID string) (Workspace, error) {
@@ -298,7 +299,7 @@ func (a *app) prepareControlWorkspaceFileStream(ctx context.Context, params work
 	return a.prepareLocalControlWorkspaceFileStream(ws, params)
 }
 
-func (a *app) executeControlWorkspaceCommand(ctx context.Context, params workspaceExecParams) (workspaceExecResult, error) {
+func (a *app) executeControlWorkspaceCommand(ctx context.Context, params workspaceExecParams, grant TrustGrant) (workspaceExecResult, error) {
 	ws, err := a.controlWorkspace(params.WorkspaceID)
 	if err != nil {
 		return workspaceExecResult{}, err
@@ -307,11 +308,18 @@ func (a *app) executeControlWorkspaceCommand(ctx context.Context, params workspa
 	if command == "" {
 		return workspaceExecResult{}, newActionError(http.StatusBadRequest, "command_required", "command required")
 	}
+	policy := normalizeWorkspaceExecPolicy(grant.WorkspaceExecPolicy)
+	if policy == "" {
+		policy = WorkspaceExecPolicyTrusted
+	}
+	if err := enforceWorkspaceExecPolicy(policy, command, params.CWD); err != nil {
+		return workspaceExecResult{}, err
+	}
 	timeout := workspaceExecTimeout(params.TimeoutMS)
 	if ws.Target == "ssh" {
-		return a.executeRemoteControlWorkspaceCommand(ctx, ws, command, params.CWD, timeout)
+		return a.executeRemoteControlWorkspaceCommand(ctx, ws, command, params.CWD, timeout, policy)
 	}
-	return executeLocalControlWorkspaceCommand(ctx, ws, command, params.CWD, timeout)
+	return executeLocalControlWorkspaceCommand(ctx, ws, command, params.CWD, timeout, policy)
 }
 
 func (a *app) readLocalControlWorkspaceFiles(ws Workspace, params workspaceFilesReadParams) (workspaceFilesReadResult, error) {
@@ -851,7 +859,7 @@ func (a *app) streamRemoteControlWorkspaceFile(ctx context.Context, ws Workspace
 	conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameComplete, WorkspaceFile: workspaceFileCompleteFrame(result, requestID, seq+1, offset)})
 }
 
-func executeLocalControlWorkspaceCommand(parent context.Context, ws Workspace, command, requestedCWD string, timeout time.Duration) (workspaceExecResult, error) {
+func executeLocalControlWorkspaceCommand(parent context.Context, ws Workspace, command, requestedCWD string, timeout time.Duration, approvalPolicy string) (workspaceExecResult, error) {
 	root := filepath.Clean(ws.LocalCWD)
 	cwd, rel, err := resolveWorkspacePath(root, requestedCWD)
 	if err != nil {
@@ -878,18 +886,19 @@ func executeLocalControlWorkspaceCommand(parent context.Context, ws Workspace, c
 		}
 	}
 	return workspaceExecResult{
-		WorkspaceID: ws.ID,
-		Target:      ws.Target,
-		Command:     command,
-		CWD:         rel,
-		ExitCode:    exitCode,
-		Stdout:      stdout.String(),
-		Stderr:      stderr.String(),
-		DurationMS:  time.Since(start).Milliseconds(),
+		WorkspaceID:    ws.ID,
+		Target:         ws.Target,
+		Command:        command,
+		CWD:            rel,
+		ApprovalPolicy: approvalPolicy,
+		ExitCode:       exitCode,
+		Stdout:         stdout.String(),
+		Stderr:         stderr.String(),
+		DurationMS:     time.Since(start).Milliseconds(),
 	}, nil
 }
 
-func (a *app) executeRemoteControlWorkspaceCommand(parent context.Context, ws Workspace, command, requestedCWD string, timeout time.Duration) (workspaceExecResult, error) {
+func (a *app) executeRemoteControlWorkspaceCommand(parent context.Context, ws Workspace, command, requestedCWD string, timeout time.Duration, approvalPolicy string) (workspaceExecResult, error) {
 	if a.ssh == nil {
 		return workspaceExecResult{}, newActionError(http.StatusNotImplemented, "ssh_unavailable", "ssh manager unavailable")
 	}
@@ -905,16 +914,17 @@ func (a *app) executeRemoteControlWorkspaceCommand(parent context.Context, ws Wo
 		return workspaceExecResult{}, newActionError(http.StatusBadRequest, "workspace_exec_failed", err.Error())
 	}
 	return workspaceExecResult{
-		WorkspaceID: ws.ID,
-		Target:      ws.Target,
-		Command:     firstString(out["command"], command),
-		CWD:         rel,
-		ExitCode:    int(numberValue(out["exit_code"])),
-		Stdout:      stringValue(out["stdout"]),
-		Stderr:      stringValue(out["stderr"]),
-		Output:      stringValue(out["output"]),
-		DurationMS:  int64(numberValue(out["duration_ms"])),
-		Failure:     stringValue(out["failure"]),
+		WorkspaceID:    ws.ID,
+		Target:         ws.Target,
+		Command:        firstString(out["command"], command),
+		CWD:            rel,
+		ApprovalPolicy: approvalPolicy,
+		ExitCode:       int(numberValue(out["exit_code"])),
+		Stdout:         stringValue(out["stdout"]),
+		Stderr:         stringValue(out["stderr"]),
+		Output:         stringValue(out["output"]),
+		DurationMS:     int64(numberValue(out["duration_ms"])),
+		Failure:        stringValue(out["failure"]),
 	}, nil
 }
 
@@ -1154,6 +1164,30 @@ func workspaceFileBaseStreamFrame(result workspaceFileStreamResult, requestID st
 		MIMEType:    result.MIMEType,
 		Size:        result.Size,
 	}
+}
+
+func enforceWorkspaceExecPolicy(policy string, command, requestedCWD string) error {
+	switch policy {
+	case WorkspaceExecPolicyTrusted:
+		return nil
+	case WorkspaceExecPolicyRequireApproval:
+		return newActionError(http.StatusConflict, "workspace_exec_approval_required", workspaceExecPolicyMessage(command, requestedCWD, "workspace.exec requires Host approval before executing"))
+	case WorkspaceExecPolicyDisabled:
+		return newActionError(http.StatusForbidden, "workspace_exec_disabled", workspaceExecPolicyMessage(command, requestedCWD, "workspace.exec is disabled by Host policy"))
+	default:
+		return newActionError(http.StatusBadRequest, "workspace_exec_policy_invalid", "invalid workspace_exec_policy")
+	}
+}
+
+func workspaceExecPolicyMessage(command, requestedCWD, prefix string) string {
+	cwd := strings.TrimSpace(requestedCWD)
+	if cwd == "" {
+		cwd = "."
+	}
+	if cwd != "" {
+		return prefix + ": " + command + " (cwd " + cwd + ")"
+	}
+	return prefix + ": " + command
 }
 
 func allowCreateParents(value *bool) bool {

@@ -519,9 +519,61 @@ func TestControlGatewayExecutesWorkspaceCommand(t *testing.T) {
 	if !ok {
 		t.Fatalf("exec result = %#v, want workspaceExecResult", response.Result)
 	}
-	if result.ExitCode != 0 || result.Stdout != "exec body" || result.CWD != "" {
+	if result.ExitCode != 0 || result.Stdout != "exec body" || result.CWD != "" || result.ApprovalPolicy != WorkspaceExecPolicyTrusted {
 		t.Fatalf("exec result = %#v", result)
 	}
+}
+
+func TestControlGatewayWorkspaceExecHonorsRequireApprovalPolicy(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	if _, err := app.store.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:  "device_mobile",
+		Capabilities:        []string{CapabilityWorkspaceExec},
+		WorkspaceExecPolicy: WorkspaceExecPolicyRequireApproval,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(workspace.LocalCWD, "should-not-run.txt")
+	command := "printf nope > should-not-run.txt"
+	if runtime.GOOS == "windows" {
+		command = "echo nope > should-not-run.txt"
+	}
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceExec,
+		Action:             ControlActionWorkspaceExec,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"command":      command,
+		},
+	})
+	assertActionError(t, err, http.StatusConflict, "workspace_exec_approval_required")
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("policy-gated command created marker, stat err = %v", statErr)
+	}
+}
+
+func TestControlGatewayWorkspaceExecHonorsDisabledPolicy(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	if _, err := app.store.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:  "device_mobile",
+		Capabilities:        []string{CapabilityWorkspaceExec},
+		WorkspaceExecPolicy: WorkspaceExecPolicyDisabled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceExec,
+		Action:             ControlActionWorkspaceExec,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"command":      "pwd",
+		},
+	})
+	assertActionError(t, err, http.StatusForbidden, "workspace_exec_disabled")
 }
 
 func TestControlGatewayWorkspaceExecRequiresCapability(t *testing.T) {

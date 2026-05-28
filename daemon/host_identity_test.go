@@ -78,8 +78,23 @@ func TestTrustGrantPersistsRevokesAndBlocksGateway(t *testing.T) {
 	if grant.HostDeviceID != st.hostInfo().Identity.DeviceID || grant.Status != TrustStatusTrusted || grant.Scope != TrustScopeFull {
 		t.Fatalf("grant = %#v, want trusted full grant for local Host", grant)
 	}
+	if grant.WorkspaceExecPolicy != WorkspaceExecPolicyTrusted {
+		t.Fatalf("workspace exec policy = %q, want trusted", grant.WorkspaceExecPolicy)
+	}
 	if len(grant.Capabilities) != 1 || grant.Capabilities[0] != CapabilityCoreRead {
 		t.Fatalf("grant capabilities = %#v, want normalized core.read", grant.Capabilities)
+	}
+
+	grant, err = st.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:  "dev_exec_review",
+		Capabilities:        []string{CapabilityWorkspaceExec},
+		WorkspaceExecPolicy: WorkspaceExecPolicyRequireApproval,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant.WorkspaceExecPolicy != WorkspaceExecPolicyRequireApproval {
+		t.Fatalf("workspace exec policy = %q, want require_approval", grant.WorkspaceExecPolicy)
 	}
 
 	reloaded, err := loadStore(dir)

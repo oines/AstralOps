@@ -19,13 +19,16 @@ import (
 const (
 	DeviceKindDesktop = "desktop"
 
-	TrustScopeFull      = "full"
-	TrustStatusTrusted  = "trusted"
-	TrustStatusRevoked  = "revoked"
-	trustGrantFileName  = "trust_grants.json"
-	deviceIdentityFile  = "device_identity.json"
-	deviceIdentityDir   = "host"
-	defaultHostFileMode = 0o600
+	TrustScopeFull                     = "full"
+	TrustStatusTrusted                 = "trusted"
+	TrustStatusRevoked                 = "revoked"
+	WorkspaceExecPolicyTrusted         = "trusted"
+	WorkspaceExecPolicyRequireApproval = "require_approval"
+	WorkspaceExecPolicyDisabled        = "disabled"
+	trustGrantFileName                 = "trust_grants.json"
+	deviceIdentityFile                 = "device_identity.json"
+	deviceIdentityDir                  = "host"
+	defaultHostFileMode                = 0o600
 )
 
 type DeviceIdentity struct {
@@ -53,6 +56,7 @@ type TrustGrant struct {
 	Scope                          string   `json:"scope"`
 	Status                         string   `json:"status"`
 	Capabilities                   []string `json:"capabilities"`
+	WorkspaceExecPolicy            string   `json:"workspace_exec_policy,omitempty"`
 	CreatedAt                      string   `json:"created_at"`
 	UpdatedAt                      string   `json:"updated_at"`
 	RevokedAt                      string   `json:"revoked_at,omitempty"`
@@ -65,6 +69,7 @@ type trustDeviceRequest struct {
 	ControllerPublicKeyFingerprint string   `json:"controller_public_key_fingerprint,omitempty"`
 	Scope                          string   `json:"scope,omitempty"`
 	Capabilities                   []string `json:"capabilities,omitempty"`
+	WorkspaceExecPolicy            string   `json:"workspace_exec_policy,omitempty"`
 }
 
 type HostInfo struct {
@@ -270,6 +275,13 @@ func (s *store) trustDevice(req trustDeviceRequest) (TrustGrant, error) {
 	if err := validateCapabilities(capabilities); err != nil {
 		return TrustGrant{}, err
 	}
+	workspaceExecPolicy := normalizeWorkspaceExecPolicy(req.WorkspaceExecPolicy)
+	if workspaceExecPolicy == "" {
+		workspaceExecPolicy = WorkspaceExecPolicyTrusted
+	}
+	if err := validateWorkspaceExecPolicy(workspaceExecPolicy); err != nil {
+		return TrustGrant{}, err
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	scope := strings.TrimSpace(req.Scope)
@@ -301,6 +313,7 @@ func (s *store) trustDevice(req trustDeviceRequest) (TrustGrant, error) {
 	grant.Scope = scope
 	grant.Status = TrustStatusTrusted
 	grant.Capabilities = capabilities
+	grant.WorkspaceExecPolicy = workspaceExecPolicy
 	grant.UpdatedAt = now
 	grant.RevokedAt = ""
 	if s.trustGrants == nil {
@@ -376,6 +389,10 @@ func normalizeTrustGrant(grant TrustGrant) TrustGrant {
 		grant.Status = TrustStatusTrusted
 	}
 	grant.Capabilities = normalizeCapabilities(grant.Capabilities)
+	grant.WorkspaceExecPolicy = normalizeWorkspaceExecPolicy(grant.WorkspaceExecPolicy)
+	if grant.WorkspaceExecPolicy == "" {
+		grant.WorkspaceExecPolicy = WorkspaceExecPolicyTrusted
+	}
 	return grant
 }
 
@@ -405,6 +422,19 @@ func validateCapabilities(capabilities []string) error {
 		}
 	}
 	return nil
+}
+
+func normalizeWorkspaceExecPolicy(policy string) string {
+	return strings.TrimSpace(policy)
+}
+
+func validateWorkspaceExecPolicy(policy string) error {
+	switch normalizeWorkspaceExecPolicy(policy) {
+	case "", WorkspaceExecPolicyTrusted, WorkspaceExecPolicyRequireApproval, WorkspaceExecPolicyDisabled:
+		return nil
+	default:
+		return newActionError(http.StatusBadRequest, "workspace_exec_policy_invalid", "invalid workspace_exec_policy")
+	}
 }
 
 func trustGrantAllows(grant TrustGrant, capability string) bool {
