@@ -631,14 +631,10 @@ func (a *app) handleSessions(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/sessions/"), "/")
 	if len(parts) == 1 && r.Method == http.MethodDelete {
-		ss, ok := a.store.getSession(parts[0])
-		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+		if _, err := a.deleteSessionByID(parts[0]); err != nil {
+			writeActionError(w, err)
 			return
 		}
-		a.stopSessionRuntime(ss, "session deleted")
-		a.store.deleteSession(parts[0])
-		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "session.deleted", Normalized: map[string]any{"session_id": ss.ID}})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}

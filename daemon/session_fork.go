@@ -16,6 +16,11 @@ type forkSessionResponse struct {
 	Session Session `json:"session"`
 }
 
+type sessionForkControlParams struct {
+	SessionID string `json:"session_id"`
+	EventSeq  int64  `json:"event_seq"`
+}
+
 type forkAnchor struct {
 	EventSeq      int64
 	TurnEndSeq    int64
@@ -39,38 +44,45 @@ func (a *app) handleForkSession(w http.ResponseWriter, sessionID string, r *http
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	response, err := a.forkSession(sessionID, req)
+	if err != nil {
+		writeActionError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, response)
+}
+
+func (a *app) forkSession(sessionID string, req forkSessionRequest) (forkSessionResponse, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return forkSessionResponse{}, newActionError(http.StatusBadRequest, "session_id_required", "session_id required")
+	}
 	source, ok := a.store.getSession(sessionID)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
-		return
+		return forkSessionResponse{}, newActionError(http.StatusNotFound, "session_not_found", "session not found")
 	}
 	workspace, ok := a.store.getWorkspace(source.WorkspaceID)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
-		return
+		return forkSessionResponse{}, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found")
 	}
 	sourceEvents := a.store.queryEvents("", source.ID, 0)
 	anchor, err := a.resolveForkAnchor(source, sourceEvents, req.EventSeq)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
+		return forkSessionResponse{}, newActionError(http.StatusBadRequest, "session_fork_invalid", err.Error())
 	}
 	var forker SessionForker
 	if source.Agent == AgentCodex {
 		if source.NativeThreadID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "source codex session is missing native thread id"})
-			return
+			return forkSessionResponse{}, newActionError(http.StatusBadRequest, "session_fork_source_missing_native_thread", "source codex session is missing native thread id")
 		}
 		runtime, ok := a.runtimes[source.Agent]
 		if !ok {
-			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "agent runtime is not implemented"})
-			return
+			return forkSessionResponse{}, newActionError(http.StatusNotImplemented, "runtime_not_implemented", "agent runtime is not implemented")
 		}
 		var supportsFork bool
 		forker, supportsFork = runtime.(SessionForker)
 		if !supportsFork {
-			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "agent runtime does not support session fork"})
-			return
+			return forkSessionResponse{}, newActionError(http.StatusNotImplemented, "session_fork_unsupported", "agent runtime does not support session fork")
 		}
 	}
 
@@ -80,8 +92,7 @@ func (a *app) handleForkSession(w http.ResponseWriter, sessionID string, r *http
 		if err := forker.ForkSession(source, fork, workspace, anchor.RollbackTurns); err != nil {
 			a.store.deleteSession(fork.ID)
 			a.emit(AstralEvent{WorkspaceID: fork.WorkspaceID, SessionID: fork.ID, Agent: fork.Agent, Kind: "session.deleted", Normalized: map[string]any{"session_id": fork.ID, "reason": "fork_failed", "message": err.Error()}})
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
+			return forkSessionResponse{}, newActionError(http.StatusBadRequest, "session_fork_failed", err.Error())
 		}
 		if updated, ok := a.store.getSession(fork.ID); ok {
 			fork = updated
@@ -90,7 +101,7 @@ func (a *app) handleForkSession(w http.ResponseWriter, sessionID string, r *http
 	for _, ev := range safeForkTranscriptEvents(sourceEvents, anchor.TurnEndSeq, fork) {
 		a.emit(ev)
 	}
-	writeJSON(w, http.StatusCreated, forkSessionResponse{Session: fork})
+	return forkSessionResponse{Session: fork}, nil
 }
 
 func (a *app) resolveForkAnchor(source Session, events []AstralEvent, eventSeq int64) (forkAnchor, error) {

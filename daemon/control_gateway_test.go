@@ -282,6 +282,103 @@ func TestControlGatewayQueueCancelRequiresExistingQueue(t *testing.T) {
 	assertActionError(t, err, http.StatusNotFound, "queue_not_found")
 }
 
+func TestControlGatewayForksSession(t *testing.T) {
+	runtime := &recordingForkRuntime{}
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, runtime)
+	session.NativeThreadID = "source-thread"
+	app.store.mu.Lock()
+	app.store.sessions[session.ID] = session
+	app.store.mu.Unlock()
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
+
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "one"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-1", "status": "running"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "answer", "item_id": "item-1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn-1", "status": "idle"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "two"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-2", "status": "running"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "later", "item_id": "item-2"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn-2", "status": "idle"}})
+	targetSeq := int64(0)
+	for _, event := range app.store.queryEvents("", session.ID, 0) {
+		if event.Kind == "message.assistant" && stringValue(mapValue(event.Normalized)["text"]) == "answer" {
+			targetSeq = event.Seq
+			break
+		}
+	}
+	if targetSeq == 0 {
+		t.Fatal("missing fork target")
+	}
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionSessionFork,
+		Params: map[string]any{
+			"session_id": session.ID,
+			"event_seq":  targetSeq,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(forkSessionResponse)
+	if !ok {
+		t.Fatalf("fork result = %#v, want forkSessionResponse", response.Result)
+	}
+	if result.Session.ForkedFromSessionID != session.ID || result.Session.ForkedFromEventSeq != targetSeq || result.Session.ForkedFromNativeAnchor != "turn-1" {
+		t.Fatalf("fork metadata = %#v", result.Session)
+	}
+	if runtime.source.ID != session.ID || runtime.fork.ID != result.Session.ID || runtime.workspace.ID != workspace.ID {
+		t.Fatalf("fork runtime call = source %#v fork %#v workspace %#v", runtime.source, runtime.fork, runtime.workspace)
+	}
+	if runtime.rollbackTurns != 1 {
+		t.Fatalf("rollbackTurns = %d, want 1", runtime.rollbackTurns)
+	}
+	if !containsEventKind(app.store.queryEvents("", result.Session.ID, 0), "session.started") {
+		t.Fatalf("fork events = %#v, want session.started", eventKinds(app.store.queryEvents("", result.Session.ID, 0)))
+	}
+}
+
+func TestControlGatewayDeletesSession(t *testing.T) {
+	runtime := &recordingRuntime{}
+	app, _, session := newControlGatewayTestApp(t, AgentCodex, runtime)
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
+	turn := app.enqueueTurn(session, "queued prompt", TurnOptions{})
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionSessionDelete,
+		Params: map[string]any{
+			"session_id": session.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(sessionDeleteResult)
+	if !ok {
+		t.Fatalf("delete result = %#v, want sessionDeleteResult", response.Result)
+	}
+	if !result.OK || result.SessionID != session.ID {
+		t.Fatalf("delete result = %#v", result)
+	}
+	if _, ok := app.store.getSession(session.ID); ok {
+		t.Fatal("session still exists after delete")
+	}
+	if _, ok := app.peekQueuedTurn(session.ID, turn.ID); ok {
+		t.Fatal("queued input still exists after session delete")
+	}
+	if len(runtime.interrupts) != 1 || runtime.interrupts[0] != session.ID {
+		t.Fatalf("runtime interrupts = %#v, want deleted session interrupted", runtime.interrupts)
+	}
+	events := app.store.queryEvents("", session.ID, 0)
+	if !containsEventKind(events, "session.deleted") {
+		t.Fatalf("events = %#v, want session.deleted", eventKinds(events))
+	}
+}
+
 func TestControlGatewayRejectsReplacedInteraction(t *testing.T) {
 	runtime := &recordingRuntime{}
 	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, runtime)

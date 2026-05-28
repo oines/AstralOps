@@ -721,6 +721,8 @@ export type ControlAction =
   | "core.control.interrupt"
   | "core.control.queue.cancel"
   | "core.control.queue.steer"
+  | "core.control.session.fork"
+  | "core.control.session.delete"
   | "interaction.respond"
   | "session.edit"
   | "attachment.ingest"
@@ -1012,8 +1014,21 @@ export type SessionForkRequest = {
   event_seq: number;
 };
 
+export type SessionForkControlParams = SessionForkRequest & {
+  session_id: string;
+};
+
 export type SessionForkResponse = {
   session: Session;
+};
+
+export type SessionDeleteParams = {
+  session_id: string;
+};
+
+export type SessionDeleteResult = {
+  ok: boolean;
+  session_id: string;
 };
 
 export type SessionCommand = {

@@ -32,6 +32,8 @@ const (
 	ControlActionInterrupt                  = "core.control.interrupt"
 	ControlActionQueueCancel                = "core.control.queue.cancel"
 	ControlActionQueueSteer                 = "core.control.queue.steer"
+	ControlActionSessionFork                = "core.control.session.fork"
+	ControlActionSessionDelete              = "core.control.session.delete"
 	ControlActionInteractionRespond         = "interaction.respond"
 	ControlActionSessionEdit                = "session.edit"
 	ControlActionAttachmentIngest           = "attachment.ingest"
@@ -112,7 +114,7 @@ func controlActionCapability(action string) string {
 	switch action {
 	case ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces:
 		return CapabilityCoreRead
-	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer:
+	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionSessionFork, ControlActionSessionDelete:
 		return CapabilityCoreControl
 	case ControlActionInteractionRespond:
 		return CapabilityInteractionRespond
@@ -209,6 +211,18 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, gra
 			return nil, err
 		}
 		return a.steerControlQueuedTurn(params)
+	case ControlActionSessionFork:
+		var params sessionForkControlParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.forkSession(params.SessionID, forkSessionRequest{EventSeq: params.EventSeq})
+	case ControlActionSessionDelete:
+		var params sessionDeleteParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.deleteSessionByID(params.SessionID)
 	case ControlActionInteractionRespond:
 		var params struct {
 			InteractionID string         `json:"interaction_id"`

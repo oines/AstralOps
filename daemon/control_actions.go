@@ -11,6 +11,15 @@ type queueControlParams struct {
 	QueueID   string `json:"queue_id"`
 }
 
+type sessionDeleteParams struct {
+	SessionID string `json:"session_id"`
+}
+
+type sessionDeleteResult struct {
+	OK        bool   `json:"ok"`
+	SessionID string `json:"session_id"`
+}
+
 func (a *app) startSessionInput(sessionID, input string, options TurnOptions) (map[string]any, error) {
 	input = strings.TrimSpace(input)
 	options.Attachments = sanitizeInputAttachments(options.Attachments)
@@ -85,6 +94,21 @@ func (a *app) interruptSession(sessionID string) (map[string]any, error) {
 		return nil, newActionError(http.StatusConflict, "interrupt_failed", err.Error())
 	}
 	return map[string]any{"ok": true}, nil
+}
+
+func (a *app) deleteSessionByID(sessionID string) (sessionDeleteResult, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return sessionDeleteResult{}, newActionError(http.StatusBadRequest, "session_id_required", "session_id required")
+	}
+	ss, ok := a.store.getSession(sessionID)
+	if !ok {
+		return sessionDeleteResult{}, newActionError(http.StatusNotFound, "session_not_found", "session not found")
+	}
+	a.stopSessionRuntime(ss, "session deleted")
+	a.store.deleteSession(ss.ID)
+	a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "session.deleted", Normalized: map[string]any{"session_id": ss.ID}})
+	return sessionDeleteResult{OK: true, SessionID: ss.ID}, nil
 }
 
 func (a *app) cancelControlQueuedTurn(params queueControlParams) (map[string]any, error) {
