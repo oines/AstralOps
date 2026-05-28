@@ -22,6 +22,17 @@ func startRemoteControlListener(a *app) (string, error) {
 		return "", err
 	}
 	handler := remoteControlHandler(a, os.Getenv(envRemoteControlDevPairing) == "1")
+	if os.Getenv(envRemoteControlDiscovery) != "0" {
+		if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok {
+			discoveryConn, err := startRemoteControlDiscovery(a.store.hostInfo().Identity, tcpAddr.Port)
+			if err != nil {
+				log.Printf("remote control discovery disabled: %v", err)
+			} else {
+				_ = discoveryConn
+				log.Printf("astralops remote control UDP discovery listening on port %d", tcpAddr.Port)
+			}
+		}
+	}
 	go func() {
 		log.Printf("astralops remote control listening on %s", ln.Addr().String())
 		if err := http.Serve(ln, withCORS(handler)); err != nil && err != http.ErrServerClosed {

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -30,7 +31,7 @@ func runControlDevClient(args []string) bool {
 
 func runControlDevClientCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: control-client <identity|pair|workspaces|request>")
+		return fmt.Errorf("usage: control-client <identity|discover|pair|workspaces|request>")
 	}
 	st, err := loadStore(defaultDataDir())
 	if err != nil {
@@ -39,6 +40,18 @@ func runControlDevClientCommand(args []string) error {
 	switch args[0] {
 	case "identity":
 		return writePrettyJSON(os.Stdout, st.hostInfo().Identity)
+	case "discover":
+		fs := flag.NewFlagSet("control-client discover", flag.ContinueOnError)
+		timeout := fs.Duration("timeout", 3*time.Second, "LAN discovery timeout")
+		port := fs.Int("port", defaultRemoteControlDiscoveryPort, "LAN discovery UDP port")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		candidates, err := discoverRemoteControlHostsWithTimeout(*timeout, *port)
+		if err != nil {
+			return err
+		}
+		return writePrettyJSON(os.Stdout, candidates)
 	case "pair":
 		fs := flag.NewFlagSet("control-client pair", flag.ContinueOnError)
 		host := fs.String("host", "", "remote Host base URL, for example http://10.0.0.10:43900")

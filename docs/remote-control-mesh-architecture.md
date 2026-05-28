@@ -160,21 +160,33 @@ LAN direct 和 relay 只是 packet path。
 所有路径都必须跑同一套设备认证 E2EE 握手。
 ```
 
-Desktop Host 在本机网络上提供一个远控 LAN listener，并通过 mDNS 发布候选地址：
+Desktop Host 在本机网络上提供一个远控 LAN listener，并在同一个端口监听 UDP discovery。Controller 需要 LAN 发现时，向局域网广播一个 discovery request，Host 只单播回复候选地址：
 
 ```text
-service: _astralops._tcp.local
-TXT:
-  device_id
-  account_id_hash
-  public_key_fingerprint
-  port
+UDP request:
+  type=astralops.discovery.request
+  version=astralops-control-v1
+
+UDP response:
+  type=astralops.discovery.response
+  version=astralops-control-v1
+  candidate.device_id
+  candidate.account_id_hash
+  candidate.public_key_fingerprint
+  candidate.host
+  candidate.port
 ```
 
 当前 daemon MVP 通过显式环境变量开启 LAN listener：
 
 ```text
 ASTRALOPS_CONTROL_LISTEN=0.0.0.0:43900
+```
+
+开启 LAN listener 时，daemon 默认开启 UDP discovery。开发或排障时可以关闭：
+
+```text
+ASTRALOPS_CONTROL_DISCOVERY=0
 ```
 
 LAN listener 只暴露远控所需的最小接口：
@@ -194,7 +206,15 @@ ASTRALOPS_DEV_REMOTE_PAIRING=1
 
 这只用于两台本机设备在开发环境快速写入 Host trust grant。正式 pairing 必须由账号设备注册、已有可信设备或目标 Host 明确批准驱动，不能留下未授权的 LAN trust 写入口。
 
-mDNS 只用于发现候选地址，不能授予信任。Controller 收到 LAN 广播后，必须用本地 trust store 或云端 device registry 校验 `device_id` 和 public key fingerprint。真正连接成功的条件仍然是：
+Controller 侧可以用开发命令查看 LAN 候选 Host：
+
+```text
+go run ./daemon control-client discover --timeout 3s --port 43900
+```
+
+discover 只返回 `LanHostCandidate`，例如 device id、public key fingerprint、LAN 地址和端口。它不能自动授信、不能自动 pair、不能绕过 Host Gateway。后续连接仍必须进入 `/v1/control/ws` 并完成 E2EE 握手。
+
+UDP discovery 只用于发现候选地址，不能授予信任。Controller 收到 LAN response 后，必须用本地 trust store 或云端 device registry 校验 `device_id` 和 public key fingerprint。真正连接成功的条件仍然是：
 
 ```text
 LAN transport connected
@@ -305,7 +325,7 @@ Onboarding 分两层：
 5. 选择这台 Desktop 是否允许被远程控制。
 6. 如果允许被远程控制：
    - 启动 Host control listener。
-   - 开启 LAN mDNS 发布。
+   - 开启 LAN UDP discovery。
    - 准备 relay fallback。
    - 创建本地 Host trust store。
 7. 创建第一个 workspace。
@@ -356,7 +376,7 @@ temporary access
    - 允许被远程控制。
    - 只作为 Controller。
 5. 由已有可信设备或目标 Host 批准加入。
-6. 如果允许被远控，启动 Host listener、mDNS、relay fallback。
+6. 如果允许被远控，启动 Host listener、LAN UDP discovery、relay fallback。
 ```
 
 Desktop 可以同时是 Controller 和 Host。是否允许被控制是本机选择，不由云端默认开启。
@@ -978,7 +998,7 @@ Host 本地维护 active control sessions。撤销某个 Controller trust grant 
 Desktop Host LAN listener
 remote-control-only HTTP surface
 dev-only pairing path
-mDNS publish / discover
+LAN UDP discovery
 LAN candidate validation
 short LAN connection timeout
 relay fallback
@@ -1053,7 +1073,7 @@ Mobile 不包含 Host daemon 和 runtime。
 把附件或媒体明文上传到云端/relay
 把 Host 本地 path 当作远程 Controller 可访问资源
 把 desktop 本机设置和自动更新默认暴露成远控能力
-把 LAN/mDNS 发现结果当作信任来源
+把 LAN discovery 结果当作信任来源
 在 v1 做 NAT punching、STUN/TURN、WebRTC 或复杂 transport migration
 ```
 

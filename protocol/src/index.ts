@@ -482,9 +482,11 @@ export type TrustDeviceRequest = {
   capabilities?: ControlCapability[];
 };
 
+export type ControlProtocolVersion = "astralops-control-v1" | string;
+
 export type ControlHelloFrame = {
   type: "hello";
-  version: "astralops-control-v1" | string;
+  version: ControlProtocolVersion;
   controller_device_id: string;
   controller_public_key: string;
   controller_ephemeral_key: string;
@@ -494,7 +496,7 @@ export type ControlHelloFrame = {
 
 export type ControlHelloAckFrame = {
   type: "hello_ack";
-  version: "astralops-control-v1" | string;
+  version: ControlProtocolVersion;
   connection_id: string;
   host_device_id: string;
   host_public_key: string;
@@ -525,6 +527,28 @@ export type ControlSealedFrame = {
   seq: number;
   nonce: string;
   ciphertext: string;
+};
+
+export type LanHostCandidate = {
+  device_id: string;
+  device_name?: string;
+  account_id_hash?: string;
+  public_key_fingerprint: string;
+  host: string;
+  port: number;
+  base_url: string;
+  addresses: string[];
+};
+
+export type ControlDiscoveryRequest = {
+  type: "astralops.discovery.request";
+  version: ControlProtocolVersion;
+};
+
+export type ControlDiscoveryResponse = {
+  type: "astralops.discovery.response";
+  version: ControlProtocolVersion;
+  candidate: LanHostCandidate;
 };
 
 export type SessionForkRequest = {
