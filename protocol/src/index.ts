@@ -349,6 +349,7 @@ export type PendingInteractionView = {
 };
 
 export type InteractionDetailRow = {
+  key?: "plan" | "tool" | "command" | "cwd" | "path" | "reason" | "permissions" | "network" | "changes" | string;
   label: string;
   value: string;
   mono?: boolean;

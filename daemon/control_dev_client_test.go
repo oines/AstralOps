@@ -31,6 +31,15 @@ func rememberTestKnownHost(t *testing.T, st *store, deviceID string) KnownHost {
 	return host
 }
 
+func rememberAppKnownHost(t *testing.T, st *store, app *app, baseURL string) KnownHost {
+	t.Helper()
+	host, err := st.rememberKnownHost(app.store.hostInfo(), baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return host
+}
+
 func TestSelectKnownLanCandidateRequiresKnownFingerprint(t *testing.T) {
 	st, err := loadStore(t.TempDir())
 	if err != nil {
@@ -102,6 +111,7 @@ func TestControlClientResolveTargetFallsBackToExplicitHostWhenLanMissing(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	rememberAppKnownHost(t, controllerStore, hostApp, hostServer.URL)
 
 	target, err := controlClientResolveTarget(controllerStore, controlClientTargetOptions{
 		Host:             hostServer.URL,
@@ -119,6 +129,55 @@ func TestControlClientResolveTargetFallsBackToExplicitHostWhenLanMissing(t *test
 	}
 	if target.HostInfo.Identity.DeviceID != hostApp.store.deviceIdentity.DeviceID {
 		t.Fatalf("target HostInfo = %#v, want fallback Host identity", target.HostInfo)
+	}
+	if !target.HasExpectedHost || target.ExpectedHost.DeviceID != hostApp.store.deviceIdentity.DeviceID {
+		t.Fatalf("target expected Host = %#v, want known fallback Host", target.ExpectedHost)
+	}
+}
+
+func TestControlClientResolveTargetRejectsFallbackIdentityMismatch(t *testing.T) {
+	expectedApp, _ := newRemoteControlHandlerTestApp(t)
+	wrongApp, _ := newRemoteControlHandlerTestApp(t)
+	wrongServer := httptest.NewServer(remoteControlHandler(wrongApp, false))
+	defer wrongServer.Close()
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rememberAppKnownHost(t, controllerStore, expectedApp, "http://10.0.0.10:43900")
+
+	_, err = controlClientResolveTarget(controllerStore, controlClientTargetOptions{
+		Host:             wrongServer.URL,
+		Discover:         true,
+		HostDeviceID:     expectedApp.store.deviceIdentity.DeviceID,
+		DiscoveryPort:    9,
+		DiscoveryTimeout: time.Millisecond,
+		LANTimeout:       time.Millisecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "fallback host identity mismatch") {
+		t.Fatalf("err = %v, want fallback identity mismatch", err)
+	}
+}
+
+func TestControlClientResolveTargetRequiresKnownIdentityForFallback(t *testing.T) {
+	hostApp, _ := newRemoteControlHandlerTestApp(t)
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, false))
+	defer hostServer.Close()
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = controlClientResolveTarget(controllerStore, controlClientTargetOptions{
+		Host:             hostServer.URL,
+		Discover:         true,
+		HostDeviceID:     hostApp.store.deviceIdentity.DeviceID,
+		DiscoveryPort:    9,
+		DiscoveryTimeout: time.Millisecond,
+		LANTimeout:       time.Millisecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "fallback host requires a known Host identity") {
+		t.Fatalf("err = %v, want fallback known identity requirement", err)
 	}
 }
 

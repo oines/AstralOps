@@ -15,6 +15,23 @@ var controlPrivatePathKeys = map[string]bool{
 	"filePath":   true,
 }
 
+var controlPrivateRuntimeKeys = map[string]bool{
+	"native_session_id":         true,
+	"nativeSessionID":           true,
+	"native_thread_id":          true,
+	"nativeThreadID":            true,
+	"forked_from_native_anchor": true,
+	"forkedFromNativeAnchor":    true,
+}
+
+var controlPrivateWorkspaceKeys = map[string]bool{
+	"local_cwd":             true,
+	"localCWD":              true,
+	"local_projection_root": true,
+	"localProjectionRoot":   true,
+	"ssh":                   true,
+}
+
 func sanitizeControlEvents(events []AstralEvent) []AstralEvent {
 	out := make([]AstralEvent, len(events))
 	for index, event := range events {
@@ -35,6 +52,10 @@ func sanitizeControlEventNormalized(kind string, normalized any) any {
 	if !ok {
 		return cloned
 	}
+	sanitizeControlEventRuntimeInternals(value)
+	if strings.HasPrefix(kind, "workspace.") {
+		sanitizeControlEventWorkspaceInternals(value)
+	}
 	if strings.HasPrefix(kind, "message.") {
 		if attachments, ok := value["attachments"]; ok {
 			value["attachments"] = sanitizeControlEventMediaReferences(attachments)
@@ -47,6 +68,18 @@ func sanitizeControlEventNormalized(kind string, normalized any) any {
 		sanitizeControlEventMediaReference(value)
 	}
 	return value
+}
+
+func sanitizeControlEventRuntimeInternals(value map[string]any) {
+	for key := range controlPrivateRuntimeKeys {
+		delete(value, key)
+	}
+}
+
+func sanitizeControlEventWorkspaceInternals(value map[string]any) {
+	for key := range controlPrivateWorkspaceKeys {
+		delete(value, key)
+	}
 }
 
 func sanitizeControlEventMediaReferences(value any) any {
@@ -122,7 +155,7 @@ func sanitizeControlPendingInteraction(pending *pendingInteractionView, workspac
 	out := *pending
 	out.DetailRows = make([]interactionDetailRow, len(pending.DetailRows))
 	for index, row := range pending.DetailRows {
-		if row.Label == "目录" || row.Label == "路径" {
+		if row.Key == "cwd" || row.Key == "path" {
 			row.Value = sanitizeControlDecisionPath(row.Value, workspace)
 		}
 		out.DetailRows[index] = row

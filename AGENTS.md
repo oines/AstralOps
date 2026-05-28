@@ -73,6 +73,7 @@ If an event is not covered by a fixture, preserve it only as hidden control.raw 
 Do not add "best guess" UI branches for event names that have not been observed locally.
 turn.replaced is an AstralOps/Core-generated semantic event, not a Claude/Codex raw mapping. It marks a replaced transcript seq range after editing and resending the last user message. Normal transcript, pending interaction projection, and interaction responses must treat events in that seq range as stale/hidden.
 message.user attachments and message.media are first-class transcript media surfaces. UI clients render media from AstralEvent.normalized only. Local filesystem paths in normalized media are Host-private references for Core/runtime/media serving; clients must not treat them as directly readable remote paths. Remote controllers must fetch media through Host/Core media capabilities using event_seq + media_id over the encrypted control/data channel.
+Remote control event projection must strip Host/runtime internals such as raw payloads, native session/thread IDs, local workspace paths, SSH config, and private transcript media paths before sending events to Controllers.
 Session input while a turn is running must be modeled as an explicit Core decision: start, queue, or steer. Controller UI must not independently decide continuation semantics for remote control. Desktop app settings, shell theme/window behavior, notifications, logs, and auto updates are local shell concerns unless a future Host management capability explicitly says otherwise.
 ```
 
@@ -119,6 +120,7 @@ UI implementation rule:
 Desktop UI visual language, density, spacing, radius, platform integration, settings layout, controls, and transcript display norms are documented in docs/desktop-ui-design-language.md and should be followed for desktop React/Electron UI changes.
 Visible UI copy must not use emoji or decorative Unicode symbols. Use plain text and lucide icons for affordances/status. Keyboard hints must be plain labels such as Enter, Cmd+Enter, or ESC.
 Permission, command, file-change, Ask, MCP elicitation, and plan confirmation surfaces must show the concrete decision target from AstralEvent.normalized, such as command, cwd, tool name, reason, file/change summary, prompt, or params. Do not show generic approval text when normalized data contains a more specific target.
+Pending interaction detail rows must carry machine-readable keys such as `command`, `cwd`, `path`, or `reason`; Core/Gateway logic must branch on those keys, not translated UI labels.
 ```
 
 ## Current event coverage audit

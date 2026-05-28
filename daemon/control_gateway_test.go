@@ -166,13 +166,38 @@ func TestControlGatewaySessionViewProjectsPendingInteractionPaths(t *testing.T) 
 	}
 	rows := map[string]string{}
 	for _, row := range view.PendingInteraction.DetailRows {
-		rows[row.Label] = row.Value
+		rows[row.Key] = row.Value
 		if strings.Contains(row.Value, workspace.LocalCWD) {
 			t.Fatalf("pending detail row leaked Host cwd: %#v", row)
 		}
 	}
-	if rows["目录"] != "nested" || rows["路径"] != "nested/note.txt" {
+	if rows["cwd"] != "nested" || rows["path"] != "nested/note.txt" {
 		t.Fatalf("pending detail rows = %#v, want workspace-relative cwd/path", rows)
+	}
+}
+
+func TestControlPendingInteractionProjectionUsesDetailRowKey(t *testing.T) {
+	_, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	pending := &pendingInteractionView{
+		ID:    "approval_1",
+		Kind:  "approval",
+		Title: "Approval",
+		DetailRows: []interactionDetailRow{
+			{Key: "cwd", Label: "Working directory", Value: filepath.Join(workspace.LocalCWD, "nested"), Mono: true},
+			{Key: "path", Label: "File", Value: filepath.Join(workspace.LocalCWD, "nested", "note.txt"), Mono: true},
+		},
+	}
+
+	projected := sanitizeControlPendingInteraction(pending, workspace)
+	rows := map[string]string{}
+	for _, row := range projected.DetailRows {
+		rows[row.Key] = row.Value
+		if strings.Contains(row.Value, workspace.LocalCWD) {
+			t.Fatalf("pending detail row leaked Host cwd: %#v", row)
+		}
+	}
+	if rows["cwd"] != "nested" || rows["path"] != "nested/note.txt" {
+		t.Fatalf("pending detail rows = %#v, want key-based workspace-relative paths", rows)
 	}
 }
 
@@ -216,12 +241,12 @@ func TestControlGatewaySessionViewProjectsSSHPendingInteractionPaths(t *testing.
 	}
 	rows := map[string]string{}
 	for _, row := range view.PendingInteraction.DetailRows {
-		rows[row.Label] = row.Value
+		rows[row.Key] = row.Value
 		if strings.Contains(row.Value, "/remote/project") {
 			t.Fatalf("pending detail row leaked SSH remote cwd: %#v", row)
 		}
 	}
-	if rows["目录"] != "nested" || rows["路径"] != "nested/note.txt" {
+	if rows["cwd"] != "nested" || rows["path"] != "nested/note.txt" {
 		t.Fatalf("pending detail rows = %#v, want workspace-relative cwd/path", rows)
 	}
 }
@@ -330,6 +355,70 @@ func TestControlGatewayReadsEventsWindow(t *testing.T) {
 	}
 	if len(events) != 2 || events[0].Seq != second.Seq || events[1].Seq != third.Seq {
 		t.Fatalf("events = %#v, want second and third event in seq order", events)
+	}
+}
+
+func TestControlGatewayEventsHideHostSessionAndWorkspaceInternals(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+	workspace.LocalProjectionRoot = "/host/private/projection"
+	workspace.NativeSessionID = "workspace-native-session"
+	workspace.NativeThreadID = "workspace-native-thread"
+	workspace.SSH = &SSHConfig{Endpoint: "root@example.test", RemoteCWD: "/remote/project"}
+	session.NativeSessionID = "session-native-id"
+	session.NativeThreadID = "session-native-thread"
+	session.ForkedFromNativeAnchor = "native-anchor"
+
+	workspaceEvent, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: workspace.Agent, Kind: "workspace.created", Normalized: workspace, Raw: map[string]any{"secret": "workspace"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionEvent, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: session, Raw: map[string]any{"secret": "session"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextEvent, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.context", Normalized: map[string]any{"native_thread_id": "native-thread", "total_tokens": 42}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionEvents,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"after_seq":    workspaceEvent.Seq - 1,
+			"limit":        10,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, ok := response.Result.([]AstralEvent)
+	if !ok || len(events) != 3 || events[0].Seq != workspaceEvent.Seq || events[1].Seq != sessionEvent.Seq || events[2].Seq != contextEvent.Seq {
+		t.Fatalf("events result = %#v, want projected events", response.Result)
+	}
+	workspaceNormalized := mapValue(events[0].Normalized)
+	if events[0].Raw != nil || stringValue(workspaceNormalized["local_cwd"]) != "" || stringValue(workspaceNormalized["local_projection_root"]) != "" || workspaceNormalized["ssh"] != nil || stringValue(workspaceNormalized["native_session_id"]) != "" || stringValue(workspaceNormalized["native_thread_id"]) != "" {
+		t.Fatalf("workspace event leaked Host internals: %#v", events[0])
+	}
+	sessionNormalized := mapValue(events[1].Normalized)
+	if events[1].Raw != nil || stringValue(sessionNormalized["native_session_id"]) != "" || stringValue(sessionNormalized["native_thread_id"]) != "" || stringValue(sessionNormalized["forked_from_native_anchor"]) != "" {
+		t.Fatalf("session event leaked Host internals: %#v", events[1])
+	}
+	contextNormalized := mapValue(events[2].Normalized)
+	if stringValue(contextNormalized["native_thread_id"]) != "" || int64(numberValue(contextNormalized["total_tokens"])) != 42 {
+		t.Fatalf("context event projection = %#v, want native thread id removed and totals preserved", contextNormalized)
+	}
+	stored := app.store.queryEvents(workspace.ID, "", 0)
+	storedWorkspace, ok := stored[0].Normalized.(Workspace)
+	if !ok || storedWorkspace.SSH == nil || storedWorkspace.LocalCWD == "" {
+		t.Fatalf("stored workspace event was mutated: %#v", stored[0])
+	}
+	storedSession, ok := stored[1].Normalized.(Session)
+	if !ok || storedSession.NativeSessionID != "session-native-id" {
+		t.Fatalf("stored events were mutated: %#v", stored)
 	}
 }
 

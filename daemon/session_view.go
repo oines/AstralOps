@@ -25,6 +25,7 @@ type pendingInteractionView struct {
 }
 
 type interactionDetailRow struct {
+	Key   string `json:"key,omitempty"`
 	Label string `json:"label"`
 	Value string `json:"value"`
 	Mono  bool   `json:"mono,omitempty"`
@@ -401,31 +402,31 @@ func questionAllowsCustomAnswer(question map[string]any, defaultValue bool) bool
 
 func interactionDetailRows(kind string, value map[string]any, params map[string]any) []interactionDetailRow {
 	rows := []interactionDetailRow{}
-	add := func(label string, raw any, mono bool) {
+	add := func(key, label string, raw any, mono bool) {
 		text := stringValue(raw)
 		if text == "" {
 			return
 		}
-		rows = append(rows, interactionDetailRow{Label: label, Value: text, Mono: mono})
+		rows = append(rows, interactionDetailRow{Key: key, Label: label, Value: text, Mono: mono})
 	}
 	if kind == "plan" {
 		if plan := firstNonNil(value["text"], value["plan"]); plan != nil {
-			rows = append(rows, interactionDetailRow{Label: "计划", Value: jsonPreviewAny(plan)})
+			rows = append(rows, interactionDetailRow{Key: "plan", Label: "计划", Value: jsonPreviewAny(plan)})
 		}
 	}
-	add("工具", firstString(value["tool_name"], value["toolName"], params["tool_name"], params["toolName"], params["name"]), false)
-	add("命令", firstString(value["command"], params["command"]), true)
-	add("目录", firstString(value["cwd"], params["cwd"]), true)
-	add("路径", firstString(value["path"], value["file_path"], value["grant_root"], value["grantRoot"], params["path"], params["file_path"], params["grant_root"], params["grantRoot"]), true)
-	add("原因", firstString(value["reason"], params["reason"]), false)
+	add("tool", "工具", firstString(value["tool_name"], value["toolName"], params["tool_name"], params["toolName"], params["name"]), false)
+	add("command", "命令", firstString(value["command"], params["command"]), true)
+	add("cwd", "目录", firstString(value["cwd"], params["cwd"]), true)
+	add("path", "路径", firstString(value["path"], value["file_path"], value["grant_root"], value["grantRoot"], params["path"], params["file_path"], params["grant_root"], params["grantRoot"]), true)
+	add("reason", "原因", firstString(value["reason"], params["reason"]), false)
 	if permissions := firstNonNil(value["permissions"], params["permissions"], value["additional_permissions"], params["additionalPermissions"]); permissions != nil {
-		rows = append(rows, interactionDetailRow{Label: "权限", Value: jsonPreviewAny(permissions), Mono: true})
+		rows = append(rows, interactionDetailRow{Key: "permissions", Label: "权限", Value: jsonPreviewAny(permissions), Mono: true})
 	}
 	if network := firstNonNil(value["network_approval_context"], params["networkApprovalContext"]); network != nil {
-		rows = append(rows, interactionDetailRow{Label: "网络", Value: jsonPreviewAny(network), Mono: true})
+		rows = append(rows, interactionDetailRow{Key: "network", Label: "网络", Value: jsonPreviewAny(network), Mono: true})
 	}
 	if changes := firstNonNil(value["changes"], params["changes"]); changes != nil {
-		rows = append(rows, interactionDetailRow{Label: "变更", Value: jsonPreviewAny(changes), Mono: true})
+		rows = append(rows, interactionDetailRow{Key: "changes", Label: "变更", Value: jsonPreviewAny(changes), Mono: true})
 	}
 	return rows
 }

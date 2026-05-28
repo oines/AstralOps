@@ -367,10 +367,12 @@ type controlClientTargetOptions struct {
 }
 
 type controlClientTarget struct {
-	BaseURL      string
-	HostInfo     HostInfo
-	Timeout      time.Duration
-	FallbackHost string
+	BaseURL         string
+	HostInfo        HostInfo
+	Timeout         time.Duration
+	FallbackHost    string
+	ExpectedHost    KnownHost
+	HasExpectedHost bool
 }
 
 type controlClientSmokeOptions struct {
@@ -414,7 +416,7 @@ type controlClientSmokeStep struct {
 
 func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (controlClientTarget, error) {
 	if opts.Host != "" && !opts.Discover {
-		return controlClientExplicitTarget(opts.Host)
+		return controlClientExplicitTargetForKnownHost(st, opts.Host, opts.HostDeviceID)
 	}
 	if !opts.Discover {
 		return controlClientTarget{}, fmt.Errorf("--host is required unless --discover is set")
@@ -425,23 +427,24 @@ func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (con
 	if opts.LANTimeout <= 0 {
 		opts.LANTimeout = 2 * time.Second
 	}
+	fallbackKnownHost, hasFallbackKnownHost := controlClientFallbackKnownHost(st, opts.HostDeviceID)
 	candidates, err := discoverRemoteControlHostsWithTimeout(opts.DiscoveryTimeout, opts.DiscoveryPort)
 	if err != nil {
-		return controlClientFallbackTarget(opts.Host, err)
+		return controlClientFallbackTarget(opts.Host, err, fallbackKnownHost, hasFallbackKnownHost)
 	}
 	candidate, knownHost, err := selectKnownLanCandidate(st, candidates, opts.HostDeviceID)
 	if err != nil {
-		return controlClientFallbackTarget(opts.Host, err)
+		return controlClientFallbackTarget(opts.Host, err, fallbackKnownHost, hasFallbackKnownHost)
 	}
 	client := &http.Client{Timeout: opts.LANTimeout}
 	hostInfo, err := controlClientHostInfoWithClient(candidate.BaseURL, client)
 	if err != nil {
-		return controlClientFallbackTarget(opts.Host, err)
+		return controlClientFallbackTarget(opts.Host, err, knownHost, true)
 	}
 	if err := validateKnownLanHost(candidate, knownHost, hostInfo); err != nil {
-		return controlClientFallbackTarget(opts.Host, err)
+		return controlClientFallbackTarget(opts.Host, err, knownHost, true)
 	}
-	return controlClientTarget{BaseURL: candidate.BaseURL, HostInfo: hostInfo, Timeout: opts.LANTimeout, FallbackHost: strings.TrimSpace(opts.Host)}, nil
+	return controlClientTarget{BaseURL: candidate.BaseURL, HostInfo: hostInfo, Timeout: opts.LANTimeout, FallbackHost: strings.TrimSpace(opts.Host), ExpectedHost: knownHost, HasExpectedHost: true}, nil
 }
 
 func controlClientExplicitTarget(host string) (controlClientTarget, error) {
@@ -452,15 +455,67 @@ func controlClientExplicitTarget(host string) (controlClientTarget, error) {
 	return controlClientTarget{BaseURL: host, HostInfo: hostInfo}, nil
 }
 
-func controlClientFallbackTarget(host string, lanErr error) (controlClientTarget, error) {
+func controlClientExplicitTargetForKnownHost(st *store, host, hostDeviceID string) (controlClientTarget, error) {
+	target, err := controlClientExplicitTarget(host)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	if st == nil {
+		return target, nil
+	}
+	expected, ok := controlClientExpectedKnownHost(st, strings.TrimSpace(hostDeviceID), target.HostInfo.Identity.DeviceID)
+	if !ok {
+		if strings.TrimSpace(hostDeviceID) != "" {
+			return controlClientTarget{}, fmt.Errorf("known Host %q is not paired; pair the Host before using --host-device-id", strings.TrimSpace(hostDeviceID))
+		}
+		return target, nil
+	}
+	if err := validateHostInfoAgainstKnownHost(expected, target.HostInfo); err != nil {
+		return controlClientTarget{}, err
+	}
+	target.ExpectedHost = expected
+	target.HasExpectedHost = true
+	return target, nil
+}
+
+func controlClientFallbackTarget(host string, lanErr error, expected KnownHost, hasExpected bool) (controlClientTarget, error) {
 	if strings.TrimSpace(host) == "" {
 		return controlClientTarget{}, lanErr
+	}
+	if !hasExpected {
+		return controlClientTarget{}, fmt.Errorf("LAN target unavailable: %v; fallback host requires a known Host identity", lanErr)
 	}
 	target, err := controlClientExplicitTarget(host)
 	if err != nil {
 		return controlClientTarget{}, fmt.Errorf("LAN target unavailable: %v; fallback host failed: %w", lanErr, err)
 	}
+	if err := validateHostInfoAgainstKnownHost(expected, target.HostInfo); err != nil {
+		return controlClientTarget{}, fmt.Errorf("LAN target unavailable: %v; fallback host identity mismatch: %w", lanErr, err)
+	}
+	target.ExpectedHost = expected
+	target.HasExpectedHost = true
 	return target, nil
+}
+
+func controlClientFallbackKnownHost(st *store, hostDeviceID string) (KnownHost, bool) {
+	if st == nil {
+		return KnownHost{}, false
+	}
+	hostDeviceID = strings.TrimSpace(hostDeviceID)
+	if hostDeviceID == "" {
+		return KnownHost{}, false
+	}
+	return st.knownHost(hostDeviceID)
+}
+
+func controlClientExpectedKnownHost(st *store, requestedDeviceID, actualDeviceID string) (KnownHost, bool) {
+	if requestedDeviceID != "" {
+		return st.knownHost(requestedDeviceID)
+	}
+	if actualDeviceID != "" {
+		return st.knownHost(actualDeviceID)
+	}
+	return KnownHost{}, false
 }
 
 func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlClientSmokeResult, error) {
@@ -1569,13 +1624,22 @@ func validateKnownLanHost(candidate LanHostCandidate, knownHost KnownHost, hostI
 	if hostInfo.Identity.DeviceID != candidate.DeviceID {
 		return fmt.Errorf("LAN candidate device_id mismatch: discovered %q but Host returned %q", candidate.DeviceID, hostInfo.Identity.DeviceID)
 	}
-	if hostInfo.Identity.DeviceID != knownHost.DeviceID {
-		return fmt.Errorf("known Host device_id mismatch: known %q but Host returned %q", knownHost.DeviceID, hostInfo.Identity.DeviceID)
+	if candidate.PublicKeyFingerprint != knownHost.PublicKeyFingerprint {
+		return fmt.Errorf("known Host public key fingerprint mismatch for %s", knownHost.DeviceID)
 	}
-	if hostInfo.Identity.PublicKey != knownHost.PublicKey {
+	return validateHostInfoAgainstKnownHost(knownHost, hostInfo)
+}
+
+func validateHostInfoAgainstKnownHost(knownHost KnownHost, hostInfo HostInfo) error {
+	knownHost = normalizeKnownHost(knownHost)
+	identity := hostInfo.Identity
+	if identity.DeviceID != knownHost.DeviceID {
+		return fmt.Errorf("known Host device_id mismatch: known %q but Host returned %q", knownHost.DeviceID, identity.DeviceID)
+	}
+	if identity.PublicKey != knownHost.PublicKey {
 		return fmt.Errorf("known Host public key mismatch for %s", knownHost.DeviceID)
 	}
-	if hostInfo.Identity.PublicKeyFingerprint != knownHost.PublicKeyFingerprint || candidate.PublicKeyFingerprint != knownHost.PublicKeyFingerprint {
+	if identity.PublicKeyFingerprint != knownHost.PublicKeyFingerprint {
 		return fmt.Errorf("known Host public key fingerprint mismatch for %s", knownHost.DeviceID)
 	}
 	return nil
@@ -1690,7 +1754,11 @@ func controlClientDialTarget(target controlClientTarget, st *store) (*websocket.
 	if fallbackErr != nil {
 		return nil, nil, target, fmt.Errorf("LAN control channel failed: %v; fallback host failed: %w", err, fallbackErr)
 	}
-	if fallback.HostInfo.Identity.DeviceID != target.HostInfo.Identity.DeviceID || fallback.HostInfo.Identity.PublicKey != target.HostInfo.Identity.PublicKey {
+	if target.HasExpectedHost {
+		if validateErr := validateHostInfoAgainstKnownHost(target.ExpectedHost, fallback.HostInfo); validateErr != nil {
+			return nil, nil, target, fmt.Errorf("LAN control channel failed: %v; fallback host identity mismatch: %w", err, validateErr)
+		}
+	} else if fallback.HostInfo.Identity.DeviceID != target.HostInfo.Identity.DeviceID || fallback.HostInfo.Identity.PublicKey != target.HostInfo.Identity.PublicKey {
 		return nil, nil, target, fmt.Errorf("LAN control channel failed: %v; fallback host identity mismatch for %s", err, target.HostInfo.Identity.DeviceID)
 	}
 	socket, cipher, fallbackDialErr := controlClientDialWithTimeout(fallback.BaseURL, st, fallback.HostInfo, fallback.Timeout)
