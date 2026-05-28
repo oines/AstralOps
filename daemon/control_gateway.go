@@ -39,6 +39,7 @@ const (
 	ControlActionMediaRead              = "media.read"
 	ControlActionMediaDownload          = "media.download"
 	ControlActionMediaStream            = "media.stream"
+	ControlActionMediaStreamCancel      = "media.stream.cancel"
 	ControlActionWorkspaceFilesRead     = "workspace.files.read"
 	ControlActionWorkspaceFilesWrite    = "workspace.files.write"
 	ControlActionWorkspaceExec          = "workspace.exec"
@@ -114,7 +115,7 @@ func controlActionCapability(action string) string {
 		return CapabilityMediaRead
 	case ControlActionMediaDownload:
 		return CapabilityMediaDownload
-	case ControlActionMediaStream:
+	case ControlActionMediaStream, ControlActionMediaStreamCancel:
 		return CapabilityMediaStream
 	case ControlActionWorkspaceFilesRead:
 		return CapabilityWorkspaceFilesRead
@@ -258,6 +259,19 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn) (an
 			return nil, err
 		}
 		return a.prepareControlMediaStream(params)
+	case ControlActionMediaStreamCancel:
+		if conn == nil {
+			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "media.stream.cancel requires an encrypted control connection")
+		}
+		var params mediaStreamCancelParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		streamID := strings.TrimSpace(params.StreamID)
+		if streamID == "" {
+			return nil, newActionError(http.StatusBadRequest, "media_stream_id_required", "stream_id required")
+		}
+		return mediaStreamCancelResult{StreamID: streamID, Cancelled: conn.cancelMediaStream(streamID)}, nil
 	case ControlActionWorkspaceFilesRead:
 		var params workspaceFilesReadParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

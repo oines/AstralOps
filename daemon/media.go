@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -45,6 +46,10 @@ type mediaStreamParams struct {
 	ChunkSize int    `json:"chunk_size,omitempty"`
 }
 
+type mediaStreamCancelParams struct {
+	StreamID string `json:"stream_id"`
+}
+
 type mediaReadResult struct {
 	SessionID     string `json:"session_id"`
 	EventSeq      int64  `json:"event_seq"`
@@ -68,6 +73,11 @@ type mediaStreamResult struct {
 	Size      int64  `json:"size,omitempty"`
 	Offset    int64  `json:"offset"`
 	ChunkSize int    `json:"chunk_size"`
+}
+
+type mediaStreamCancelResult struct {
+	StreamID  string `json:"stream_id"`
+	Cancelled bool   `json:"cancelled"`
 }
 
 type mediaStreamFrame struct {
@@ -131,7 +141,7 @@ func (a *app) prepareControlMediaStream(params mediaStreamParams) (mediaStreamRe
 	}, nil
 }
 
-func (a *app) streamControlMedia(params mediaStreamParams, result mediaStreamResult, conn *controlWSConn, requestID string) {
+func (a *app) streamControlMedia(ctx context.Context, params mediaStreamParams, result mediaStreamResult, conn *controlWSConn, requestID string) {
 	media, err := a.resolveSessionMedia(params.SessionID, params.EventSeq, params.MediaID)
 	if err != nil {
 		conn.writePlain(controlPlainFrame{Type: mediaStreamFrameError, Media: mediaStreamErrorFrame(result, requestID, "media_not_found", err.Error())})
@@ -153,8 +163,14 @@ func (a *app) streamControlMedia(params mediaStreamParams, result mediaStreamRes
 	buffer := make([]byte, result.ChunkSize)
 	seq := int64(0)
 	for {
+		if mediaStreamCancelled(ctx) {
+			return
+		}
 		n, readErr := file.Read(buffer)
 		if n > 0 {
+			if mediaStreamCancelled(ctx) {
+				return
+			}
 			seq++
 			chunk := mediaStreamFrame{
 				StreamID:   result.StreamID,
@@ -172,6 +188,9 @@ func (a *app) streamControlMedia(params mediaStreamParams, result mediaStreamRes
 			}
 			conn.writePlain(controlPlainFrame{Type: mediaStreamFrameChunk, Media: &chunk})
 			offset += int64(n)
+		}
+		if mediaStreamCancelled(ctx) {
+			return
 		}
 		if readErr == nil {
 			continue
@@ -195,6 +214,15 @@ func (a *app) streamControlMedia(params mediaStreamParams, result mediaStreamRes
 		}
 		conn.writePlain(controlPlainFrame{Type: mediaStreamFrameError, Media: mediaStreamErrorFrame(result, requestID, "media_stream_read_failed", readErr.Error())})
 		return
+	}
+}
+
+func mediaStreamCancelled(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	default:
+		return false
 	}
 }
 

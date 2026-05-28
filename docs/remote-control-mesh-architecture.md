@@ -637,7 +637,7 @@ media.download
   请求 Host 以下载语义返回媒体资源，文件名、MIME type、大小等元数据由 Host/Core 决定。
 
 media.stream
-  面向大文件、生成中图片、未来视频或渐进式预览的媒体流。数据帧和 PTY 一样走 E2EE channel，relay 只转发密文。
+  面向大文件、生成中图片、未来视频或渐进式预览的媒体流。数据帧和 PTY 一样走 E2EE channel，relay 只转发密文。Controller 可以用 offset 重新发起 stream 来恢复读取，也可以用 media.stream.cancel 取消同一 control connection 上的 active stream。
 
 workspace.files.read
   通过 Host 浏览目录或读取文件内容。SSH workspace 中，由 Host 发起 SSH 读取。v1 返回目录列表或中小文件的 base64 内容；大文件后续走 stream。
@@ -1061,12 +1061,14 @@ media.read
 media.download
 media.stream
 chunked E2EE media frames
+media.stream offset resume
+media.stream.cancel
 event_seq + media_id reference validation
 E2EE response frames
 Host path never exposed in control response
 
 待落地:
-stream cancellation/resume policy
+stream persistence across control connection reconnect
 ```
 
 Local Desktop 可以继续用本地 HTTP URL 渲染媒体，但 RemoteCoreClient 和 Mobile 必须只依赖 capability 和 encrypted media frames。

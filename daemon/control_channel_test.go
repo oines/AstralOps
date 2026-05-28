@@ -308,6 +308,59 @@ func TestControlWebSocketMediaStreamChunksAreEncrypted(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketMediaStreamResumesFromOffset(t *testing.T) {
+	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityMediaStream)
+	secret := []byte("0123456789")
+	media := addControlMediaFixture(t, app, workspace, session, secret)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "media_stream_resume",
+			Capability: CapabilityMediaStream,
+			Action:     ControlActionMediaStream,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"event_seq":  media.eventSeq,
+				"media_id":   media.mediaID,
+				"offset":     4,
+				"chunk_size": 3,
+			},
+		},
+	})
+
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("stream response = %#v, want ok", plain)
+	}
+	streamID := stringValue(mapValue(plain.Response.Result)["stream_id"])
+	var streamed []byte
+	for {
+		frame := readEncryptedControlFrame(t, client, cipher)
+		if frame.Media == nil || frame.Media.StreamID != streamID {
+			t.Fatalf("stream frame = %#v, want media frame for stream %q", frame, streamID)
+		}
+		switch frame.Type {
+		case mediaStreamFrameChunk:
+			body, err := base64.StdEncoding.DecodeString(frame.Media.DataBase64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			streamed = append(streamed, body...)
+		case mediaStreamFrameComplete:
+			if string(streamed) != "456789" {
+				t.Fatalf("resumed stream = %q, want 456789", string(streamed))
+			}
+			return
+		default:
+			t.Fatalf("stream frame type = %q", frame.Type)
+		}
+	}
+}
+
 func TestControlWebSocketChunkedAttachmentIngestIsEncrypted(t *testing.T) {
 	app, _, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityAttachmentIngest)
 	server := startControlChannelTestServer(t, app)

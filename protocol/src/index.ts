@@ -402,6 +402,10 @@ export type MediaStreamParams = MediaReadParams & {
   chunk_size?: number;
 };
 
+export type MediaStreamCancelParams = {
+  stream_id: string;
+};
+
 export type AttachmentIngestParams = {
   session_id: string;
   name: string;
@@ -482,6 +486,11 @@ export type MediaStreamResult = {
   size?: number;
   offset: number;
   chunk_size: number;
+};
+
+export type MediaStreamCancelResult = {
+  stream_id: string;
+  cancelled: boolean;
 };
 
 export type MediaStreamFrame = {
@@ -599,6 +608,7 @@ export type ControlAction =
   | "media.read"
   | "media.download"
   | "media.stream"
+  | "media.stream.cancel"
   | "workspace.files.read"
   | "workspace.files.write"
   | "workspace.exec"

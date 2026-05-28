@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -133,6 +134,53 @@ func TestControlGatewayMediaStreamRequiresCapability(t *testing.T) {
 		},
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
+}
+
+func TestControlGatewayMediaStreamCancelCancelsRegisteredStream(t *testing.T) {
+	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityMediaStream)
+	ctx, cancel := context.WithCancel(context.Background())
+	conn := &controlWSConn{}
+	conn.registerMediaStream("media_stream_1", cancel)
+
+	response, err := app.executeControlRequestWithConnection(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityMediaStream,
+		Action:             ControlActionMediaStreamCancel,
+		Params: map[string]any{
+			"stream_id": "media_stream_1",
+		},
+	}, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(mediaStreamCancelResult)
+	if !ok {
+		t.Fatalf("cancel result = %#v, want mediaStreamCancelResult", response.Result)
+	}
+	if !result.Cancelled || result.StreamID != "media_stream_1" {
+		t.Fatalf("cancel result = %#v", result)
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("registered stream context was not cancelled")
+	}
+}
+
+func TestControlGatewayMediaStreamCancelRequiresConnection(t *testing.T) {
+	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityMediaStream)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityMediaStream,
+		Action:             ControlActionMediaStreamCancel,
+		Params: map[string]any{
+			"stream_id": "media_stream_1",
+		},
+	})
+	assertActionError(t, err, http.StatusBadRequest, "control_connection_required")
 }
 
 type controlMediaFixture struct {

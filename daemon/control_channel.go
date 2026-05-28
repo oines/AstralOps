@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
@@ -69,6 +70,8 @@ type controlWSConn struct {
 	controllerDeviceID string
 	cipher             *controlCipher
 	writeMu            sync.Mutex
+	streamMu           sync.Mutex
+	mediaStreams       map[string]context.CancelFunc
 }
 
 type controlCipher struct {
@@ -251,8 +254,61 @@ func (c *controlWSConn) afterControlResponse(req ControlRequest, response Contro
 	if err := decodeControlParams(req.Params, &params); err != nil {
 		return nil
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.registerMediaStream(result.StreamID, cancel)
 	return func() {
-		c.app.streamControlMedia(params, result, c, req.RequestID)
+		defer c.unregisterMediaStream(result.StreamID)
+		c.app.streamControlMedia(ctx, params, result, c, req.RequestID)
+	}
+}
+
+func (c *controlWSConn) registerMediaStream(streamID string, cancel context.CancelFunc) {
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" || cancel == nil {
+		return
+	}
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	if c.mediaStreams == nil {
+		c.mediaStreams = map[string]context.CancelFunc{}
+	}
+	c.mediaStreams[streamID] = cancel
+}
+
+func (c *controlWSConn) cancelMediaStream(streamID string) bool {
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return false
+	}
+	c.streamMu.Lock()
+	cancel, ok := c.mediaStreams[streamID]
+	if ok {
+		delete(c.mediaStreams, streamID)
+	}
+	c.streamMu.Unlock()
+	if ok {
+		cancel()
+	}
+	return ok
+}
+
+func (c *controlWSConn) unregisterMediaStream(streamID string) {
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return
+	}
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	delete(c.mediaStreams, streamID)
+}
+
+func (c *controlWSConn) cancelAllMediaStreams() {
+	c.streamMu.Lock()
+	streams := c.mediaStreams
+	c.mediaStreams = nil
+	c.streamMu.Unlock()
+	for _, cancel := range streams {
+		cancel()
 	}
 }
 
@@ -288,6 +344,7 @@ func (c *controlWSConn) writeUnsealedClose(code, reason string) {
 }
 
 func (c *controlWSConn) shutdown() {
+	c.cancelAllMediaStreams()
 	c.app.detachTerminalViewersForControlSession(c.id, "connection_closed")
 	c.app.unregisterControlSession(c.id)
 	_ = c.socket.Close()
