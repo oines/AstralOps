@@ -37,12 +37,12 @@ func (a *app) startSessionInput(sessionID, input string, options TurnOptions) (m
 				return result, handledErr
 			}
 			turn := a.enqueueTurn(ss, input, options)
-			return map[string]any{"ok": true, "queued": true, "queue_id": turn.ID}, nil
+			return map[string]any{"ok": true, "mode": "queue", "queued": true, "queue_id": turn.ID}, nil
 		}
 		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": err.Error()}})
 		return nil, newActionError(http.StatusBadRequest, "runtime_error", err.Error())
 	}
-	return map[string]any{"ok": true}, nil
+	return map[string]any{"ok": true, "mode": "start"}, nil
 }
 
 func (a *app) tryRunningInput(ss Session, ws Workspace, runtime AgentRuntime, input string, options TurnOptions) (map[string]any, bool, error) {
@@ -51,10 +51,10 @@ func (a *app) tryRunningInput(ss Session, ws Workspace, runtime AgentRuntime, in
 		return nil, false, nil
 	}
 	if steerErr := steerer.Steer(ss.ID, input, options); steerErr == nil {
-		return map[string]any{"ok": true, "steered": true}, true, nil
+		return map[string]any{"ok": true, "mode": "steer", "steered": true}, true, nil
 	} else if errors.Is(steerErr, ErrSessionIdle) {
 		if retryErr := runtime.StartTurn(ss, ws, input, options); retryErr == nil {
-			return map[string]any{"ok": true}, true, nil
+			return map[string]any{"ok": true, "mode": "start"}, true, nil
 		} else if errors.Is(retryErr, ErrSessionRunning) {
 			return nil, false, nil
 		} else {

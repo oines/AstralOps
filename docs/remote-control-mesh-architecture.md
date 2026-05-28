@@ -690,6 +690,14 @@ steer
 
 Controller UI 可以只显示“发送”或“继续输入”，但远控协议和 Host 日志不能含糊。多 Controller 同时控制同一 Host 时，Host/Core 是唯一可以决定 start、queue、steer 的地方。
 
+`core.control.session_input` 的 response 必须带 Host/Core 最终决策：
+
+```text
+mode: start | queue | steer
+queue_id: only when mode=queue
+queued / steered: legacy compatibility flags
+```
+
 ## 本机 Shell 设置
 
 当前 `AppSettings`、桌面主题、通知偏好、窗口效果、日志目录、自动更新检查/安装，都属于本机 desktop shell concern。

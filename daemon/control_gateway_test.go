@@ -138,11 +138,67 @@ func TestControlGatewayStartsSessionInput(t *testing.T) {
 	if !response.OK {
 		t.Fatalf("response = %#v, want ok", response)
 	}
+	result := mapValue(response.Result)
+	if stringValue(result["mode"]) != "start" || boolValue(result["queued"]) || boolValue(result["steered"]) {
+		t.Fatalf("session input result = %#v, want start mode", result)
+	}
 	if len(runtime.inputs) != 1 || runtime.inputs[0] != "implement gateway" {
 		t.Fatalf("runtime inputs = %#v, want gateway input", runtime.inputs)
 	}
 	if runtime.options[0].Model != "gpt-test" || runtime.options[0].ReasoningEffort != "low" || runtime.options[0].PermissionMode != "auto" {
 		t.Fatalf("runtime options = %#v", runtime.options[0])
+	}
+}
+
+func TestControlGatewaySessionInputQueuesWhenRuntimeIsRunning(t *testing.T) {
+	runtime := &recordingRuntime{startErr: ErrSessionRunning}
+	app, _, session := newControlGatewayTestApp(t, AgentCodex, runtime)
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionSessionInput,
+		Params: map[string]any{
+			"session_id": session.ID,
+			"input":      "queue this",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := mapValue(response.Result)
+	if stringValue(result["mode"]) != "queue" || !boolValue(result["queued"]) || stringValue(result["queue_id"]) == "" {
+		t.Fatalf("session input result = %#v, want queue mode", result)
+	}
+	if !containsEventKind(app.store.queryEvents("", session.ID, 0), "queue.queued") {
+		t.Fatalf("events = %#v, want queue.queued", app.store.queryEvents("", session.ID, 0))
+	}
+}
+
+func TestControlGatewaySessionInputSteersWhenRuntimeSupportsSteer(t *testing.T) {
+	runtime := &recordingSteerRuntime{recordingRuntime: recordingRuntime{startErr: ErrSessionRunning}}
+	app, _, session := newControlGatewayTestApp(t, AgentCodex, runtime)
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionSessionInput,
+		Params: map[string]any{
+			"session_id": session.ID,
+			"input":      "steer this",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := mapValue(response.Result)
+	if stringValue(result["mode"]) != "steer" || !boolValue(result["steered"]) || boolValue(result["queued"]) {
+		t.Fatalf("session input result = %#v, want steer mode", result)
+	}
+	if len(runtime.steered) != 1 || runtime.steered[0] != "steer this" {
+		t.Fatalf("steered = %#v, want steer this", runtime.steered)
 	}
 }
 

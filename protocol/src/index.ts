@@ -381,6 +381,16 @@ export type SessionInputRequest = {
   permission_mode?: "default" | "auto" | "plan" | "bypassPermissions";
 };
 
+export type SessionInputMode = "start" | "queue" | "steer";
+
+export type SessionInputResult = {
+  ok: boolean;
+  mode: SessionInputMode;
+  queued?: boolean;
+  steered?: boolean;
+  queue_id?: string;
+};
+
 export type EditLastUserMessageRequest = {
   event_seq: number;
   input: string;
