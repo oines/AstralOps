@@ -2438,6 +2438,113 @@ func TestControlWebSocketHostTrustRevokeClosesTargetSessionOnly(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketTrustRevokeBroadcastsEncryptedAuditEventToTrustedSubscriber(t *testing.T) {
+	app, _, _, adminPublicKey, adminPrivateKey := newControlChannelTestApp(t, CapabilityHostManage, CapabilityCoreRead)
+	readerPublicKey, readerPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = app.store.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:  "device_reader_broadcast_secret",
+		ControllerPublicKey: base64.StdEncoding.EncodeToString(readerPublicKey),
+		Capabilities:        []string{CapabilityCoreRead},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := app.store.queryEvents("", "", 0)
+	afterSeq := int64(0)
+	if len(events) > 0 {
+		afterSeq = events[len(events)-1].Seq
+	}
+	server := startControlChannelTestServer(t, app)
+	adminClient, adminCipher, _ := dialControlChannel(t, server.URL, app, adminPublicKey, adminPrivateKey)
+	defer adminClient.Close()
+	readerClient, readerCipher, _ := dialControlChannelAs(t, server.URL, app, "device_reader_broadcast_secret", readerPublicKey, readerPrivateKey)
+	defer readerClient.Close()
+
+	writeEncryptedControlFrame(t, adminClient, adminCipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "trust_revoke_event_subscription",
+			Capability: CapabilityCoreRead,
+			Action:     ControlActionEventsSubscribe,
+			Params: map[string]any{
+				"after_seq": afterSeq,
+			},
+		},
+	})
+	adminPlain := readEncryptedControlFrame(t, adminClient, adminCipher)
+	if adminPlain.Type != "response" || adminPlain.Response == nil || !adminPlain.Response.OK {
+		t.Fatalf("subscribe response = %#v, want ok", adminPlain)
+	}
+	streamID := stringValue(mapValue(adminPlain.Response.Result)["stream_id"])
+	if streamID == "" {
+		t.Fatalf("subscribe result = %#v, want stream id", adminPlain.Response.Result)
+	}
+
+	readySecret := "trust-revoke-subscription-ready-secret"
+	app.emit(AstralEvent{Kind: "control.status", Normalized: map[string]any{"message": readySecret}})
+	adminPlain, sealedEvent := readEncryptedControlFrameWithBody(t, adminClient, adminCipher)
+	if strings.Contains(string(sealedEvent), readySecret) {
+		t.Fatalf("sealed subscription ready event leaked payload: %s", string(sealedEvent))
+	}
+	if adminPlain.Type != eventStreamFrameEvent || adminPlain.Event == nil || adminPlain.Event.StreamID != streamID || adminPlain.Event.Event.Kind != "control.status" {
+		t.Fatalf("ready event frame = %#v, want encrypted control.status event", adminPlain)
+	}
+
+	sealedRevoke := writeEncryptedControlFrame(t, adminClient, adminCipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "host_trust_revoke_broadcast_reader",
+			Capability: CapabilityHostManage,
+			Action:     ControlActionHostTrustRevoke,
+			Params: map[string]any{
+				"controller_device_id": "device_reader_broadcast_secret",
+			},
+		},
+	})
+	if strings.Contains(string(sealedRevoke), ControlActionHostTrustRevoke) || strings.Contains(string(sealedRevoke), "device_reader_broadcast_secret") {
+		t.Fatalf("sealed trust revoke request leaked payload: %s", string(sealedRevoke))
+	}
+
+	gotResponse := false
+	gotAuditEvent := false
+	for attempts := 0; attempts < 4 && (!gotResponse || !gotAuditEvent); attempts++ {
+		frame, sealed := readEncryptedControlFrameWithBody(t, adminClient, adminCipher)
+		if strings.Contains(string(sealed), "device_reader_broadcast_secret") || strings.Contains(string(sealed), "control.trust.revoked") {
+			t.Fatalf("sealed trust revoke broadcast frame leaked payload: %s", string(sealed))
+		}
+		if frame.Type == "response" && frame.Response != nil && frame.Response.RequestID == "host_trust_revoke_broadcast_reader" {
+			if !frame.Response.OK {
+				t.Fatalf("revoke response = %#v, want ok", frame.Response)
+			}
+			gotResponse = true
+			continue
+		}
+		if frame.Type == eventStreamFrameEvent && frame.Event != nil && frame.Event.StreamID == streamID && frame.Event.Event.Kind == "control.trust.revoked" {
+			normalized := mapValue(frame.Event.Event.Normalized)
+			if stringValue(normalized["controller_device_id"]) != "device_reader_broadcast_secret" {
+				t.Fatalf("trust revoke event = %#v, want reader device id", frame.Event.Event)
+			}
+			gotAuditEvent = true
+			continue
+		}
+		t.Fatalf("unexpected frame while waiting for trust revoke response/event = %#v", frame)
+	}
+	if !gotResponse || !gotAuditEvent {
+		t.Fatalf("got response=%v audit event=%v, want both", gotResponse, gotAuditEvent)
+	}
+
+	readerPlain, sealedClose := readEncryptedControlFrameWithBody(t, readerClient, readerCipher)
+	if strings.Contains(string(sealedClose), "trust_revoked") || strings.Contains(string(sealedClose), "device_reader_broadcast_secret") {
+		t.Fatalf("sealed reader close leaked payload: %s", string(sealedClose))
+	}
+	if readerPlain.Type != "close" || readerPlain.Code != "trust_revoked" {
+		t.Fatalf("reader close frame = %#v, want trust_revoked", readerPlain)
+	}
+}
+
 func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 
