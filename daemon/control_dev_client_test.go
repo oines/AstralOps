@@ -105,6 +105,8 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if err := os.WriteFile(attachmentPath, attachmentBody, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	mediaBody := []byte("media-stream-smoke-secret-0123456789")
+	media := addControlMediaFixture(t, hostApp, workspace, session, mediaBody)
 	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
 	defer hostServer.Close()
 
@@ -112,7 +114,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	capabilities := []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceExec, CapabilityAttachmentIngest}
+	capabilities := []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceExec, CapabilityAttachmentIngest, CapabilityMediaStream}
 	runTerminal := terminalAvailableOnHost()
 	if runTerminal {
 		t.Setenv("SHELL", terminalManagerTestShell(t))
@@ -131,6 +133,9 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 		StreamChunkSize:     5,
 		AttachmentPath:      attachmentPath,
 		AttachmentChunkSize: 7,
+		MediaEventSeq:       media.eventSeq,
+		MediaID:             media.mediaID,
+		MediaChunkSize:      8,
 		ExecCommand:         "echo smoke",
 		Terminal:            runTerminal,
 	})
@@ -140,7 +145,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if result.Target != hostServer.URL || result.HostDeviceID != hostApp.store.deviceIdentity.DeviceID {
 		t.Fatalf("smoke result target = %#v", result)
 	}
-	wantSteps := []string{"workspaces", "workspace_files_read", "attachment_ingest", "workspace_files_stream", "workspace_exec"}
+	wantSteps := []string{"workspaces", "workspace_files_read", "attachment_ingest", "workspace_files_stream", "media_stream", "workspace_exec"}
 	if runTerminal {
 		wantSteps = append(wantSteps, "terminal_open", "terminal_close")
 	}
@@ -177,12 +182,19 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if string(storedBody) != string(attachmentBody) {
 		t.Fatalf("stored attachment body = %q, want %q", string(storedBody), string(attachmentBody))
 	}
+	mediaStep, _ := smokeStepByName(result, "media_stream")
+	if stringValue(mediaStep.Summary["media_id"]) != media.mediaID || int64(numberValue(mediaStep.Summary["event_seq"])) != media.eventSeq || int64(numberValue(mediaStep.Summary["bytes"])) != int64(len(mediaBody)) || int(numberValue(mediaStep.Summary["chunks"])) < 2 {
+		t.Fatalf("media_stream summary = %#v, want streamed media bytes and multiple chunks", mediaStep.Summary)
+	}
+	if stringValue(mediaStep.Summary["resume_token"]) == "" {
+		t.Fatalf("media_stream summary = %#v, want resume token", mediaStep.Summary)
+	}
 	wire, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(wire), string(streamBody)) || strings.Contains(string(wire), string(attachmentBody)) {
-		t.Fatalf("smoke result leaked streamed or attached file content: %s", string(wire))
+	if strings.Contains(string(wire), string(streamBody)) || strings.Contains(string(wire), string(attachmentBody)) || strings.Contains(string(wire), string(mediaBody)) || strings.Contains(string(wire), media.path) {
+		t.Fatalf("smoke result leaked streamed file content, attached file content, media content, or Host path: %s", string(wire))
 	}
 	if runTerminal && countKind(hostApp.store.queryEvents(workspace.ID, "", 0), "control.terminal.closed") != 1 {
 		t.Fatalf("host events = %#v, want terminal close event", eventKinds(hostApp.store.queryEvents(workspace.ID, "", 0)))
@@ -209,6 +221,18 @@ func TestControlClientSmokeRequiresWorkspaceForOptionalChecks(t *testing.T) {
 	_, err = runControlClientSmoke(st, controlClientSmokeOptions{AttachmentPath: "upload.txt"})
 	if err == nil || !strings.Contains(err.Error(), "--session-id") {
 		t.Fatalf("err = %v, want session requirement for attachment path", err)
+	}
+	_, err = runControlClientSmoke(st, controlClientSmokeOptions{MediaEventSeq: 1, MediaID: "att_1"})
+	if err == nil || !strings.Contains(err.Error(), "--session-id") {
+		t.Fatalf("err = %v, want session requirement for media stream", err)
+	}
+	_, err = runControlClientSmoke(st, controlClientSmokeOptions{SessionID: "sess_1", MediaEventSeq: 1})
+	if err == nil || !strings.Contains(err.Error(), "--media-event-seq and --media-id") {
+		t.Fatalf("err = %v, want media reference requirement", err)
+	}
+	_, err = runControlClientSmoke(st, controlClientSmokeOptions{SessionID: "sess_1", MediaID: "att_1"})
+	if err == nil || !strings.Contains(err.Error(), "--media-event-seq and --media-id") {
+		t.Fatalf("err = %v, want media reference requirement", err)
 	}
 }
 

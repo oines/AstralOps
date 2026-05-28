@@ -153,12 +153,15 @@ func runControlDevClientCommand(args []string) error {
 		discoveryTimeout := fs.Duration("discovery-timeout", 3*time.Second, "LAN discovery timeout")
 		lanTimeout := fs.Duration("lan-timeout", 2*time.Second, "LAN host validation and handshake timeout")
 		workspaceID := fs.String("workspace-id", "", "workspace id for workspace/terminal checks")
-		sessionID := fs.String("session-id", "", "session id for attachment checks")
+		sessionID := fs.String("session-id", "", "session id for attachment/media checks")
 		path := fs.String("path", ".", "workspace path to read when --workspace-id is set")
 		streamPath := fs.String("stream-path", "", "optional workspace path to read via workspace.files.stream")
 		streamChunkSize := fs.Int("stream-chunk-size", 64*1024, "workspace.files.stream chunk size")
 		attachmentPath := fs.String("attachment-path", "", "optional local Controller file to upload with chunked attachment.ingest")
 		attachmentChunkSize := fs.Int("attachment-chunk-size", 64*1024, "attachment ingest chunk size")
+		mediaEventSeq := fs.Int64("media-event-seq", 0, "optional transcript event seq for media.stream")
+		mediaID := fs.String("media-id", "", "optional transcript media id for media.stream")
+		mediaChunkSize := fs.Int("media-chunk-size", 64*1024, "media.stream chunk size")
 		execCommand := fs.String("exec-command", "", "optional workspace.exec command to run")
 		terminal := fs.Bool("terminal", false, "open and close a Host-owned terminal session")
 		if err := fs.Parse(args[1:]); err != nil {
@@ -180,6 +183,9 @@ func runControlDevClientCommand(args []string) error {
 			StreamChunkSize:     *streamChunkSize,
 			AttachmentPath:      *attachmentPath,
 			AttachmentChunkSize: *attachmentChunkSize,
+			MediaEventSeq:       *mediaEventSeq,
+			MediaID:             *mediaID,
+			MediaChunkSize:      *mediaChunkSize,
 			ExecCommand:         *execCommand,
 			Terminal:            *terminal,
 		})
@@ -216,6 +222,9 @@ type controlClientSmokeOptions struct {
 	StreamChunkSize     int
 	AttachmentPath      string
 	AttachmentChunkSize int
+	MediaEventSeq       int64
+	MediaID             string
+	MediaChunkSize      int
 	ExecCommand         string
 	Terminal            bool
 }
@@ -292,6 +301,14 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 	if opts.SessionID == "" && strings.TrimSpace(opts.AttachmentPath) != "" {
 		return controlClientSmokeResult{}, fmt.Errorf("--session-id is required for --attachment-path")
 	}
+	opts.MediaID = strings.TrimSpace(opts.MediaID)
+	mediaRequested := opts.MediaEventSeq != 0 || opts.MediaID != ""
+	if mediaRequested && opts.SessionID == "" {
+		return controlClientSmokeResult{}, fmt.Errorf("--session-id is required for --media-event-seq and --media-id")
+	}
+	if mediaRequested && (opts.MediaEventSeq <= 0 || opts.MediaID == "") {
+		return controlClientSmokeResult{}, fmt.Errorf("--media-event-seq and --media-id are required together")
+	}
 	target, err := controlClientResolveTarget(st, opts.Target)
 	if err != nil {
 		return controlClientSmokeResult{}, err
@@ -332,6 +349,14 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 
 	if opts.WorkspaceID != "" && strings.TrimSpace(opts.StreamPath) != "" {
 		step, err := controlClientSmokeWorkspaceFileStream(st, target, opts.WorkspaceID, opts.StreamPath, opts.StreamChunkSize)
+		result.Steps = append(result.Steps, step)
+		if err != nil {
+			return result, err
+		}
+	}
+
+	if opts.SessionID != "" && opts.MediaEventSeq > 0 && opts.MediaID != "" {
+		step, err := controlClientSmokeMediaStream(st, target, opts.SessionID, opts.MediaEventSeq, opts.MediaID, opts.MediaChunkSize)
 		result.Steps = append(result.Steps, step)
 		if err != nil {
 			return result, err
@@ -465,6 +490,102 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 			return step, err
 		default:
 			err := fmt.Errorf("unexpected workspace file stream frame type %q", frame.Type)
+			step.OK = false
+			step.Error = &ControlError{Code: "unexpected_stream_frame", Message: err.Error()}
+			return step, err
+		}
+	}
+}
+
+func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessionID string, eventSeq int64, mediaID string, chunkSize int) (controlClientSmokeStep, error) {
+	name := "media_stream"
+	params := map[string]any{
+		"session_id": sessionID,
+		"event_seq":  eventSeq,
+		"media_id":   mediaID,
+	}
+	if chunkSize > 0 {
+		params["chunk_size"] = chunkSize
+	}
+	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	if err != nil {
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "connect_failed", Message: err.Error()}}
+		return step, err
+	}
+	defer socket.Close()
+
+	req := ControlRequest{
+		RequestID:  "smoke_" + name,
+		Capability: CapabilityMediaStream,
+		Action:     ControlActionMediaStream,
+		Params:     params,
+	}
+	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req}); err != nil {
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
+		return step, err
+	}
+	plain, err := controlClientReadWithTimeout(socket, cipher, target.Timeout)
+	if err != nil {
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "read_failed", Message: err.Error()}}
+		return step, err
+	}
+	if plain.Response == nil {
+		err := fmt.Errorf("remote did not return a response frame")
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "invalid_response", Message: err.Error()}}
+		return step, err
+	}
+	step := controlClientSmokeStepFromResponse(name, CapabilityMediaStream, ControlActionMediaStream, *plain.Response, controlClientMediaStreamSmokeSummary(*plain.Response))
+	if err := controlClientSmokeResponseError(name, *plain.Response); err != nil {
+		return step, err
+	}
+	streamID := stringValue(mapValue(plain.Response.Result)["stream_id"])
+	if streamID == "" {
+		err := fmt.Errorf("smoke step %s failed: stream_id missing", name)
+		step.OK = false
+		step.Error = &ControlError{Code: "stream_id_missing", Message: err.Error()}
+		return step, err
+	}
+
+	var bytesRead int64
+	chunks := 0
+	for {
+		frame, err := controlClientReadWithTimeout(socket, cipher, target.Timeout)
+		if err != nil {
+			step.OK = false
+			step.Error = &ControlError{Code: "stream_read_failed", Message: err.Error()}
+			return step, err
+		}
+		if frame.Media == nil || frame.Media.StreamID != streamID {
+			err := fmt.Errorf("unexpected media stream frame")
+			step.OK = false
+			step.Error = &ControlError{Code: "unexpected_stream_frame", Message: err.Error()}
+			return step, err
+		}
+		switch frame.Type {
+		case mediaStreamFrameChunk:
+			body, err := base64.StdEncoding.DecodeString(frame.Media.DataBase64)
+			if err != nil {
+				step.OK = false
+				step.Error = &ControlError{Code: "stream_chunk_invalid", Message: err.Error()}
+				return step, err
+			}
+			chunks++
+			bytesRead += int64(len(body))
+		case mediaStreamFrameComplete:
+			if step.Summary == nil {
+				step.Summary = map[string]any{}
+			}
+			step.Summary["chunks"] = chunks
+			step.Summary["bytes"] = bytesRead
+			step.Summary["final_offset"] = frame.Media.Offset
+			return step, nil
+		case mediaStreamFrameError:
+			err := fmt.Errorf("media stream failed: %s", frame.Media.ErrorMessage)
+			step.OK = false
+			step.Error = &ControlError{Code: firstString(frame.Media.ErrorCode, "stream_error"), Message: err.Error()}
+			return step, err
+		default:
+			err := fmt.Errorf("unexpected media stream frame type %q", frame.Type)
 			step.OK = false
 			step.Error = &ControlError{Code: "unexpected_stream_frame", Message: err.Error()}
 			return step, err
@@ -683,6 +804,23 @@ func controlClientWorkspaceFileStreamSmokeSummary(response ControlResponse) map[
 		"size":         int64(numberValue(result["size"])),
 		"offset":       int64(numberValue(result["offset"])),
 		"chunk_size":   int(numberValue(result["chunk_size"])),
+	}
+}
+
+func controlClientMediaStreamSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	return map[string]any{
+		"session_id":   stringValue(result["session_id"]),
+		"event_seq":    int64(numberValue(result["event_seq"])),
+		"media_id":     stringValue(result["media_id"]),
+		"kind":         stringValue(result["kind"]),
+		"name":         stringValue(result["name"]),
+		"mime_type":    stringValue(result["mime_type"]),
+		"size":         int64(numberValue(result["size"])),
+		"offset":       int64(numberValue(result["offset"])),
+		"chunk_size":   int(numberValue(result["chunk_size"])),
+		"stream_id":    stringValue(result["stream_id"]),
+		"resume_token": stringValue(result["resume_token"]),
 	}
 }
 
