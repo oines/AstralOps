@@ -15,6 +15,7 @@ import (
 )
 
 const (
+	controlMediaReadMaxBytes = 25 * 1024 * 1024
 	mediaStreamFrameChunk    = "media.chunk"
 	mediaStreamFrameComplete = "media.completed"
 	mediaStreamFrameError    = "media.error"
@@ -257,9 +258,9 @@ func (a *app) readControlMedia(params mediaReadParams, download bool) (mediaRead
 	if err != nil {
 		return mediaReadResult{}, err
 	}
-	body, err := os.ReadFile(media.Path)
+	body, err := readControlMediaBytes(media)
 	if err != nil {
-		return mediaReadResult{}, newActionError(http.StatusNotFound, "media_file_not_found", "media file not found")
+		return mediaReadResult{}, err
 	}
 	return mediaReadResult{
 		SessionID:     media.SessionID,
@@ -272,6 +273,32 @@ func (a *app) readControlMedia(params mediaReadParams, download bool) (mediaRead
 		ContentBase64: base64.StdEncoding.EncodeToString(body),
 		Download:      download,
 	}, nil
+}
+
+func readControlMediaBytes(media resolvedSessionMedia) ([]byte, error) {
+	if media.Size > controlMediaReadMaxBytes {
+		return nil, newActionError(http.StatusRequestEntityTooLarge, "media_too_large", "media is too large for media.read; use media.stream")
+	}
+	file, err := os.Open(media.Path)
+	if err != nil {
+		return nil, newActionError(http.StatusNotFound, "media_file_not_found", "media file not found")
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.IsDir() {
+		return nil, newActionError(http.StatusNotFound, "media_file_not_found", "media file not found")
+	}
+	if info.Size() > controlMediaReadMaxBytes {
+		return nil, newActionError(http.StatusRequestEntityTooLarge, "media_too_large", "media is too large for media.read; use media.stream")
+	}
+	body, err := io.ReadAll(io.LimitReader(file, controlMediaReadMaxBytes+1))
+	if err != nil {
+		return nil, newActionError(http.StatusBadRequest, "media_read_failed", err.Error())
+	}
+	if int64(len(body)) > controlMediaReadMaxBytes {
+		return nil, newActionError(http.StatusRequestEntityTooLarge, "media_too_large", "media is too large for media.read; use media.stream")
+	}
+	return body, nil
 }
 
 func mediaStreamChunkSize(requested int) int {

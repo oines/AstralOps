@@ -100,6 +100,50 @@ func TestControlGatewayMediaDownloadMarksDownloadResponse(t *testing.T) {
 	}
 }
 
+func TestControlGatewayMediaReadRequiresStreamForLargeMedia(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	media := addControlMediaFixture(t, app, workspace, session, []byte("large"))
+	if err := os.Truncate(media.path, controlMediaReadMaxBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityMediaRead, CapabilityMediaDownload, CapabilityMediaStream)
+
+	params := map[string]any{
+		"session_id": session.ID,
+		"event_seq":  media.eventSeq,
+		"media_id":   media.mediaID,
+	}
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityMediaRead,
+		Action:             ControlActionMediaRead,
+		Params:             params,
+	})
+	assertActionError(t, err, http.StatusRequestEntityTooLarge, "media_too_large")
+
+	_, err = app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityMediaDownload,
+		Action:             ControlActionMediaDownload,
+		Params:             params,
+	})
+	assertActionError(t, err, http.StatusRequestEntityTooLarge, "media_too_large")
+
+	stream, err := app.executeControlRequestWithConnection(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityMediaStream,
+		Action:             ControlActionMediaStream,
+		Params:             params,
+	}, &controlWSConn{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := stream.Result.(mediaStreamResult)
+	if !ok || result.Size != controlMediaReadMaxBytes+1 {
+		t.Fatalf("stream result = %#v, want large media stream metadata", stream.Result)
+	}
+}
+
 func TestControlGatewayMediaReferenceRequiresMatchingSessionEventAndMediaID(t *testing.T) {
 	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	otherSession := app.store.createSession(workspace, AgentCodex)

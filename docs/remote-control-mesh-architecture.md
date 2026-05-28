@@ -1127,6 +1127,7 @@ media.stream offset resume
 media.stream resume_token reconnect resume
 media.stream.cancel
 event_seq + media_id reference validation
+media.read / media.download bounded to medium payloads; large media must use media.stream
 E2EE response frames
 Host path never exposed in control response
 ```
