@@ -1607,6 +1607,86 @@ func TestControlWebSocketRemoteWorkspaceFileWriteUsesProxyOverEncryptedChannel(t
 	}
 }
 
+func TestControlWebSocketRemoteWorkspaceExecUsesProxyOverEncryptedChannel(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentCodex,
+		SSH:    &SSHConfig{Endpoint: "root@example.test", RemoteCWD: "/remote/project"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteStore := t.TempDir()
+	proxy, cleanup := newMutableClaudeRemoteProxy(t, workspace, remoteStore)
+	defer cleanup()
+	controllerPublicKey, controllerPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:  "dev_controller",
+		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
+		Capabilities:        []string{CapabilityWorkspaceExec},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{
+		store:    st,
+		hub:      newEventHub(),
+		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
+	}
+	app.ssh = &sshManager{
+		app: app,
+		by: map[string]*sshTarget{
+			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
+		},
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	command := "pwd"
+	stdout := "/remote/project\n"
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "remote_workspace_exec",
+			Capability: CapabilityWorkspaceExec,
+			Action:     ControlActionWorkspaceExec,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"command":      command,
+				"timeout_ms":   5000,
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionWorkspaceExec) || strings.Contains(string(sealedRequest), workspace.ID) || strings.Contains(string(sealedRequest), command) || strings.Contains(string(sealedRequest), "/remote/project") {
+		t.Fatalf("sealed remote workspace exec request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), command) || strings.Contains(string(sealedResponse), stdout) || strings.Contains(string(sealedResponse), "/remote/project") {
+		t.Fatalf("sealed remote workspace exec response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("remote exec response = %#v, want ok", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["workspace_id"]) != workspace.ID || stringValue(result["target"]) != "ssh" || stringValue(result["command"]) != command || stringValue(result["cwd"]) != "" {
+		t.Fatalf("remote exec result metadata = %#v", result)
+	}
+	if stringValue(result["approval_policy"]) != WorkspaceExecPolicyTrusted || int(numberValue(result["exit_code"])) != 0 || stringValue(result["stdout"]) != stdout || stringValue(result["output"]) != stdout {
+		t.Fatalf("remote exec result = %#v", result)
+	}
+}
+
 func TestControlWebSocketRejectsControllerDeviceMismatch(t *testing.T) {
 	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
 	server := startControlChannelTestServer(t, app)
