@@ -409,7 +409,50 @@ export type ControlAction =
   | "core.control.interrupt"
   | "interaction.respond"
   | "session.edit"
+  | "terminal.open"
+  | "terminal.input"
+  | "terminal.resize"
+  | "terminal.close"
   | (string & {});
+
+export type TerminalOpenParams = {
+  workspace_id: string;
+  cwd?: string;
+  cols?: number;
+  rows?: number;
+};
+
+export type TerminalInputParams = {
+  terminal_id: string;
+  data?: string;
+};
+
+export type TerminalResizeParams = {
+  terminal_id: string;
+  cols: number;
+  rows: number;
+};
+
+export type TerminalCloseParams = {
+  terminal_id: string;
+};
+
+export type TerminalOpenResult = {
+  terminal_id: string;
+  workspace_id: string;
+  target: WorkspaceTarget;
+  shell?: string;
+  cwd?: string;
+  status: "open" | "closed";
+  writer_device_id?: string;
+  output_seq: number;
+};
+
+export type TerminalAckResult = {
+  terminal_id: string;
+  status: "open" | "closed";
+  output_seq: number;
+};
 
 export type ControlRequest = {
   request_id?: string;

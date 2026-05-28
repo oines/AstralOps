@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -31,6 +32,10 @@ const (
 	ControlActionInterrupt          = "core.control.interrupt"
 	ControlActionInteractionRespond = "interaction.respond"
 	ControlActionSessionEdit        = "session.edit"
+	ControlActionTerminalOpen       = "terminal.open"
+	ControlActionTerminalInput      = "terminal.input"
+	ControlActionTerminalResize     = "terminal.resize"
+	ControlActionTerminalClose      = "terminal.close"
 )
 
 type ControlRequest struct {
@@ -87,6 +92,10 @@ func controlActionCapability(action string) string {
 		return CapabilityInteractionRespond
 	case ControlActionSessionEdit:
 		return CapabilitySessionEdit
+	case ControlActionTerminalOpen:
+		return CapabilityTerminalOpen
+	case ControlActionTerminalInput, ControlActionTerminalResize, ControlActionTerminalClose:
+		return CapabilityTerminalInput
 	default:
 		return ""
 	}
@@ -170,6 +179,30 @@ func (a *app) dispatchControlAction(req ControlRequest) (any, error) {
 			ReasoningEffort: params.ReasoningEffort,
 			PermissionMode:  params.PermissionMode,
 		})
+	case ControlActionTerminalOpen:
+		var params terminalOpenParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.terminalManager().open(context.Background(), req.ControllerDeviceID, params)
+	case ControlActionTerminalInput:
+		var params terminalInputParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.terminalManager().input(context.Background(), req.ControllerDeviceID, params)
+	case ControlActionTerminalResize:
+		var params terminalResizeParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.terminalManager().resize(context.Background(), req.ControllerDeviceID, params)
+	case ControlActionTerminalClose:
+		var params terminalCloseParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.terminalManager().close(context.Background(), req.ControllerDeviceID, params)
 	default:
 		return nil, newActionError(http.StatusNotFound, "control_action_unknown", "control action not found")
 	}

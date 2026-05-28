@@ -787,7 +787,7 @@ Controller
 
 PTY 输出不能作为普通 event JSONL 存储。JSONL 最多记录生命周期事件，例如 opened、closed、failed、attached。高频 ANSI 输出留在 stream channel。
 
-未来 PTY manager 形态：
+PTY manager 目标形态：
 
 ```text
 terminal.open -> terminal_id
@@ -797,6 +797,19 @@ terminal.resize
 terminal.output stream
 terminal.close
 ```
+
+当前 daemon 已落地最小 Host-owned PTY 控制面：
+
+```text
+terminal.open
+terminal.input
+terminal.resize
+terminal.close
+single active writer
+opened/closed lifecycle events only
+```
+
+这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。PTY 输出 stream、attach/detach、多 viewer 和 retention timeout 是下一步。
 
 断线行为：
 
@@ -1035,14 +1048,19 @@ Local Desktop 可以继续用本地 HTTP URL 渲染媒体，但 RemoteCoreClient
 把当前“一条 WebSocket 对应一个 PTY”的语义升级成 Host-owned terminal session：
 
 ```text
-open
-attach
-detach
-input
-resize
-close
-retention timeout
+已落地:
+terminal.open
+terminal.input
+terminal.resize
+terminal.close
 single active writer
+lifecycle event only, no ANSI output JSONL storage
+
+待落地:
+terminal.attach
+terminal.detach
+terminal.output stream
+retention timeout
 multi viewer
 ```
 

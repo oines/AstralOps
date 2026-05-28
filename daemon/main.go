@@ -35,6 +35,8 @@ type app struct {
 	projections       *sessionProjectionCache
 	controlMu         sync.Mutex
 	controlSessions   map[string]*controlWSConn
+	terminalMu        sync.Mutex
+	terminals         *terminalManager
 	queueMu           sync.Mutex
 	queues            map[string][]queuedTurn
 	codexExecMu       sync.Mutex
