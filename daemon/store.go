@@ -20,6 +20,7 @@ type store struct {
 	deviceIdentity   DeviceIdentity
 	devicePrivateKey []byte
 	trustGrants      map[string]TrustGrant
+	knownHosts       map[string]KnownHost
 	workspaces       map[string]Workspace
 	sessions         map[string]Session
 	events           []AstralEvent
@@ -35,11 +36,16 @@ func loadStore(dataDir string) (*store, error) {
 	if err != nil {
 		return nil, err
 	}
+	knownHosts, err := loadKnownHosts(dataDir)
+	if err != nil {
+		return nil, err
+	}
 	st := &store{
 		dataDir:          dataDir,
 		deviceIdentity:   identity,
 		devicePrivateKey: privateKey,
 		trustGrants:      trustGrants,
+		knownHosts:       knownHosts,
 		workspaces:       map[string]Workspace{},
 		sessions:         map[string]Session{},
 	}

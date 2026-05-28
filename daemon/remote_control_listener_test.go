@@ -70,7 +70,7 @@ func TestRemoteControlDevPairingAndClientWorkspaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	grant, err := controlClientPair(hostServer.URL, controllerStore.deviceIdentity, []string{CapabilityCoreRead})
+	grant, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead})
 	if err != nil {
 		t.Fatal(err)
 	}

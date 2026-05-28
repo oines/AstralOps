@@ -31,7 +31,7 @@ func runControlDevClient(args []string) bool {
 
 func runControlDevClientCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: control-client <identity|discover|pair|workspaces|request>")
+		return fmt.Errorf("usage: control-client <identity|known-hosts|discover|pair|workspaces|request>")
 	}
 	st, err := loadStore(defaultDataDir())
 	if err != nil {
@@ -40,6 +40,8 @@ func runControlDevClientCommand(args []string) error {
 	switch args[0] {
 	case "identity":
 		return writePrettyJSON(os.Stdout, st.hostInfo().Identity)
+	case "known-hosts":
+		return writePrettyJSON(os.Stdout, st.listKnownHosts())
 	case "discover":
 		fs := flag.NewFlagSet("control-client discover", flag.ContinueOnError)
 		timeout := fs.Duration("timeout", 3*time.Second, "LAN discovery timeout")
@@ -62,7 +64,7 @@ func runControlDevClientCommand(args []string) error {
 		if *host == "" {
 			return fmt.Errorf("--host is required")
 		}
-		grant, err := controlClientPair(*host, st.deviceIdentity, parseCapabilityList(*capabilityList))
+		grant, err := controlClientPair(*host, st, parseCapabilityList(*capabilityList))
 		if err != nil {
 			return err
 		}
@@ -70,13 +72,26 @@ func runControlDevClientCommand(args []string) error {
 	case "workspaces":
 		fs := flag.NewFlagSet("control-client workspaces", flag.ContinueOnError)
 		host := fs.String("host", "", "remote Host base URL")
+		discover := fs.Bool("discover", false, "discover a known Host on LAN before connecting")
+		hostDeviceID := fs.String("host-device-id", "", "known Host device id for LAN discovery")
+		discoveryPort := fs.Int("discovery-port", defaultRemoteControlDiscoveryPort, "LAN discovery UDP port")
+		discoveryTimeout := fs.Duration("discovery-timeout", 3*time.Second, "LAN discovery timeout")
+		lanTimeout := fs.Duration("lan-timeout", 2*time.Second, "LAN host validation and handshake timeout")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *host == "" {
-			return fmt.Errorf("--host is required")
+		target, err := controlClientResolveTarget(st, controlClientTargetOptions{
+			Host:             *host,
+			Discover:         *discover,
+			HostDeviceID:     *hostDeviceID,
+			DiscoveryPort:    *discoveryPort,
+			DiscoveryTimeout: *discoveryTimeout,
+			LANTimeout:       *lanTimeout,
+		})
+		if err != nil {
+			return err
 		}
-		response, err := controlClientRequest(*host, st, ControlRequest{
+		response, err := controlClientRequestToTarget(target, st, ControlRequest{
 			RequestID:  "dev_workspaces",
 			Capability: CapabilityCoreRead,
 			Action:     ControlActionWorkspaces,
@@ -88,6 +103,11 @@ func runControlDevClientCommand(args []string) error {
 	case "request":
 		fs := flag.NewFlagSet("control-client request", flag.ContinueOnError)
 		host := fs.String("host", "", "remote Host base URL")
+		discover := fs.Bool("discover", false, "discover a known Host on LAN before connecting")
+		hostDeviceID := fs.String("host-device-id", "", "known Host device id for LAN discovery")
+		discoveryPort := fs.Int("discovery-port", defaultRemoteControlDiscoveryPort, "LAN discovery UDP port")
+		discoveryTimeout := fs.Duration("discovery-timeout", 3*time.Second, "LAN discovery timeout")
+		lanTimeout := fs.Duration("lan-timeout", 2*time.Second, "LAN host validation and handshake timeout")
 		action := fs.String("action", "", "control action")
 		capability := fs.String("capability", "", "control capability")
 		params := fs.String("params", "{}", "JSON params object")
@@ -95,14 +115,25 @@ func runControlDevClientCommand(args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *host == "" || *action == "" || *capability == "" {
-			return fmt.Errorf("--host, --action, and --capability are required")
+		if *action == "" || *capability == "" {
+			return fmt.Errorf("--action and --capability are required")
 		}
 		var decodedParams map[string]any
 		if err := json.Unmarshal([]byte(*params), &decodedParams); err != nil {
 			return err
 		}
-		response, err := controlClientRequest(*host, st, ControlRequest{
+		target, err := controlClientResolveTarget(st, controlClientTargetOptions{
+			Host:             *host,
+			Discover:         *discover,
+			HostDeviceID:     *hostDeviceID,
+			DiscoveryPort:    *discoveryPort,
+			DiscoveryTimeout: *discoveryTimeout,
+			LANTimeout:       *lanTimeout,
+		})
+		if err != nil {
+			return err
+		}
+		response, err := controlClientRequestToTarget(target, st, ControlRequest{
 			RequestID:  *requestID,
 			Capability: *capability,
 			Action:     *action,
@@ -117,7 +148,116 @@ func runControlDevClientCommand(args []string) error {
 	}
 }
 
-func controlClientPair(host string, identity DeviceIdentity, capabilities []string) (TrustGrant, error) {
+type controlClientTargetOptions struct {
+	Host             string
+	Discover         bool
+	HostDeviceID     string
+	DiscoveryPort    int
+	DiscoveryTimeout time.Duration
+	LANTimeout       time.Duration
+}
+
+type controlClientTarget struct {
+	BaseURL  string
+	HostInfo HostInfo
+	Timeout  time.Duration
+}
+
+func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (controlClientTarget, error) {
+	if opts.Host != "" && opts.Discover {
+		return controlClientTarget{}, fmt.Errorf("--host and --discover cannot be used together")
+	}
+	if opts.Host != "" {
+		hostInfo, err := controlClientHostInfo(opts.Host)
+		if err != nil {
+			return controlClientTarget{}, err
+		}
+		return controlClientTarget{BaseURL: opts.Host, HostInfo: hostInfo}, nil
+	}
+	if !opts.Discover {
+		return controlClientTarget{}, fmt.Errorf("--host is required unless --discover is set")
+	}
+	if opts.DiscoveryTimeout <= 0 {
+		opts.DiscoveryTimeout = 3 * time.Second
+	}
+	if opts.LANTimeout <= 0 {
+		opts.LANTimeout = 2 * time.Second
+	}
+	candidates, err := discoverRemoteControlHostsWithTimeout(opts.DiscoveryTimeout, opts.DiscoveryPort)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	candidate, knownHost, err := selectKnownLanCandidate(st, candidates, opts.HostDeviceID)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	client := &http.Client{Timeout: opts.LANTimeout}
+	hostInfo, err := controlClientHostInfoWithClient(candidate.BaseURL, client)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	if err := validateKnownLanHost(candidate, knownHost, hostInfo); err != nil {
+		return controlClientTarget{}, err
+	}
+	return controlClientTarget{BaseURL: candidate.BaseURL, HostInfo: hostInfo, Timeout: opts.LANTimeout}, nil
+}
+
+func selectKnownLanCandidate(st *store, candidates []LanHostCandidate, hostDeviceID string) (LanHostCandidate, KnownHost, error) {
+	hostDeviceID = strings.TrimSpace(hostDeviceID)
+	matches := []struct {
+		candidate LanHostCandidate
+		knownHost KnownHost
+	}{}
+	for _, candidate := range candidates {
+		if hostDeviceID != "" && candidate.DeviceID != hostDeviceID {
+			continue
+		}
+		knownHost, ok := st.knownHost(candidate.DeviceID)
+		if !ok {
+			continue
+		}
+		if knownHost.PublicKeyFingerprint != candidate.PublicKeyFingerprint {
+			continue
+		}
+		matches = append(matches, struct {
+			candidate LanHostCandidate
+			knownHost KnownHost
+		}{candidate: candidate, knownHost: knownHost})
+	}
+	if len(matches) == 0 {
+		if hostDeviceID == "" {
+			return LanHostCandidate{}, KnownHost{}, fmt.Errorf("no known LAN Host candidates found; pair the Host first or pass --host")
+		}
+		return LanHostCandidate{}, KnownHost{}, fmt.Errorf("known Host %q was not found on LAN", hostDeviceID)
+	}
+	if len(matches) > 1 {
+		return LanHostCandidate{}, KnownHost{}, fmt.Errorf("multiple known LAN Host candidates found; pass --host-device-id")
+	}
+	return matches[0].candidate, matches[0].knownHost, nil
+}
+
+func validateKnownLanHost(candidate LanHostCandidate, knownHost KnownHost, hostInfo HostInfo) error {
+	if hostInfo.Identity.DeviceID != candidate.DeviceID {
+		return fmt.Errorf("LAN candidate device_id mismatch: discovered %q but Host returned %q", candidate.DeviceID, hostInfo.Identity.DeviceID)
+	}
+	if hostInfo.Identity.DeviceID != knownHost.DeviceID {
+		return fmt.Errorf("known Host device_id mismatch: known %q but Host returned %q", knownHost.DeviceID, hostInfo.Identity.DeviceID)
+	}
+	if hostInfo.Identity.PublicKey != knownHost.PublicKey {
+		return fmt.Errorf("known Host public key mismatch for %s", knownHost.DeviceID)
+	}
+	if hostInfo.Identity.PublicKeyFingerprint != knownHost.PublicKeyFingerprint || candidate.PublicKeyFingerprint != knownHost.PublicKeyFingerprint {
+		return fmt.Errorf("known Host public key fingerprint mismatch for %s", knownHost.DeviceID)
+	}
+	return nil
+}
+
+func controlClientPair(host string, st *store, capabilities []string) (TrustGrant, error) {
+	hostInfo, err := controlClientHostInfo(host)
+	if err != nil {
+		return TrustGrant{}, err
+	}
+	identity := st.deviceIdentity
 	req := trustDeviceRequest{
 		ControllerDeviceID:             identity.DeviceID,
 		ControllerDeviceName:           identity.DeviceName,
@@ -142,6 +282,9 @@ func controlClientPair(host string, identity DeviceIdentity, capabilities []stri
 	if err := json.Unmarshal(responseBody, &grant); err != nil {
 		return TrustGrant{}, err
 	}
+	if _, err := st.rememberKnownHost(hostInfo, host); err != nil {
+		return TrustGrant{}, err
+	}
 	return grant, nil
 }
 
@@ -150,7 +293,11 @@ func controlClientRequest(host string, st *store, req ControlRequest) (ControlRe
 	if err != nil {
 		return ControlResponse{}, err
 	}
-	socket, cipher, err := controlClientDial(host, st, hostInfo)
+	return controlClientRequestToTarget(controlClientTarget{BaseURL: host, HostInfo: hostInfo}, st, req)
+}
+
+func controlClientRequestToTarget(target controlClientTarget, st *store, req ControlRequest) (ControlResponse, error) {
+	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
 	if err != nil {
 		return ControlResponse{}, err
 	}
@@ -171,7 +318,11 @@ func controlClientRequest(host string, st *store, req ControlRequest) (ControlRe
 }
 
 func controlClientHostInfo(host string) (HostInfo, error) {
-	resp, err := http.Get(controlHTTPURL(host, "/v1/host"))
+	return controlClientHostInfoWithClient(host, http.DefaultClient)
+}
+
+func controlClientHostInfoWithClient(host string, client *http.Client) (HostInfo, error) {
+	resp, err := client.Get(controlHTTPURL(host, "/v1/host"))
 	if err != nil {
 		return HostInfo{}, err
 	}
@@ -191,7 +342,15 @@ func controlClientHostInfo(host string) (HostInfo, error) {
 }
 
 func controlClientDial(host string, st *store, hostInfo HostInfo) (*websocket.Conn, *controlCipher, error) {
-	socket, _, err := websocket.DefaultDialer.Dial(controlWSURL(host, "/v1/control/ws"), nil)
+	return controlClientDialWithTimeout(host, st, hostInfo, 0)
+}
+
+func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, timeout time.Duration) (*websocket.Conn, *controlCipher, error) {
+	dialer := *websocket.DefaultDialer
+	if timeout > 0 {
+		dialer.HandshakeTimeout = timeout
+	}
+	socket, _, err := dialer.Dial(controlWSURL(host, "/v1/control/ws"), nil)
 	if err != nil {
 		return nil, nil, err
 	}

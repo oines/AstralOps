@@ -214,6 +214,13 @@ go run ./daemon control-client discover --timeout 3s --port 43900
 
 discover 只返回 `LanHostCandidate`，例如 device id、public key fingerprint、LAN 地址和端口。它不能自动授信、不能自动 pair、不能绕过 Host Gateway。后续连接仍必须进入 `/v1/control/ws` 并完成 E2EE 握手。
 
+当前开发客户端在 `pair` 成功后，会把 Host public identity 记入本机 `known_hosts.json`。这只是 Controller 侧的 Host 身份缓存，用来校验后续 LAN discovery candidate；真正的执行授权仍然由 Host 本地 trust store 决定。
+
+```text
+go run ./daemon control-client known-hosts
+go run ./daemon control-client workspaces --discover --host-device-id <host_device_id>
+```
+
 UDP discovery 只用于发现候选地址，不能授予信任。Controller 收到 LAN response 后，必须用本地 trust store 或云端 device registry 校验 `device_id` 和 public key fingerprint。真正连接成功的条件仍然是：
 
 ```text
