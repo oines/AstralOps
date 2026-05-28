@@ -1841,7 +1841,7 @@ func TestValidateProxyHelloRequiresCoreExecutionMethods(t *testing.T) {
 	err = validateProxyHello(map[string]any{
 		"version": "0.1.0",
 		"capabilities": map[string]any{"methods": []string{
-			"hello", "read", "write", "remove", "move", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill",
+			"hello", "read", "read_range", "write", "remove", "move", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill",
 		}},
 	})
 	if err != nil {
@@ -5235,7 +5235,7 @@ if [[ "$args" == *"exec "*"astral-proxy-agent"* ]]; then
 import os
 for line in sys.stdin:
     req = json.loads(line)
-    methods = ["hello", "read", "write", "remove", "move", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill"]
+    methods = ["hello", "read", "read_range", "write", "remove", "move", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill"]
     if os.environ.get("ASTRALOPS_TEST_PROXY_OLD_UNTIL_UPLOAD") == "1" and not os.path.exists(os.environ["ASTRALOPS_TEST_PROXY_UPGRADE_MARKER"]):
         methods = ["hello", "read", "write", "list", "stat"]
     print(json.dumps({"id": req.get("id"), "result": {"shell": "/bin/sh", "user": "root", "hostname": "host", "capabilities": {"methods": methods}}}), flush=True)'
@@ -6084,12 +6084,18 @@ for line in sys.stdin:
     result = {}
     error = None
     if method == "hello":
-        result = {"version":"fake","capabilities":{"methods":["hello","read","dirs","write","remove","move","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
+        result = {"version":"fake","capabilities":{"methods":["hello","read","read_range","dirs","write","remove","move","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
     elif method == "stat":
         result = {"path": params.get("path"), "size": 12}
     elif method == "read":
         body = "remote read\n"
         result = {"path": params.get("path"), "content": body, "dataBase64": base64.b64encode(body.encode()).decode()}
+    elif method == "read_range":
+        body = "remote read\n".encode()
+        offset = int(params.get("offset") or 0)
+        length = int(params.get("length") or 65536)
+        chunk = body[offset:offset + length]
+        result = {"path": params.get("path"), "offset": offset, "bytes": len(chunk), "dataBase64": base64.b64encode(chunk).decode(), "eof": offset + len(chunk) >= len(body)}
     elif method == "glob":
         result = {"matches": ["/remote/project/src/main.go"], "backend": "fake"}
     elif method == "grep":
@@ -6196,10 +6202,16 @@ for line in sys.stdin:
     error = None
     try:
         if method == "hello":
-            result = {"version":"fake","capabilities":{"methods":["hello","read","dirs","write","mkdir","remove","move","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
+            result = {"version":"fake","capabilities":{"methods":["hello","read","read_range","dirs","write","mkdir","remove","move","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
         elif method == "read":
             body = read_file(params.get("path"))
             result = {"path": clean_remote(params.get("path")), "content": body.decode("utf-8", "replace"), "dataBase64": base64.b64encode(body).decode()}
+        elif method == "read_range":
+            body = read_file(params.get("path"))
+            offset = int(params.get("offset") or 0)
+            length = int(params.get("length") or 65536)
+            chunk = body[offset:offset + length]
+            result = {"path": clean_remote(params.get("path")), "offset": offset, "bytes": len(chunk), "dataBase64": base64.b64encode(chunk).decode(), "eof": offset + len(chunk) >= len(body)}
         elif method == "write":
             if params.get("dataBase64"):
                 body = base64.b64decode(params.get("dataBase64"))

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"mime"
 	"net/http"
 	"os"
@@ -16,10 +17,13 @@ import (
 )
 
 const (
-	workspaceFileDefaultMaxBytes = 10 * 1024 * 1024
-	workspaceFileHardMaxBytes    = 25 * 1024 * 1024
-	workspaceExecDefaultTimeout  = 60 * time.Second
-	workspaceExecMaxTimeout      = 120 * time.Second
+	workspaceFileDefaultMaxBytes     = 10 * 1024 * 1024
+	workspaceFileHardMaxBytes        = 25 * 1024 * 1024
+	workspaceExecDefaultTimeout      = 60 * time.Second
+	workspaceExecMaxTimeout          = 120 * time.Second
+	workspaceFileStreamFrameChunk    = "workspace_file.chunk"
+	workspaceFileStreamFrameComplete = "workspace_file.completed"
+	workspaceFileStreamFrameError    = "workspace_file.error"
 )
 
 type workspaceFilesReadParams struct {
@@ -62,6 +66,17 @@ type workspaceFilesMoveParams struct {
 	DestinationPath string `json:"destination_path"`
 	Overwrite       bool   `json:"overwrite,omitempty"`
 	CreateParents   *bool  `json:"create_parents,omitempty"`
+}
+
+type workspaceFilesStreamParams struct {
+	WorkspaceID string `json:"workspace_id"`
+	Path        string `json:"path"`
+	Offset      int64  `json:"offset,omitempty"`
+	ChunkSize   int    `json:"chunk_size,omitempty"`
+}
+
+type workspaceFileStreamCancelParams struct {
+	StreamID string `json:"stream_id"`
 }
 
 type workspaceExecParams struct {
@@ -126,6 +141,42 @@ type workspaceFilesMoveResult struct {
 	ToPath      string `json:"to_path"`
 	Kind        string `json:"kind"`
 	Size        int64  `json:"size,omitempty"`
+}
+
+type workspaceFileStreamResult struct {
+	StreamID    string `json:"stream_id"`
+	WorkspaceID string `json:"workspace_id"`
+	Target      string `json:"target"`
+	Path        string `json:"path"`
+	Kind        string `json:"kind"`
+	Name        string `json:"name,omitempty"`
+	MIMEType    string `json:"mime_type,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	Offset      int64  `json:"offset"`
+	ChunkSize   int    `json:"chunk_size"`
+}
+
+type workspaceFileStreamCancelResult struct {
+	StreamID  string `json:"stream_id"`
+	Cancelled bool   `json:"cancelled"`
+}
+
+type workspaceFileStreamFrame struct {
+	StreamID     string `json:"stream_id"`
+	RequestID    string `json:"request_id,omitempty"`
+	WorkspaceID  string `json:"workspace_id"`
+	Target       string `json:"target"`
+	Path         string `json:"path"`
+	Kind         string `json:"kind,omitempty"`
+	Name         string `json:"name,omitempty"`
+	MIMEType     string `json:"mime_type,omitempty"`
+	Size         int64  `json:"size,omitempty"`
+	Seq          int64  `json:"seq"`
+	Offset       int64  `json:"offset"`
+	DataBase64   string `json:"data_base64,omitempty"`
+	Final        bool   `json:"final,omitempty"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 type workspaceExecResult struct {
@@ -228,6 +279,23 @@ func (a *app) moveControlWorkspacePath(ctx context.Context, params workspaceFile
 		return a.moveRemoteControlWorkspacePath(ctx, ws, params)
 	}
 	return a.moveLocalControlWorkspacePath(ws, params)
+}
+
+func (a *app) prepareControlWorkspaceFileStream(ctx context.Context, params workspaceFilesStreamParams) (workspaceFileStreamResult, error) {
+	ws, err := a.controlWorkspace(params.WorkspaceID)
+	if err != nil {
+		return workspaceFileStreamResult{}, err
+	}
+	if strings.TrimSpace(params.Path) == "" {
+		return workspaceFileStreamResult{}, newActionError(http.StatusBadRequest, "workspace_file_path_required", "path required")
+	}
+	if params.Offset < 0 {
+		return workspaceFileStreamResult{}, newActionError(http.StatusBadRequest, "workspace_file_stream_offset_invalid", "workspace file stream offset is invalid")
+	}
+	if ws.Target == "ssh" {
+		return a.prepareRemoteControlWorkspaceFileStream(ctx, ws, params)
+	}
+	return a.prepareLocalControlWorkspaceFileStream(ws, params)
 }
 
 func (a *app) executeControlWorkspaceCommand(ctx context.Context, params workspaceExecParams) (workspaceExecResult, error) {
@@ -610,6 +678,179 @@ func (a *app) moveRemoteControlWorkspacePath(ctx context.Context, ws Workspace, 
 	return workspaceFilesMoveResult{WorkspaceID: ws.ID, Target: ws.Target, FromPath: fromRel, ToPath: toRel, Kind: kind, Size: int64(numberValue(stat["size"]))}, nil
 }
 
+func (a *app) prepareLocalControlWorkspaceFileStream(ws Workspace, params workspaceFilesStreamParams) (workspaceFileStreamResult, error) {
+	root := filepath.Clean(ws.LocalCWD)
+	target, rel, err := resolveWorkspacePath(root, params.Path)
+	if err != nil {
+		return workspaceFileStreamResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return workspaceFileStreamResult{}, newActionError(http.StatusNotFound, "workspace_file_not_found", "workspace file not found")
+	}
+	if info.IsDir() {
+		return workspaceFileStreamResult{}, newActionError(http.StatusBadRequest, "workspace_path_is_directory", "workspace path is a directory")
+	}
+	if params.Offset > info.Size() {
+		return workspaceFileStreamResult{}, newActionError(http.StatusBadRequest, "workspace_file_stream_offset_invalid", "workspace file stream offset is invalid")
+	}
+	return workspaceFileStreamResult{
+		StreamID:    "workspace_file_" + randomID(16),
+		WorkspaceID: ws.ID,
+		Target:      ws.Target,
+		Path:        rel,
+		Kind:        "file",
+		Name:        filepath.Base(target),
+		MIMEType:    workspaceFileMIMEType(target, nil),
+		Size:        info.Size(),
+		Offset:      params.Offset,
+		ChunkSize:   workspaceFileStreamChunkSize(params.ChunkSize),
+	}, nil
+}
+
+func (a *app) prepareRemoteControlWorkspaceFileStream(ctx context.Context, ws Workspace, params workspaceFilesStreamParams) (workspaceFileStreamResult, error) {
+	if a.ssh == nil {
+		return workspaceFileStreamResult{}, newActionError(http.StatusNotImplemented, "ssh_unavailable", "ssh manager unavailable")
+	}
+	root := remotePathClean(ws.SSH.RemoteCWD)
+	target, rel, err := resolveRemoteWorkspacePath(root, params.Path)
+	if err != nil {
+		return workspaceFileStreamResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	var stat map[string]any
+	if err := a.ssh.call(ctx, ws, "stat", map[string]any{"path": target}, &stat); err != nil {
+		return workspaceFileStreamResult{}, newActionError(http.StatusNotFound, "workspace_file_not_found", err.Error())
+	}
+	if boolValue(stat["is_dir"]) {
+		return workspaceFileStreamResult{}, newActionError(http.StatusBadRequest, "workspace_path_is_directory", "workspace path is a directory")
+	}
+	size := int64(numberValue(stat["size"]))
+	if params.Offset > size {
+		return workspaceFileStreamResult{}, newActionError(http.StatusBadRequest, "workspace_file_stream_offset_invalid", "workspace file stream offset is invalid")
+	}
+	return workspaceFileStreamResult{
+		StreamID:    "workspace_file_" + randomID(16),
+		WorkspaceID: ws.ID,
+		Target:      ws.Target,
+		Path:        rel,
+		Kind:        "file",
+		Name:        firstString(stat["name"], remotePathBase(target)),
+		MIMEType:    workspaceFileMIMEType(target, nil),
+		Size:        size,
+		Offset:      params.Offset,
+		ChunkSize:   workspaceFileStreamChunkSize(params.ChunkSize),
+	}, nil
+}
+
+func (a *app) streamControlWorkspaceFile(ctx context.Context, params workspaceFilesStreamParams, result workspaceFileStreamResult, conn *controlWSConn, requestID string) {
+	ws, err := a.controlWorkspace(params.WorkspaceID)
+	if err != nil {
+		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "workspace_not_found", err.Error())})
+		return
+	}
+	if ws.Target == "ssh" {
+		a.streamRemoteControlWorkspaceFile(ctx, ws, result, conn, requestID)
+		return
+	}
+	a.streamLocalControlWorkspaceFile(ctx, ws, result, conn, requestID)
+}
+
+func (a *app) streamLocalControlWorkspaceFile(ctx context.Context, ws Workspace, result workspaceFileStreamResult, conn *controlWSConn, requestID string) {
+	root := filepath.Clean(ws.LocalCWD)
+	target, _, err := resolveWorkspacePath(root, result.Path)
+	if err != nil {
+		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "workspace_path_invalid", err.Error())})
+		return
+	}
+	file, err := os.Open(target)
+	if err != nil {
+		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "workspace_file_not_found", "workspace file not found")})
+		return
+	}
+	defer file.Close()
+	offset := result.Offset
+	if offset > 0 {
+		if _, err := file.Seek(offset, io.SeekStart); err != nil {
+			conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "workspace_file_stream_seek_failed", err.Error())})
+			return
+		}
+	}
+	buffer := make([]byte, result.ChunkSize)
+	seq := int64(0)
+	for {
+		if controlStreamCancelled(ctx) {
+			return
+		}
+		n, readErr := file.Read(buffer)
+		if n > 0 {
+			if controlStreamCancelled(ctx) {
+				return
+			}
+			seq++
+			conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameChunk, WorkspaceFile: workspaceFileChunkFrame(result, requestID, seq, offset, buffer[:n])})
+			offset += int64(n)
+		}
+		if controlStreamCancelled(ctx) {
+			return
+		}
+		if readErr == nil {
+			continue
+		}
+		if readErr == io.EOF {
+			conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameComplete, WorkspaceFile: workspaceFileCompleteFrame(result, requestID, seq+1, offset)})
+			return
+		}
+		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "workspace_file_stream_read_failed", readErr.Error())})
+		return
+	}
+}
+
+func (a *app) streamRemoteControlWorkspaceFile(ctx context.Context, ws Workspace, result workspaceFileStreamResult, conn *controlWSConn, requestID string) {
+	if a.ssh == nil {
+		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "ssh_unavailable", "ssh manager unavailable")})
+		return
+	}
+	root := remotePathClean(ws.SSH.RemoteCWD)
+	target, _, err := resolveRemoteWorkspacePath(root, result.Path)
+	if err != nil {
+		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "workspace_path_invalid", err.Error())})
+		return
+	}
+	offset := result.Offset
+	seq := int64(0)
+	for offset < result.Size {
+		if controlStreamCancelled(ctx) {
+			return
+		}
+		var out map[string]any
+		if err := a.ssh.call(ctx, ws, "read_range", map[string]any{"path": target, "offset": offset, "length": result.ChunkSize}, &out); err != nil {
+			if controlStreamCancelled(ctx) {
+				return
+			}
+			conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "workspace_file_stream_read_failed", err.Error())})
+			return
+		}
+		body, err := remoteReadBytes(out)
+		if err != nil {
+			conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "workspace_file_stream_read_failed", err.Error())})
+			return
+		}
+		if len(body) == 0 {
+			break
+		}
+		if controlStreamCancelled(ctx) {
+			return
+		}
+		seq++
+		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameChunk, WorkspaceFile: workspaceFileChunkFrame(result, requestID, seq, offset, body)})
+		offset += int64(len(body))
+	}
+	if controlStreamCancelled(ctx) {
+		return
+	}
+	conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameComplete, WorkspaceFile: workspaceFileCompleteFrame(result, requestID, seq+1, offset)})
+}
+
 func executeLocalControlWorkspaceCommand(parent context.Context, ws Workspace, command, requestedCWD string, timeout time.Duration) (workspaceExecResult, error) {
 	root := filepath.Clean(ws.LocalCWD)
 	cwd, rel, err := resolveWorkspacePath(root, requestedCWD)
@@ -871,6 +1112,48 @@ func remotePathIsSameOrDescendant(root, target string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, "../"))
+}
+
+func workspaceFileStreamChunkSize(requested int) int {
+	return mediaStreamChunkSize(requested)
+}
+
+func workspaceFileChunkFrame(result workspaceFileStreamResult, requestID string, seq, offset int64, body []byte) *workspaceFileStreamFrame {
+	frame := workspaceFileBaseStreamFrame(result, requestID)
+	frame.Seq = seq
+	frame.Offset = offset
+	frame.DataBase64 = base64.StdEncoding.EncodeToString(body)
+	return frame
+}
+
+func workspaceFileCompleteFrame(result workspaceFileStreamResult, requestID string, seq, offset int64) *workspaceFileStreamFrame {
+	frame := workspaceFileBaseStreamFrame(result, requestID)
+	frame.Seq = seq
+	frame.Offset = offset
+	frame.Final = true
+	return frame
+}
+
+func workspaceFileStreamErrorFrame(result workspaceFileStreamResult, requestID, code, message string) *workspaceFileStreamFrame {
+	frame := workspaceFileBaseStreamFrame(result, requestID)
+	frame.Offset = result.Offset
+	frame.ErrorCode = code
+	frame.ErrorMessage = message
+	return frame
+}
+
+func workspaceFileBaseStreamFrame(result workspaceFileStreamResult, requestID string) *workspaceFileStreamFrame {
+	return &workspaceFileStreamFrame{
+		StreamID:    result.StreamID,
+		RequestID:   requestID,
+		WorkspaceID: result.WorkspaceID,
+		Target:      result.Target,
+		Path:        result.Path,
+		Kind:        result.Kind,
+		Name:        result.Name,
+		MIMEType:    result.MIMEType,
+		Size:        result.Size,
+	}
 }
 
 func allowCreateParents(value *bool) bool {

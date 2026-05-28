@@ -531,6 +531,215 @@ func TestControlWebSocketWorkspacePatchRequestResponseIsEncrypted(t *testing.T) 
 	}
 }
 
+func TestControlWebSocketWorkspaceFileStreamChunksAreEncrypted(t *testing.T) {
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceFilesRead)
+	secret := []byte("sealed-workspace-file-stream-secret")
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "large.txt"), secret, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "workspace_file_stream",
+			Capability: CapabilityWorkspaceFilesRead,
+			Action:     ControlActionWorkspaceFilesStream,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"path":         "large.txt",
+				"chunk_size":   7,
+			},
+		},
+	})
+
+	plain, sealed := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealed), string(secret)) {
+		t.Fatalf("sealed workspace file stream response leaked payload: %s", string(sealed))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("plain response = %#v, want ok workspace file stream response", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	streamID := stringValue(result["stream_id"])
+	if streamID == "" || stringValue(result["content_base64"]) != "" {
+		t.Fatalf("stream result = %#v, want stream metadata without content", result)
+	}
+
+	var streamed []byte
+	for {
+		frame, sealed := readEncryptedControlFrameWithBody(t, client, cipher)
+		if strings.Contains(string(sealed), string(secret)) {
+			t.Fatalf("sealed workspace file stream frame leaked payload: %s", string(sealed))
+		}
+		if frame.WorkspaceFile == nil || frame.WorkspaceFile.StreamID != streamID {
+			t.Fatalf("stream frame = %#v, want workspace file frame for stream %q", frame, streamID)
+		}
+		switch frame.Type {
+		case workspaceFileStreamFrameChunk:
+			body, err := base64.StdEncoding.DecodeString(frame.WorkspaceFile.DataBase64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			streamed = append(streamed, body...)
+		case workspaceFileStreamFrameComplete:
+			if !frame.WorkspaceFile.Final {
+				t.Fatalf("completion frame = %#v, want final", frame.WorkspaceFile)
+			}
+			if string(streamed) != string(secret) {
+				t.Fatalf("streamed workspace file = %q, want %q", string(streamed), string(secret))
+			}
+			return
+		default:
+			t.Fatalf("stream frame type = %q", frame.Type)
+		}
+	}
+}
+
+func TestControlWebSocketWorkspaceFileStreamResumesFromOffset(t *testing.T) {
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceFilesRead)
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "resume.txt"), []byte("0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "workspace_file_stream_resume",
+			Capability: CapabilityWorkspaceFilesRead,
+			Action:     ControlActionWorkspaceFilesStream,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"path":         "resume.txt",
+				"offset":       4,
+				"chunk_size":   3,
+			},
+		},
+	})
+
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("stream response = %#v, want ok", plain)
+	}
+	streamID := stringValue(mapValue(plain.Response.Result)["stream_id"])
+	var streamed []byte
+	for {
+		frame := readEncryptedControlFrame(t, client, cipher)
+		if frame.WorkspaceFile == nil || frame.WorkspaceFile.StreamID != streamID {
+			t.Fatalf("stream frame = %#v, want workspace file frame for stream %q", frame, streamID)
+		}
+		switch frame.Type {
+		case workspaceFileStreamFrameChunk:
+			body, err := base64.StdEncoding.DecodeString(frame.WorkspaceFile.DataBase64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			streamed = append(streamed, body...)
+		case workspaceFileStreamFrameComplete:
+			if string(streamed) != "456789" {
+				t.Fatalf("resumed workspace file stream = %q, want 456789", string(streamed))
+			}
+			return
+		default:
+			t.Fatalf("stream frame type = %q", frame.Type)
+		}
+	}
+}
+
+func TestControlWebSocketRemoteWorkspaceFileStreamUsesProxyReadRange(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentCodex,
+		SSH:    &SSHConfig{Endpoint: "root@example.test", RemoteCWD: "/remote/project"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteStore := t.TempDir()
+	writeRemoteFixtureFile(t, remoteStore, "/remote/project/big.txt", "remote-stream-body")
+	proxy, cleanup := newMutableClaudeRemoteProxy(t, workspace, remoteStore)
+	defer cleanup()
+	controllerPublicKey, controllerPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:  "dev_controller",
+		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
+		Capabilities:        []string{CapabilityWorkspaceFilesRead},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{
+		store:    st,
+		hub:      newEventHub(),
+		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
+	}
+	app.ssh = &sshManager{
+		app: app,
+		by: map[string]*sshTarget{
+			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
+		},
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "remote_workspace_file_stream",
+			Capability: CapabilityWorkspaceFilesRead,
+			Action:     ControlActionWorkspaceFilesStream,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"path":         "big.txt",
+				"offset":       7,
+				"chunk_size":   4,
+			},
+		},
+	})
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("stream response = %#v, want ok", plain)
+	}
+	streamID := stringValue(mapValue(plain.Response.Result)["stream_id"])
+	var streamed []byte
+	for {
+		frame := readEncryptedControlFrame(t, client, cipher)
+		if frame.WorkspaceFile == nil || frame.WorkspaceFile.StreamID != streamID {
+			t.Fatalf("stream frame = %#v, want workspace file frame for stream %q", frame, streamID)
+		}
+		switch frame.Type {
+		case workspaceFileStreamFrameChunk:
+			body, err := base64.StdEncoding.DecodeString(frame.WorkspaceFile.DataBase64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			streamed = append(streamed, body...)
+		case workspaceFileStreamFrameComplete:
+			if string(streamed) != "stream-body" {
+				t.Fatalf("remote workspace stream = %q, want stream-body", string(streamed))
+			}
+			return
+		default:
+			t.Fatalf("stream frame type = %q", frame.Type)
+		}
+	}
+}
+
 func TestControlWebSocketRejectsControllerDeviceMismatch(t *testing.T) {
 	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
 	server := startControlChannelTestServer(t, app)

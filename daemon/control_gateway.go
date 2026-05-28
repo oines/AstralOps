@@ -25,33 +25,35 @@ const (
 )
 
 const (
-	ControlActionSessionView              = "core.read.session_view"
-	ControlActionSessions                 = "core.read.sessions"
-	ControlActionWorkspaces               = "core.read.workspaces"
-	ControlActionSessionInput             = "core.control.session_input"
-	ControlActionInterrupt                = "core.control.interrupt"
-	ControlActionInteractionRespond       = "interaction.respond"
-	ControlActionSessionEdit              = "session.edit"
-	ControlActionAttachmentIngest         = "attachment.ingest"
-	ControlActionAttachmentIngestStart    = "attachment.ingest.start"
-	ControlActionAttachmentIngestChunk    = "attachment.ingest.chunk"
-	ControlActionAttachmentIngestFinish   = "attachment.ingest.finish"
-	ControlActionMediaRead                = "media.read"
-	ControlActionMediaDownload            = "media.download"
-	ControlActionMediaStream              = "media.stream"
-	ControlActionMediaStreamCancel        = "media.stream.cancel"
-	ControlActionWorkspaceFilesRead       = "workspace.files.read"
-	ControlActionWorkspaceFilesWrite      = "workspace.files.write"
-	ControlActionWorkspaceFilesApplyPatch = "workspace.files.apply_patch"
-	ControlActionWorkspaceFilesDelete     = "workspace.files.delete"
-	ControlActionWorkspaceFilesMove       = "workspace.files.move"
-	ControlActionWorkspaceExec            = "workspace.exec"
-	ControlActionTerminalOpen             = "terminal.open"
-	ControlActionTerminalAttach           = "terminal.attach"
-	ControlActionTerminalDetach           = "terminal.detach"
-	ControlActionTerminalInput            = "terminal.input"
-	ControlActionTerminalResize           = "terminal.resize"
-	ControlActionTerminalClose            = "terminal.close"
+	ControlActionSessionView                = "core.read.session_view"
+	ControlActionSessions                   = "core.read.sessions"
+	ControlActionWorkspaces                 = "core.read.workspaces"
+	ControlActionSessionInput               = "core.control.session_input"
+	ControlActionInterrupt                  = "core.control.interrupt"
+	ControlActionInteractionRespond         = "interaction.respond"
+	ControlActionSessionEdit                = "session.edit"
+	ControlActionAttachmentIngest           = "attachment.ingest"
+	ControlActionAttachmentIngestStart      = "attachment.ingest.start"
+	ControlActionAttachmentIngestChunk      = "attachment.ingest.chunk"
+	ControlActionAttachmentIngestFinish     = "attachment.ingest.finish"
+	ControlActionMediaRead                  = "media.read"
+	ControlActionMediaDownload              = "media.download"
+	ControlActionMediaStream                = "media.stream"
+	ControlActionMediaStreamCancel          = "media.stream.cancel"
+	ControlActionWorkspaceFilesRead         = "workspace.files.read"
+	ControlActionWorkspaceFilesWrite        = "workspace.files.write"
+	ControlActionWorkspaceFilesApplyPatch   = "workspace.files.apply_patch"
+	ControlActionWorkspaceFilesDelete       = "workspace.files.delete"
+	ControlActionWorkspaceFilesMove         = "workspace.files.move"
+	ControlActionWorkspaceFilesStream       = "workspace.files.stream"
+	ControlActionWorkspaceFilesStreamCancel = "workspace.files.stream.cancel"
+	ControlActionWorkspaceExec              = "workspace.exec"
+	ControlActionTerminalOpen               = "terminal.open"
+	ControlActionTerminalAttach             = "terminal.attach"
+	ControlActionTerminalDetach             = "terminal.detach"
+	ControlActionTerminalInput              = "terminal.input"
+	ControlActionTerminalResize             = "terminal.resize"
+	ControlActionTerminalClose              = "terminal.close"
 )
 
 type ControlRequest struct {
@@ -120,7 +122,7 @@ func controlActionCapability(action string) string {
 		return CapabilityMediaDownload
 	case ControlActionMediaStream, ControlActionMediaStreamCancel:
 		return CapabilityMediaStream
-	case ControlActionWorkspaceFilesRead:
+	case ControlActionWorkspaceFilesRead, ControlActionWorkspaceFilesStream, ControlActionWorkspaceFilesStreamCancel:
 		return CapabilityWorkspaceFilesRead
 	case ControlActionWorkspaceFilesWrite, ControlActionWorkspaceFilesApplyPatch, ControlActionWorkspaceFilesDelete, ControlActionWorkspaceFilesMove:
 		return CapabilityWorkspaceFilesWrite
@@ -305,6 +307,28 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn) (an
 			return nil, err
 		}
 		return a.moveControlWorkspacePath(context.Background(), params)
+	case ControlActionWorkspaceFilesStream:
+		if conn == nil {
+			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "workspace.files.stream requires an encrypted control connection")
+		}
+		var params workspaceFilesStreamParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.prepareControlWorkspaceFileStream(context.Background(), params)
+	case ControlActionWorkspaceFilesStreamCancel:
+		if conn == nil {
+			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "workspace.files.stream.cancel requires an encrypted control connection")
+		}
+		var params workspaceFileStreamCancelParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		streamID := strings.TrimSpace(params.StreamID)
+		if streamID == "" {
+			return nil, newActionError(http.StatusBadRequest, "workspace_file_stream_id_required", "stream_id required")
+		}
+		return workspaceFileStreamCancelResult{StreamID: streamID, Cancelled: conn.cancelWorkspaceFileStream(streamID)}, nil
 	case ControlActionWorkspaceExec:
 		var params workspaceExecParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

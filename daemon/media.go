@@ -218,6 +218,10 @@ func (a *app) streamControlMedia(ctx context.Context, params mediaStreamParams, 
 }
 
 func mediaStreamCancelled(ctx context.Context) bool {
+	return controlStreamCancelled(ctx)
+}
+
+func controlStreamCancelled(ctx context.Context) bool {
 	select {
 	case <-ctx.Done():
 		return true

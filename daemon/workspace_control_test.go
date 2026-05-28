@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -365,6 +366,38 @@ func TestControlGatewayWorkspaceDeleteRequiresWriteCapability(t *testing.T) {
 		},
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
+}
+
+func TestControlGatewayWorkspaceFileStreamCancelCancelsRegisteredStream(t *testing.T) {
+	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesRead)
+	conn := &controlWSConn{}
+	ctx, cancel := context.WithCancel(context.Background())
+	conn.registerWorkspaceFileStream("workspace_file_1", cancel)
+
+	response, err := app.executeControlRequestWithConnection(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesRead,
+		Action:             ControlActionWorkspaceFilesStreamCancel,
+		Params: map[string]any{
+			"stream_id": "workspace_file_1",
+		},
+	}, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(workspaceFileStreamCancelResult)
+	if !ok {
+		t.Fatalf("cancel result = %#v, want workspaceFileStreamCancelResult", response.Result)
+	}
+	if !result.Cancelled || result.StreamID != "workspace_file_1" {
+		t.Fatalf("cancel result = %#v", result)
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("workspace file stream cancel did not cancel context")
+	}
 }
 
 func TestControlGatewayDeletesAndMovesRemoteWorkspacePaths(t *testing.T) {

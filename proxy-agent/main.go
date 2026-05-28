@@ -31,6 +31,7 @@ var supportedMethods = []string{
 	"stat",
 	"list",
 	"read",
+	"read_range",
 	"dirs",
 	"write",
 	"mkdir",
@@ -250,6 +251,12 @@ func dispatch(req request) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"path": path, "content": string(body), "dataBase64": base64.StdEncoding.EncodeToString(body)}, nil
+	case "read_range":
+		var p readRangeParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return readRange(p)
 	case "dirs":
 		var p dirsParams
 		if err := parse(req.Params, &p); err != nil {
@@ -427,6 +434,12 @@ type moveParams struct {
 	Destination   string `json:"destination"`
 	Overwrite     bool   `json:"overwrite"`
 	CreateParents bool   `json:"create_parents"`
+}
+
+type readRangeParams struct {
+	Path   string `json:"path"`
+	Offset int64  `json:"offset"`
+	Length int    `json:"length"`
 }
 
 type writeParams struct {
@@ -1151,6 +1164,40 @@ func movePath(p moveParams) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"source": src, "destination": dst}, nil
+}
+
+func readRange(p readRangeParams) (any, error) {
+	path, err := resolveRemotePath(p.Path)
+	if err != nil {
+		return nil, err
+	}
+	if p.Offset < 0 {
+		return nil, errors.New("offset must be >= 0")
+	}
+	length := p.Length
+	if length <= 0 || length > 256*1024 {
+		length = 64 * 1024
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if _, err := file.Seek(p.Offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, length)
+	n, err := file.Read(buf)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return map[string]any{
+		"path":       path,
+		"offset":     p.Offset,
+		"bytes":      n,
+		"dataBase64": base64.StdEncoding.EncodeToString(buf[:n]),
+		"eof":        err == io.EOF,
+	}, nil
 }
 
 func applyPatch(p applyPatchParams) (any, error) {

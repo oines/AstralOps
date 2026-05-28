@@ -553,6 +553,17 @@ export type WorkspaceFilesMoveParams = {
   create_parents?: boolean;
 };
 
+export type WorkspaceFilesStreamParams = {
+  workspace_id: string;
+  path: string;
+  offset?: number;
+  chunk_size?: number;
+};
+
+export type WorkspaceFilesStreamCancelParams = {
+  stream_id: string;
+};
+
 export type WorkspaceExecParams = {
   workspace_id: string;
   command: string;
@@ -612,6 +623,42 @@ export type WorkspaceFilesMoveResult = {
   size?: number;
 };
 
+export type WorkspaceFileStreamResult = {
+  stream_id: string;
+  workspace_id: string;
+  target: WorkspaceTarget;
+  path: string;
+  kind: "file" | string;
+  name?: string;
+  mime_type?: string;
+  size?: number;
+  offset: number;
+  chunk_size: number;
+};
+
+export type WorkspaceFileStreamCancelResult = {
+  stream_id: string;
+  cancelled: boolean;
+};
+
+export type WorkspaceFileStreamFrame = {
+  stream_id: string;
+  request_id?: string;
+  workspace_id: string;
+  target: WorkspaceTarget;
+  path: string;
+  kind?: "file" | string;
+  name?: string;
+  mime_type?: string;
+  size?: number;
+  seq: number;
+  offset: number;
+  data_base64?: string;
+  final?: boolean;
+  error_code?: string;
+  error_message?: string;
+};
+
 export type WorkspaceExecResult = {
   workspace_id: string;
   target: WorkspaceTarget;
@@ -663,6 +710,8 @@ export type ControlAction =
   | "workspace.files.apply_patch"
   | "workspace.files.delete"
   | "workspace.files.move"
+  | "workspace.files.stream"
+  | "workspace.files.stream.cancel"
   | "workspace.exec"
   | "terminal.open"
   | "terminal.attach"
@@ -864,6 +913,18 @@ export type ControlPlainFrame =
   | {
       type: "media.error";
       media: MediaStreamFrame;
+    }
+  | {
+      type: "workspace_file.chunk";
+      workspace_file: WorkspaceFileStreamFrame;
+    }
+  | {
+      type: "workspace_file.completed";
+      workspace_file: WorkspaceFileStreamFrame;
+    }
+  | {
+      type: "workspace_file.error";
+      workspace_file: WorkspaceFileStreamFrame;
     }
   | {
       type: "close";

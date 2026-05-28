@@ -47,13 +47,14 @@ type controlHelloAckFrame struct {
 }
 
 type controlPlainFrame struct {
-	Type     string               `json:"type"`
-	Request  *ControlRequest      `json:"request,omitempty"`
-	Response *ControlResponse     `json:"response,omitempty"`
-	Terminal *terminalStreamFrame `json:"terminal,omitempty"`
-	Media    *mediaStreamFrame    `json:"media,omitempty"`
-	Reason   string               `json:"reason,omitempty"`
-	Code     string               `json:"code,omitempty"`
+	Type          string                    `json:"type"`
+	Request       *ControlRequest           `json:"request,omitempty"`
+	Response      *ControlResponse          `json:"response,omitempty"`
+	Terminal      *terminalStreamFrame      `json:"terminal,omitempty"`
+	Media         *mediaStreamFrame         `json:"media,omitempty"`
+	WorkspaceFile *workspaceFileStreamFrame `json:"workspace_file,omitempty"`
+	Reason        string                    `json:"reason,omitempty"`
+	Code          string                    `json:"code,omitempty"`
 }
 
 type controlSealedFrame struct {
@@ -71,7 +72,7 @@ type controlWSConn struct {
 	cipher             *controlCipher
 	writeMu            sync.Mutex
 	streamMu           sync.Mutex
-	mediaStreams       map[string]context.CancelFunc
+	streams            map[string]context.CancelFunc
 }
 
 type controlCipher struct {
@@ -243,47 +244,83 @@ func (c *controlWSConn) handleRequest(req ControlRequest) (*ControlResponse, fun
 }
 
 func (c *controlWSConn) afterControlResponse(req ControlRequest, response ControlResponse) func() {
-	if !response.OK || req.Action != ControlActionMediaStream {
+	if !response.OK {
 		return nil
 	}
-	result, ok := response.Result.(mediaStreamResult)
-	if !ok {
+	switch req.Action {
+	case ControlActionMediaStream:
+		result, ok := response.Result.(mediaStreamResult)
+		if !ok {
+			return nil
+		}
+		var params mediaStreamParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		c.registerControlStream(result.StreamID, cancel)
+		return func() {
+			defer c.unregisterControlStream(result.StreamID)
+			c.app.streamControlMedia(ctx, params, result, c, req.RequestID)
+		}
+	case ControlActionWorkspaceFilesStream:
+		result, ok := response.Result.(workspaceFileStreamResult)
+		if !ok {
+			return nil
+		}
+		var params workspaceFilesStreamParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		c.registerControlStream(result.StreamID, cancel)
+		return func() {
+			defer c.unregisterControlStream(result.StreamID)
+			c.app.streamControlWorkspaceFile(ctx, params, result, c, req.RequestID)
+		}
+	default:
 		return nil
-	}
-	var params mediaStreamParams
-	if err := decodeControlParams(req.Params, &params); err != nil {
-		return nil
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	c.registerMediaStream(result.StreamID, cancel)
-	return func() {
-		defer c.unregisterMediaStream(result.StreamID)
-		c.app.streamControlMedia(ctx, params, result, c, req.RequestID)
 	}
 }
 
 func (c *controlWSConn) registerMediaStream(streamID string, cancel context.CancelFunc) {
+	c.registerControlStream(streamID, cancel)
+}
+
+func (c *controlWSConn) registerWorkspaceFileStream(streamID string, cancel context.CancelFunc) {
+	c.registerControlStream(streamID, cancel)
+}
+
+func (c *controlWSConn) registerControlStream(streamID string, cancel context.CancelFunc) {
 	streamID = strings.TrimSpace(streamID)
 	if streamID == "" || cancel == nil {
 		return
 	}
 	c.streamMu.Lock()
 	defer c.streamMu.Unlock()
-	if c.mediaStreams == nil {
-		c.mediaStreams = map[string]context.CancelFunc{}
+	if c.streams == nil {
+		c.streams = map[string]context.CancelFunc{}
 	}
-	c.mediaStreams[streamID] = cancel
+	c.streams[streamID] = cancel
 }
 
 func (c *controlWSConn) cancelMediaStream(streamID string) bool {
+	return c.cancelControlStream(streamID)
+}
+
+func (c *controlWSConn) cancelWorkspaceFileStream(streamID string) bool {
+	return c.cancelControlStream(streamID)
+}
+
+func (c *controlWSConn) cancelControlStream(streamID string) bool {
 	streamID = strings.TrimSpace(streamID)
 	if streamID == "" {
 		return false
 	}
 	c.streamMu.Lock()
-	cancel, ok := c.mediaStreams[streamID]
+	cancel, ok := c.streams[streamID]
 	if ok {
-		delete(c.mediaStreams, streamID)
+		delete(c.streams, streamID)
 	}
 	c.streamMu.Unlock()
 	if ok {
@@ -293,19 +330,31 @@ func (c *controlWSConn) cancelMediaStream(streamID string) bool {
 }
 
 func (c *controlWSConn) unregisterMediaStream(streamID string) {
+	c.unregisterControlStream(streamID)
+}
+
+func (c *controlWSConn) unregisterWorkspaceFileStream(streamID string) {
+	c.unregisterControlStream(streamID)
+}
+
+func (c *controlWSConn) unregisterControlStream(streamID string) {
 	streamID = strings.TrimSpace(streamID)
 	if streamID == "" {
 		return
 	}
 	c.streamMu.Lock()
 	defer c.streamMu.Unlock()
-	delete(c.mediaStreams, streamID)
+	delete(c.streams, streamID)
 }
 
 func (c *controlWSConn) cancelAllMediaStreams() {
+	c.cancelAllControlStreams()
+}
+
+func (c *controlWSConn) cancelAllControlStreams() {
 	c.streamMu.Lock()
-	streams := c.mediaStreams
-	c.mediaStreams = nil
+	streams := c.streams
+	c.streams = nil
 	c.streamMu.Unlock()
 	for _, cancel := range streams {
 		cancel()

@@ -87,7 +87,7 @@ func TestProxyAgentProtocolSmokeE2E(t *testing.T) {
 
 	hello := send("hello", "hello", map[string]any{})
 	methods := methodSet(mapValueForTest(hello.Result)["capabilities"])
-	for _, method := range []string{"read", "write", "remove", "move", "exec_start", "exec_kill", "pty_start", "pty_kill"} {
+	for _, method := range []string{"read", "read_range", "write", "remove", "move", "exec_start", "exec_kill", "pty_start", "pty_kill"} {
 		if !methods[method] {
 			t.Fatalf("hello missing method %s: %#v", method, hello.Result)
 		}
@@ -98,6 +98,10 @@ func TestProxyAgentProtocolSmokeE2E(t *testing.T) {
 	read := send("read", "read", map[string]any{"path": filepath.Join(dir, "blob.bin")})
 	if got := stringValue(mapValueForTest(read.Result)["dataBase64"]); got != base64.StdEncoding.EncodeToString(body) {
 		t.Fatalf("read dataBase64 = %q", got)
+	}
+	readRange := send("read-range", "read_range", map[string]any{"path": filepath.Join(dir, "blob.bin"), "offset": 1, "length": 2})
+	if got := stringValue(mapValueForTest(readRange.Result)["dataBase64"]); got != base64.StdEncoding.EncodeToString(body[1:3]) {
+		t.Fatalf("read_range dataBase64 = %q", got)
 	}
 
 	send("exec-start", "exec_start", map[string]any{"id": "exec-smoke", "cwd": dir, "argv": []string{"/bin/sh", "-c", "printf smoke"}})
@@ -271,7 +275,7 @@ func TestHelloAdvertisesCoreExecutionMethods(t *testing.T) {
 	for _, method := range caps["methods"].([]string) {
 		methods[method] = true
 	}
-	for _, method := range []string{"read", "write", "remove", "move", "exec_start", "exec_kill", "pty_start", "pty_kill"} {
+	for _, method := range []string{"read", "read_range", "write", "remove", "move", "exec_start", "exec_kill", "pty_start", "pty_kill"} {
 		if !methods[method] {
 			t.Fatalf("hello did not advertise core method %s: %#v", method, caps["methods"])
 		}

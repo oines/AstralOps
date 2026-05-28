@@ -640,7 +640,7 @@ media.stream
   面向大文件、生成中图片、未来视频或渐进式预览的媒体流。数据帧和 PTY 一样走 E2EE channel，relay 只转发密文。Controller 可以用 offset 重新发起 stream 来恢复读取，也可以用 media.stream.cancel 取消同一 control connection 上的 active stream。
 
 workspace.files.read
-  通过 Host 浏览目录或读取文件内容。SSH workspace 中，由 Host 发起 SSH 读取。v1 返回目录列表或中小文件的 base64 内容；大文件后续走 stream。
+  通过 Host 浏览目录或读取文件内容。SSH workspace 中，由 Host 发起 SSH 读取。v1 返回目录列表或中小文件的 base64 内容；大文件用 `workspace.files.stream` action，仍复用该 capability。
 
 workspace.files.write
   通过 Host 创建、覆盖、精确文本编辑、删除或移动 workspace root 内的文件路径。SSH workspace 中，由 Host 发起 SSH 写入、删除或移动。复杂大文件流式读写仍作为独立能力后续扩展，不塞进普通 write response。
@@ -1084,22 +1084,26 @@ workspace.files.write
 workspace.files.apply_patch
 workspace.files.delete
 workspace.files.move
+workspace.files.stream
+workspace.files.stream.cancel
 workspace.exec
 local workspace root confinement
-SSH workspace Host-initiated read/write/delete/move/exec
+SSH workspace Host-initiated read/range-read/write/delete/move/exec
 E2EE request/response frames
+chunked E2EE workspace_file frames
 no Host local absolute root in workspace.files.read response
 
 待落地:
-workspace file streaming for large files
 command approval policy integration
 ```
 
-`workspace.files.read` v1 用于目录列表和中小文件读取；文件内容以 base64 放在 encrypted control response 中。`workspace.files.write` v1 只创建或覆盖单个文件。
+`workspace.files.read` v1 用于目录列表和中小文件读取；文件内容以 base64 放在 encrypted control response 中。`workspace.files.write` action v1 只创建或覆盖单个文件；精确编辑、删除、移动和大文件读取分别使用独立 action，避免把文件管理语义塞进一个过宽 action。
 
 `workspace.files.apply_patch` v1 是 Host 侧精确文本编辑能力：Controller 提交 `old_string`/`new_string` edits，Host 在 workspace root 内读取目标文件，要求默认单次匹配唯一；只有显式 `replace_all` 才允许替换多处。它不解析完整 unified diff，不 shell out 到 `patch`，也不做跨端文件同步。这样先满足远控编辑需要，同时把 delete/move/大文件流式读写作为独立 action 后续扩展，避免把文件管理语义一次性塞进一个过宽 action。
 
 `workspace.files.delete` 和 `workspace.files.move` v1 是独立 Host 侧文件管理 action，复用 `workspace.files.write` capability。它们只接受 workspace root 内的路径，不能删除或移动 workspace root 本身；删除目录必须显式 `recursive=true`；移动默认不覆盖已有目标，只有显式 `overwrite=true` 才允许覆盖非目录目标。SSH workspace 中由 Host 通过 proxy helper 发起 `remove`/`move`，Controller 不接触远端路径之外的本机文件系统能力。
+
+`workspace.files.stream` v1 用于大文件读取：普通 `workspace.files.read` 仍负责目录列表和中小文件 base64 response；超过普通 response 适合承载的内容由 Controller 请求 `workspace.files.stream`，Host 返回 stream metadata 后在同一 encrypted control connection 上发送 `workspace_file.chunk` / `workspace_file.completed` / `workspace_file.error` frame。Controller 可以通过 offset 重新请求来恢复读取，也可以用 `workspace.files.stream.cancel` 取消当前 control connection 上的 active stream。SSH workspace 通过 proxy helper 的 `read_range` 从远端按 chunk 读取，Host 只转发密文 frame，不生成可被 relay 或云端读取的明文 URL。
 
 ### Phase 9 - PTY Attach Manager
 
