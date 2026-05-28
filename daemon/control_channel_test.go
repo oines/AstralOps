@@ -189,6 +189,57 @@ func TestControlWebSocketEncryptedRequestResponse(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketMediaReadResponseIsEncrypted(t *testing.T) {
+	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityMediaRead)
+	media := addControlMediaFixture(t, app, workspace, session, []byte("sealed-media-secret"))
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	body := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "media_read",
+			Capability: CapabilityMediaRead,
+			Action:     ControlActionMediaRead,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"event_seq":  media.eventSeq,
+				"media_id":   media.mediaID,
+			},
+		},
+	})
+	if strings.Contains(string(body), media.path) || strings.Contains(string(body), "sealed-media-secret") {
+		t.Fatalf("sealed media request leaked payload: %s", string(body))
+	}
+
+	plain, sealed := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealed), media.path) || strings.Contains(string(sealed), "sealed-media-secret") {
+		t.Fatalf("sealed media response leaked payload: %s", string(sealed))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("plain response = %#v, want ok media response", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["name"]) != "clip.png" || stringValue(result["mime_type"]) != "image/png" {
+		t.Fatalf("media response metadata = %#v", result)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(stringValue(result["content_base64"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != "sealed-media-secret" {
+		t.Fatalf("media response body = %q, want fixture body", string(decoded))
+	}
+	wire, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), media.path) {
+		t.Fatalf("decrypted media response leaked Host path: %s", string(wire))
+	}
+}
+
 func TestControlWebSocketRejectsControllerDeviceMismatch(t *testing.T) {
 	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
 	server := startControlChannelTestServer(t, app)

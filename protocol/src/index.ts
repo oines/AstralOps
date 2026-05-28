@@ -384,6 +384,26 @@ export type EditLastUserMessageRequest = {
   permission_mode?: "default" | "auto" | "plan" | "bypassPermissions";
 };
 
+export type MediaReadParams = {
+  session_id: string;
+  event_seq: number;
+  media_id: string;
+};
+
+export type MediaDownloadParams = MediaReadParams;
+
+export type MediaReadResult = {
+  session_id: string;
+  event_seq: number;
+  media_id: string;
+  kind: "image" | "file" | string;
+  name: string;
+  mime_type?: string;
+  size?: number;
+  content_base64: string;
+  download?: boolean;
+};
+
 export type ControlCapability =
   | "core.read"
   | "core.control"
@@ -409,6 +429,8 @@ export type ControlAction =
   | "core.control.interrupt"
   | "interaction.respond"
   | "session.edit"
+  | "media.read"
+  | "media.download"
   | "terminal.open"
   | "terminal.attach"
   | "terminal.detach"

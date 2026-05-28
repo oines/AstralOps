@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"mime"
 	"net/http"
@@ -10,33 +11,104 @@ import (
 	"strings"
 )
 
+type resolvedSessionMedia struct {
+	SessionID string
+	EventSeq  int64
+	MediaID   string
+	Path      string
+	Name      string
+	Kind      string
+	MIMEType  string
+	Size      int64
+}
+
+type mediaReadParams struct {
+	SessionID string `json:"session_id"`
+	EventSeq  int64  `json:"event_seq"`
+	MediaID   string `json:"media_id"`
+}
+
+type mediaReadResult struct {
+	SessionID     string `json:"session_id"`
+	EventSeq      int64  `json:"event_seq"`
+	MediaID       string `json:"media_id"`
+	Kind          string `json:"kind"`
+	Name          string `json:"name"`
+	MIMEType      string `json:"mime_type,omitempty"`
+	Size          int64  `json:"size,omitempty"`
+	ContentBase64 string `json:"content_base64"`
+	Download      bool   `json:"download,omitempty"`
+}
+
 func (a *app) handleSessionMedia(w http.ResponseWriter, r *http.Request, sessionID, seqText, mediaID string) {
 	seq, err := strconv.ParseInt(seqText, 10, 64)
-	if err != nil || seq <= 0 || strings.TrimSpace(mediaID) == "" {
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid media reference"})
 		return
+	}
+	media, err := a.resolveSessionMedia(sessionID, seq, mediaID)
+	if err != nil {
+		writeActionError(w, err)
+		return
+	}
+	if media.MIMEType != "" {
+		w.Header().Set("Content-Type", media.MIMEType)
+	}
+	if r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", media.Name))
+	}
+	http.ServeFile(w, r, media.Path)
+}
+
+func (a *app) readControlMedia(params mediaReadParams, download bool) (mediaReadResult, error) {
+	media, err := a.resolveSessionMedia(params.SessionID, params.EventSeq, params.MediaID)
+	if err != nil {
+		return mediaReadResult{}, err
+	}
+	body, err := os.ReadFile(media.Path)
+	if err != nil {
+		return mediaReadResult{}, newActionError(http.StatusNotFound, "media_file_not_found", "media file not found")
+	}
+	return mediaReadResult{
+		SessionID:     media.SessionID,
+		EventSeq:      media.EventSeq,
+		MediaID:       media.MediaID,
+		Kind:          media.Kind,
+		Name:          media.Name,
+		MIMEType:      media.MIMEType,
+		Size:          int64(len(body)),
+		ContentBase64: base64.StdEncoding.EncodeToString(body),
+		Download:      download,
+	}, nil
+}
+
+func (a *app) resolveSessionMedia(sessionID string, eventSeq int64, mediaID string) (resolvedSessionMedia, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	mediaID = strings.TrimSpace(mediaID)
+	if sessionID == "" || eventSeq <= 0 || mediaID == "" {
+		return resolvedSessionMedia{}, newActionError(http.StatusBadRequest, "media_reference_invalid", "invalid media reference")
+	}
+	if _, ok := a.store.getSession(sessionID); !ok {
+		return resolvedSessionMedia{}, newActionError(http.StatusNotFound, "session_not_found", "session not found")
 	}
 	events := a.store.queryEvents("", sessionID, 0)
 	var target *AstralEvent
 	for index := range events {
-		if events[index].Seq == seq {
+		if events[index].Seq == eventSeq {
 			target = &events[index]
 			break
 		}
 	}
 	if target == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "media event not found"})
-		return
+		return resolvedSessionMedia{}, newActionError(http.StatusNotFound, "media_event_not_found", "media event not found")
 	}
 	media, ok := mediaReferenceFromEvent(*target, mediaID)
 	if !ok || media.Path == "" {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "media not found"})
-		return
+		return resolvedSessionMedia{}, newActionError(http.StatusNotFound, "media_not_found", "media not found")
 	}
 	info, err := os.Stat(media.Path)
 	if err != nil || info.IsDir() {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "media file not found"})
-		return
+		return resolvedSessionMedia{}, newActionError(http.StatusNotFound, "media_file_not_found", "media file not found")
 	}
 	name := media.Name
 	if strings.TrimSpace(name) == "" {
@@ -46,13 +118,24 @@ func (a *app) handleSessionMedia(w http.ResponseWriter, r *http.Request, session
 	if mimeType == "" {
 		mimeType = mime.TypeByExtension(strings.ToLower(filepath.Ext(name)))
 	}
-	if mimeType != "" {
-		w.Header().Set("Content-Type", mimeType)
+	size := media.Size
+	if size <= 0 {
+		size = info.Size()
 	}
-	if r.URL.Query().Get("download") == "1" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	kind := media.Kind
+	if strings.TrimSpace(kind) == "" {
+		kind = "file"
 	}
-	http.ServeFile(w, r, media.Path)
+	return resolvedSessionMedia{
+		SessionID: sessionID,
+		EventSeq:  eventSeq,
+		MediaID:   mediaID,
+		Path:      media.Path,
+		Name:      name,
+		Kind:      kind,
+		MIMEType:  mimeType,
+		Size:      size,
+	}, nil
 }
 
 func mediaReferenceFromEvent(event AstralEvent, mediaID string) (InputAttachment, bool) {

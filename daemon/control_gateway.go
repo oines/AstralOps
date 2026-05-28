@@ -32,6 +32,8 @@ const (
 	ControlActionInterrupt          = "core.control.interrupt"
 	ControlActionInteractionRespond = "interaction.respond"
 	ControlActionSessionEdit        = "session.edit"
+	ControlActionMediaRead          = "media.read"
+	ControlActionMediaDownload      = "media.download"
 	ControlActionTerminalOpen       = "terminal.open"
 	ControlActionTerminalAttach     = "terminal.attach"
 	ControlActionTerminalDetach     = "terminal.detach"
@@ -98,6 +100,10 @@ func controlActionCapability(action string) string {
 		return CapabilityInteractionRespond
 	case ControlActionSessionEdit:
 		return CapabilitySessionEdit
+	case ControlActionMediaRead:
+		return CapabilityMediaRead
+	case ControlActionMediaDownload:
+		return CapabilityMediaDownload
 	case ControlActionTerminalOpen, ControlActionTerminalAttach, ControlActionTerminalDetach:
 		return CapabilityTerminalOpen
 	case ControlActionTerminalInput, ControlActionTerminalResize, ControlActionTerminalClose:
@@ -185,6 +191,18 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn) (an
 			ReasoningEffort: params.ReasoningEffort,
 			PermissionMode:  params.PermissionMode,
 		})
+	case ControlActionMediaRead:
+		var params mediaReadParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.readControlMedia(params, false)
+	case ControlActionMediaDownload:
+		var params mediaReadParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.readControlMedia(params, true)
 	case ControlActionTerminalOpen:
 		var params terminalOpenParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

@@ -1038,13 +1038,18 @@ same E2EE handshake on LAN and relay
 把附件和 transcript 媒体收口到 Host gateway：
 
 ```text
-attachment.ingest
+已落地:
 media.read
 media.download
-media.stream
 event_seq + media_id reference validation
-Host-local upload store
-E2EE data frames
+E2EE response frames
+Host path never exposed in control response
+
+待落地:
+attachment.ingest
+media.stream
+Host-local upload store for remote attachment ingest
+chunked E2EE data frames
 ```
 
 Local Desktop 可以继续用本地 HTTP URL 渲染媒体，但 RemoteCoreClient 和 Mobile 必须只依赖 capability 和 encrypted media frames。
