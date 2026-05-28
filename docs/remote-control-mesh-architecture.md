@@ -1090,6 +1090,8 @@ sealed
 
 会话密钥由 X25519 临时密钥交换派生。`request/response/close` 等业务帧只能放进 `sealed`，不能以明文 JSON 发送。Host 收到 request 后必须覆盖或校验 `controller_device_id`，然后进入 Host Gateway 执行 capability/trust 检查。
 
+Host control WebSocket 必须设置 read limit：hello 只允许小型握手帧，sealed frame 只允许能承载当前同步能力上限的有限 payload。超过上限的请求应关闭 control connection；大文件、大媒体和持续输出必须使用对应 chunk/stream/PTY 能力，不能把单个 E2EE WebSocket message 做成无限大上传。
+
 Host 本地维护 active control sessions。撤销某个 Controller trust grant 时，Host 必须发送加密 close frame 并关闭该 Controller 的所有 active control sessions。
 
 云端 signaling 负责协商连接。Relay 只转发加密帧。

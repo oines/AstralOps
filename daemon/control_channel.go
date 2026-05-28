@@ -21,7 +21,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const controlProtocolVersion = "astralops-control-v1"
+const (
+	controlProtocolVersion            = "astralops-control-v1"
+	controlHelloFrameMaxBytesDefault  = 16 * 1024
+	controlSealedFrameMaxBytesDefault = 64 * 1024 * 1024
+)
 
 type controlHelloFrame struct {
 	Type                   string `json:"type"`
@@ -91,13 +95,29 @@ func (a *app) handleControlWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	socket.SetReadLimit(a.controlHelloFrameMaxBytes())
 	conn := &controlWSConn{app: a, socket: socket}
 	if err := conn.acceptHello(); err != nil {
 		_ = socket.Close()
 		return
 	}
+	socket.SetReadLimit(a.controlSealedFrameMaxBytes())
 	a.registerControlSession(conn)
 	conn.serve()
+}
+
+func (a *app) controlHelloFrameMaxBytes() int64 {
+	if a.controlHelloLimit > 0 {
+		return a.controlHelloLimit
+	}
+	return controlHelloFrameMaxBytesDefault
+}
+
+func (a *app) controlSealedFrameMaxBytes() int64 {
+	if a.controlFrameLimit > 0 {
+		return a.controlFrameLimit
+	}
+	return controlSealedFrameMaxBytesDefault
 }
 
 func (c *controlWSConn) acceptHello() error {

@@ -185,6 +185,44 @@ func readEncryptedControlFrameWithBody(t *testing.T, client *websocket.Conn, cip
 	return plain, body
 }
 
+func expectControlWebSocketReadError(t *testing.T, client *websocket.Conn) {
+	t.Helper()
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	defer client.SetReadDeadline(time.Time{})
+	if _, _, err := client.ReadMessage(); err == nil {
+		t.Fatal("control websocket read succeeded, want connection closed")
+	}
+}
+
+func TestControlWebSocketRejectsOversizedHelloFrame(t *testing.T) {
+	app, _, _, _, _ := newControlChannelTestApp(t, CapabilityCoreRead)
+	app.controlHelloLimit = 64
+	server := startControlChannelTestServer(t, app)
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	if err := client.WriteMessage(websocket.TextMessage, []byte(strings.Repeat("x", int(app.controlHelloLimit)+1))); err != nil {
+		t.Fatal(err)
+	}
+	expectControlWebSocketReadError(t, client)
+}
+
+func TestControlWebSocketRejectsOversizedSealedFrame(t *testing.T) {
+	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
+	app.controlFrameLimit = 128
+	server := startControlChannelTestServer(t, app)
+	client, _, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	if err := client.WriteMessage(websocket.TextMessage, []byte(strings.Repeat("x", int(app.controlFrameLimit)+1))); err != nil {
+		t.Fatal(err)
+	}
+	expectControlWebSocketReadError(t, client)
+}
+
 func TestControlWebSocketEncryptedRequestResponse(t *testing.T) {
 	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
 	server := startControlChannelTestServer(t, app)

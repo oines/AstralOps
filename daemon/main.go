@@ -33,6 +33,8 @@ type app struct {
 	runtimes          map[AgentKind]AgentRuntime
 	ssh               *sshManager
 	projections       *sessionProjectionCache
+	controlHelloLimit int64
+	controlFrameLimit int64
 	controlMu         sync.Mutex
 	controlSessions   map[string]*controlWSConn
 	terminalMu        sync.Mutex
