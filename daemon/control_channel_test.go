@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -237,6 +239,48 @@ func TestControlWebSocketMediaReadResponseIsEncrypted(t *testing.T) {
 	}
 	if strings.Contains(string(wire), media.path) {
 		t.Fatalf("decrypted media response leaked Host path: %s", string(wire))
+	}
+}
+
+func TestControlWebSocketWorkspaceFileReadResponseIsEncrypted(t *testing.T) {
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceFilesRead)
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "secret.txt"), []byte("sealed-workspace-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "workspace_file_read",
+			Capability: CapabilityWorkspaceFilesRead,
+			Action:     ControlActionWorkspaceFilesRead,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"path":         "secret.txt",
+			},
+		},
+	})
+
+	plain, sealed := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealed), "sealed-workspace-secret") {
+		t.Fatalf("sealed workspace file response leaked payload: %s", string(sealed))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("plain response = %#v, want ok workspace file response", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["path"]) != "secret.txt" || stringValue(result["kind"]) != "file" {
+		t.Fatalf("workspace file response metadata = %#v", result)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(stringValue(result["content_base64"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != "sealed-workspace-secret" {
+		t.Fatalf("workspace file response body = %q, want fixture body", string(decoded))
 	}
 }
 

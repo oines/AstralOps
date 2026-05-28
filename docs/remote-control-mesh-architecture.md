@@ -640,13 +640,13 @@ media.stream
   面向大文件、生成中图片、未来视频或渐进式预览的媒体流。数据帧必须和 PTY 一样走 E2EE channel，relay 只转发密文。
 
 workspace.files.read
-  通过 Host 浏览文件。SSH workspace 中，由 Host 发起 SSH 读取。
+  通过 Host 浏览目录或读取文件内容。SSH workspace 中，由 Host 发起 SSH 读取。v1 返回目录列表或中小文件的 base64 内容；大文件后续走 stream。
 
 workspace.files.write
-  通过 Host 创建、编辑、删除、移动文件或应用 diff。SSH workspace 中，由 Host 发起 SSH 写入。
+  通过 Host 创建或覆盖文件。SSH workspace 中，由 Host 发起 SSH 写入。删除、移动、应用 diff 是后续扩展，不塞进 v1。
 
 workspace.exec
-  通过 Host 执行 workspace command，包括 agent command approval。
+  通过 Host 在 workspace root 内执行 command。SSH workspace 中，由 Host 发起 SSH exec；是否接入更细的 command approval 是后续策略层。
 
 terminal.open
   打开或 attach Host 拥有的 PTY。
@@ -1057,7 +1057,31 @@ chunked E2EE data frames
 
 Local Desktop 可以继续用本地 HTTP URL 渲染媒体，但 RemoteCoreClient 和 Mobile 必须只依赖 capability 和 encrypted media frames。
 
-### Phase 8 - PTY Attach Manager
+### Phase 8 - Workspace Gateway
+
+把 workspace 文件和命令能力收口到 Host Gateway。Controller 只能请求 Host 操作 workspace root 内的路径，不能把 Controller 本机路径当作 Host 路径。
+
+```text
+已落地:
+workspace.files.read
+workspace.files.write
+workspace.exec
+local workspace root confinement
+SSH workspace Host-initiated read/write/exec
+E2EE request/response frames
+no Host local absolute root in workspace.files.read response
+
+待落地:
+workspace.files.delete
+workspace.files.move
+workspace.files.apply_patch
+workspace file streaming for large files
+command approval policy integration
+```
+
+`workspace.files.read` v1 用于目录列表和中小文件读取；文件内容以 base64 放在 encrypted control response 中。`workspace.files.write` v1 只创建或覆盖单个文件，复杂 diff/edit/delete/move 后续单独扩展，避免把文件管理语义一次性塞进一个过宽 action。
+
+### Phase 9 - PTY Attach Manager
 
 把当前“一条 WebSocket 对应一个 PTY”的语义升级成 Host-owned terminal session：
 
@@ -1079,7 +1103,7 @@ lifecycle event only, no ANSI output JSONL storage
 跨进程持久 terminal session 恢复
 ```
 
-### Phase 9 - Mobile Controller
+### Phase 10 - Mobile Controller
 
 Mobile 用同一套远控协议构建完整 Controller UI：
 

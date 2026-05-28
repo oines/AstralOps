@@ -25,22 +25,25 @@ const (
 )
 
 const (
-	ControlActionSessionView        = "core.read.session_view"
-	ControlActionSessions           = "core.read.sessions"
-	ControlActionWorkspaces         = "core.read.workspaces"
-	ControlActionSessionInput       = "core.control.session_input"
-	ControlActionInterrupt          = "core.control.interrupt"
-	ControlActionInteractionRespond = "interaction.respond"
-	ControlActionSessionEdit        = "session.edit"
-	ControlActionAttachmentIngest   = "attachment.ingest"
-	ControlActionMediaRead          = "media.read"
-	ControlActionMediaDownload      = "media.download"
-	ControlActionTerminalOpen       = "terminal.open"
-	ControlActionTerminalAttach     = "terminal.attach"
-	ControlActionTerminalDetach     = "terminal.detach"
-	ControlActionTerminalInput      = "terminal.input"
-	ControlActionTerminalResize     = "terminal.resize"
-	ControlActionTerminalClose      = "terminal.close"
+	ControlActionSessionView         = "core.read.session_view"
+	ControlActionSessions            = "core.read.sessions"
+	ControlActionWorkspaces          = "core.read.workspaces"
+	ControlActionSessionInput        = "core.control.session_input"
+	ControlActionInterrupt           = "core.control.interrupt"
+	ControlActionInteractionRespond  = "interaction.respond"
+	ControlActionSessionEdit         = "session.edit"
+	ControlActionAttachmentIngest    = "attachment.ingest"
+	ControlActionMediaRead           = "media.read"
+	ControlActionMediaDownload       = "media.download"
+	ControlActionWorkspaceFilesRead  = "workspace.files.read"
+	ControlActionWorkspaceFilesWrite = "workspace.files.write"
+	ControlActionWorkspaceExec       = "workspace.exec"
+	ControlActionTerminalOpen        = "terminal.open"
+	ControlActionTerminalAttach      = "terminal.attach"
+	ControlActionTerminalDetach      = "terminal.detach"
+	ControlActionTerminalInput       = "terminal.input"
+	ControlActionTerminalResize      = "terminal.resize"
+	ControlActionTerminalClose       = "terminal.close"
 )
 
 type ControlRequest struct {
@@ -107,6 +110,12 @@ func controlActionCapability(action string) string {
 		return CapabilityMediaRead
 	case ControlActionMediaDownload:
 		return CapabilityMediaDownload
+	case ControlActionWorkspaceFilesRead:
+		return CapabilityWorkspaceFilesRead
+	case ControlActionWorkspaceFilesWrite:
+		return CapabilityWorkspaceFilesWrite
+	case ControlActionWorkspaceExec:
+		return CapabilityWorkspaceExec
 	case ControlActionTerminalOpen, ControlActionTerminalAttach, ControlActionTerminalDetach:
 		return CapabilityTerminalOpen
 	case ControlActionTerminalInput, ControlActionTerminalResize, ControlActionTerminalClose:
@@ -216,6 +225,24 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn) (an
 			return nil, err
 		}
 		return a.readControlMedia(params, true)
+	case ControlActionWorkspaceFilesRead:
+		var params workspaceFilesReadParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.readControlWorkspaceFiles(context.Background(), params)
+	case ControlActionWorkspaceFilesWrite:
+		var params workspaceFilesWriteParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.writeControlWorkspaceFile(context.Background(), params)
+	case ControlActionWorkspaceExec:
+		var params workspaceExecParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.executeControlWorkspaceCommand(context.Background(), params)
 	case ControlActionTerminalOpen:
 		var params terminalOpenParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

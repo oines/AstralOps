@@ -423,6 +423,71 @@ export type MediaReadResult = {
   download?: boolean;
 };
 
+export type WorkspaceFilesReadParams = {
+  workspace_id: string;
+  path?: string;
+  mode?: "auto" | "list" | "file";
+  max_bytes?: number;
+};
+
+export type WorkspaceFilesWriteParams = {
+  workspace_id: string;
+  path: string;
+  content?: string;
+  content_base64?: string;
+  create_parents?: boolean;
+};
+
+export type WorkspaceExecParams = {
+  workspace_id: string;
+  command: string;
+  cwd?: string;
+  timeout_ms?: number;
+};
+
+export type WorkspaceFileEntry = {
+  name: string;
+  path: string;
+  kind: "dir" | "file" | string;
+  size?: number;
+  mod_time?: string;
+};
+
+export type WorkspaceFilesReadResult = {
+  workspace_id: string;
+  target: WorkspaceTarget;
+  path: string;
+  kind: "dir" | "file" | string;
+  name?: string;
+  size?: number;
+  mod_time?: string;
+  mime_type?: string;
+  content_base64?: string;
+  entries?: WorkspaceFileEntry[];
+  truncated?: boolean;
+};
+
+export type WorkspaceFilesWriteResult = {
+  workspace_id: string;
+  target: WorkspaceTarget;
+  path: string;
+  kind: "file" | string;
+  size: number;
+};
+
+export type WorkspaceExecResult = {
+  workspace_id: string;
+  target: WorkspaceTarget;
+  command: string;
+  cwd: string;
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+  output?: string;
+  duration_ms: number;
+  failure?: string;
+};
+
 export type ControlCapability =
   | "core.read"
   | "core.control"
@@ -451,6 +516,9 @@ export type ControlAction =
   | "attachment.ingest"
   | "media.read"
   | "media.download"
+  | "workspace.files.read"
+  | "workspace.files.write"
+  | "workspace.exec"
   | "terminal.open"
   | "terminal.attach"
   | "terminal.detach"
