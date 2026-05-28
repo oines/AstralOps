@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -895,6 +896,111 @@ func TestControlWebSocketWorkspacePatchRequestResponseIsEncrypted(t *testing.T) 
 	}
 	if string(body) != "new-wire-secret\n" {
 		t.Fatalf("patched body = %q, want encrypted patch output", string(body))
+	}
+}
+
+func TestControlWebSocketWorkspaceExecRequestResponseIsEncrypted(t *testing.T) {
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceExec)
+	secret := "sealed-workspace-exec-secret"
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "exec-secret.txt"), []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := "cat exec-secret.txt"
+	if runtime.GOOS == "windows" {
+		command = "type exec-secret.txt"
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "workspace_exec",
+			Capability: CapabilityWorkspaceExec,
+			Action:     ControlActionWorkspaceExec,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"command":      command,
+				"timeout_ms":   5000,
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionWorkspaceExec) || strings.Contains(string(sealedRequest), command) || strings.Contains(string(sealedRequest), workspace.ID) {
+		t.Fatalf("sealed workspace exec request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), secret) || strings.Contains(string(sealedResponse), command) || strings.Contains(string(sealedResponse), workspace.LocalCWD) {
+		t.Fatalf("sealed workspace exec response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("plain response = %#v, want ok workspace exec response", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["workspace_id"]) != workspace.ID || stringValue(result["command"]) != command || stringValue(result["cwd"]) != "" {
+		t.Fatalf("workspace exec response metadata = %#v", result)
+	}
+	if int(numberValue(result["exit_code"])) != 0 || stringValue(result["stdout"]) != secret || stringValue(result["approval_policy"]) != WorkspaceExecPolicyTrusted {
+		t.Fatalf("workspace exec response result = %#v", result)
+	}
+	wire, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), workspace.LocalCWD) {
+		t.Fatalf("workspace exec response leaked Host root: %s", string(wire))
+	}
+}
+
+func TestControlWebSocketWorkspaceExecRequireApprovalIsEncrypted(t *testing.T) {
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceExec)
+	if _, err := app.store.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:  "dev_controller",
+		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
+		Capabilities:        []string{CapabilityWorkspaceExec},
+		WorkspaceExecPolicy: WorkspaceExecPolicyRequireApproval,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(workspace.LocalCWD, "should-not-run.txt")
+	command := "printf nope > should-not-run.txt"
+	if runtime.GOOS == "windows" {
+		command = "echo nope > should-not-run.txt"
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "workspace_exec_approval",
+			Capability: CapabilityWorkspaceExec,
+			Action:     ControlActionWorkspaceExec,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"command":      command,
+				"timeout_ms":   5000,
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionWorkspaceExec) || strings.Contains(string(sealedRequest), command) || strings.Contains(string(sealedRequest), workspace.ID) {
+		t.Fatalf("sealed workspace exec approval request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), command) || strings.Contains(string(sealedResponse), "workspace_exec_approval_required") {
+		t.Fatalf("sealed workspace exec approval response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || plain.Response.OK || plain.Response.Error == nil {
+		t.Fatalf("plain response = %#v, want workspace exec approval error", plain)
+	}
+	if plain.Response.Error.Status != http.StatusConflict || plain.Response.Error.Code != "workspace_exec_approval_required" {
+		t.Fatalf("workspace exec approval error = %#v", plain.Response.Error)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("policy-gated command created marker, stat err = %v", statErr)
 	}
 }
 
