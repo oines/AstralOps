@@ -73,6 +73,7 @@ If an event is not covered by a fixture, preserve it only as hidden control.raw 
 Do not add "best guess" UI branches for event names that have not been observed locally.
 turn.replaced is an AstralOps/Core-generated semantic event, not a Claude/Codex raw mapping. It marks a replaced transcript seq range after editing and resending the last user message. Normal transcript, pending interaction projection, and interaction responses must treat events in that seq range as stale/hidden.
 message.user attachments and message.media are first-class transcript media surfaces. UI clients render media from AstralEvent.normalized only. Local filesystem paths in normalized media are Host-private references for Core/runtime/media serving; clients must not treat them as directly readable remote paths. Remote controllers must fetch media through Host/Core media capabilities using event_seq + media_id over the encrypted control/data channel.
+Session input while a turn is running must be modeled as an explicit Core decision: start, queue, or steer. Controller UI must not independently decide continuation semantics for remote control. Desktop app settings, shell theme/window behavior, notifications, logs, and auto updates are local shell concerns unless a future Host management capability explicitly says otherwise.
 ```
 
 Architecture and fallback rule:

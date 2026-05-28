@@ -150,6 +150,71 @@ Core API 消息、event subscription payload、附件/媒体数据帧、PTY stre
 
 推送通知不能包含 session 或任务内容。推送最多只能提示 AstralOps 有新活动；App 打开后必须通过 E2EE channel 拉取详情。
 
+## 远控传输策略
+
+远控 v1 使用 LAN-first relay fallback。传输路径不参与信任判断：
+
+```text
+Transport is not trust.
+LAN direct 和 relay 只是 packet path。
+所有路径都必须跑同一套设备认证 E2EE 握手。
+```
+
+Desktop Host 在本机网络上提供一个远控 LAN listener，并通过 mDNS 发布候选地址：
+
+```text
+service: _astralops._tcp.local
+TXT:
+  device_id
+  account_id_hash
+  public_key_fingerprint
+  port
+```
+
+mDNS 只用于发现候选地址，不能授予信任。Controller 收到 LAN 广播后，必须用本地 trust store 或云端 device registry 校验 `device_id` 和 public key fingerprint。真正连接成功的条件仍然是：
+
+```text
+LAN transport connected
+  -> E2EE handshake succeeds
+  -> Host public key matches trusted device
+  -> Host trust grant / trust_epoch is valid
+```
+
+连接某台 Host 时，Controller 使用简单规则：
+
+```text
+if host_device_id has LAN candidate:
+  try LAN for a short timeout
+  if LAN E2EE handshake succeeds:
+    use LAN
+  else:
+    use relay
+else:
+  use relay
+```
+
+这个判断是 per Controller-Host pair 的。一个账号的 mesh 里可以同时存在：
+
+```text
+Phone -> Home Desktop: LAN
+Phone -> Office Desktop: relay
+Laptop -> Home Desktop: LAN
+Tablet -> Home Desktop: relay
+```
+
+v1 明确不做：
+
+```text
+public direct
+NAT punching
+STUN/TURN
+WebRTC
+复杂 candidate 竞速
+运行中 transport migration
+```
+
+如果未来需要更强穿透能力，再引入 ICE/WebRTC/QUIC。当前目标是低复杂度、低延迟优先、relay 自动兜底。
+
 ## Mesh 模型
 
 一个账号下可以有多台设备：
@@ -358,7 +423,7 @@ core.read
   查看 workspace 列表、session 列表、session view、transcript projection、agent 状态、queue、pending interaction。
 
 core.control
-  发送 prompt、中断 turn、取消/steer queued prompt、fork/delete session。
+  发送 prompt、中断 turn、取消/steer queued prompt、fork/delete session。发送 prompt 时必须由 Host/Core 明确判定 session input mode，而不是由 Controller UI 自行猜测。
 
 session.edit
   编辑最后一条用户消息并由 Host/Core 执行 rollback/resend。被替换的旧 turn range 必须从 transcript 和 pending interaction projection 中隐藏，旧 approval/ask 响应必须由 Host 拒绝为 stale。
@@ -394,7 +459,7 @@ terminal.input
   向 Host 拥有的 PTY 发送原始按键输入。
 
 host.manage
-  创建/删除 workspace，连接/断开 SSH workspace，管理设置，管理 trusted devices，撤销会话。
+  创建/删除 workspace，连接/断开 SSH workspace，管理 trusted devices，撤销会话。
 ```
 
 UI 可以展示更简单的模式：
@@ -407,6 +472,42 @@ UI 可以展示更简单的模式：
 ```
 
 但 Host 内部应该按细粒度 capability 执行权限判断。
+
+## Session Input 语义
+
+远控 v1 不需要把 `session.input` 拆成单独 capability；它属于 `core.control`。但它的行为语义必须明确。
+
+Controller 发来的输入必须由 Host/Core 归一成以下模式之一：
+
+```text
+start
+  session 空闲时启动一个新 turn。
+
+queue
+  session 正在运行，但本次输入应该排队，等待当前 turn 完成后再执行。
+
+steer
+  session 正在运行，本次输入用于引导当前任务。
+  Codex 当前对应 turn/steer。
+  Claude 当前实现更接近 interrupt 当前 turn 后用新输入接上。
+```
+
+Controller UI 可以只显示“发送”或“继续输入”，但远控协议和 Host 日志不能含糊。多 Controller 同时控制同一 Host 时，Host/Core 是唯一可以决定 start、queue、steer 的地方。
+
+## 本机 Shell 设置
+
+当前 `AppSettings`、桌面主题、通知偏好、窗口效果、日志目录、自动更新检查/安装，都属于本机 desktop shell concern。
+
+远控 v1 不暴露这些能力：
+
+```text
+settings.read
+settings.write
+updates.check
+updates.install
+```
+
+未来如果要做远程设备管理，再单独设计 Host management capability。不要把当前 desktop 本机设置默认纳入远控核心能力。
 
 ## 附件和媒体资源
 
@@ -642,7 +743,22 @@ reconnect and resume semantics
 
 云端 signaling 负责协商连接。Relay 只转发加密帧。
 
-### Phase 5 - Attachment and Media Gateway
+### Phase 5 - LAN-first Relay Fallback
+
+实现远控传输 v1：
+
+```text
+Desktop Host LAN listener
+mDNS publish / discover
+LAN candidate validation
+short LAN connection timeout
+relay fallback
+same E2EE handshake on LAN and relay
+```
+
+不实现 NAT punching、WebRTC、STUN/TURN 或 transport migration。
+
+### Phase 6 - Attachment and Media Gateway
 
 把附件和 transcript 媒体收口到 Host gateway：
 
@@ -658,7 +774,7 @@ E2EE data frames
 
 Local Desktop 可以继续用本地 HTTP URL 渲染媒体，但 RemoteCoreClient 和 Mobile 必须只依赖 capability 和 encrypted media frames。
 
-### Phase 6 - PTY Attach Manager
+### Phase 7 - PTY Attach Manager
 
 把当前“一条 WebSocket 对应一个 PTY”的语义升级成 Host-owned terminal session：
 
@@ -674,7 +790,7 @@ single active writer
 multi viewer
 ```
 
-### Phase 7 - Mobile Controller
+### Phase 8 - Mobile Controller
 
 Mobile 用同一套远控协议构建完整 Controller UI：
 
@@ -706,6 +822,9 @@ Mobile 不包含 Host daemon 和 runtime。
 把 PTY 字节输出塞进 AstralEvent JSONL
 把附件或媒体明文上传到云端/relay
 把 Host 本地 path 当作远程 Controller 可访问资源
+把 desktop 本机设置和自动更新默认暴露成远控能力
+把 LAN/mDNS 发现结果当作信任来源
+在 v1 做 NAT punching、STUN/TURN、WebRTC 或复杂 transport migration
 ```
 
 ## 核心不变量
@@ -719,4 +838,5 @@ Desktop Host 是执行权威。
 Controller 设备是完整远程 UI。
 业务 payload 在 Controller 和 Host 之间端到端加密。
 附件、媒体、PTY 都是 Host-owned resource stream，不是云端同步数据。
+LAN 和 relay 只是传输路径；E2EE 和 Host trust store 才是安全边界。
 ```
