@@ -91,18 +91,18 @@ export function WorkspaceModal({
   }
 
   return (
-    <div className="fixed inset-0 z-[var(--ao-z-modal)] grid place-items-center bg-[rgba(20,20,22,0.36)] p-6 backdrop-blur-md">
-      <section className="w-[min(580px,100%)] overflow-hidden rounded-[18px] border border-[#e9e7e1] bg-white shadow-[0_18px_48px_rgba(29,29,31,0.16)]">
-        <header className="flex items-start justify-between gap-5 border-b border-[#e7e5e0] px-5 pb-4 pt-5">
+    <div className="fixed inset-0 z-[var(--ao-z-modal)] grid place-items-center bg-[rgba(20,20,22,0.36)] p-4 backdrop-blur-md">
+      <section className="w-[min(520px,100%)] overflow-hidden rounded-lg border border-[#e9e7e1] bg-white shadow-[0_18px_48px_rgba(29,29,31,0.16)]">
+        <header className="flex items-start justify-between gap-4 border-b border-[#e7e5e0] px-4 pb-3 pt-4">
           <div>
-            <h2 className="m-0 text-[18px] font-bold text-[#1d1d1f]">创建工作区</h2>
+            <h2 className="m-0 text-[16px] font-bold text-[#1d1d1f]">创建工作区</h2>
           </div>
-          <button className="grid size-8 place-items-center rounded-[10px] text-[#98979c] hover:bg-black/[0.035]" type="button" title="Close" onClick={onClose}>
+          <button className="grid size-8 place-items-center rounded-lg text-[#98979c] hover:bg-black/[0.035]" type="button" title="Close" onClick={onClose}>
             <X size={16} />
           </button>
         </header>
 
-        <div className="grid gap-4 px-5 py-5">
+        <div className="grid gap-3 px-4 py-4">
           <Field label="位置">
             <div className="grid grid-cols-2 gap-2">
               <TargetChoice
@@ -125,7 +125,7 @@ export function WorkspaceModal({
           {draft.target === "local" ? (
             <Field label="本机文件夹">
               <button
-                className="flex h-11 w-full items-center gap-2 rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 text-left text-[14px] font-semibold text-[#343438] hover:bg-[#f1f0ec]"
+                className="flex h-10 w-full items-center gap-2 rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 text-left text-[13px] font-semibold text-[#343438] hover:bg-[#f1f0ec]"
                 type="button"
                 onClick={() => void chooseFolder()}
               >
@@ -139,7 +139,7 @@ export function WorkspaceModal({
             <div className="grid gap-3">
               <Field label="SSH 地址">
                 <input
-                  className="h-10 w-full rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
+                  className="h-10 w-full rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
                   placeholder="root@example.com"
                   value={draft.ssh_endpoint}
                   onChange={(event) => setDraft((current) => ({ ...current, ssh_endpoint: event.target.value }))}
@@ -148,7 +148,7 @@ export function WorkspaceModal({
               <div className="grid grid-cols-[110px_1fr] gap-3">
                 <Field label="端口">
                   <input
-                    className="h-10 w-full rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
+                    className="h-10 w-full rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
                     min={1}
                     type="number"
                     value={draft.ssh_port}
@@ -157,7 +157,7 @@ export function WorkspaceModal({
                 </Field>
                 <Field label="远程目录">
                   <input
-                    className="h-10 w-full rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
+                    className="h-10 w-full rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
                     placeholder="/home/user/project"
                     value={draft.ssh_remote_cwd}
                     onChange={(event) => setDraft((current) => ({ ...current, ssh_remote_cwd: event.target.value }))}
@@ -169,21 +169,21 @@ export function WorkspaceModal({
 
           <Field label="名称">
             <input
-              className="h-10 w-full rounded-xl border border-[#e7e5e0] bg-[#f7f6f3] px-3 text-[14px] outline-none focus:border-[#2563eb]"
+              className="h-10 w-full rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 text-[14px] outline-none focus:border-[#2563eb]"
               placeholder="默认使用文件夹名"
               value={draft.name}
               onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
             />
           </Field>
 
-          {error ? <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-600">{error}</div> : null}
+          {error ? <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-600">{error}</div> : null}
         </div>
 
-        <footer className="flex justify-end gap-2 border-t border-[#e7e5e0] px-5 pb-5 pt-4">
-          <button className="rounded-full border border-[#e7e5e0] px-4 py-2 text-[14px] font-semibold text-[#1d1d1f] hover:bg-black/[0.035]" type="button" onClick={onClose}>
+        <footer className="flex justify-end gap-2 border-t border-[#e7e5e0] px-4 pb-4 pt-3">
+          <button className="rounded-lg border border-[#e7e5e0] px-3 py-1.5 text-[13px] font-semibold text-[#1d1d1f] hover:bg-black/[0.035]" type="button" onClick={onClose}>
             取消
           </button>
-          <button className="rounded-full bg-[#2563eb] px-4 py-2 text-[14px] font-semibold text-white disabled:opacity-50" type="button" disabled={busy || !canCreate} onClick={() => void submit()}>
+          <button className="rounded-lg bg-[#2563eb] px-3 py-1.5 text-[13px] font-semibold text-white disabled:opacity-50" type="button" disabled={busy || !canCreate} onClick={() => void submit()}>
             创建工作区
           </button>
         </footer>
@@ -218,7 +218,7 @@ type TargetChoiceProps = {
 function TargetChoice({ active, description, disabled = false, icon, label, onClick }: TargetChoiceProps): React.JSX.Element {
   return (
     <button
-      className={`flex min-w-0 items-center gap-2 rounded-xl border px-3 py-3 text-left transition ${
+      className={`flex min-w-0 items-center gap-2 rounded-lg border px-3 py-2.5 text-left transition ${
         active
           ? "border-[#2563eb] bg-[#eff4ff] text-[#1d1d1f]"
           : "border-[#e7e5e0] bg-[#f7f6f3] text-[#343438] hover:bg-[#f1f0ec]"
@@ -229,7 +229,7 @@ function TargetChoice({ active, description, disabled = false, icon, label, onCl
     >
       {icon}
       <span className="min-w-0">
-        <span className="flex items-center gap-1.5 text-[14px] font-semibold">
+        <span className="flex items-center gap-1.5 text-[13px] font-semibold">
           {label}
           {active ? <Check size={14} strokeWidth={2} /> : null}
         </span>

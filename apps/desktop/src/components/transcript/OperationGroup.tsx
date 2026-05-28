@@ -284,7 +284,7 @@ function CommandRow({ item }: { item: CommandItem }): React.JSX.Element {
         {hasOutput ? <ChevronRight className={`ml-auto shrink-0 transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`} size={15} strokeWidth={2} /> : null}
       </button>
       {open && hasOutput ? (
-        <div className="min-w-0 rounded-[12px] bg-black/5 px-3 py-2 text-[#5f6368]">
+        <div className="min-w-0 rounded-lg bg-black/5 px-3 py-2 text-[#5f6368]">
           <div className="mb-1.5 text-[13px] font-medium">Shell</div>
           {outputClipped ? <div className="mb-2 text-[12px] font-semibold text-[#a0a3a7]">已显示最新 12000 个字符</div> : null}
           <pre className="max-h-72 min-w-0 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 [overflow-wrap:anywhere]">{outputPreview}</pre>

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Notification, Tray, clipboard, dialog, ipcMain, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, Menu, Notification, Tray, clipboard, dialog, ipcMain, nativeImage, nativeTheme, shell } = require("electron");
 const { execFile, spawn } = require("child_process");
 const { promisify } = require("util");
 const crypto = require("crypto");
@@ -667,6 +667,7 @@ ipcMain.handle("astral:show-notification", async (_event, payload) => {
 });
 
 app.whenReady().then(async () => {
+  nativeTheme.themeSource = "system";
   if (process.platform !== "darwin") {
     Menu.setApplicationMenu(null);
   }

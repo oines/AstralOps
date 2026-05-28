@@ -1,10 +1,11 @@
-import { Bot, Check, ChevronRight, Folder, Link2, LoaderCircle, Plus, TerminalSquare, Trash2, Unlink2 } from "lucide-react";
+import { Bot, Check, ChevronRight, Folder, Link2, LoaderCircle, Plus, Settings, TerminalSquare, Trash2, Unlink2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AgentKind, Session, Workspace, WorkspaceConnection } from "../types";
 
 type SidebarProps = {
   activeSessionId: string;
   collapsed: boolean;
+  nativeVibrancy: boolean;
   sessions: Session[];
   sessionStates: Record<string, string>;
   sessionTitles: Record<string, string>;
@@ -17,6 +18,7 @@ type SidebarProps = {
   onDisconnectWorkspace: (workspaceId: string) => void;
   onDeleteSession: (sessionId: string) => void;
   onDeleteWorkspace: (workspaceId: string) => void;
+  onOpenSettings: () => void;
   onResize: (width: number) => void;
   onSelectSession: (sessionId: string) => void;
   onSelectWorkspace: (workspaceId: string) => void;
@@ -25,6 +27,7 @@ type SidebarProps = {
 export function Sidebar({
   activeSessionId,
   collapsed,
+  nativeVibrancy,
   sessions,
   sessionStates,
   sessionTitles,
@@ -37,6 +40,7 @@ export function Sidebar({
   onDisconnectWorkspace,
   onDeleteSession,
   onDeleteWorkspace,
+  onOpenSettings,
   onResize,
   onSelectSession,
 }: SidebarProps): React.JSX.Element {
@@ -107,16 +111,16 @@ export function Sidebar({
 
   return (
     <aside
-      className={`relative flex shrink-0 flex-col overflow-hidden bg-transparent transition-[width,border-color] duration-180 ease-out ${collapsed ? "border-r border-transparent" : "border-r border-black/5"} ${dragging ? "cursor-col-resize" : ""}`}
+      className={`ao-sidebar ${nativeVibrancy ? "ao-sidebar-vibrant" : "ao-sidebar-solid"} relative flex shrink-0 flex-col overflow-hidden transition-[width,border-color] duration-180 ease-out ${collapsed ? "border-r border-transparent" : "border-r border-black/5"} ${dragging ? "cursor-col-resize" : ""}`}
       style={{ width: collapsed ? 0 : width }}
       aria-hidden={collapsed}
     >
       <div className={`flex h-full flex-col transition-[opacity,transform] duration-180 ease-out ${collapsed ? "pointer-events-none -translate-x-2 opacity-0" : "translate-x-0 opacity-100"}`} style={{ width }}>
-      <div className="h-[52px] shrink-0" />
+      <div className="[-webkit-app-region:drag] h-[52px] shrink-0" />
 
       <nav className="grid gap-1 px-3 pb-6">
         <button
-          className="flex h-9 w-full items-center gap-3 rounded-lg px-2 text-left text-[15px] font-semibold text-[#242426] transition-colors duration-150 ease-out hover:bg-black/5"
+          className="flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-left text-[14px] font-semibold text-[#242426] transition-colors duration-150 ease-out hover:bg-black/5"
           type="button"
           onClick={onCreateWorkspace}
         >
@@ -128,7 +132,7 @@ export function Sidebar({
       <nav className="min-h-0 flex-1 overflow-auto px-3 pb-4">
         {workspaces.length === 0 ? (
           <button
-            className="mx-2 mt-1 w-[calc(100%-16px)] rounded-lg border border-dashed border-black/15 px-3 py-3 text-center text-[14px] font-semibold text-[#6b6b70] hover:bg-black/5 hover:text-[#1d1d1f]"
+            className="mx-2 mt-1 w-[calc(100%-16px)] rounded-lg border border-dashed border-black/15 px-3 py-2 text-center text-[13px] font-semibold text-[#6b6b70] hover:bg-black/5 hover:text-[#1d1d1f]"
             type="button"
             onClick={onCreateWorkspace}
           >
@@ -180,7 +184,16 @@ export function Sidebar({
         </div>
       </nav>
 
-      <div className="h-5 shrink-0" />
+      <nav className="shrink-0 px-3 pb-3 pt-2">
+        <button
+          className="flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-left text-[13px] font-semibold text-[var(--ao-muted-strong)] transition-colors duration-150 ease-out hover:bg-black/[0.045] hover:text-[var(--ao-text)]"
+          type="button"
+          onClick={onOpenSettings}
+        >
+          <Settings size={16} strokeWidth={1.9} />
+          <span>设置</span>
+        </button>
+      </nav>
       </div>
       <div
         className={`absolute inset-y-0 right-[-3px] z-20 w-1.5 cursor-col-resize transition-colors duration-150 ease-out hover:bg-black/10 ${collapsed ? "hidden" : ""}`}
@@ -318,7 +331,7 @@ function WorkspaceRow({
     : "grid-cols-[14px_17px_minmax(0,1fr)_26px_26px]";
   return (
     <div
-      className={`group relative grid min-h-[32px] w-full cursor-default ${rowGridClass} items-center gap-1.5 rounded-[9px] py-0.5 pl-1.5 pr-1.5 text-[#6f7378] transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.045]`}
+      className={`group relative grid min-h-[32px] w-full cursor-default ${rowGridClass} items-center gap-1.5 rounded-lg py-0.5 pl-1.5 pr-1.5 text-[#6f7378] transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.045]`}
       data-sidebar-menu
       onClick={onClick}
     >
@@ -400,12 +413,12 @@ function WorkspaceRow({
       </button>
       {menuOpen ? (
         <div
-          className="absolute left-9 top-10 z-20 w-40 rounded-[16px] border border-black/10 bg-white p-1.5 shadow-[0_18px_45px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]"
+          className="absolute left-9 top-10 z-20 w-40 rounded-lg border border-black/10 bg-white p-1.5 shadow-[0_18px_45px_rgba(0,0,0,0.12),0_2px_8px_rgba(0,0,0,0.06)]"
           data-sidebar-menu
           onClick={(event) => event.stopPropagation()}
         >
           <button
-            className="flex h-8 w-full items-center gap-2 rounded-[10px] px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5"
+            className="flex h-8 w-full items-center gap-2 rounded-lg px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5"
             type="button"
             onClick={() => void onCreateSession("claude")}
           >
@@ -413,7 +426,7 @@ function WorkspaceRow({
             Claude Code
           </button>
           <button
-            className="flex h-8 w-full items-center gap-2 rounded-[10px] px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5"
+            className="flex h-8 w-full items-center gap-2 rounded-lg px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-black/5"
             type="button"
             onClick={() => void onCreateSession("codex")}
           >
@@ -454,7 +467,7 @@ function SessionRow({
   }
   return (
     <div
-      className={`group relative grid h-8 cursor-default grid-cols-[minmax(0,1fr)_50px] items-center gap-1 rounded-[9px] pl-2.5 pr-2 transition-all duration-150 ease-out ${
+      className={`group relative grid h-8 cursor-default grid-cols-[minmax(0,1fr)_50px] items-center gap-1 rounded-lg pl-2.5 pr-2 transition-all duration-150 ease-out ${
         active ? "bg-black/[0.06] text-[#202124]" : "text-[#5f6368] hover:bg-black/[0.035] hover:text-[#202124]"
       }`}
       role="button"

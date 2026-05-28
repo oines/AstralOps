@@ -303,14 +303,14 @@ export function Transcript({
       </section>
       {showBackToBottom ? (
         <button
-          className="absolute left-1/2 z-20 grid size-11 -translate-x-1/2 place-items-center rounded-full border border-black/10 bg-white/95 text-[#343438] shadow-[0_4px_12px_rgba(0,0,0,0.08),0_1px_3px_rgba(0,0,0,0.04)] backdrop-blur transition-[background-color,transform,box-shadow] duration-150 ease-out hover:-translate-x-1/2 hover:scale-[1.03] hover:bg-black/5"
+          className="absolute left-1/2 z-20 grid size-8 -translate-x-1/2 place-items-center rounded-full border border-black/10 bg-white/95 text-[#343438] shadow-[0_2px_7px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] backdrop-blur transition-[background-color,transform,box-shadow] duration-150 ease-out hover:-translate-x-1/2 hover:scale-[1.03] hover:bg-black/5"
           type="button"
           aria-label="回到底部"
           title="回到底部"
           style={{ bottom: composerHeight + 16 }}
           onClick={() => scrollToBottom()}
         >
-          <ArrowDown size={23} strokeWidth={2} />
+          <ArrowDown size={18} strokeWidth={2} />
         </button>
       ) : null}
     </div>
@@ -355,7 +355,7 @@ function LoadOlderRow({ loading, onLoadOlder }: { loading: boolean; onLoadOlder?
   return (
     <div className="mb-4 flex justify-center">
       <button
-        className="rounded-full border border-black/5 bg-white px-4 py-2 text-[13px] font-semibold text-[#777b80] shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-colors duration-150 ease-out hover:bg-black/5 disabled:cursor-default disabled:opacity-60"
+        className="rounded-lg border border-black/5 bg-white px-4 py-2 text-[13px] font-semibold text-[#777b80] shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-colors duration-150 ease-out hover:bg-black/5 disabled:cursor-default disabled:opacity-60"
         disabled={loading}
         type="button"
         onClick={onLoadOlder}
@@ -382,7 +382,7 @@ function ForkOriginRow({
     <div className="my-8 flex min-w-0 items-center gap-4 text-[#8a8d91]">
       <div className="h-px min-w-0 flex-1 bg-black/10" />
       <button
-        className="flex shrink-0 items-center gap-2 rounded-full px-3 py-1.5 text-[14px] font-semibold leading-5 text-[#2f8cff] transition-colors duration-150 ease-out hover:bg-[#2f8cff]/10 disabled:cursor-default disabled:text-[#a0a3a7] disabled:hover:bg-transparent"
+        className="flex shrink-0 items-center gap-2 rounded-lg px-3 py-1.5 text-[14px] font-semibold leading-5 text-[#2f8cff] transition-colors duration-150 ease-out hover:bg-[#2f8cff]/10 disabled:cursor-default disabled:text-[#a0a3a7] disabled:hover:bg-transparent"
         disabled={disabled}
         type="button"
         onClick={() => onOpenSourceSession?.(sourceSessionId, eventSeq)}
@@ -566,9 +566,9 @@ function UserMessage({
   if (editing) {
     return (
       <div className="flex justify-end">
-        <div className="grid w-[min(80%,620px)] gap-2 rounded-[16px] bg-black/[0.045] p-2">
+        <div className="grid w-[min(80%,620px)] gap-2 rounded-lg bg-black/[0.045] p-2">
           <textarea
-            className="max-h-40 min-h-20 resize-none rounded-[12px] border border-black/10 bg-white/85 px-3 py-2 text-[15px] font-semibold leading-6 text-[#202124] outline-none focus:border-[#2f8cff]/50"
+            className="max-h-40 min-h-20 resize-none rounded-lg border border-black/10 bg-white/85 px-3 py-2 text-[15px] font-semibold leading-6 text-[#202124] outline-none focus:border-[#2f8cff]/50"
             disabled={submitting}
             value={draft}
             onChange={(changeEvent) => setDraft(changeEvent.target.value)}
@@ -627,7 +627,7 @@ function UserMessage({
         ) : null}
         <div className="grid min-w-0 gap-2">
           {text ? (
-            <div className="min-w-0 rounded-[16px] bg-black/[0.045] px-4 py-2 text-[15px] font-semibold leading-6 text-[#202124]">
+            <div className="min-w-0 rounded-lg bg-black/[0.045] px-4 py-2 text-[15px] font-semibold leading-6 text-[#202124]">
               {text}
             </div>
           ) : null}
@@ -697,7 +697,7 @@ function DetailEvent({
         title="文件变更"
         summary={diffSummary(value)}
       >
-        <pre className="max-h-72 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-[12px] border border-black/5 bg-black/5 p-3 font-mono text-[12px] leading-5 text-[#343438] [overflow-wrap:anywhere]">
+        <pre className="max-h-72 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-[12px] leading-5 text-[#343438] [overflow-wrap:anywhere]">
           {textValue(value, "diff") || JSON.stringify(value.patch ?? value.changes ?? value, null, 2)}
         </pre>
       </FoldableDetail>
@@ -710,7 +710,7 @@ function DetailEvent({
     return (
       <FoldableDetail defaultOpen icon={<TerminalSquare size={16} strokeWidth={1.8} />} title="命令输出">
         {preview.length !== text.length ? <div className="mb-2 text-[12px] font-semibold text-[#a0a3a7]">已显示最新 8000 个字符</div> : null}
-        <pre className="min-w-0 overflow-hidden whitespace-pre-wrap break-words rounded-[12px] bg-black/5 px-3 py-2 font-mono text-[12px] leading-5 text-[#77747a] [overflow-wrap:anywhere]">
+        <pre className="min-w-0 overflow-hidden whitespace-pre-wrap break-words rounded-lg bg-black/5 px-3 py-2 font-mono text-[12px] leading-5 text-[#77747a] [overflow-wrap:anywhere]">
           {preview}
         </pre>
       </FoldableDetail>
@@ -729,7 +729,7 @@ function FileReadBlock({ file }: { file: NonNullable<ReturnType<typeof fileReadF
   const lineNumberWidth = Math.max(2, String(file.startLine + Math.max(0, lines.length - 1)).length);
   return (
     <FoldableDetail defaultOpen={false} icon={<FileText size={16} strokeWidth={1.8} />} title="已读取文件" summary={file.path}>
-      <div className="overflow-hidden rounded-[12px] border border-black/5 bg-black/[0.035]">
+      <div className="overflow-hidden rounded-lg border border-black/5 bg-black/[0.035]">
         <div className="truncate border-b border-black/5 px-3 py-2 font-mono text-[13px] text-[#6f7378]">{file.name}</div>
         <div className="max-h-72 min-w-0 overflow-auto py-2 font-mono text-[12px] leading-5 text-[#5f6368]">
           {lines.map((line, index) => {
@@ -763,7 +763,7 @@ function TodoBlock({ event }: { event: AstralEvent }): React.JSX.Element {
 
   return (
     <FoldableDetail defaultOpen icon={<ListChecks size={16} strokeWidth={1.8} />} title="任务清单已更新" summary={summary}>
-      <div className="grid gap-1.5 rounded-[16px] bg-black/5 px-4 py-3">
+      <div className="grid gap-1.5 rounded-lg bg-black/5 px-4 py-3">
         {todos.length > 0 ? (
           todos.map((todo, index) => (
             <div className="flex min-w-0 items-start gap-3 text-[14px] font-medium leading-6 text-[#5f6368]" key={`${todo.text}-${index}`}>
@@ -791,7 +791,7 @@ function PlanBlock({ event }: { event: AstralEvent }): React.JSX.Element {
   return (
     <FoldableDetail defaultOpen icon={<Pencil size={16} strokeWidth={1.8} />} title={title} summary={summary}>
       {plan.length > 0 ? (
-        <div className="grid gap-2 rounded-[18px] bg-black/5 px-4 py-3">
+        <div className="grid gap-2 rounded-lg bg-black/5 px-4 py-3">
           {plan.map((item, index) => (
             <div className="flex min-w-0 items-start gap-3 text-[14px] leading-[1.65] text-[#343438]" key={`${item.step}-${index}`}>
               <span className="w-5 shrink-0 text-right text-[#b0b2b6]">{index + 1}.</span>
@@ -801,7 +801,7 @@ function PlanBlock({ event }: { event: AstralEvent }): React.JSX.Element {
           ))}
         </div>
       ) : text ? (
-        <div className="rounded-[16px] bg-black/5 px-4 py-3 text-[14px] leading-[1.65] text-[#343438]">
+        <div className="rounded-lg bg-black/5 px-4 py-3 text-[14px] leading-[1.65] text-[#343438]">
           <MarkdownText text={text} />
         </div>
       ) : null}
@@ -859,7 +859,7 @@ function ToolDetail({ value }: { value: Record<string, unknown> }): React.JSX.El
   const visibleInput = input ? detailPayload(input) : {};
 
   return (
-    <div className="grid min-w-0 gap-2 rounded-[14px] bg-black/5 px-3 py-2.5 text-[13px] leading-6 text-[#6f7378]">
+    <div className="grid min-w-0 gap-2 rounded-lg bg-black/5 px-3 py-2.5 text-[13px] leading-6 text-[#6f7378]">
       {Object.keys(visibleInput).length > 0 ? <KeyValueList value={visibleInput} /> : null}
       {result !== undefined && result !== "" ? (
         <div className="border-t border-black/5 pt-2">
@@ -881,7 +881,7 @@ function HookEventBlock({ event }: { event: AstralEvent }): React.JSX.Element {
 
   return (
     <FoldableDetail defaultOpen={running} icon={meta.icon} title={meta.title} summary={summary}>
-      <div className="rounded-[14px] bg-black/5 px-3 py-2.5">
+      <div className="rounded-lg bg-black/5 px-3 py-2.5">
         <KeyValueList value={detailPayload(value)} />
       </div>
     </FoldableDetail>
@@ -946,7 +946,7 @@ function TranscriptPlanBubble({ event }: { event: AstralEvent }): React.ReactNod
 
   return (
     <div className="flex justify-center">
-      <div className="group w-full rounded-[18px] border border-black/5 bg-black/[0.035] px-4 py-3 text-[#202124] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+      <div className="group w-full rounded-lg border border-black/5 bg-black/[0.035] px-4 py-3 text-[#202124] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
         <div className="mb-2.5 flex items-center gap-2 text-[13px] font-medium leading-5 text-[#777b80]">
           <Pencil size={15} strokeWidth={1.8} />
           <span>{title}</span>
@@ -1027,14 +1027,14 @@ function FoldableDetail({
 const MarkdownText = React.memo(function MarkdownText({ muted = false, text }: { muted?: boolean; text: string }): React.JSX.Element {
   return (
     <div
-      className={`min-w-0 break-words [overflow-wrap:anywhere] [&_code]:break-words [&_code]:rounded-md [&_code]:bg-black/5 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em] [&_h1]:mb-2.5 [&_h1]:mt-4 [&_h1]:text-[19px] [&_h1]:font-bold [&_h2]:mb-2 [&_h2]:mt-3.5 [&_h2]:text-[17px] [&_h2]:font-bold [&_h3]:mb-1.5 [&_h3]:mt-3 [&_h3]:text-[15px] [&_h3]:font-bold [&_ol]:my-2.5 [&_ol]:pl-6 [&_p]:m-0 [&_p+p]:mt-2 [&_pre]:my-2.5 [&_pre]:min-w-0 [&_pre]:overflow-auto [&_pre]:whitespace-pre-wrap [&_pre]:break-words [&_pre]:rounded-xl [&_pre]:bg-black/5 [&_pre]:p-3 [&_pre]:[overflow-wrap:anywhere] [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_ul]:my-2.5 [&_ul]:pl-6 [&_li+li]:mt-0.5 ${
+      className={`min-w-0 break-words [overflow-wrap:anywhere] [&_code]:break-words [&_code]:rounded-md [&_code]:bg-black/5 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em] [&_h1]:mb-2.5 [&_h1]:mt-4 [&_h1]:text-[19px] [&_h1]:font-bold [&_h2]:mb-2 [&_h2]:mt-3.5 [&_h2]:text-[17px] [&_h2]:font-bold [&_h3]:mb-1.5 [&_h3]:mt-3 [&_h3]:text-[15px] [&_h3]:font-bold [&_ol]:my-2.5 [&_ol]:pl-6 [&_p]:m-0 [&_p+p]:mt-2 [&_pre]:my-2.5 [&_pre]:min-w-0 [&_pre]:overflow-auto [&_pre]:whitespace-pre-wrap [&_pre]:break-words [&_pre]:rounded-lg [&_pre]:bg-black/5 [&_pre]:p-3 [&_pre]:[overflow-wrap:anywhere] [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_ul]:my-2.5 [&_ul]:pl-6 [&_li+li]:mt-0.5 ${
         muted ? "text-[#6f7378]" : ""
       }`}
     >
       <ReactMarkdown
         components={{
           table: ({ children }) => (
-            <div className="my-3 overflow-x-auto rounded-xl border border-black/5 bg-white shadow-sm">
+            <div className="my-3 overflow-x-auto rounded-lg border border-black/5 bg-white shadow-sm">
               <table className="w-full border-collapse text-left text-[13px] leading-6">{children}</table>
             </div>
           ),
@@ -1067,7 +1067,7 @@ function QueueEventBlock({ event }: { event: AstralEvent }): React.JSX.Element {
   const text = textValue(value, "text");
 
   return (
-    <div className="grid gap-2 rounded-[14px] bg-black/5 px-4 py-3">
+    <div className="grid gap-2 rounded-lg bg-black/5 px-4 py-3">
       <div className="flex min-w-0 items-center gap-2 text-[13px] font-medium leading-6 text-[#8a8d91]">
         <CircleDot size={16} strokeWidth={1.8} />
         <span className="shrink-0">{queueLabel(event.kind)}</span>
@@ -1127,7 +1127,7 @@ function KeyValueList({ value }: { value: Record<string, unknown> }): React.JSX.
           {isScalar(val) ? (
             <span className="min-w-0 break-words font-medium text-[#5f6368] [overflow-wrap:anywhere]">{String(val)}</span>
           ) : (
-            <pre className="max-h-40 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-[10px] bg-black/5 px-3 py-2 font-mono text-[12px] leading-5 text-[#6f7378] [overflow-wrap:anywhere]">{jsonPreview(val)}</pre>
+            <pre className="max-h-40 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-black/5 px-3 py-2 font-mono text-[12px] leading-5 text-[#6f7378] [overflow-wrap:anywhere]">{jsonPreview(val)}</pre>
           )}
         </div>
       ))}

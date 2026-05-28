@@ -3,6 +3,7 @@ import { PanelLeft, PanelRight } from "lucide-react";
 import { createLocalCoreClient, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
+import { SettingsView } from "./components/SettingsView";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { Transcript } from "./components/Transcript";
@@ -60,6 +61,7 @@ export function App(): React.JSX.Element {
   const [pendingOpenSessionId, setPendingOpenSessionId] = useState("");
   const [eventIndex, setEventIndex] = useState<EventIndex>(EMPTY_EVENT_INDEX);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string>("");
   const [modelOverride, setModelOverride] = useState("");
   const [modelSlotOverride, setModelSlotOverride] = useState("");
@@ -649,11 +651,18 @@ export function App(): React.JSX.Element {
   );
   return (
     <div ref={appChromeRef} className="relative flex h-screen min-h-0 select-none overflow-hidden bg-transparent text-[#1d1d1f]">
-
-
+      {settingsOpen ? (
+        <SettingsView
+          health={health}
+          nativeVibrancy={isMacDesktop}
+          onBack={() => setSettingsOpen(false)}
+        />
+      ) : (
+        <>
       <Sidebar
         activeSessionId={activeSessionId}
         collapsed={sidebarCollapsed}
+        nativeVibrancy={isMacDesktop}
         sessions={sessions}
         sessionStates={sessionStates}
         sessionTitles={sessionTitles}
@@ -666,6 +675,7 @@ export function App(): React.JSX.Element {
         onDisconnectWorkspace={(workspaceId) => void handleDisconnectWorkspace(workspaceId)}
         onDeleteSession={(sessionId) => void deleteSession(sessionId)}
         onDeleteWorkspace={(workspaceId) => void deleteWorkspace(workspaceId)}
+        onOpenSettings={() => setSettingsOpen(true)}
         onResize={setSidebarWidth}
         onSelectSession={handleSelectSession}
         onSelectWorkspace={handleSelectWorkspace}
@@ -799,6 +809,8 @@ export function App(): React.JSX.Element {
       >
         <PanelRight size={19} strokeWidth={1.8} />
       </button>
+        </>
+      )}
     </div>
   );
 }

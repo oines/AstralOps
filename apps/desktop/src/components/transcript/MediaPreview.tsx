@@ -162,12 +162,12 @@ export function MediaPreview({ downloadUrl, media, onClose, url }: MediaPreviewP
 
   return createPortal(
     <div className="[-webkit-app-region:no-drag] fixed inset-0 z-[var(--ao-z-modal)] overflow-hidden bg-black/78 backdrop-blur-[2px]" role="dialog" aria-modal="true">
-      <div className="[-webkit-app-region:no-drag] absolute right-4 top-4 z-30 flex items-center gap-3" onPointerDown={(event) => event.stopPropagation()}>
-        <a className="[-webkit-app-region:no-drag] grid size-14 place-items-center rounded-full bg-white text-[#202124] shadow-[0_8px_28px_rgba(0,0,0,0.22)] transition-colors hover:bg-[#f2f3f5]" href={downloadUrl} aria-label="下载" title="下载" onClick={(event) => event.stopPropagation()}>
-          <Download size={23} strokeWidth={1.9} />
+      <div className="[-webkit-app-region:no-drag] absolute right-3 top-3 z-30 flex items-center gap-1.5" onPointerDown={(event) => event.stopPropagation()}>
+        <a className="[-webkit-app-region:no-drag] grid size-8 place-items-center rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)] text-[var(--ao-text)] shadow-[var(--ao-shadow-panel)] transition-colors hover:bg-[var(--ao-panel)]" href={downloadUrl} aria-label="下载" title="下载" onClick={(event) => event.stopPropagation()}>
+          <Download size={16} strokeWidth={1.9} />
         </a>
         <button
-          className="[-webkit-app-region:no-drag] grid size-14 place-items-center rounded-full bg-white text-[#202124] shadow-[0_8px_28px_rgba(0,0,0,0.22)] transition-colors hover:bg-[#f2f3f5]"
+          className="[-webkit-app-region:no-drag] grid size-8 place-items-center rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)] text-[var(--ao-text)] shadow-[var(--ao-shadow-panel)] transition-colors hover:bg-[var(--ao-panel)]"
           type="button"
           aria-label="关闭"
           title="关闭"
@@ -177,11 +177,11 @@ export function MediaPreview({ downloadUrl, media, onClose, url }: MediaPreviewP
             onClose();
           }}
         >
-          <X size={26} strokeWidth={1.9} />
+          <X size={17} strokeWidth={1.9} />
         </button>
       </div>
       <div
-        className="[-webkit-app-region:no-drag] absolute inset-0 z-20 grid place-items-center overflow-hidden px-10 py-24"
+        className="[-webkit-app-region:no-drag] absolute inset-0 z-20 grid place-items-center overflow-hidden px-8 py-16"
         ref={viewportRef}
         style={{ touchAction: "none" }}
         onDoubleClick={handleDoubleClick}
@@ -192,7 +192,7 @@ export function MediaPreview({ downloadUrl, media, onClose, url }: MediaPreviewP
       >
         <img
           alt={media.name}
-          className="max-h-[calc(100vh-192px)] max-w-[calc(100vw-96px)] select-none rounded-[8px] bg-white object-contain shadow-[0_22px_70px_rgba(0,0,0,0.42)] will-change-transform"
+          className="max-h-[calc(100vh-128px)] max-w-[calc(100vw-64px)] select-none rounded-lg bg-[var(--ao-bg)] object-contain shadow-[0_18px_56px_rgba(0,0,0,0.36)] will-change-transform"
           draggable={false}
           ref={imageRef}
           src={url}
@@ -204,27 +204,27 @@ export function MediaPreview({ downloadUrl, media, onClose, url }: MediaPreviewP
           }}
         />
       </div>
-      <div className="[-webkit-app-region:no-drag] absolute bottom-7 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full bg-white px-1.5 py-1.5 text-[#202124] shadow-[0_10px_34px_rgba(0,0,0,0.24)]" onPointerDown={(event) => event.stopPropagation()}>
+      <div className="[-webkit-app-region:no-drag] absolute bottom-5 left-1/2 z-30 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)] px-1 py-1 text-[var(--ao-text)] shadow-[var(--ao-shadow-panel)]" onPointerDown={(event) => event.stopPropagation()}>
         <button
-          className="grid size-12 place-items-center rounded-full bg-[#eef0f2] text-[#202124] transition-colors hover:bg-[#e1e4e7] disabled:text-[#a6aaaf]"
+          className="grid size-8 place-items-center rounded-lg bg-[var(--ao-panel)] text-[var(--ao-text)] transition-colors hover:bg-[var(--ao-panel-strong)] disabled:text-[var(--ao-subtle)]"
           type="button"
           aria-label="缩小"
           title="缩小"
           disabled={zoom <= minZoom}
           onClick={() => setZoomAt(zoomRef.current - 0.25)}
         >
-          <Minus size={22} strokeWidth={1.9} />
+          <Minus size={16} strokeWidth={1.9} />
         </button>
-        <div className="min-w-20 text-center text-[16px] font-semibold leading-8">{zoomPercent}</div>
+        <div className="min-w-14 text-center text-[13px] font-semibold leading-8">{zoomPercent}</div>
         <button
-          className="grid size-12 place-items-center rounded-full bg-[#eef0f2] text-[#202124] transition-colors hover:bg-[#e1e4e7] disabled:text-[#a6aaaf]"
+          className="grid size-8 place-items-center rounded-lg bg-[var(--ao-panel)] text-[var(--ao-text)] transition-colors hover:bg-[var(--ao-panel-strong)] disabled:text-[var(--ao-subtle)]"
           type="button"
           aria-label="放大"
           title="放大"
           disabled={zoom >= maxZoom}
           onClick={() => setZoomAt(zoomRef.current + 0.25)}
         >
-          <Plus size={22} strokeWidth={1.9} />
+          <Plus size={16} strokeWidth={1.9} />
         </button>
       </div>
     </div>,

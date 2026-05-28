@@ -109,6 +109,7 @@ If a real task exposes repeated questions, repeated plan confirmations, repeated
 UI implementation rule:
 
 ```text
+Desktop UI visual language, density, spacing, radius, platform integration, settings layout, controls, and transcript display norms are documented in docs/desktop-ui-design-language.md and should be followed for desktop React/Electron UI changes.
 Visible UI copy must not use emoji or decorative Unicode symbols. Use plain text and lucide icons for affordances/status. Keyboard hints must be plain labels such as Enter, Cmd+Enter, or ESC.
 Permission, command, file-change, Ask, MCP elicitation, and plan confirmation surfaces must show the concrete decision target from AstralEvent.normalized, such as command, cwd, tool name, reason, file/change summary, prompt, or params. Do not show generic approval text when normalized data contains a more specific target.
 ```

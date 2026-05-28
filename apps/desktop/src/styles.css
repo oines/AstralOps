@@ -5,11 +5,90 @@
   --ao-z-chrome: 200;
   --ao-z-chrome-menu: 220;
   --ao-z-modal: 1000;
+  --ao-bg: #ffffff;
+  --ao-panel: #f7f8fa;
+  --ao-panel-strong: #eef0f3;
+  --ao-panel-soft: #fafbfc;
+  --ao-border: rgba(0, 0, 0, 0.1);
+  --ao-border-strong: rgba(0, 0, 0, 0.14);
+  --ao-hover: rgba(0, 0, 0, 0.045);
+  --ao-hover-strong: rgba(0, 0, 0, 0.07);
+  --ao-text: #202124;
+  --ao-text-soft: #4f5358;
+  --ao-muted: #8f9296;
+  --ao-muted-strong: #6f7378;
+  --ao-subtle: #aeb1b7;
+  --ao-blue: #2f8cff;
+  --ao-warning: #b7791f;
+  --ao-danger: #e5483f;
+  --ao-green: #2f8c58;
+  --ao-radius-control: 8px;
+  --ao-shadow-popover: 0 18px 48px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06);
+  --ao-shadow-panel: 0 12px 36px rgba(0, 0, 0, 0.075), 0 1px 3px rgba(0, 0, 0, 0.04);
   --ao-context-ring: #2f8cff;
   --ao-context-track: rgba(0, 0, 0, 0.12);
   --ao-context-center: #ffffff;
   --ao-context-tooltip: rgba(32, 33, 36, 0.94);
   --ao-context-tooltip-text: #ffffff;
+}
+
+.rounded-\[22px\],
+.rounded-\[18px\],
+.rounded-\[16px\],
+.rounded-\[15px\],
+.rounded-\[14px\],
+.rounded-\[12px\],
+.rounded-\[11px\],
+.rounded-\[10px\],
+.rounded-\[9px\],
+.rounded-xl,
+.rounded-lg,
+.rounded-md {
+  border-radius: var(--ao-radius-control) !important;
+}
+
+.bg-\[\#fdfdfd\],
+.bg-\[\#fbfbfc\],
+.bg-\[\#fafafa\],
+.bg-\[\#f8fafc\],
+.bg-\[\#f7f7f5\],
+.bg-\[\#f7f6f3\],
+.bg-\[\#f5f7fb\],
+.bg-\[\#f1f1f2\],
+.bg-\[\#f1f0ec\],
+.bg-\[\#efeeeb\] {
+  background-color: var(--ao-panel) !important;
+}
+
+.hover\:bg-\[\#f1f0ec\]:hover,
+.hover\:bg-\[\#eeece8\]:hover,
+.hover\:bg-\[\#f7f6f3\]:hover {
+  background-color: var(--ao-panel-strong) !important;
+}
+
+.border-\[\#e9e7e1\],
+.border-\[\#e7e5e0\],
+.border-\[\#dedbd3\],
+.border-\[\#ece9e2\],
+.border-\[\#ebe8e1\],
+.border-\[\#e5e5e5\],
+.border-\[\#e5e7eb\],
+.border-\[\#d6dbe3\] {
+  border-color: var(--ao-border) !important;
+}
+
+.bg-\[\#ebe8e1\],
+.bg-\[\#ece9e2\] {
+  background-color: var(--ao-border) !important;
+}
+
+.shadow-\[0_18px_48px_rgba\(29\,29\,31\,0\.16\)\],
+.shadow-\[0_18px_55px_rgba\(0\,0\,0\,0\.16\)\],
+.shadow-\[0_18px_55px_rgba\(37\,34\,29\,0\.18\)\,0_2px_8px_rgba\(37\,34\,29\,0\.08\)\],
+.shadow-\[0_18px_45px_rgba\(0\,0\,0\,0\.12\)\,0_2px_8px_rgba\(0\,0\,0\,0\.06\)\],
+.shadow-\[0_16px_48px_rgba\(0\,0\,0\,0\.10\)\,0_2px_8px_rgba\(0\,0\,0\,0\.06\)\],
+.shadow-\[0_16px_44px_rgba\(37\,34\,29\,0\.13\)\,0_1px_4px_rgba\(37\,34\,29\,0\.08\)\] {
+  box-shadow: var(--ao-shadow-popover) !important;
 }
 
 * {
@@ -23,6 +102,14 @@ html, body, #root {
 
 .workspace-opener-menu {
   will-change: right;
+}
+
+.ao-sidebar-solid {
+  background-color: var(--ao-panel);
+}
+
+.ao-sidebar-vibrant {
+  background-color: transparent;
 }
 
 [data-right-panel-resizing="true"] .workspace-opener-menu {

@@ -241,14 +241,14 @@ export function Composer({
 
   if (pendingInteraction && !disabled) {
     return (
-      <footer className="pointer-events-none absolute inset-x-0 bottom-0 pb-5" ref={footerRef}>
+      <footer className="pointer-events-none absolute inset-x-0 bottom-0 pb-4" ref={footerRef}>
         <PendingInteractionPanel interaction={pendingInteraction} onRespond={onRespond} />
       </footer>
     );
   }
 
   return (
-    <footer className="pointer-events-none absolute inset-x-0 bottom-0 pb-5" ref={footerRef}>
+    <footer className="pointer-events-none absolute inset-x-0 bottom-0 pb-4" ref={footerRef}>
       {slashPaletteOpen ? (
         <CommandPalette
           commands={filteredCommands}
@@ -260,7 +260,7 @@ export function Composer({
           onSelect={(command) => void executeCommand(command)}
         />
       ) : null}
-      <div className={`pointer-events-auto mx-auto grid w-[760px] max-w-[calc(100%-72px)] gap-1.5 rounded-[22px] border px-3.5 py-2.5 shadow-[0_12px_36px_rgba(0,0,0,0.075),0_1px_3px_rgba(0,0,0,0.04)] backdrop-blur-xl transition-all duration-150 ease-out ${
+      <div className={`pointer-events-auto mx-auto grid w-[720px] max-w-[calc(100%-72px)] gap-1 rounded-lg border px-3 py-2 shadow-[0_12px_36px_rgba(0,0,0,0.075),0_1px_3px_rgba(0,0,0,0.04)] backdrop-blur-xl transition-all duration-150 ease-out ${
         disabled ? "border-black/5 bg-white/55 opacity-80" : "border-black/10 bg-white/92"
       }`}>
         {queuedInputs.length > 0 ? (
@@ -269,7 +269,7 @@ export function Composer({
         {attachments.length > 0 ? (
           <div className="flex flex-wrap gap-1.5 px-0.5">
             {attachments.map((attachment) => (
-              <span className="flex h-7 max-w-[230px] items-center gap-1.5 rounded-full bg-black/5 pl-2.5 pr-1 text-[12px] font-semibold text-[#6f7378]" key={attachment.id}>
+              <span className="flex h-7 max-w-[230px] items-center gap-1.5 rounded-lg bg-black/5 pl-2.5 pr-1 text-[12px] font-semibold text-[#6f7378]" key={attachment.id}>
                 <Paperclip size={13} strokeWidth={1.9} />
                 <span className="truncate">{attachment.name || fileName(attachment.path)}</span>
                 <button
@@ -285,7 +285,7 @@ export function Composer({
           </div>
         ) : null}
         <textarea
-          className="block max-h-36 min-h-10 w-full resize-none overflow-y-auto border-0 bg-transparent px-2 py-1.5 text-[15px] font-semibold leading-6 text-[#202124] outline-none placeholder:font-medium placeholder:text-[#b8b5af] select-text"
+          className="block max-h-32 min-h-8 w-full resize-none overflow-y-auto border-0 bg-transparent px-2 py-1 text-[14px] font-medium leading-5 text-[#202124] outline-none placeholder:font-medium placeholder:text-[#b8b5af] select-text"
           disabled={disabled || sending}
           placeholder={sending ? "正在发送..." : placeholder}
           ref={textareaRef}
@@ -322,11 +322,11 @@ export function Composer({
             }
           }}
         />
-        <div className="flex h-8 items-center justify-between gap-3">
+        <div className="flex h-7 items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-1.5">
             <div className="relative" data-composer-menu>
               <button
-                className={`grid size-8 place-items-center rounded-full transition-colors duration-150 ease-out ${
+                className={`grid size-7 place-items-center rounded-full transition-colors duration-150 ease-out ${
                   disabled
                     ? "cursor-not-allowed bg-[#e7e5df] text-[#aaa7a0]"
                     : openMenu === "actions" || runMode !== "normal" || attachments.length > 0
@@ -354,7 +354,7 @@ export function Composer({
             </div>
             {runMode !== "normal" && !disabled ? (
               <button
-                className="flex h-8 shrink-0 items-center gap-1 rounded-full bg-[#eef1ff] px-2.5 text-[13px] font-semibold text-[#5164d8] transition-colors duration-150 ease-out hover:bg-[#e4e8ff]"
+                className="flex h-7 shrink-0 items-center gap-1 rounded-lg bg-[#eef1ff] px-2 text-[12px] font-semibold text-[#5164d8] transition-colors duration-150 ease-out hover:bg-[#e4e8ff]"
                 type="button"
                 title="关闭当前输入模式"
                 onClick={() => onRunModeChange("normal")}
@@ -391,7 +391,7 @@ export function Composer({
             <ContextUsageRing usage={contextUsage} />
             <div className="relative" data-composer-menu>
               <button
-                className={`flex h-8 max-w-[180px] items-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors duration-150 ease-out ${
+                className={`flex h-7 max-w-[180px] items-center gap-1.5 rounded-lg px-2 text-[12px] font-semibold transition-colors duration-150 ease-out ${
                   disabled ? "cursor-not-allowed bg-black/5 text-black/30" : "bg-transparent text-black/60 hover:bg-black/5 hover:text-[#202124]"
                 }`}
                 type="button"
@@ -423,7 +423,7 @@ export function Composer({
             </div>
             {running ? (
               <button
-                className="grid size-8 place-items-center rounded-full bg-[#202124] text-white shadow-[0_5px_14px_rgba(32,33,36,0.18)] transition-all duration-150 ease-out hover:scale-[1.03] hover:bg-[#343438]"
+                className="grid size-7 place-items-center rounded-full bg-[#202124] text-white shadow-[0_5px_14px_rgba(32,33,36,0.18)] transition-all duration-150 ease-out hover:scale-[1.03] hover:bg-[#343438]"
                 type="button"
                 aria-label="中断"
                 onClick={() => void onInterrupt()}
@@ -432,14 +432,14 @@ export function Composer({
               </button>
             ) : null}
             <button
-              className="grid size-9 place-items-center rounded-full bg-[#8f9296] text-white shadow-[0_3px_10px_rgba(0,0,0,0.12)] transition-all duration-150 ease-out hover:scale-[1.03] hover:bg-[#7f8388] disabled:bg-black/10 disabled:text-black/30 disabled:shadow-none disabled:hover:scale-100"
+              className="grid size-8 place-items-center rounded-full bg-[#8f9296] text-white shadow-[0_3px_10px_rgba(0,0,0,0.12)] transition-all duration-150 ease-out hover:scale-[1.03] hover:bg-[#7f8388] disabled:bg-black/10 disabled:text-black/30 disabled:shadow-none disabled:hover:scale-100"
               type="button"
               disabled={disabled || sending || (!input.trim() && attachments.length === 0)}
               onClick={() => void submit()}
               aria-label={running ? (runningInputMode === "interject" ? "插入当前任务" : "排队发送") : "发送"}
               title={running ? (runningInputMode === "interject" ? "打断当前任务并发送" : "当前任务结束后发送") : "发送"}
             >
-              <ArrowUp size={20} />
+              <ArrowUp size={18} />
             </button>
           </div>
         </div>
@@ -462,7 +462,7 @@ function ContextUsageRing({ usage }: { usage?: ContextUsage }): React.JSX.Elemen
       >
         <span className="size-2 rounded-full" style={{ backgroundColor: "var(--ao-context-center)" }} />
       </div>
-      <div className="pointer-events-none absolute bottom-8 right-0 z-40 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-semibold opacity-0 shadow-[0_8px_24px_rgba(0,0,0,0.18)] transition-opacity duration-150 ease-out group-hover:opacity-100" style={{ backgroundColor: "var(--ao-context-tooltip)", color: "var(--ao-context-tooltip-text)" }}>
+      <div className="pointer-events-none absolute bottom-8 right-0 z-40 whitespace-nowrap rounded-lg px-2.5 py-1 text-[11px] font-semibold opacity-0 shadow-[0_8px_24px_rgba(0,0,0,0.18)] transition-opacity duration-150 ease-out group-hover:opacity-100" style={{ backgroundColor: "var(--ao-context-tooltip)", color: "var(--ao-context-tooltip-text)" }}>
         {label}
       </div>
     </div>
@@ -513,13 +513,13 @@ function QueuedInputShelf({
   running: boolean;
 }): React.JSX.Element {
   return (
-    <div className="grid max-h-28 gap-1.5 overflow-y-auto rounded-[14px] bg-[#f7f6f3] p-1.5">
+    <div className="grid max-h-24 gap-1 overflow-y-auto rounded-lg bg-[#f7f6f3] p-1">
       {inputs.map((item) => (
-        <div className="flex min-h-8 min-w-0 items-center gap-2 rounded-[11px] px-2 text-[13px] font-semibold text-[#5f6368]" key={item.id}>
+        <div className="flex min-h-7 min-w-0 items-center gap-2 rounded-lg px-2 text-[12px] font-semibold text-[#5f6368]" key={item.id}>
           <span className="min-w-0 flex-1 truncate">{item.text || "等待发送"}</span>
           {running ? (
             <button
-              className="flex h-7 shrink-0 items-center gap-1 rounded-full px-2 text-[#5164d8] transition-colors duration-150 ease-out hover:bg-[#eceffd]"
+              className="flex h-6 shrink-0 items-center gap-1 rounded-lg px-2 text-[#5164d8] transition-colors duration-150 ease-out hover:bg-[#eceffd]"
               type="button"
               title="插入当前任务"
               onClick={() => void onSteer(item.sessionId, item.id)}
@@ -529,7 +529,7 @@ function QueuedInputShelf({
             </button>
           ) : null}
           <button
-            className="grid size-7 shrink-0 place-items-center rounded-full text-[#8f9296] transition-colors duration-150 ease-out hover:bg-[#eeece8] hover:text-[#343438]"
+            className="grid size-6 shrink-0 place-items-center rounded-full text-[#8f9296] transition-colors duration-150 ease-out hover:bg-[#eeece8] hover:text-[#343438]"
             type="button"
             title="取消排队"
             aria-label="取消排队"
@@ -561,22 +561,22 @@ function CommandPalette({
   selectedIndex: number;
 }): React.JSX.Element {
   return (
-    <div className="pointer-events-auto mx-auto max-h-[360px] w-[760px] max-w-[calc(100%-72px)] overflow-y-auto rounded-[22px] border border-black/10 bg-white/96 p-2 shadow-[0_16px_48px_rgba(0,0,0,0.10),0_2px_8px_rgba(0,0,0,0.06)] backdrop-blur-xl">
+    <div className="pointer-events-auto mx-auto max-h-[320px] w-[720px] max-w-[calc(100%-72px)] overflow-y-auto rounded-lg border border-black/10 bg-white/96 p-1.5 shadow-[0_16px_48px_rgba(0,0,0,0.10),0_2px_8px_rgba(0,0,0,0.06)] backdrop-blur-xl">
       {error ? (
-        <div className="grid min-h-12 gap-1 px-3 py-2 text-[13px] font-semibold text-[#b45309]">
+        <div className="grid min-h-10 gap-1 px-3 py-2 text-[13px] font-semibold text-[#b45309]">
           <span>命令加载失败</span>
           <span className="truncate text-[12px] font-medium text-[#a0a3a7]">{error}</span>
         </div>
       ) : !loaded ? (
-        <div className="flex h-12 items-center px-3 text-[14px] font-semibold text-[#a0a3a7]">正在加载命令</div>
+        <div className="flex h-10 items-center px-3 text-[13px] font-semibold text-[#a0a3a7]">正在加载命令</div>
       ) : commands.length === 0 ? (
-        <div className="flex h-12 items-center px-3 text-[14px] font-semibold text-[#a0a3a7]">{query ? "没有匹配的命令" : "暂无可用命令"}</div>
+        <div className="flex h-10 items-center px-3 text-[13px] font-semibold text-[#a0a3a7]">{query ? "没有匹配的命令" : "暂无可用命令"}</div>
       ) : (
         commands.map((command, index) => {
           const selected = index === selectedIndex;
           return (
             <button
-              className={`flex min-h-11 w-full items-center gap-3 rounded-[14px] px-3 text-left transition-colors duration-120 ease-out ${
+              className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left transition-colors duration-120 ease-out ${
                 command.enabled
                   ? selected
                     ? "bg-black/[0.055] text-[#202124]"
@@ -593,8 +593,8 @@ function CommandPalette({
                 <CommandIcon icon={command.icon} />
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[15px] font-semibold">{command.title}</span>
-                <span className="block truncate text-[13px] font-medium text-[#a0a3a7]">{command.enabled ? command.description : command.disabled_reason || command.description}</span>
+                <span className="block truncate text-[14px] font-semibold">{command.title}</span>
+                <span className="block truncate text-[12px] font-medium text-[#a0a3a7]">{command.enabled ? command.description : command.disabled_reason || command.description}</span>
               </span>
             </button>
           );
@@ -643,8 +643,8 @@ function ActionMenu({
   runMode: RunMode;
 }): React.JSX.Element {
   return (
-    <div className="absolute bottom-11 left-0 z-30 w-52 origin-bottom-left rounded-[18px] border border-[#dedbd3] bg-white p-1.5 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
-      <div className="px-3 pb-1.5 pt-2 text-[13px] font-semibold text-[#96949a]">输入</div>
+    <div className="absolute bottom-10 left-0 z-30 w-48 origin-bottom-left rounded-lg border border-[#dedbd3] bg-white p-1 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
+      <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-semibold text-[#96949a]">输入</div>
       <ActionMenuButton icon={<Paperclip size={16} strokeWidth={1.9} />} label="添加附件" onClick={onAttach} />
       <div className="my-1 h-px bg-[#ebe8e1]" />
       <ActionMenuButton
@@ -676,7 +676,7 @@ function ActionMenuButton({
 }): React.JSX.Element {
   return (
     <button
-      className="flex h-10 w-full items-center gap-2 rounded-xl px-3 text-left text-[14px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
+      className="flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[13px] font-semibold text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
       type="button"
       onClick={onClick}
     >
@@ -709,7 +709,7 @@ function MenuButton({
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className={`relative flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors duration-150 ease-out ${
+      className={`relative flex h-7 items-center gap-1.5 rounded-lg px-2 text-[12px] font-semibold transition-colors duration-150 ease-out ${
         disabled
           ? "cursor-not-allowed bg-[#e7e5df] text-[#aaa7a0]"
           : tone === "danger"
@@ -749,11 +749,11 @@ function ModelEffortMenu({
   const activeModel = modelRows.find((model) => model.id === (modelValue || currentModel)) ?? modelRows[0];
   const effortRows = effortOptionsForModel(activeModel);
   return (
-    <div className="absolute bottom-11 right-0 z-30 w-56 origin-bottom-right rounded-[18px] border border-[#dedbd3] bg-white p-1.5 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
-      <div className="px-3 pb-1.5 pt-2 text-[13px] font-semibold text-[#96949a]">智能</div>
+    <div className="absolute bottom-10 right-0 z-30 w-52 origin-bottom-right rounded-lg border border-[#dedbd3] bg-white p-1 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
+      <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-semibold text-[#96949a]">智能</div>
       {effortRows.map((option) => (
         <button
-          className="flex h-8 w-full items-center rounded-xl px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
+          className="flex h-7 w-full items-center rounded-lg px-2.5 text-left text-[12px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
           type="button"
           key={option.value}
           onClick={() => onEffortChange(option.value === currentEffort ? "" : option.value)}
@@ -764,18 +764,18 @@ function ModelEffortMenu({
       ))}
       <div className="my-1 h-px bg-[#ebe8e1]" />
       <div className="relative">
-        <button className="flex h-8 w-full items-center gap-2 rounded-xl px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]" type="button" onClick={() => setModelsOpen((current) => !current)}>
+        <button className="flex h-7 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]" type="button" onClick={() => setModelsOpen((current) => !current)}>
           <span className="min-w-0 flex-1 truncate">{compactModelLabel(selectedModelInfo(modelRows, modelValue, modelSlotValue)?.label || selectedModelInfo(modelRows, modelValue, modelSlotValue)?.id || "默认")}</span>
           <ChevronLeft className="shrink-0" size={17} strokeWidth={2} />
         </button>
         {modelsOpen ? (
-          <div className="absolute bottom-[-6px] right-[calc(100%+6px)] w-64 origin-bottom-right rounded-[18px] border border-[#dedbd3] bg-white p-1.5 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
-            <div className="px-3 pb-1.5 pt-2 text-[13px] font-semibold text-[#96949a]">模型</div>
+          <div className="absolute bottom-[-6px] right-[calc(100%+6px)] w-56 origin-bottom-right rounded-lg border border-[#dedbd3] bg-white p-1 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
+            <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-semibold text-[#96949a]">模型</div>
             {modelRows.map((model, index) => {
               const selected = modelSlotValue ? model.slot === modelSlotValue : modelValue ? model.id === modelValue && !model.slot : false;
               return (
                 <button
-                  className="flex h-8 w-full items-center gap-2 rounded-xl px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
+                  className="flex h-7 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
                   type="button"
                   key={`${model.source ?? "model"}-${model.id}-${index}`}
                   onClick={() => onModelChange(model)}
@@ -800,11 +800,11 @@ function PermissionMenu({
   value: PermissionMode;
 }): React.JSX.Element {
   return (
-    <div className="absolute bottom-11 left-0 z-30 w-48 origin-bottom-left rounded-[18px] border border-[#dedbd3] bg-white p-1.5 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
-      <div className="px-3 pb-1.5 pt-2 text-[13px] font-semibold text-[#96949a]">权限</div>
+    <div className="absolute bottom-10 left-0 z-30 w-44 origin-bottom-left rounded-lg border border-[#dedbd3] bg-white p-1 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
+      <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-semibold text-[#96949a]">权限</div>
       {permissionOptions.map((option) => (
         <button
-          className="flex h-8 w-full items-center gap-2 rounded-xl px-3 text-left text-[13px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
+          className="flex h-7 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
           type="button"
           key={option.value}
           onClick={() => onChange(option.value)}
