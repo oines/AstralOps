@@ -254,6 +254,62 @@ func TestControlWebSocketMediaReadResponseIsEncrypted(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketMediaDownloadResponseIsEncrypted(t *testing.T) {
+	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityMediaDownload)
+	secret := []byte("sealed-media-download-secret")
+	encoded := base64.StdEncoding.EncodeToString(secret)
+	media := addControlMediaFixture(t, app, workspace, session, secret)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "media_download",
+			Capability: CapabilityMediaDownload,
+			Action:     ControlActionMediaDownload,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"event_seq":  media.eventSeq,
+				"media_id":   media.mediaID,
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionMediaDownload) || strings.Contains(string(sealedRequest), session.ID) || strings.Contains(string(sealedRequest), media.mediaID) || strings.Contains(string(sealedRequest), media.path) || strings.Contains(string(sealedRequest), encoded) || strings.Contains(string(sealedRequest), string(secret)) {
+		t.Fatalf("sealed media download request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), media.path) || strings.Contains(string(sealedResponse), encoded) || strings.Contains(string(sealedResponse), string(secret)) {
+		t.Fatalf("sealed media download response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("plain response = %#v, want ok media download response", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["session_id"]) != session.ID || int64(numberValue(result["event_seq"])) != media.eventSeq || stringValue(result["media_id"]) != media.mediaID {
+		t.Fatalf("media download response reference = %#v", result)
+	}
+	if stringValue(result["name"]) != "clip.png" || stringValue(result["mime_type"]) != "image/png" || !boolValue(result["download"]) {
+		t.Fatalf("media download response metadata = %#v", result)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(stringValue(result["content_base64"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != string(secret) {
+		t.Fatalf("media download response body = %q, want fixture body", string(decoded))
+	}
+	wire, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), media.path) {
+		t.Fatalf("decrypted media download response leaked Host path: %s", string(wire))
+	}
+}
+
 func TestControlWebSocketMediaStreamChunksAreEncrypted(t *testing.T) {
 	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityMediaStream)
 	secret := []byte("sealed-media-stream-secret")
