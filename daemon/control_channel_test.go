@@ -382,6 +382,72 @@ func TestControlWebSocketMediaStreamChunksAreEncrypted(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketMediaStreamReportsTruncatedFile(t *testing.T) {
+	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityMediaStream)
+	mediaID := "truncated_media_1"
+	mediaPath := filepath.Join(t.TempDir(), "clip.png")
+	if err := os.WriteFile(mediaPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app.emit(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       session.Agent,
+		Kind:        "message.user",
+		Normalized: map[string]any{"text": "", "attachments": []map[string]any{{
+			"id":        mediaID,
+			"media_id":  mediaID,
+			"kind":      "image",
+			"path":      mediaPath,
+			"name":      "clip.png",
+			"mime_type": "image/png",
+			"size":      10,
+		}}},
+	})
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if len(events) == 0 {
+		t.Fatal("media fixture event was not persisted")
+	}
+	eventSeq := events[len(events)-1].Seq
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "media_stream_truncated",
+			Capability: CapabilityMediaStream,
+			Action:     ControlActionMediaStream,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"event_seq":  eventSeq,
+				"media_id":   mediaID,
+				"chunk_size": 4,
+			},
+		},
+	})
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("stream response = %#v, want ok", plain)
+	}
+	streamID := stringValue(mapValue(plain.Response.Result)["stream_id"])
+	if streamID == "" {
+		t.Fatalf("stream result = %#v, want stream id", plain.Response.Result)
+	}
+
+	frame := readEncryptedControlFrame(t, client, cipher)
+	if frame.Type != mediaStreamFrameError || frame.Media == nil || frame.Media.StreamID != streamID {
+		t.Fatalf("stream frame = %#v, want truncated media error", frame)
+	}
+	if frame.Media.ErrorCode != "media_stream_truncated" || frame.Media.Final {
+		t.Fatalf("stream error frame = %#v, want truncated non-final error", frame.Media)
+	}
+	if frame.Media.Offset != 0 || frame.Media.Size != 10 {
+		t.Fatalf("stream error offset/size = %#v, want offset 0 size 10", frame.Media)
+	}
+}
+
 func TestControlWebSocketMediaStreamCancelIsEncrypted(t *testing.T) {
 	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityMediaStream)
 	server := startControlChannelTestServer(t, app)

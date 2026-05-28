@@ -192,13 +192,13 @@ func (a *app) streamControlMedia(ctx context.Context, result mediaStreamResult, 
 				StreamID:    result.StreamID,
 				ResumeToken: result.ResumeToken,
 				RequestID:   requestID,
-				SessionID:   media.SessionID,
-				EventSeq:    media.EventSeq,
-				MediaID:     media.MediaID,
-				Kind:        media.Kind,
-				Name:        media.Name,
-				MIMEType:    media.MIMEType,
-				Size:        media.Size,
+				SessionID:   result.SessionID,
+				EventSeq:    result.EventSeq,
+				MediaID:     result.MediaID,
+				Kind:        result.Kind,
+				Name:        result.Name,
+				MIMEType:    result.MIMEType,
+				Size:        result.Size,
 				Seq:         seq,
 				Offset:      offset,
 				DataBase64:  base64.StdEncoding.EncodeToString(buffer[:n]),
@@ -213,17 +213,21 @@ func (a *app) streamControlMedia(ctx context.Context, result mediaStreamResult, 
 			continue
 		}
 		if readErr == io.EOF {
+			if offset < result.Size {
+				conn.writePlain(controlPlainFrame{Type: mediaStreamFrameError, Media: mediaStreamOffsetErrorFrame(result, requestID, "media_stream_truncated", "media file changed during stream", offset)})
+				return
+			}
 			conn.writePlain(controlPlainFrame{Type: mediaStreamFrameComplete, Media: &mediaStreamFrame{
 				StreamID:    result.StreamID,
 				ResumeToken: result.ResumeToken,
 				RequestID:   requestID,
-				SessionID:   media.SessionID,
-				EventSeq:    media.EventSeq,
-				MediaID:     media.MediaID,
-				Kind:        media.Kind,
-				Name:        media.Name,
-				MIMEType:    media.MIMEType,
-				Size:        media.Size,
+				SessionID:   result.SessionID,
+				EventSeq:    result.EventSeq,
+				MediaID:     result.MediaID,
+				Kind:        result.Kind,
+				Name:        result.Name,
+				MIMEType:    result.MIMEType,
+				Size:        result.Size,
 				Seq:         seq + 1,
 				Offset:      offset,
 				Final:       true,
@@ -341,6 +345,10 @@ func decodeMediaStreamResumeToken(token string) (mediaReadParams, error) {
 }
 
 func mediaStreamErrorFrame(result mediaStreamResult, requestID, code, message string) *mediaStreamFrame {
+	return mediaStreamOffsetErrorFrame(result, requestID, code, message, result.Offset)
+}
+
+func mediaStreamOffsetErrorFrame(result mediaStreamResult, requestID, code, message string, offset int64) *mediaStreamFrame {
 	return &mediaStreamFrame{
 		StreamID:     result.StreamID,
 		ResumeToken:  result.ResumeToken,
@@ -352,7 +360,7 @@ func mediaStreamErrorFrame(result mediaStreamResult, requestID, code, message st
 		Name:         result.Name,
 		MIMEType:     result.MIMEType,
 		Size:         result.Size,
-		Offset:       result.Offset,
+		Offset:       offset,
 		ErrorCode:    code,
 		ErrorMessage: message,
 	}
