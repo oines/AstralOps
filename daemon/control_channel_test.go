@@ -729,6 +729,69 @@ func TestControlWebSocketEventSubscriptionStreamsEncryptedEvents(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketAttachmentIngestRequestResponseIsEncrypted(t *testing.T) {
+	app, _, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityAttachmentIngest)
+	secret := []byte("sealed-single-attachment-secret")
+	encoded := base64.StdEncoding.EncodeToString(secret)
+	name := "sealed-single-attachment.txt"
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "attachment_ingest",
+			Capability: CapabilityAttachmentIngest,
+			Action:     ControlActionAttachmentIngest,
+			Params: map[string]any{
+				"session_id":     session.ID,
+				"name":           name,
+				"mime_type":      "text/plain",
+				"content_base64": encoded,
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionAttachmentIngest) || strings.Contains(string(sealedRequest), session.ID) || strings.Contains(string(sealedRequest), name) || strings.Contains(string(sealedRequest), encoded) || strings.Contains(string(sealedRequest), string(secret)) {
+		t.Fatalf("sealed attachment ingest request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), name) || strings.Contains(string(sealedResponse), encoded) || strings.Contains(string(sealedResponse), string(secret)) || strings.Contains(string(sealedResponse), app.store.dataDir) {
+		t.Fatalf("sealed attachment ingest response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("plain response = %#v, want ok attachment ingest response", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	attachment := mapValue(result["attachment"])
+	attachmentID := stringValue(attachment["id"])
+	if stringValue(result["session_id"]) != session.ID || attachmentID == "" || stringValue(attachment["media_id"]) != attachmentID {
+		t.Fatalf("attachment ingest result = %#v", result)
+	}
+	if !boolValue(attachment["host_owned"]) || stringValue(attachment["path"]) != "" || stringValue(attachment["name"]) != name || stringValue(attachment["mime_type"]) != "text/plain" || int64(numberValue(attachment["size"])) != int64(len(secret)) {
+		t.Fatalf("attachment handle = %#v", attachment)
+	}
+	wire, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), app.store.dataDir) || strings.Contains(string(wire), string(secret)) || strings.Contains(string(wire), encoded) {
+		t.Fatalf("attachment ingest result leaked Host path or content: %s", string(wire))
+	}
+	stored, err := app.loadControlAttachment(session.ID, attachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(stored.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != string(secret) {
+		t.Fatalf("stored attachment body = %q, want secret", string(body))
+	}
+}
+
 func TestControlWebSocketChunkedAttachmentIngestIsEncrypted(t *testing.T) {
 	app, _, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityAttachmentIngest)
 	server := startControlChannelTestServer(t, app)
