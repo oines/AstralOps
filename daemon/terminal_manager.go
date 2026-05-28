@@ -839,11 +839,17 @@ func localTerminalCWD(ws Workspace, requested string) (string, error) {
 		return "", newActionError(http.StatusBadRequest, "workspace_cwd_empty", "workspace local cwd is empty")
 	}
 	if requested == "" {
+		if err := ensureLocalControlWorkspaceExistingPath(root, root); err != nil {
+			return "", err
+		}
 		return root, nil
 	}
 	target, _, err := resolveWorkspacePath(root, requested)
 	if err != nil {
-		return "", newActionError(http.StatusBadRequest, "path_invalid", err.Error())
+		return "", newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	if err := ensureLocalControlWorkspaceExistingPath(root, target); err != nil {
+		return "", err
 	}
 	return target, nil
 }

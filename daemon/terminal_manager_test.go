@@ -148,6 +148,32 @@ func TestControlGatewayTerminalAttachRequiresControlConnection(t *testing.T) {
 	assertActionError(t, err, http.StatusBadRequest, "control_connection_required")
 }
 
+func TestControlGatewayRejectsTerminalCWDThroughSymlink(t *testing.T) {
+	requireWorkspaceSymlink(t)
+
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(workspace.LocalCWD, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityTerminalOpen)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityTerminalOpen,
+		Action:             ControlActionTerminalOpen,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"cwd":          "escape",
+		},
+	})
+	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
+	events := app.store.queryEvents(workspace.ID, "", 0)
+	if countKind(events, "control.terminal.opened") != 0 {
+		t.Fatalf("terminal opened through symlink escape: %#v", eventKinds(events))
+	}
+}
+
 func TestTerminalOutputIsSplitIntoBoundedFrames(t *testing.T) {
 	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh", "device_mobile")
 	viewer := &terminalViewer{

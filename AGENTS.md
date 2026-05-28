@@ -86,6 +86,7 @@ For any active goal or implementation task, if the chosen path starts looking li
 Route judgment is part of the task, not optional commentary: when uncertainty or complexity appears, explicitly name the product goal, the simpler alternative, and why continuing or changing course fits the architecture before making more infrastructure edits.
 Do not keep drilling into a complex approach merely because work has already started. Prefer changing course early when a simpler, better-scoped infrastructure choice fits the architecture.
 路线判断原则：当实现开始变得绕、依赖不稳定、测试环境牵扯过多，或技术选型像 LAN discovery/mDNS 这类方向出现明显阻力时，先停止扩写代码，重新比较产品目标、最小可行基础设施、可替代技术选型和维护成本。只有在这条路线仍明显优于更简单方案时才继续；否则及时改道。
+远控基础设施任务开始前必须先做路线判断：明确它服务的产品目标、为什么属于 Host/Core 基础设施而不是 UI/mobile 表面、是否存在更简单的协议或系统能力可用。若当前路线需要过多兼容层、环境假设或 speculative fallback，先改道或向用户确认，不要继续堆代码。
 Prefer deleting or narrowing unsupported branches over preserving "just in case" behavior.
 Temporary compatibility code is allowed only when tied to a specific observed version/shape and documented with the fixture or source evidence that requires it.
 When implementing a requested feature, if you notice clearly problematic code quality elsewhere that is outside the feature scope, do not silently fix or refactor it unless required for the task. Finish the requested feature, then report the observed issue to the user with the relevant file/path and why it matters.
