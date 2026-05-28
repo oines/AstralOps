@@ -43,6 +43,8 @@ const (
 	ControlActionWorkspaceFilesRead       = "workspace.files.read"
 	ControlActionWorkspaceFilesWrite      = "workspace.files.write"
 	ControlActionWorkspaceFilesApplyPatch = "workspace.files.apply_patch"
+	ControlActionWorkspaceFilesDelete     = "workspace.files.delete"
+	ControlActionWorkspaceFilesMove       = "workspace.files.move"
 	ControlActionWorkspaceExec            = "workspace.exec"
 	ControlActionTerminalOpen             = "terminal.open"
 	ControlActionTerminalAttach           = "terminal.attach"
@@ -120,7 +122,7 @@ func controlActionCapability(action string) string {
 		return CapabilityMediaStream
 	case ControlActionWorkspaceFilesRead:
 		return CapabilityWorkspaceFilesRead
-	case ControlActionWorkspaceFilesWrite, ControlActionWorkspaceFilesApplyPatch:
+	case ControlActionWorkspaceFilesWrite, ControlActionWorkspaceFilesApplyPatch, ControlActionWorkspaceFilesDelete, ControlActionWorkspaceFilesMove:
 		return CapabilityWorkspaceFilesWrite
 	case ControlActionWorkspaceExec:
 		return CapabilityWorkspaceExec
@@ -291,6 +293,18 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn) (an
 			return nil, err
 		}
 		return a.applyControlWorkspacePatch(context.Background(), params)
+	case ControlActionWorkspaceFilesDelete:
+		var params workspaceFilesDeleteParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.deleteControlWorkspacePath(context.Background(), params)
+	case ControlActionWorkspaceFilesMove:
+		var params workspaceFilesMoveParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.moveControlWorkspacePath(context.Background(), params)
 	case ControlActionWorkspaceExec:
 		var params workspaceExecParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

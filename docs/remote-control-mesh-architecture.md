@@ -643,7 +643,7 @@ workspace.files.read
   通过 Host 浏览目录或读取文件内容。SSH workspace 中，由 Host 发起 SSH 读取。v1 返回目录列表或中小文件的 base64 内容；大文件后续走 stream。
 
 workspace.files.write
-  通过 Host 创建或覆盖文件。SSH workspace 中，由 Host 发起 SSH 写入。删除、移动、应用 diff 是后续扩展，不塞进 v1。
+  通过 Host 创建、覆盖、精确文本编辑、删除或移动 workspace root 内的文件路径。SSH workspace 中，由 Host 发起 SSH 写入、删除或移动。复杂大文件流式读写仍作为独立能力后续扩展，不塞进普通 write response。
 
 workspace.exec
   通过 Host 在 workspace root 内执行 command。SSH workspace 中，由 Host 发起 SSH exec；是否接入更细的 command approval 是后续策略层。
@@ -1082,15 +1082,15 @@ Local Desktop 可以继续用本地 HTTP URL 渲染媒体，但 RemoteCoreClient
 workspace.files.read
 workspace.files.write
 workspace.files.apply_patch
+workspace.files.delete
+workspace.files.move
 workspace.exec
 local workspace root confinement
-SSH workspace Host-initiated read/write/exec
+SSH workspace Host-initiated read/write/delete/move/exec
 E2EE request/response frames
 no Host local absolute root in workspace.files.read response
 
 待落地:
-workspace.files.delete
-workspace.files.move
 workspace file streaming for large files
 command approval policy integration
 ```
@@ -1098,6 +1098,8 @@ command approval policy integration
 `workspace.files.read` v1 用于目录列表和中小文件读取；文件内容以 base64 放在 encrypted control response 中。`workspace.files.write` v1 只创建或覆盖单个文件。
 
 `workspace.files.apply_patch` v1 是 Host 侧精确文本编辑能力：Controller 提交 `old_string`/`new_string` edits，Host 在 workspace root 内读取目标文件，要求默认单次匹配唯一；只有显式 `replace_all` 才允许替换多处。它不解析完整 unified diff，不 shell out 到 `patch`，也不做跨端文件同步。这样先满足远控编辑需要，同时把 delete/move/大文件流式读写作为独立 action 后续扩展，避免把文件管理语义一次性塞进一个过宽 action。
+
+`workspace.files.delete` 和 `workspace.files.move` v1 是独立 Host 侧文件管理 action，复用 `workspace.files.write` capability。它们只接受 workspace root 内的路径，不能删除或移动 workspace root 本身；删除目录必须显式 `recursive=true`；移动默认不覆盖已有目标，只有显式 `overwrite=true` 才允许覆盖非目录目标。SSH workspace 中由 Host 通过 proxy helper 发起 `remove`/`move`，Controller 不接触远端路径之外的本机文件系统能力。
 
 ### Phase 9 - PTY Attach Manager
 

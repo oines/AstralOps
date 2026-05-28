@@ -538,6 +538,21 @@ export type WorkspaceFilesApplyPatchParams = {
   edits: WorkspaceFileTextEdit[];
 };
 
+export type WorkspaceFilesDeleteParams = {
+  workspace_id: string;
+  path: string;
+  recursive?: boolean;
+  force?: boolean;
+};
+
+export type WorkspaceFilesMoveParams = {
+  workspace_id: string;
+  path: string;
+  destination_path: string;
+  overwrite?: boolean;
+  create_parents?: boolean;
+};
+
 export type WorkspaceExecParams = {
   workspace_id: string;
   command: string;
@@ -578,6 +593,23 @@ export type WorkspaceFilesWriteResult = {
 export type WorkspaceFilesApplyPatchResult = WorkspaceFilesWriteResult & {
   applied_edits: number;
   structured_patch?: Array<Record<string, unknown>>;
+};
+
+export type WorkspaceFilesDeleteResult = {
+  workspace_id: string;
+  target: WorkspaceTarget;
+  path: string;
+  kind: "dir" | "file" | "missing" | string;
+  removed: boolean;
+};
+
+export type WorkspaceFilesMoveResult = {
+  workspace_id: string;
+  target: WorkspaceTarget;
+  from_path: string;
+  to_path: string;
+  kind: "dir" | "file" | string;
+  size?: number;
 };
 
 export type WorkspaceExecResult = {
@@ -629,6 +661,8 @@ export type ControlAction =
   | "workspace.files.read"
   | "workspace.files.write"
   | "workspace.files.apply_patch"
+  | "workspace.files.delete"
+  | "workspace.files.move"
   | "workspace.exec"
   | "terminal.open"
   | "terminal.attach"

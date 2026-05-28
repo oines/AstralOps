@@ -49,6 +49,21 @@ type workspaceFileTextEdit struct {
 	ReplaceAll bool   `json:"replace_all,omitempty"`
 }
 
+type workspaceFilesDeleteParams struct {
+	WorkspaceID string `json:"workspace_id"`
+	Path        string `json:"path"`
+	Recursive   bool   `json:"recursive,omitempty"`
+	Force       bool   `json:"force,omitempty"`
+}
+
+type workspaceFilesMoveParams struct {
+	WorkspaceID     string `json:"workspace_id"`
+	Path            string `json:"path"`
+	DestinationPath string `json:"destination_path"`
+	Overwrite       bool   `json:"overwrite,omitempty"`
+	CreateParents   *bool  `json:"create_parents,omitempty"`
+}
+
 type workspaceExecParams struct {
 	WorkspaceID string `json:"workspace_id"`
 	Command     string `json:"command"`
@@ -94,6 +109,23 @@ type workspaceFilesApplyPatchResult struct {
 	Size            int64            `json:"size"`
 	AppliedEdits    int              `json:"applied_edits"`
 	StructuredPatch []map[string]any `json:"structured_patch,omitempty"`
+}
+
+type workspaceFilesDeleteResult struct {
+	WorkspaceID string `json:"workspace_id"`
+	Target      string `json:"target"`
+	Path        string `json:"path"`
+	Kind        string `json:"kind"`
+	Removed     bool   `json:"removed"`
+}
+
+type workspaceFilesMoveResult struct {
+	WorkspaceID string `json:"workspace_id"`
+	Target      string `json:"target"`
+	FromPath    string `json:"from_path"`
+	ToPath      string `json:"to_path"`
+	Kind        string `json:"kind"`
+	Size        int64  `json:"size,omitempty"`
 }
 
 type workspaceExecResult struct {
@@ -165,6 +197,37 @@ func (a *app) applyControlWorkspacePatch(ctx context.Context, params workspaceFi
 		return a.applyRemoteControlWorkspacePatch(ctx, ws, params)
 	}
 	return a.applyLocalControlWorkspacePatch(ws, params)
+}
+
+func (a *app) deleteControlWorkspacePath(ctx context.Context, params workspaceFilesDeleteParams) (workspaceFilesDeleteResult, error) {
+	ws, err := a.controlWorkspace(params.WorkspaceID)
+	if err != nil {
+		return workspaceFilesDeleteResult{}, err
+	}
+	if strings.TrimSpace(params.Path) == "" {
+		return workspaceFilesDeleteResult{}, newActionError(http.StatusBadRequest, "workspace_file_path_required", "path required")
+	}
+	if ws.Target == "ssh" {
+		return a.deleteRemoteControlWorkspacePath(ctx, ws, params)
+	}
+	return a.deleteLocalControlWorkspacePath(ws, params)
+}
+
+func (a *app) moveControlWorkspacePath(ctx context.Context, params workspaceFilesMoveParams) (workspaceFilesMoveResult, error) {
+	ws, err := a.controlWorkspace(params.WorkspaceID)
+	if err != nil {
+		return workspaceFilesMoveResult{}, err
+	}
+	if strings.TrimSpace(params.Path) == "" {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_file_path_required", "path required")
+	}
+	if strings.TrimSpace(params.DestinationPath) == "" {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_destination_path_required", "destination_path required")
+	}
+	if ws.Target == "ssh" {
+		return a.moveRemoteControlWorkspacePath(ctx, ws, params)
+	}
+	return a.moveLocalControlWorkspacePath(ws, params)
 }
 
 func (a *app) executeControlWorkspaceCommand(ctx context.Context, params workspaceExecParams) (workspaceExecResult, error) {
@@ -419,6 +482,134 @@ func (a *app) applyRemoteControlWorkspacePatch(ctx context.Context, ws Workspace
 	}, nil
 }
 
+func (a *app) deleteLocalControlWorkspacePath(ws Workspace, params workspaceFilesDeleteParams) (workspaceFilesDeleteResult, error) {
+	root := filepath.Clean(ws.LocalCWD)
+	target, rel, err := resolveWorkspacePath(root, params.Path)
+	if err != nil {
+		return workspaceFilesDeleteResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	if rel == "" {
+		return workspaceFilesDeleteResult{}, newActionError(http.StatusBadRequest, "workspace_root_path_forbidden", "workspace root cannot be deleted")
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		if os.IsNotExist(err) && params.Force {
+			return workspaceFilesDeleteResult{WorkspaceID: ws.ID, Target: ws.Target, Path: rel, Kind: "missing", Removed: false}, nil
+		}
+		return workspaceFilesDeleteResult{}, newActionError(http.StatusNotFound, "workspace_file_not_found", "workspace file not found")
+	}
+	kind := workspacePathKind(info)
+	if info.IsDir() && !params.Recursive {
+		return workspaceFilesDeleteResult{}, newActionError(http.StatusBadRequest, "workspace_delete_recursive_required", "recursive=true required to delete a directory")
+	}
+	if err := removeWorkspacePath(target, info); err != nil {
+		return workspaceFilesDeleteResult{}, newActionError(http.StatusBadRequest, "workspace_file_delete_failed", err.Error())
+	}
+	return workspaceFilesDeleteResult{WorkspaceID: ws.ID, Target: ws.Target, Path: rel, Kind: kind, Removed: true}, nil
+}
+
+func (a *app) deleteRemoteControlWorkspacePath(ctx context.Context, ws Workspace, params workspaceFilesDeleteParams) (workspaceFilesDeleteResult, error) {
+	if a.ssh == nil {
+		return workspaceFilesDeleteResult{}, newActionError(http.StatusNotImplemented, "ssh_unavailable", "ssh manager unavailable")
+	}
+	root := remotePathClean(ws.SSH.RemoteCWD)
+	target, rel, err := resolveRemoteWorkspacePath(root, params.Path)
+	if err != nil {
+		return workspaceFilesDeleteResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	if rel == "" {
+		return workspaceFilesDeleteResult{}, newActionError(http.StatusBadRequest, "workspace_root_path_forbidden", "workspace root cannot be deleted")
+	}
+	var stat map[string]any
+	if err := a.ssh.call(ctx, ws, "stat", map[string]any{"path": target}, &stat); err != nil {
+		if params.Force {
+			if removeErr := a.ssh.call(ctx, ws, "remove", map[string]any{"path": target, "recursive": params.Recursive, "force": true}, nil); removeErr != nil {
+				return workspaceFilesDeleteResult{}, newActionError(http.StatusBadRequest, "workspace_file_delete_failed", removeErr.Error())
+			}
+			return workspaceFilesDeleteResult{WorkspaceID: ws.ID, Target: ws.Target, Path: rel, Kind: "missing", Removed: false}, nil
+		}
+		return workspaceFilesDeleteResult{}, newActionError(http.StatusNotFound, "workspace_file_not_found", err.Error())
+	}
+	kind := remoteWorkspaceKind(stat)
+	if kind == "dir" && !params.Recursive {
+		return workspaceFilesDeleteResult{}, newActionError(http.StatusBadRequest, "workspace_delete_recursive_required", "recursive=true required to delete a directory")
+	}
+	if err := a.ssh.call(ctx, ws, "remove", map[string]any{"path": target, "recursive": params.Recursive, "force": params.Force}, nil); err != nil {
+		return workspaceFilesDeleteResult{}, newActionError(http.StatusBadRequest, "workspace_file_delete_failed", err.Error())
+	}
+	return workspaceFilesDeleteResult{WorkspaceID: ws.ID, Target: ws.Target, Path: rel, Kind: kind, Removed: true}, nil
+}
+
+func (a *app) moveLocalControlWorkspacePath(ws Workspace, params workspaceFilesMoveParams) (workspaceFilesMoveResult, error) {
+	root := filepath.Clean(ws.LocalCWD)
+	source, fromRel, err := resolveWorkspacePath(root, params.Path)
+	if err != nil {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	destination, toRel, err := resolveWorkspacePath(root, params.DestinationPath)
+	if err != nil {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	if fromRel == "" || toRel == "" {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_root_path_forbidden", "workspace root cannot be moved")
+	}
+	if source == destination {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusConflict, "workspace_move_same_path", "source and destination are the same path")
+	}
+	info, err := os.Lstat(source)
+	if err != nil {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusNotFound, "workspace_file_not_found", "workspace file not found")
+	}
+	if info.IsDir() && localPathIsSameOrDescendant(source, destination) {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_move_descendant_forbidden", "cannot move a directory into itself or a descendant")
+	}
+	if allowCreateParents(params.CreateParents) {
+		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+			return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_file_move_failed", err.Error())
+		}
+	}
+	if err := prepareWorkspaceMoveDestination(destination, params.Overwrite); err != nil {
+		return workspaceFilesMoveResult{}, err
+	}
+	if err := os.Rename(source, destination); err != nil {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_file_move_failed", err.Error())
+	}
+	return workspaceFilesMoveResult{WorkspaceID: ws.ID, Target: ws.Target, FromPath: fromRel, ToPath: toRel, Kind: workspacePathKind(info), Size: info.Size()}, nil
+}
+
+func (a *app) moveRemoteControlWorkspacePath(ctx context.Context, ws Workspace, params workspaceFilesMoveParams) (workspaceFilesMoveResult, error) {
+	if a.ssh == nil {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusNotImplemented, "ssh_unavailable", "ssh manager unavailable")
+	}
+	root := remotePathClean(ws.SSH.RemoteCWD)
+	source, fromRel, err := resolveRemoteWorkspacePath(root, params.Path)
+	if err != nil {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	destination, toRel, err := resolveRemoteWorkspacePath(root, params.DestinationPath)
+	if err != nil {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
+	if fromRel == "" || toRel == "" {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_root_path_forbidden", "workspace root cannot be moved")
+	}
+	if source == destination {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusConflict, "workspace_move_same_path", "source and destination are the same path")
+	}
+	var stat map[string]any
+	if err := a.ssh.call(ctx, ws, "stat", map[string]any{"path": source}, &stat); err != nil {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusNotFound, "workspace_file_not_found", err.Error())
+	}
+	kind := remoteWorkspaceKind(stat)
+	if kind == "dir" && remotePathIsSameOrDescendant(source, destination) {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_move_descendant_forbidden", "cannot move a directory into itself or a descendant")
+	}
+	if err := a.ssh.call(ctx, ws, "move", map[string]any{"source": source, "destination": destination, "overwrite": params.Overwrite, "create_parents": allowCreateParents(params.CreateParents)}, nil); err != nil {
+		return workspaceFilesMoveResult{}, newActionError(http.StatusBadRequest, "workspace_file_move_failed", err.Error())
+	}
+	return workspaceFilesMoveResult{WorkspaceID: ws.ID, Target: ws.Target, FromPath: fromRel, ToPath: toRel, Kind: kind, Size: int64(numberValue(stat["size"]))}, nil
+}
+
 func executeLocalControlWorkspaceCommand(parent context.Context, ws Workspace, command, requestedCWD string, timeout time.Duration) (workspaceExecResult, error) {
 	root := filepath.Clean(ws.LocalCWD)
 	cwd, rel, err := resolveWorkspacePath(root, requestedCWD)
@@ -623,6 +814,63 @@ func applyWorkspaceTextEdits(content string, edits []workspaceFileTextEdit) (str
 		}
 	}
 	return next, applied, nil
+}
+
+func workspacePathKind(info os.FileInfo) string {
+	if info.IsDir() {
+		return "dir"
+	}
+	return "file"
+}
+
+func remoteWorkspaceKind(stat map[string]any) string {
+	if boolValue(stat["is_dir"]) {
+		return "dir"
+	}
+	return "file"
+}
+
+func removeWorkspacePath(target string, info os.FileInfo) error {
+	if info.IsDir() {
+		return os.RemoveAll(target)
+	}
+	return os.Remove(target)
+}
+
+func prepareWorkspaceMoveDestination(destination string, overwrite bool) error {
+	info, err := os.Lstat(destination)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return newActionError(http.StatusBadRequest, "workspace_file_move_failed", err.Error())
+	}
+	if !overwrite {
+		return newActionError(http.StatusConflict, "workspace_destination_exists", "destination already exists")
+	}
+	if info.IsDir() {
+		return newActionError(http.StatusConflict, "workspace_destination_exists", "destination already exists and is a directory")
+	}
+	if err := os.Remove(destination); err != nil {
+		return newActionError(http.StatusBadRequest, "workspace_file_move_failed", err.Error())
+	}
+	return nil
+}
+
+func localPathIsSameOrDescendant(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+func remotePathIsSameOrDescendant(root, target string) bool {
+	rel, err := remotePathRel(root, target)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, "../"))
 }
 
 func allowCreateParents(value *bool) bool {

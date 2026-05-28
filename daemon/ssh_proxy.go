@@ -269,7 +269,7 @@ func validateProxyHello(hello map[string]any) error {
 			}
 		}
 	}
-	required := []string{"hello", "read", "write", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill"}
+	required := []string{"hello", "read", "write", "remove", "move", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill"}
 	missing := []string{}
 	for _, method := range required {
 		if !methods[method] {

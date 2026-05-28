@@ -209,6 +209,238 @@ func TestControlGatewayWorkspacePatchRequiresWriteCapability(t *testing.T) {
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }
 
+func TestControlGatewayDeletesWorkspaceFile(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	target := filepath.Join(workspace.LocalCWD, "old.txt")
+	if err := os.WriteFile(target, []byte("remove me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesDelete,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "old.txt",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(workspaceFilesDeleteResult)
+	if !ok {
+		t.Fatalf("delete result = %#v, want workspaceFilesDeleteResult", response.Result)
+	}
+	if result.Path != "old.txt" || result.Kind != "file" || !result.Removed {
+		t.Fatalf("delete result = %#v", result)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("deleted file stat err = %v, want not exist", err)
+	}
+}
+
+func TestControlGatewayWorkspaceDeleteRequiresRecursiveForDirectory(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	if err := os.Mkdir(filepath.Join(workspace.LocalCWD, "dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "dir", "note.txt"), []byte("body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesDelete,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "dir",
+		},
+	})
+	assertActionError(t, err, http.StatusBadRequest, "workspace_delete_recursive_required")
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesDelete,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "dir",
+			"recursive":    true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := response.Result.(workspaceFilesDeleteResult)
+	if result.Path != "dir" || result.Kind != "dir" || !result.Removed {
+		t.Fatalf("delete directory result = %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.LocalCWD, "dir")); !os.IsNotExist(err) {
+		t.Fatalf("deleted directory stat err = %v, want not exist", err)
+	}
+}
+
+func TestControlGatewayMovesWorkspaceFile(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	source := filepath.Join(workspace.LocalCWD, "from.txt")
+	if err := os.WriteFile(source, []byte("move me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesMove,
+		Params: map[string]any{
+			"workspace_id":     workspace.ID,
+			"path":             "from.txt",
+			"destination_path": "nested/to.txt",
+			"create_parents":   true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(workspaceFilesMoveResult)
+	if !ok {
+		t.Fatalf("move result = %#v, want workspaceFilesMoveResult", response.Result)
+	}
+	if result.FromPath != "from.txt" || result.ToPath != "nested/to.txt" || result.Kind != "file" || result.Size != int64(len("move me")) {
+		t.Fatalf("move result = %#v", result)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("moved source stat err = %v, want not exist", err)
+	}
+	body, err := os.ReadFile(filepath.Join(workspace.LocalCWD, "nested", "to.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "move me" {
+		t.Fatalf("moved body = %q", string(body))
+	}
+}
+
+func TestControlGatewayWorkspaceMoveRejectsExistingDestination(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "from.txt"), []byte("from"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "to.txt"), []byte("to"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesMove,
+		Params: map[string]any{
+			"workspace_id":     workspace.ID,
+			"path":             "from.txt",
+			"destination_path": "to.txt",
+		},
+	})
+	assertActionError(t, err, http.StatusConflict, "workspace_destination_exists")
+}
+
+func TestControlGatewayWorkspaceDeleteRequiresWriteCapability(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "old.txt"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesRead)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesDelete,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "old.txt",
+		},
+	})
+	assertActionError(t, err, http.StatusForbidden, "capability_denied")
+}
+
+func TestControlGatewayDeletesAndMovesRemoteWorkspacePaths(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote",
+		Target: "ssh",
+		Agent:  AgentCodex,
+		SSH:    &SSHConfig{Endpoint: "root@example.test", RemoteCWD: "/remote/project"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteStore := t.TempDir()
+	writeRemoteFixtureFile(t, remoteStore, "/remote/project/delete.txt", "delete me")
+	writeRemoteFixtureFile(t, remoteStore, "/remote/project/from.txt", "move me")
+	proxy, cleanup := newMutableClaudeRemoteProxy(t, workspace, remoteStore)
+	defer cleanup()
+	app := &app{store: st, hub: newEventHub()}
+	app.ssh = &sshManager{
+		app: app,
+		by: map[string]*sshTarget{
+			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
+		},
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
+
+	deleteResponse, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesDelete,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"path":         "delete.txt",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleteResult := deleteResponse.Result.(workspaceFilesDeleteResult)
+	if deleteResult.Target != "ssh" || deleteResult.Path != "delete.txt" || !deleteResult.Removed {
+		t.Fatalf("remote delete result = %#v", deleteResult)
+	}
+	if _, err := os.Stat(filepath.Join(remoteStore, "remote", "project", "delete.txt")); !os.IsNotExist(err) {
+		t.Fatalf("remote deleted file stat err = %v, want not exist", err)
+	}
+
+	moveResponse, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceFilesWrite,
+		Action:             ControlActionWorkspaceFilesMove,
+		Params: map[string]any{
+			"workspace_id":     workspace.ID,
+			"path":             "from.txt",
+			"destination_path": "nested/to.txt",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	moveResult := moveResponse.Result.(workspaceFilesMoveResult)
+	if moveResult.Target != "ssh" || moveResult.FromPath != "from.txt" || moveResult.ToPath != "nested/to.txt" {
+		t.Fatalf("remote move result = %#v", moveResult)
+	}
+	if _, err := os.Stat(filepath.Join(remoteStore, "remote", "project", "from.txt")); !os.IsNotExist(err) {
+		t.Fatalf("remote moved source stat err = %v, want not exist", err)
+	}
+	if got := readRemoteFixtureFile(t, remoteStore, "/remote/project/nested/to.txt"); got != "move me" {
+		t.Fatalf("remote moved body = %q", got)
+	}
+}
+
 func TestControlGatewayRejectsWorkspacePathEscape(t *testing.T) {
 	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)

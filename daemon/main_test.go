@@ -1841,7 +1841,7 @@ func TestValidateProxyHelloRequiresCoreExecutionMethods(t *testing.T) {
 	err = validateProxyHello(map[string]any{
 		"version": "0.1.0",
 		"capabilities": map[string]any{"methods": []string{
-			"hello", "read", "write", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill",
+			"hello", "read", "write", "remove", "move", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill",
 		}},
 	})
 	if err != nil {
@@ -5235,7 +5235,7 @@ if [[ "$args" == *"exec "*"astral-proxy-agent"* ]]; then
 import os
 for line in sys.stdin:
     req = json.loads(line)
-    methods = ["hello", "read", "write", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill"]
+    methods = ["hello", "read", "write", "remove", "move", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill"]
     if os.environ.get("ASTRALOPS_TEST_PROXY_OLD_UNTIL_UPLOAD") == "1" and not os.path.exists(os.environ["ASTRALOPS_TEST_PROXY_UPGRADE_MARKER"]):
         methods = ["hello", "read", "write", "list", "stat"]
     print(json.dumps({"id": req.get("id"), "result": {"shell": "/bin/sh", "user": "root", "hostname": "host", "capabilities": {"methods": methods}}}), flush=True)'
@@ -6084,7 +6084,7 @@ for line in sys.stdin:
     result = {}
     error = None
     if method == "hello":
-        result = {"version":"fake","capabilities":{"methods":["hello","read","dirs","write","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
+        result = {"version":"fake","capabilities":{"methods":["hello","read","dirs","write","remove","move","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
     elif method == "stat":
         result = {"path": params.get("path"), "size": 12}
     elif method == "read":
@@ -6196,7 +6196,7 @@ for line in sys.stdin:
     error = None
     try:
         if method == "hello":
-            result = {"version":"fake","capabilities":{"methods":["hello","read","dirs","write","mkdir","remove","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
+            result = {"version":"fake","capabilities":{"methods":["hello","read","dirs","write","mkdir","remove","move","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
         elif method == "read":
             body = read_file(params.get("path"))
             result = {"path": clean_remote(params.get("path")), "content": body.decode("utf-8", "replace"), "dataBase64": base64.b64encode(body).decode()}
@@ -6220,6 +6220,19 @@ for line in sys.stdin:
             elif not params.get("force", True):
                 raise FileNotFoundError(clean_remote(params.get("path")))
             result = {"path": clean_remote(params.get("path"))}
+        elif method == "move":
+            source = local_path(params.get("source"))
+            destination = local_path(params.get("destination"))
+            if params.get("create_parents"):
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+            if os.path.exists(destination):
+                if not params.get("overwrite"):
+                    raise FileExistsError(clean_remote(params.get("destination")))
+                if os.path.isdir(destination):
+                    raise IsADirectoryError(clean_remote(params.get("destination")))
+                os.remove(destination)
+            os.rename(source, destination)
+            result = {"source": clean_remote(params.get("source")), "destination": clean_remote(params.get("destination"))}
         elif method == "dirs":
             dirs, files, truncated = list_dirs(params.get("path") or remote_cwd, int(params.get("limit") or 5000))
             result = {"dirs": dirs, "files": files, "truncated": truncated}

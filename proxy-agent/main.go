@@ -35,6 +35,7 @@ var supportedMethods = []string{
 	"write",
 	"mkdir",
 	"remove",
+	"move",
 	"copy",
 	"glob",
 	"grep",
@@ -312,6 +313,12 @@ func dispatch(req request) (any, error) {
 			return map[string]any{"path": path}, os.Remove(path)
 		}
 		return map[string]any{"path": path}, os.Remove(path)
+	case "move":
+		var p moveParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return movePath(p)
 	case "copy":
 		var p copyParams
 		if err := parse(req.Params, &p); err != nil {
@@ -413,6 +420,13 @@ type removeParams struct {
 	Path      string `json:"path"`
 	Recursive *bool  `json:"recursive"`
 	Force     *bool  `json:"force"`
+}
+
+type moveParams struct {
+	Source        string `json:"source"`
+	Destination   string `json:"destination"`
+	Overwrite     bool   `json:"overwrite"`
+	CreateParents bool   `json:"create_parents"`
 }
 
 type writeParams struct {
@@ -1093,6 +1107,50 @@ func destinationIsSameOrDescendant(src, dst string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+func movePath(p moveParams) (any, error) {
+	src, err := resolveRemotePath(p.Source)
+	if err != nil {
+		return nil, err
+	}
+	dst, err := resolveRemotePath(p.Destination)
+	if err != nil {
+		return nil, err
+	}
+	if src == dst {
+		return nil, errors.New("source and destination are the same path")
+	}
+	info, err := os.Lstat(src)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() && destinationIsSameOrDescendant(src, dst) {
+		return nil, errors.New("cannot move a directory to itself or a descendant")
+	}
+	if p.CreateParents {
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return nil, err
+		}
+	}
+	dstInfo, err := os.Lstat(dst)
+	if err == nil {
+		if !p.Overwrite {
+			return nil, errors.New("destination already exists")
+		}
+		if dstInfo.IsDir() {
+			return nil, errors.New("destination already exists and is a directory")
+		}
+		if err := os.Remove(dst); err != nil {
+			return nil, err
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return nil, err
+	}
+	return map[string]any{"source": src, "destination": dst}, nil
 }
 
 func applyPatch(p applyPatchParams) (any, error) {
