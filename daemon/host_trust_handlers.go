@@ -82,6 +82,8 @@ func (a *app) revokeTrustedControlDevice(controllerDeviceID, exceptConnectionID 
 	if !ok {
 		return hostTrustRevokeResult{}, newActionError(http.StatusNotFound, "trusted_device_not_found", "trusted device not found")
 	}
+	closed := a.closeControlSessionsForDeviceExcept(grant.ControllerDeviceID, "trust_revoked", exceptConnectionID)
+	a.cleanupExceptedControlSessionForDevice(grant.ControllerDeviceID, exceptConnectionID, "trust_revoked")
 	releasedWriters := a.releaseTerminalWritersForDevice(grant.ControllerDeviceID)
 	a.emit(AstralEvent{
 		Kind: "control.trust.revoked",
@@ -92,7 +94,6 @@ func (a *app) revokeTrustedControlDevice(controllerDeviceID, exceptConnectionID 
 			"released_terminal_writers": releasedWriters,
 		},
 	})
-	closed := a.closeControlSessionsForDeviceExcept(grant.ControllerDeviceID, "trust_revoked", exceptConnectionID)
 	return hostTrustRevokeResult{
 		ControllerDeviceID:      grant.ControllerDeviceID,
 		Grant:                   grant,
@@ -100,4 +101,19 @@ func (a *app) revokeTrustedControlDevice(controllerDeviceID, exceptConnectionID 
 		ReleasedTerminalWriters: releasedWriters,
 		RevokedAt:               grant.RevokedAt,
 	}, nil
+}
+
+func (a *app) cleanupExceptedControlSessionForDevice(controllerDeviceID, connectionID, reason string) {
+	if strings.TrimSpace(controllerDeviceID) == "" || strings.TrimSpace(connectionID) == "" {
+		return
+	}
+	a.controlMu.Lock()
+	conn := a.controlSessions[connectionID]
+	if conn == nil || conn.controllerDeviceID != controllerDeviceID {
+		a.controlMu.Unlock()
+		return
+	}
+	a.controlMu.Unlock()
+	conn.cancelAllControlStreams()
+	a.detachTerminalViewersForControlSession(conn.id, reason)
 }

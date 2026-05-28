@@ -2209,6 +2209,46 @@ func TestCloseControlSessionsForDeviceImmediatelyCleansControlStreams(t *testing
 	}
 }
 
+func TestSelfRevokeCleansExceptedControlSessionStreamsBeforeClose(t *testing.T) {
+	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityHostManage)
+	server := startControlChannelTestServer(t, app)
+	client, _, ack := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+	conn := controlSessionForAck(t, app, ack)
+
+	mediaCtx, cancelMedia := context.WithCancel(context.Background())
+	eventCtx, cancelEvent := context.WithCancel(context.Background())
+	workspaceCtx, cancelWorkspace := context.WithCancel(context.Background())
+	conn.registerMediaStream("media_self_revoke_cleanup", cancelMedia)
+	conn.registerEventSubscription("event_self_revoke_cleanup", cancelEvent)
+	conn.registerWorkspaceFileStream("workspace_self_revoke_cleanup", cancelWorkspace)
+
+	result, err := app.revokeTrustedControlDevice("dev_controller", conn.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ClosedControlSessions != 0 {
+		t.Fatalf("closed sessions = %d, want current response connection left open", result.ClosedControlSessions)
+	}
+	for name, ctx := range map[string]context.Context{
+		"media":     mediaCtx,
+		"event":     eventCtx,
+		"workspace": workspaceCtx,
+	} {
+		select {
+		case <-ctx.Done():
+		default:
+			t.Fatalf("%s stream was not cancelled while preserving self-revoke response connection", name)
+		}
+	}
+	if got := app.activeControlSessionCountForDevice("dev_controller"); got != 1 {
+		t.Fatalf("active sessions = %d, want self-revoke response connection still registered", got)
+	}
+	if countKind(app.store.queryEvents("", "", 0), "control.trust.revoked") != 1 {
+		t.Fatalf("events = %#v, want one trust revoke audit event", eventKinds(app.store.queryEvents("", "", 0)))
+	}
+}
+
 func TestControlWebSocketHostTrustListIsEncrypted(t *testing.T) {
 	app, _, _, adminPublicKey, adminPrivateKey := newControlChannelTestApp(t, CapabilityHostManage)
 	readerPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
