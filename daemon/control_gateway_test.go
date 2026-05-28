@@ -202,6 +202,86 @@ func TestControlGatewaySessionInputSteersWhenRuntimeSupportsSteer(t *testing.T) 
 	}
 }
 
+func TestControlGatewayQueueCancelCancelsQueuedInput(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
+	turn := app.enqueueTurn(session, "queued prompt", TurnOptions{})
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionQueueCancel,
+		Params: map[string]any{
+			"session_id": session.ID,
+			"queue_id":   turn.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := mapValue(response.Result)
+	if !boolValue(result["ok"]) || stringValue(result["queue_id"]) != turn.ID {
+		t.Fatalf("queue cancel result = %#v", result)
+	}
+	if _, ok := app.peekQueuedTurn(session.ID, turn.ID); ok {
+		t.Fatal("queued input still exists after cancel")
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if !containsEventKind(events, "queue.cancelled") {
+		t.Fatalf("events = %#v, want queue.cancelled", events)
+	}
+}
+
+func TestControlGatewayQueueSteerSteersQueuedInput(t *testing.T) {
+	runtime := &recordingSteerRuntime{}
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, runtime)
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
+	turn := app.enqueueTurn(session, "steer queued prompt", TurnOptions{})
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionQueueSteer,
+		Params: map[string]any{
+			"session_id": session.ID,
+			"queue_id":   turn.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := mapValue(response.Result)
+	if !boolValue(result["ok"]) || stringValue(result["queue_id"]) != turn.ID {
+		t.Fatalf("queue steer result = %#v", result)
+	}
+	if len(runtime.steered) != 1 || runtime.steered[0] != "steer queued prompt" {
+		t.Fatalf("steered = %#v", runtime.steered)
+	}
+	if _, ok := app.peekQueuedTurn(session.ID, turn.ID); ok {
+		t.Fatal("queued input still exists after steer")
+	}
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if !containsEventKind(events, "queue.steered") {
+		t.Fatalf("events = %#v, want queue.steered", events)
+	}
+}
+
+func TestControlGatewayQueueCancelRequiresExistingQueue(t *testing.T) {
+	app, _, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionQueueCancel,
+		Params: map[string]any{
+			"session_id": session.ID,
+			"queue_id":   "queue_missing",
+		},
+	})
+	assertActionError(t, err, http.StatusNotFound, "queue_not_found")
+}
+
 func TestControlGatewayRejectsReplacedInteraction(t *testing.T) {
 	runtime := &recordingRuntime{}
 	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, runtime)

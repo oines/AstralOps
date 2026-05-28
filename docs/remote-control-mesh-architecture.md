@@ -619,7 +619,7 @@ core.read
   查看 workspace 列表、session 列表、session view、transcript projection、agent 状态、queue、pending interaction。
 
 core.control
-  发送 prompt、中断 turn、取消/steer queued prompt、fork/delete session。发送 prompt 时必须由 Host/Core 明确判定 session input mode，而不是由 Controller UI 自行猜测。
+  发送 prompt、中断 turn、取消/steer queued prompt、fork/delete session。发送 prompt 时必须由 Host/Core 明确判定 session input mode，而不是由 Controller UI 自行猜测。queued prompt 管理由 `core.control.queue.cancel` 和 `core.control.queue.steer` 暴露，Controller 只能传 session_id + queue_id；Host 负责确认 queued turn 是否仍存在并落 queue.cancelled / queue.steered 事件。
 
 session.edit
   编辑最后一条用户消息并由 Host/Core 执行 rollback/resend。被替换的旧 turn range 必须从 transcript 和 pending interaction projection 中隐藏，旧 approval/ask 响应必须由 Host 拒绝为 stale。
@@ -696,6 +696,16 @@ Controller UI 可以只显示“发送”或“继续输入”，但远控协议
 mode: start | queue | steer
 queue_id: only when mode=queue
 queued / steered: legacy compatibility flags
+```
+
+queued input 后续控制：
+
+```text
+core.control.queue.cancel(session_id, queue_id)
+  -> queue.cancelled
+
+core.control.queue.steer(session_id, queue_id)
+  -> queue.steered
 ```
 
 ## 本机 Shell 设置

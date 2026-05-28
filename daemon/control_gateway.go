@@ -30,6 +30,8 @@ const (
 	ControlActionWorkspaces                 = "core.read.workspaces"
 	ControlActionSessionInput               = "core.control.session_input"
 	ControlActionInterrupt                  = "core.control.interrupt"
+	ControlActionQueueCancel                = "core.control.queue.cancel"
+	ControlActionQueueSteer                 = "core.control.queue.steer"
 	ControlActionInteractionRespond         = "interaction.respond"
 	ControlActionSessionEdit                = "session.edit"
 	ControlActionAttachmentIngest           = "attachment.ingest"
@@ -110,7 +112,7 @@ func controlActionCapability(action string) string {
 	switch action {
 	case ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces:
 		return CapabilityCoreRead
-	case ControlActionSessionInput, ControlActionInterrupt:
+	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer:
 		return CapabilityCoreControl
 	case ControlActionInteractionRespond:
 		return CapabilityInteractionRespond
@@ -195,6 +197,18 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn, gra
 			return nil, err
 		}
 		return a.interruptSession(params.SessionID)
+	case ControlActionQueueCancel:
+		var params queueControlParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.cancelControlQueuedTurn(params)
+	case ControlActionQueueSteer:
+		var params queueControlParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.steerControlQueuedTurn(params)
 	case ControlActionInteractionRespond:
 		var params struct {
 			InteractionID string         `json:"interaction_id"`

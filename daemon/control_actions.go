@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+type queueControlParams struct {
+	SessionID string `json:"session_id"`
+	QueueID   string `json:"queue_id"`
+}
+
 func (a *app) startSessionInput(sessionID, input string, options TurnOptions) (map[string]any, error) {
 	input = strings.TrimSpace(input)
 	options.Attachments = sanitizeInputAttachments(options.Attachments)
@@ -80,6 +85,44 @@ func (a *app) interruptSession(sessionID string) (map[string]any, error) {
 		return nil, newActionError(http.StatusConflict, "interrupt_failed", err.Error())
 	}
 	return map[string]any{"ok": true}, nil
+}
+
+func (a *app) cancelControlQueuedTurn(params queueControlParams) (map[string]any, error) {
+	sessionID := strings.TrimSpace(params.SessionID)
+	queueID := strings.TrimSpace(params.QueueID)
+	if sessionID == "" || queueID == "" {
+		return nil, newActionError(http.StatusBadRequest, "queue_reference_invalid", "session_id and queue_id are required")
+	}
+	if _, ok := a.store.getSession(sessionID); !ok {
+		return nil, newActionError(http.StatusNotFound, "session_not_found", "session not found")
+	}
+	if _, ok := a.peekQueuedTurn(sessionID, queueID); !ok {
+		return nil, newActionError(http.StatusNotFound, "queue_not_found", "queued input not found")
+	}
+	a.cancelQueuedTurn(sessionID, queueID)
+	return map[string]any{"ok": true, "queue_id": queueID}, nil
+}
+
+func (a *app) steerControlQueuedTurn(params queueControlParams) (map[string]any, error) {
+	sessionID := strings.TrimSpace(params.SessionID)
+	queueID := strings.TrimSpace(params.QueueID)
+	if sessionID == "" || queueID == "" {
+		return nil, newActionError(http.StatusBadRequest, "queue_reference_invalid", "session_id and queue_id are required")
+	}
+	err := a.steerQueuedTurn(sessionID, queueID)
+	if err == nil {
+		return map[string]any{"ok": true, "queue_id": queueID}, nil
+	}
+	switch {
+	case err.Error() == "session not found":
+		return nil, newActionError(http.StatusNotFound, "session_not_found", err.Error())
+	case err.Error() == "queued message not found":
+		return nil, newActionError(http.StatusNotFound, "queue_not_found", err.Error())
+	case errors.Is(err, ErrSteerUnsupported):
+		return nil, newActionError(http.StatusNotImplemented, "steer_unsupported", err.Error())
+	default:
+		return nil, newActionError(http.StatusConflict, "steer_failed", err.Error())
+	}
 }
 
 func (a *app) respondInteraction(id string, req map[string]any) (map[string]any, error) {

@@ -391,6 +391,16 @@ export type SessionInputResult = {
   queue_id?: string;
 };
 
+export type QueueControlParams = {
+  session_id: string;
+  queue_id: string;
+};
+
+export type QueueControlResult = {
+  ok: boolean;
+  queue_id: string;
+};
+
 export type EditLastUserMessageRequest = {
   event_seq: number;
   input: string;
@@ -709,6 +719,8 @@ export type ControlAction =
   | "core.read.workspaces"
   | "core.control.session_input"
   | "core.control.interrupt"
+  | "core.control.queue.cancel"
+  | "core.control.queue.steer"
   | "interaction.respond"
   | "session.edit"
   | "attachment.ingest"
