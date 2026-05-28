@@ -79,6 +79,50 @@ func TestControlGatewayIngestsAttachmentWithoutHostPath(t *testing.T) {
 	}
 }
 
+func TestControlGatewayRejectsCrossSessionAttachmentHandle(t *testing.T) {
+	runtime := &recordingRuntime{}
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, runtime)
+	otherSession := app.store.createSession(workspace, AgentCodex)
+	trustControlDevice(t, app, "device_mobile", CapabilityAttachmentIngest, CapabilityCoreControl)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityAttachmentIngest,
+		Action:             ControlActionAttachmentIngest,
+		Params: map[string]any{
+			"session_id":     session.ID,
+			"name":           "session-scoped.txt",
+			"content_base64": base64.StdEncoding.EncodeToString([]byte("session-scoped-secret")),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(attachmentIngestResult)
+	if !ok || result.Attachment.ID == "" {
+		t.Fatalf("ingest result = %#v, want attachment handle", response.Result)
+	}
+
+	_, err = app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionSessionInput,
+		Params: map[string]any{
+			"session_id": otherSession.ID,
+			"attachments": []map[string]any{{
+				"id": result.Attachment.ID,
+			}},
+		},
+	})
+	assertActionError(t, err, http.StatusNotFound, "attachment_not_found")
+	if len(runtime.inputs) != 0 {
+		t.Fatalf("runtime inputs = %#v, want none", runtime.inputs)
+	}
+	if len(runtime.options) != 0 {
+		t.Fatalf("runtime options = %#v, want none", runtime.options)
+	}
+}
+
 func TestControlGatewayChunkedAttachmentIngest(t *testing.T) {
 	runtime := &recordingRuntime{}
 	app, _, session := newControlGatewayTestApp(t, AgentCodex, runtime)
