@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+)
 
 var controlPrivatePathKeys = map[string]bool{
 	"path":       true,
@@ -106,7 +109,77 @@ func sanitizeControlSession(session Session) Session {
 	return session
 }
 
-func sanitizeControlSessionView(view sessionView) sessionView {
+func sanitizeControlSessionView(view sessionView, workspace Workspace) sessionView {
 	view.Session = sanitizeControlSession(view.Session)
+	view.PendingInteraction = sanitizeControlPendingInteraction(view.PendingInteraction, workspace)
 	return view
+}
+
+func sanitizeControlPendingInteraction(pending *pendingInteractionView, workspace Workspace) *pendingInteractionView {
+	if pending == nil || len(pending.DetailRows) == 0 {
+		return pending
+	}
+	out := *pending
+	out.DetailRows = make([]interactionDetailRow, len(pending.DetailRows))
+	for index, row := range pending.DetailRows {
+		if row.Label == "目录" || row.Label == "路径" {
+			row.Value = sanitizeControlDecisionPath(row.Value, workspace)
+		}
+		out.DetailRows[index] = row
+	}
+	return &out
+}
+
+func sanitizeControlDecisionPath(value string, workspace Workspace) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	switch workspace.Target {
+	case "local":
+		return sanitizeLocalControlDecisionPath(value, workspace.LocalCWD)
+	case "ssh":
+		if workspace.SSH != nil {
+			return sanitizeRemoteControlDecisionPath(value, workspace.SSH.RemoteCWD)
+		}
+	}
+	return value
+}
+
+func sanitizeLocalControlDecisionPath(value, root string) string {
+	root = filepath.Clean(strings.TrimSpace(root))
+	if root == "" || root == "." {
+		return value
+	}
+	if !filepath.IsAbs(value) {
+		return value
+	}
+	target := filepath.Clean(value)
+	if !localPathIsSameOrDescendant(root, target) {
+		return value
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return value
+	}
+	if rel == "." {
+		return "."
+	}
+	return filepath.ToSlash(rel)
+}
+
+func sanitizeRemoteControlDecisionPath(value, root string) string {
+	root = remotePathClean(root)
+	value = remotePathClean(value)
+	if root == "" || value == "" || !remotePathIsAbs(value) {
+		return value
+	}
+	rel, err := remotePathRel(root, value)
+	if err != nil || pathEscapesRoot(rel) {
+		return value
+	}
+	if rel == "." {
+		return "."
+	}
+	return rel
 }

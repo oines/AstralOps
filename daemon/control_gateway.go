@@ -169,7 +169,8 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if !ok {
 			return nil, newActionError(http.StatusNotFound, "session_not_found", "session not found")
 		}
-		return sanitizeControlSessionView(view), nil
+		workspace, _ := a.store.getWorkspace(view.Session.WorkspaceID)
+		return sanitizeControlSessionView(view, workspace), nil
 	case ControlActionSessions:
 		var params struct {
 			WorkspaceID string `json:"workspace_id"`

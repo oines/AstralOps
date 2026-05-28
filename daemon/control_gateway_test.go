@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -124,6 +126,103 @@ func TestControlGatewayReadsSessionView(t *testing.T) {
 	stored, ok := app.store.getSession(session.ID)
 	if !ok || stored.NativeSessionID != "native-session-secret" || stored.NativeThreadID != "native-thread-secret" {
 		t.Fatalf("stored session was mutated: %#v", stored)
+	}
+}
+
+func TestControlGatewaySessionViewProjectsPendingInteractionPaths(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	if _, err := app.store.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       session.Agent,
+		Kind:        "approval.requested",
+		Normalized: map[string]any{
+			"approval_id": "approval_1",
+			"kind":        "command",
+			"command":     "pwd",
+			"cwd":         filepath.Join(workspace.LocalCWD, "nested"),
+			"path":        filepath.Join(workspace.LocalCWD, "nested", "note.txt"),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionSessionView,
+		Params:             map[string]any{"session_id": session.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, ok := response.Result.(sessionView)
+	if !ok {
+		t.Fatalf("result = %#v, want sessionView", response.Result)
+	}
+	if view.PendingInteraction == nil {
+		t.Fatal("pending interaction is nil")
+	}
+	rows := map[string]string{}
+	for _, row := range view.PendingInteraction.DetailRows {
+		rows[row.Label] = row.Value
+		if strings.Contains(row.Value, workspace.LocalCWD) {
+			t.Fatalf("pending detail row leaked Host cwd: %#v", row)
+		}
+	}
+	if rows["目录"] != "nested" || rows["路径"] != "nested/note.txt" {
+		t.Fatalf("pending detail rows = %#v, want workspace-relative cwd/path", rows)
+	}
+}
+
+func TestControlGatewaySessionViewProjectsSSHPendingInteractionPaths(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	workspace.Target = "ssh"
+	workspace.LocalCWD = ""
+	workspace.SSH = &SSHConfig{Endpoint: "root@example.test", RemoteCWD: "/remote/project"}
+	app.store.mu.Lock()
+	app.store.workspaces[workspace.ID] = workspace
+	app.store.mu.Unlock()
+	if _, err := app.store.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       session.Agent,
+		Kind:        "approval.requested",
+		Normalized: map[string]any{
+			"approval_id": "approval_ssh_1",
+			"kind":        "command",
+			"command":     "pwd",
+			"cwd":         "/remote/project/nested",
+			"path":        "/remote/project/nested/note.txt",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionSessionView,
+		Params:             map[string]any{"session_id": session.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, ok := response.Result.(sessionView)
+	if !ok || view.PendingInteraction == nil {
+		t.Fatalf("session view = %#v, want pending interaction", response.Result)
+	}
+	rows := map[string]string{}
+	for _, row := range view.PendingInteraction.DetailRows {
+		rows[row.Label] = row.Value
+		if strings.Contains(row.Value, "/remote/project") {
+			t.Fatalf("pending detail row leaked SSH remote cwd: %#v", row)
+		}
+	}
+	if rows["目录"] != "nested" || rows["路径"] != "nested/note.txt" {
+		t.Fatalf("pending detail rows = %#v, want workspace-relative cwd/path", rows)
 	}
 }
 
