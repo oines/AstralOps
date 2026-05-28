@@ -882,7 +882,7 @@ opened/attached/detached/closed lifecycle events only
 trust revocation releases active writer lock
 ```
 
-这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.attach` 必须发生在已完成握手的 encrypted control WebSocket 上，因为 PTY 输出只能回到这条 E2EE channel。`terminal.open` 的本地 cwd 必须和 workspace files/exec 一样做 workspace root confinement，包括拒绝通过 symlink 逃逸到 root 外。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。`terminal.input` 是按键/粘贴输入，不是无限上传通道，必须有单次 payload 上限；PTY 输出 frame 也必须由 Host 拆成有界 E2EE frame。PTY 输出不进入 JSONL，只有 opened、attached、detached、closed lifecycle event 会落盘。
+这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.attach` 必须发生在已完成握手的 encrypted control WebSocket 上，因为 PTY 输出只能回到这条 E2EE channel。`terminal.open` 的本地 cwd 必须和 workspace files/exec 一样做 workspace root confinement，包括拒绝通过 symlink 逃逸到 root 外。`terminal.open` response 和 terminal lifecycle event 里的 `cwd` 只能是 workspace-relative display cwd，不能暴露 Desktop 本机绝对路径或 SSH remote cwd；真实执行 cwd 只留在 Host 内部。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。`terminal.input` 是按键/粘贴输入，不是无限上传通道，必须有单次 payload 上限；PTY 输出 frame 也必须由 Host 拆成有界 E2EE frame。PTY 输出不进入 JSONL，只有 opened、attached、detached、closed lifecycle event 会落盘。
 
 断线行为：
 

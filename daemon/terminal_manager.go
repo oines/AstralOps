@@ -168,7 +168,7 @@ func (m *terminalManager) open(ctx context.Context, controllerDeviceID string, p
 }
 
 func (m *terminalManager) openLocal(_ context.Context, controllerDeviceID string, ws Workspace, requestedCWD string, cols, rows uint16) (terminalOpenResult, error) {
-	cwd, err := localTerminalCWD(ws, requestedCWD)
+	cwd, displayCWD, err := localTerminalCWD(ws, requestedCWD)
 	if err != nil {
 		return terminalOpenResult{}, err
 	}
@@ -183,7 +183,7 @@ func (m *terminalManager) openLocal(_ context.Context, controllerDeviceID string
 	if err != nil {
 		return terminalOpenResult{}, err
 	}
-	session := newTerminalSession(ws.ID, ws.Agent, ws.Target, cwd, filepath.Base(shell), controllerDeviceID)
+	session := newTerminalSession(ws.ID, ws.Agent, ws.Target, displayCWD, filepath.Base(shell), controllerDeviceID)
 	session.localCmd = cmd
 	session.localPTY = ptmx
 	m.register(session)
@@ -201,14 +201,15 @@ func (m *terminalManager) openSSH(ctx context.Context, controllerDeviceID string
 		return terminalOpenResult{}, newActionError(http.StatusBadRequest, "workspace_ssh_missing", "workspace SSH config is missing")
 	}
 	cwd := ws.SSH.RemoteCWD
+	displayCWD := ""
 	if requestedCWD != "" {
 		var err error
-		cwd, _, err = resolveRemoteWorkspacePath(ws.SSH.RemoteCWD, requestedCWD)
+		cwd, displayCWD, err = resolveRemoteWorkspacePath(ws.SSH.RemoteCWD, requestedCWD)
 		if err != nil {
 			return terminalOpenResult{}, newActionError(http.StatusBadRequest, "path_invalid", err.Error())
 		}
 	}
-	session := newTerminalSession(ws.ID, ws.Agent, ws.Target, cwd, "", controllerDeviceID)
+	session := newTerminalSession(ws.ID, ws.Agent, ws.Target, displayCWD, "", controllerDeviceID)
 	session.sshWorkspace = &ws
 	session.sshTerminalID = session.id
 	_, events, unsubscribe, started, err := m.app.ssh.startPTY(ctx, ws, session.id, map[string]any{"cwd": cwd, "cols": cols, "rows": rows})
@@ -833,23 +834,23 @@ func terminalOutputChunks(data string) []string {
 	return chunks
 }
 
-func localTerminalCWD(ws Workspace, requested string) (string, error) {
+func localTerminalCWD(ws Workspace, requested string) (string, string, error) {
 	root := filepath.Clean(ws.LocalCWD)
 	if root == "" || root == "." {
-		return "", newActionError(http.StatusBadRequest, "workspace_cwd_empty", "workspace local cwd is empty")
+		return "", "", newActionError(http.StatusBadRequest, "workspace_cwd_empty", "workspace local cwd is empty")
 	}
 	if requested == "" {
 		if err := ensureLocalControlWorkspaceExistingPath(root, root); err != nil {
-			return "", err
+			return "", "", err
 		}
-		return root, nil
+		return root, "", nil
 	}
-	target, _, err := resolveWorkspacePath(root, requested)
+	target, rel, err := resolveWorkspacePath(root, requested)
 	if err != nil {
-		return "", newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+		return "", "", newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
 	}
 	if err := ensureLocalControlWorkspaceExistingPath(root, target); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return target, nil
+	return target, rel, nil
 }

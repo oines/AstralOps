@@ -82,6 +82,64 @@ func TestControlGatewayTerminalOpenInputResizeAndClose(t *testing.T) {
 	}
 }
 
+func TestControlGatewayTerminalOpenReturnsWorkspaceRelativeCWD(t *testing.T) {
+	t.Setenv("SHELL", terminalManagerTestShell(t))
+
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	if err := os.Mkdir(filepath.Join(workspace.LocalCWD, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityTerminalOpen, CapabilityTerminalInput)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityTerminalOpen,
+		Action:             ControlActionTerminalOpen,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"cwd":          "nested",
+			"cols":         80,
+			"rows":         24,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, ok := response.Result.(terminalOpenResult)
+	if !ok {
+		t.Fatalf("open result = %#v, want terminalOpenResult", response.Result)
+	}
+	t.Cleanup(func() {
+		_, _ = app.terminalManager().close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
+	})
+	if open.CWD != "nested" {
+		t.Fatalf("terminal cwd = %q, want workspace-relative cwd", open.CWD)
+	}
+	wire, err := json.Marshal(open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), workspace.LocalCWD) {
+		t.Fatalf("terminal open result leaked Host cwd: %s", string(wire))
+	}
+
+	events := app.store.queryEvents(workspace.ID, "", 0)
+	for _, event := range events {
+		if event.Kind != "control.terminal.opened" {
+			continue
+		}
+		normalized, err := json.Marshal(event.Normalized)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(normalized), workspace.LocalCWD) {
+			t.Fatalf("terminal lifecycle event leaked Host cwd: %s", string(normalized))
+		}
+		return
+	}
+	t.Fatal("terminal opened event was not persisted")
+}
+
 func TestControlGatewayTerminalInputRequiresInputCapability(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 
