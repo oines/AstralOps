@@ -126,6 +126,17 @@ func dialControlChannel(t *testing.T, serverURL string, app *app, controllerPubl
 	return client, cipher, ack
 }
 
+func controlSessionForAck(t *testing.T, app *app, ack controlHelloAckFrame) *controlWSConn {
+	t.Helper()
+	app.controlMu.Lock()
+	defer app.controlMu.Unlock()
+	conn := app.controlSessions[ack.ConnectionID]
+	if conn == nil {
+		t.Fatalf("control session %q was not registered", ack.ConnectionID)
+	}
+	return conn
+}
+
 func writeEncryptedControlFrame(t *testing.T, client *websocket.Conn, cipher *controlCipher, plain controlPlainFrame) []byte {
 	t.Helper()
 	sealed, err := cipher.seal(plain)
@@ -305,6 +316,47 @@ func TestControlWebSocketMediaStreamChunksAreEncrypted(t *testing.T) {
 		default:
 			t.Fatalf("stream frame type = %q", frame.Type)
 		}
+	}
+}
+
+func TestControlWebSocketMediaStreamCancelIsEncrypted(t *testing.T) {
+	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityMediaStream)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, ack := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	streamID := "media_stream_secret_id"
+	ctx, cancel := context.WithCancel(context.Background())
+	controlSessionForAck(t, app, ack).registerMediaStream(streamID, cancel)
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "media_stream_cancel",
+			Capability: CapabilityMediaStream,
+			Action:     ControlActionMediaStreamCancel,
+			Params:     map[string]any{"stream_id": streamID},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionMediaStreamCancel) || strings.Contains(string(sealedRequest), streamID) {
+		t.Fatalf("sealed media stream cancel request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), streamID) {
+		t.Fatalf("sealed media stream cancel response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("cancel response = %#v, want ok", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["stream_id"]) != streamID || !boolValue(result["cancelled"]) {
+		t.Fatalf("cancel result = %#v, want cancelled stream", result)
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("media stream cancel did not cancel registered context")
 	}
 }
 
@@ -910,6 +962,47 @@ func TestControlWebSocketWorkspaceFileStreamChunksAreEncrypted(t *testing.T) {
 		default:
 			t.Fatalf("stream frame type = %q", frame.Type)
 		}
+	}
+}
+
+func TestControlWebSocketWorkspaceFileStreamCancelIsEncrypted(t *testing.T) {
+	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceFilesRead)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, ack := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	streamID := "workspace_file_secret_id"
+	ctx, cancel := context.WithCancel(context.Background())
+	controlSessionForAck(t, app, ack).registerWorkspaceFileStream(streamID, cancel)
+
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "workspace_file_stream_cancel",
+			Capability: CapabilityWorkspaceFilesRead,
+			Action:     ControlActionWorkspaceFilesStreamCancel,
+			Params:     map[string]any{"stream_id": streamID},
+		},
+	})
+	if strings.Contains(string(sealedRequest), ControlActionWorkspaceFilesStreamCancel) || strings.Contains(string(sealedRequest), streamID) {
+		t.Fatalf("sealed workspace file stream cancel request leaked payload: %s", string(sealedRequest))
+	}
+
+	plain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), streamID) {
+		t.Fatalf("sealed workspace file stream cancel response leaked payload: %s", string(sealedResponse))
+	}
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("cancel response = %#v, want ok", plain)
+	}
+	result := mapValue(plain.Response.Result)
+	if stringValue(result["stream_id"]) != streamID || !boolValue(result["cancelled"]) {
+		t.Fatalf("cancel result = %#v, want cancelled stream", result)
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("workspace file stream cancel did not cancel registered context")
 	}
 }
 
