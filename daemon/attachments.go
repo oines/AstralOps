@@ -16,15 +16,18 @@ import (
 )
 
 const (
-	controlAttachmentMaxBytes       = 25 * 1024 * 1024
-	controlAttachmentUploadMaxBytes = 512 * 1024 * 1024
-	controlAttachmentChunkMaxBytes  = 4 * 1024 * 1024
-	controlAttachmentMetadata       = "attachment.json"
-	controlAttachmentUploadMetadata = "upload.json"
-	controlAttachmentFileSubdir     = "file"
-	controlAttachmentUploadPart     = "upload.part"
-	controlAttachmentIDByteCount    = 18
-	controlAttachmentUploadTTL      = 24 * time.Hour
+	controlAttachmentMaxBytes         = 25 * 1024 * 1024
+	controlAttachmentUploadMaxBytes   = 512 * 1024 * 1024
+	controlAttachmentChunkMaxBytes    = 4 * 1024 * 1024
+	controlAttachmentMetadata         = "attachment.json"
+	controlAttachmentUploadMetadata   = "upload.json"
+	controlAttachmentFileSubdir       = "file"
+	controlAttachmentUploadPart       = "upload.part"
+	controlAttachmentIDByteCount      = 18
+	controlAttachmentUploadTTL        = 24 * time.Hour
+	controlAttachmentNameMaxBytes     = 255
+	controlAttachmentMIMETypeMaxBytes = 256
+	controlAttachmentDetailMaxBytes   = 128
 )
 
 type InputAttachment struct {
@@ -129,6 +132,13 @@ type storedControlAttachmentUpload struct {
 	UpdatedAt      string `json:"updated_at"`
 }
 
+type controlAttachmentDescriptor struct {
+	Name     string
+	Kind     string
+	MIMEType string
+	Detail   string
+}
+
 func sanitizeInputAttachments(attachments []InputAttachment) []InputAttachment {
 	out := make([]InputAttachment, 0, len(attachments))
 	for _, attachment := range attachments {
@@ -182,12 +192,9 @@ func (a *app) ingestControlAttachment(params attachmentIngestParams) (attachment
 	}
 
 	id := "att_" + randomID(controlAttachmentIDByteCount)
-	name := safeAttachmentName(params.Name)
-	mimeType := attachmentMIMEType(name, strings.TrimSpace(params.MIMEType), body)
-	kind := attachmentKind(strings.TrimSpace(params.Kind), mimeType)
-	detail := strings.TrimSpace(params.Detail)
-	if detail == "" && kind == "image" {
-		detail = "high"
+	descriptor, err := controlAttachmentDescriptorFromParams(params.Name, params.Kind, params.MIMEType, params.Detail, body)
+	if err != nil {
+		return attachmentIngestResult{}, err
 	}
 
 	dir := a.controlAttachmentDir(sessionID, id)
@@ -195,19 +202,19 @@ func (a *app) ingestControlAttachment(params attachmentIngestParams) (attachment
 	if err := os.MkdirAll(fileDir, 0o700); err != nil {
 		return attachmentIngestResult{}, newActionError(http.StatusInternalServerError, "attachment_store_failed", err.Error())
 	}
-	target := filepath.Join(fileDir, name)
+	target := filepath.Join(fileDir, descriptor.Name)
 	if err := os.WriteFile(target, body, 0o600); err != nil {
 		return attachmentIngestResult{}, newActionError(http.StatusInternalServerError, "attachment_store_failed", err.Error())
 	}
 
 	attachment := InputAttachment{
 		ID:       id,
-		Kind:     kind,
+		Kind:     descriptor.Kind,
 		Path:     target,
-		Name:     name,
-		MIMEType: mimeType,
+		Name:     descriptor.Name,
+		MIMEType: descriptor.MIMEType,
 		Size:     int64(len(body)),
-		Detail:   detail,
+		Detail:   descriptor.Detail,
 	}
 	record := storedControlAttachment{
 		SessionID:  sessionID,
@@ -242,22 +249,19 @@ func (a *app) startControlAttachmentIngest(params attachmentIngestStartParams) (
 	}
 
 	id := "att_" + randomID(controlAttachmentIDByteCount)
-	name := safeAttachmentName(params.Name)
-	mimeType := attachmentMIMEType(name, strings.TrimSpace(params.MIMEType), nil)
-	kind := attachmentKind(strings.TrimSpace(params.Kind), mimeType)
-	detail := strings.TrimSpace(params.Detail)
-	if detail == "" && kind == "image" {
-		detail = "high"
+	descriptor, err := controlAttachmentDescriptorFromParams(params.Name, params.Kind, params.MIMEType, params.Detail, nil)
+	if err != nil {
+		return attachmentIngestStartResult{}, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	upload := storedControlAttachmentUpload{
 		SessionID:      sessionID,
 		UploadID:       id,
 		AttachmentID:   id,
-		Name:           name,
-		Kind:           kind,
-		MIMEType:       mimeType,
-		Detail:         detail,
+		Name:           descriptor.Name,
+		Kind:           descriptor.Kind,
+		MIMEType:       descriptor.MIMEType,
+		Detail:         descriptor.Detail,
 		ExpectedSize:   params.Size,
 		ExpectedSHA256: expectedSHA,
 		CreatedAt:      now,
@@ -513,6 +517,32 @@ func controlAttachmentUploadExpired(upload storedControlAttachmentUpload, now ti
 		return false
 	}
 	return now.Sub(timestamp) > controlAttachmentUploadTTL
+}
+
+func controlAttachmentDescriptorFromParams(name, kind, mimeType, detail string, body []byte) (controlAttachmentDescriptor, error) {
+	safeName := safeAttachmentName(name)
+	if len(safeName) > controlAttachmentNameMaxBytes {
+		return controlAttachmentDescriptor{}, newActionError(http.StatusRequestEntityTooLarge, "attachment_metadata_too_large", "attachment name is too long")
+	}
+	explicitMIMEType := strings.TrimSpace(mimeType)
+	if len(explicitMIMEType) > controlAttachmentMIMETypeMaxBytes {
+		return controlAttachmentDescriptor{}, newActionError(http.StatusRequestEntityTooLarge, "attachment_metadata_too_large", "attachment mime_type is too long")
+	}
+	detail = strings.TrimSpace(detail)
+	if len(detail) > controlAttachmentDetailMaxBytes {
+		return controlAttachmentDescriptor{}, newActionError(http.StatusRequestEntityTooLarge, "attachment_metadata_too_large", "attachment detail is too long")
+	}
+	resolvedMIMEType := attachmentMIMEType(safeName, explicitMIMEType, body)
+	resolvedKind := attachmentKind(strings.TrimSpace(kind), resolvedMIMEType)
+	if detail == "" && resolvedKind == "image" {
+		detail = "high"
+	}
+	return controlAttachmentDescriptor{
+		Name:     safeName,
+		Kind:     resolvedKind,
+		MIMEType: resolvedMIMEType,
+		Detail:   detail,
+	}, nil
 }
 
 func controlAttachmentHandleFromInput(attachment InputAttachment) controlAttachmentHandle {

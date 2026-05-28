@@ -80,6 +80,23 @@ func TestControlGatewayIngestsAttachmentWithoutHostPath(t *testing.T) {
 	}
 }
 
+func TestControlGatewayAttachmentIngestRejectsOversizedMetadata(t *testing.T) {
+	app, _, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityAttachmentIngest)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityAttachmentIngest,
+		Action:             ControlActionAttachmentIngest,
+		Params: map[string]any{
+			"session_id":     session.ID,
+			"name":           strings.Repeat("n", controlAttachmentNameMaxBytes+1),
+			"content_base64": base64.StdEncoding.EncodeToString([]byte("note")),
+		},
+	})
+	assertActionError(t, err, http.StatusRequestEntityTooLarge, "attachment_metadata_too_large")
+}
+
 func TestControlGatewayRejectsCrossSessionAttachmentHandle(t *testing.T) {
 	runtime := &recordingRuntime{}
 	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, runtime)
@@ -227,6 +244,23 @@ func TestControlGatewayChunkedAttachmentIngest(t *testing.T) {
 	if _, err := os.Stat(app.controlAttachmentUploadMetadataPath(session.ID, startResult.UploadID)); !os.IsNotExist(err) {
 		t.Fatalf("upload metadata still exists or stat failed unexpectedly: %v", err)
 	}
+}
+
+func TestControlGatewayChunkedAttachmentRejectsOversizedMetadata(t *testing.T) {
+	app, _, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityAttachmentIngest)
+
+	_, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityAttachmentIngest,
+		Action:             ControlActionAttachmentIngestStart,
+		Params: map[string]any{
+			"session_id": session.ID,
+			"name":       "upload.txt",
+			"mime_type":  strings.Repeat("m", controlAttachmentMIMETypeMaxBytes+1),
+		},
+	})
+	assertActionError(t, err, http.StatusRequestEntityTooLarge, "attachment_metadata_too_large")
 }
 
 func TestControlGatewayChunkedAttachmentRejectsBadOffset(t *testing.T) {
