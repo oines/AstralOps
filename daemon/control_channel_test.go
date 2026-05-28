@@ -448,6 +448,69 @@ func TestControlWebSocketMediaStreamReportsTruncatedFile(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketMediaStreamReportsGrownFile(t *testing.T) {
+	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityMediaStream)
+	mediaID := "grown_media_1"
+	mediaPath := filepath.Join(t.TempDir(), "clip.png")
+	if err := os.WriteFile(mediaPath, []byte("abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app.emit(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       session.Agent,
+		Kind:        "message.user",
+		Normalized: map[string]any{"text": "", "attachments": []map[string]any{{
+			"id":        mediaID,
+			"media_id":  mediaID,
+			"kind":      "image",
+			"path":      mediaPath,
+			"name":      "clip.png",
+			"mime_type": "image/png",
+			"size":      4,
+		}}},
+	})
+	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	if len(events) == 0 {
+		t.Fatal("media fixture event was not persisted")
+	}
+	eventSeq := events[len(events)-1].Seq
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "media_stream_grown",
+			Capability: CapabilityMediaStream,
+			Action:     ControlActionMediaStream,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"event_seq":  eventSeq,
+				"media_id":   mediaID,
+				"chunk_size": 4,
+			},
+		},
+	})
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("stream response = %#v, want ok", plain)
+	}
+	streamID := stringValue(mapValue(plain.Response.Result)["stream_id"])
+	chunk := readEncryptedControlFrame(t, client, cipher)
+	if chunk.Type != mediaStreamFrameChunk || chunk.Media == nil || chunk.Media.StreamID != streamID {
+		t.Fatalf("stream frame = %#v, want media chunk", chunk)
+	}
+	frame := readEncryptedControlFrame(t, client, cipher)
+	if frame.Type != mediaStreamFrameError || frame.Media == nil || frame.Media.StreamID != streamID {
+		t.Fatalf("stream frame = %#v, want grown media error", frame)
+	}
+	if frame.Media.ErrorCode != "media_stream_truncated" || frame.Media.Final || frame.Media.Offset != 4 || frame.Media.Size != 4 {
+		t.Fatalf("stream error frame = %#v, want changed non-final error at offset 4", frame.Media)
+	}
+}
+
 func TestControlWebSocketMediaStreamCancelIsEncrypted(t *testing.T) {
 	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityMediaStream)
 	server := startControlChannelTestServer(t, app)
@@ -1693,6 +1756,63 @@ func TestControlWebSocketWorkspaceFileStreamChunksAreEncrypted(t *testing.T) {
 				t.Fatalf("streamed workspace file = %q, want %q", string(streamed), string(secret))
 			}
 			return
+		default:
+			t.Fatalf("stream frame type = %q", frame.Type)
+		}
+	}
+}
+
+func TestControlWebSocketWorkspaceFileStreamReportsGrownFile(t *testing.T) {
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceFilesRead)
+	path := filepath.Join(workspace.LocalCWD, "growing.txt")
+	secret := strings.Repeat("a", 1024*1024)
+	if err := os.WriteFile(path, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "workspace_file_stream_grown",
+			Capability: CapabilityWorkspaceFilesRead,
+			Action:     ControlActionWorkspaceFilesStream,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"path":         "growing.txt",
+				"chunk_size":   64 * 1024,
+			},
+		},
+	})
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("stream response = %#v, want ok", plain)
+	}
+	streamID := stringValue(mapValue(plain.Response.Result)["stream_id"])
+	if streamID == "" {
+		t.Fatalf("stream result = %#v, want stream id", plain.Response.Result)
+	}
+	if err := os.WriteFile(path, []byte(secret+"b"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for {
+		frame := readEncryptedControlFrame(t, client, cipher)
+		if frame.WorkspaceFile == nil || frame.WorkspaceFile.StreamID != streamID {
+			t.Fatalf("stream frame = %#v, want workspace file frame for stream %q", frame, streamID)
+		}
+		switch frame.Type {
+		case workspaceFileStreamFrameChunk:
+			continue
+		case workspaceFileStreamFrameError:
+			if frame.WorkspaceFile.ErrorCode != "workspace_file_stream_truncated" || frame.WorkspaceFile.Final || frame.WorkspaceFile.Offset != int64(len(secret)) || frame.WorkspaceFile.Size != int64(len(secret)) {
+				t.Fatalf("stream error frame = %#v, want changed non-final error at expected size", frame.WorkspaceFile)
+			}
+			return
+		case workspaceFileStreamFrameComplete:
+			t.Fatalf("stream completed after file grew: %#v", frame.WorkspaceFile)
 		default:
 			t.Fatalf("stream frame type = %q", frame.Type)
 		}

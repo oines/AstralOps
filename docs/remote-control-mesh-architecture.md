@@ -651,7 +651,7 @@ media.download
   请求 Host 以下载语义返回媒体资源，文件名、MIME type、大小等元数据由 Host/Core 决定。
 
 media.stream
-  面向大文件、生成中图片、未来视频或渐进式预览的媒体流。数据帧和 PTY 一样走 E2EE channel，relay 只转发密文。Host 返回 resume_token；Controller 可以在新的控制连接上用 resume_token + offset 重新发起 stream 来恢复读取，也可以用 media.stream.cancel 取消同一 control connection 上的 active stream。v1 的恢复是 Host descriptor + offset replay，不是 relay 持久化、明文缓存或 transport migration。
+  面向大文件、生成中图片、未来视频或渐进式预览的媒体流。数据帧和 PTY 一样走 E2EE channel，relay 只转发密文。Host 返回 resume_token；Controller 可以在新的控制连接上用 resume_token + offset 重新发起 stream 来恢复读取，也可以用 media.stream.cancel 取消同一 control connection 上的 active stream。Host 必须按准备阶段的 expected size 读取；媒体文件在 stream 过程中变短或变长都不能返回 completed，必须返回 `media_stream_truncated`。v1 的恢复是 Host descriptor + offset replay，不是 relay 持久化、明文缓存或 transport migration。
 
 workspace.files.read
   通过 Host 浏览目录或读取文件内容。SSH workspace 中，由 Host 发起 SSH 读取。v1 返回目录列表或中小文件的 base64 内容；大文件用 `workspace.files.stream` action，仍复用该 capability。
@@ -1168,7 +1168,7 @@ async workspace.exec approval interaction, if product needs per-command confirma
 
 `workspace.files.delete` 和 `workspace.files.move` v1 是独立 Host 侧文件管理 action，复用 `workspace.files.write` capability。它们只接受 workspace root 内的路径，不能删除或移动 workspace root 本身；删除目录必须显式 `recursive=true`；移动默认不覆盖已有目标，只有显式 `overwrite=true` 才允许覆盖非目录目标。SSH workspace 中由 Host 通过 proxy helper 发起 `remove`/`move`，Controller 不接触远端路径之外的本机文件系统能力。
 
-`workspace.files.stream` v1 用于大文件读取：普通 `workspace.files.read` 仍负责目录列表和中小文件 base64 response；超过普通 response 适合承载的内容由 Controller 请求 `workspace.files.stream`，Host 返回 stream metadata 后在同一 encrypted control connection 上发送 `workspace_file.chunk` / `workspace_file.completed` / `workspace_file.error` frame。Controller 可以通过 offset 重新请求来恢复读取，也可以用 `workspace.files.stream.cancel` 取消当前 control connection 上的 active stream。SSH workspace 通过 proxy helper 的 `read_range` 从远端按 chunk 读取，Host 只转发密文 frame，不生成可被 relay 或云端读取的明文 URL。
+`workspace.files.stream` v1 用于大文件读取：普通 `workspace.files.read` 仍负责目录列表和中小文件 base64 response；超过普通 response 适合承载的内容由 Controller 请求 `workspace.files.stream`，Host 返回 stream metadata 后在同一 encrypted control connection 上发送 `workspace_file.chunk` / `workspace_file.completed` / `workspace_file.error` frame。Controller 可以通过 offset 重新请求来恢复读取，也可以用 `workspace.files.stream.cancel` 取消当前 control connection 上的 active stream。Host 必须按准备阶段的 expected size 读取；文件在 stream 过程中变短或变长都不能返回 completed，必须返回 `workspace_file_stream_truncated`。SSH workspace 通过 proxy helper 的 `read_range` 从远端按 chunk 读取，Host 只转发密文 frame，不生成可被 relay 或云端读取的明文 URL。
 
 `workspace.exec` v1 由 Host trust grant 的 `workspace_exec_policy` 决定是否执行。默认 `trusted` 表示 `workspace.exec` capability 本身就是执行授权；`require_approval` 会同步拒绝执行并返回 `workspace_exec_approval_required`，不会启动本地或 SSH command；`disabled` 直接拒绝为 `workspace_exec_disabled`。这先把 command approval policy 放进 Core/daemon 决策层，避免 Controller 自行判断或把 gateway command 伪装成 Claude/Codex 原生 approval。若未来需要逐条命令确认，应该在这个 policy gate 之上新增 Host-owned async interaction，而不是让客户端绕过策略。
 

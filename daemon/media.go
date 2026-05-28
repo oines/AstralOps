@@ -179,11 +179,12 @@ func (a *app) streamControlMedia(ctx context.Context, result mediaStreamResult, 
 	}
 	buffer := make([]byte, result.ChunkSize)
 	seq := int64(0)
-	for {
+	for offset < result.Size {
 		if mediaStreamCancelled(ctx) {
 			return
 		}
-		n, readErr := file.Read(buffer)
+		readSize := streamReadSize(len(buffer), result.Size-offset)
+		n, readErr := file.Read(buffer[:readSize])
 		if n > 0 {
 			if mediaStreamCancelled(ctx) {
 				return
@@ -214,30 +215,34 @@ func (a *app) streamControlMedia(ctx context.Context, result mediaStreamResult, 
 			continue
 		}
 		if readErr == io.EOF {
-			if offset < result.Size {
-				conn.writePlain(controlPlainFrame{Type: mediaStreamFrameError, Media: mediaStreamOffsetErrorFrame(result, requestID, "media_stream_truncated", "media file changed during stream", offset)})
-				return
-			}
-			conn.writePlain(controlPlainFrame{Type: mediaStreamFrameComplete, Media: &mediaStreamFrame{
-				StreamID:    result.StreamID,
-				ResumeToken: result.ResumeToken,
-				RequestID:   requestID,
-				SessionID:   result.SessionID,
-				EventSeq:    result.EventSeq,
-				MediaID:     result.MediaID,
-				Kind:        result.Kind,
-				Name:        result.Name,
-				MIMEType:    result.MIMEType,
-				Size:        result.Size,
-				Seq:         seq + 1,
-				Offset:      offset,
-				Final:       true,
-			}})
+			conn.writePlain(controlPlainFrame{Type: mediaStreamFrameError, Media: mediaStreamOffsetErrorFrame(result, requestID, "media_stream_truncated", "media file changed during stream", offset)})
 			return
 		}
 		conn.writePlain(controlPlainFrame{Type: mediaStreamFrameError, Media: mediaStreamErrorFrame(result, requestID, "media_stream_read_failed", readErr.Error())})
 		return
 	}
+	if mediaStreamCancelled(ctx) {
+		return
+	}
+	if info, err := os.Stat(media.Path); err != nil || info.IsDir() || info.Size() != result.Size {
+		conn.writePlain(controlPlainFrame{Type: mediaStreamFrameError, Media: mediaStreamOffsetErrorFrame(result, requestID, "media_stream_truncated", "media file changed during stream", offset)})
+		return
+	}
+	conn.writePlain(controlPlainFrame{Type: mediaStreamFrameComplete, Media: &mediaStreamFrame{
+		StreamID:    result.StreamID,
+		ResumeToken: result.ResumeToken,
+		RequestID:   requestID,
+		SessionID:   result.SessionID,
+		EventSeq:    result.EventSeq,
+		MediaID:     result.MediaID,
+		Kind:        result.Kind,
+		Name:        result.Name,
+		MIMEType:    result.MIMEType,
+		Size:        result.Size,
+		Seq:         seq + 1,
+		Offset:      offset,
+		Final:       true,
+	}})
 }
 
 func mediaStreamCancelled(ctx context.Context) bool {
@@ -251,6 +256,16 @@ func controlStreamCancelled(ctx context.Context) bool {
 	default:
 		return false
 	}
+}
+
+func streamReadSize(chunkSize int, remaining int64) int {
+	if remaining <= 0 {
+		return 0
+	}
+	if chunkSize <= 0 || int64(chunkSize) > remaining {
+		return int(remaining)
+	}
+	return chunkSize
 }
 
 func (a *app) readControlMedia(params mediaReadParams, download bool) (mediaReadResult, error) {

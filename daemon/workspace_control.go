@@ -816,11 +816,12 @@ func (a *app) streamLocalControlWorkspaceFile(ctx context.Context, ws Workspace,
 	}
 	buffer := make([]byte, result.ChunkSize)
 	seq := int64(0)
-	for {
+	for offset < result.Size {
 		if controlStreamCancelled(ctx) {
 			return
 		}
-		n, readErr := file.Read(buffer)
+		readSize := streamReadSize(len(buffer), result.Size-offset)
+		n, readErr := file.Read(buffer[:readSize])
 		if n > 0 {
 			if controlStreamCancelled(ctx) {
 				return
@@ -836,16 +837,20 @@ func (a *app) streamLocalControlWorkspaceFile(ctx context.Context, ws Workspace,
 			continue
 		}
 		if readErr == io.EOF {
-			if offset < result.Size {
-				conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamOffsetErrorFrame(result, requestID, "workspace_file_stream_truncated", "workspace file changed during stream", offset)})
-				return
-			}
-			conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameComplete, WorkspaceFile: workspaceFileCompleteFrame(result, requestID, seq+1, offset)})
+			conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamOffsetErrorFrame(result, requestID, "workspace_file_stream_truncated", "workspace file changed during stream", offset)})
 			return
 		}
 		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "workspace_file_stream_read_failed", readErr.Error())})
 		return
 	}
+	if controlStreamCancelled(ctx) {
+		return
+	}
+	if info, err := os.Stat(target); err != nil || info.IsDir() || info.Size() != result.Size {
+		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamOffsetErrorFrame(result, requestID, "workspace_file_stream_truncated", "workspace file changed during stream", offset)})
+		return
+	}
+	conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameComplete, WorkspaceFile: workspaceFileCompleteFrame(result, requestID, seq+1, offset)})
 }
 
 func (a *app) streamRemoteControlWorkspaceFile(ctx context.Context, ws Workspace, result workspaceFileStreamResult, conn *controlWSConn, requestID string) {
@@ -865,8 +870,9 @@ func (a *app) streamRemoteControlWorkspaceFile(ctx context.Context, ws Workspace
 		if controlStreamCancelled(ctx) {
 			return
 		}
+		readSize := streamReadSize(result.ChunkSize, result.Size-offset)
 		var out map[string]any
-		if err := a.ssh.call(ctx, ws, "read_range", map[string]any{"path": target, "offset": offset, "length": result.ChunkSize}, &out); err != nil {
+		if err := a.ssh.call(ctx, ws, "read_range", map[string]any{"path": target, "offset": offset, "length": readSize}, &out); err != nil {
 			if controlStreamCancelled(ctx) {
 				return
 			}
@@ -888,11 +894,20 @@ func (a *app) streamRemoteControlWorkspaceFile(ctx context.Context, ws Workspace
 		if controlStreamCancelled(ctx) {
 			return
 		}
+		if int64(len(body)) > result.Size-offset {
+			conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamOffsetErrorFrame(result, requestID, "workspace_file_stream_truncated", "workspace file changed during stream", offset)})
+			return
+		}
 		seq++
 		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameChunk, WorkspaceFile: workspaceFileChunkFrame(result, requestID, seq, offset, body)})
 		offset += int64(len(body))
 	}
 	if controlStreamCancelled(ctx) {
+		return
+	}
+	var stat map[string]any
+	if err := a.ssh.call(ctx, ws, "stat", map[string]any{"path": target}, &stat); err != nil || boolValue(stat["is_dir"]) || int64(numberValue(stat["size"])) != result.Size {
+		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamOffsetErrorFrame(result, requestID, "workspace_file_stream_truncated", "workspace file changed during stream", offset)})
 		return
 	}
 	conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameComplete, WorkspaceFile: workspaceFileCompleteFrame(result, requestID, seq+1, offset)})
