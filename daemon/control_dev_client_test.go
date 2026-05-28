@@ -4,7 +4,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -92,6 +95,10 @@ func TestValidateKnownLanHostRejectsIdentityMismatch(t *testing.T) {
 
 func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	hostApp, workspace := newRemoteControlHandlerTestApp(t)
+	streamBody := []byte("stream-smoke-secret-0123456789")
+	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "stream.txt"), streamBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
 	defer hostServer.Close()
 
@@ -110,11 +117,13 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	}
 
 	result, err := runControlClientSmoke(controllerStore, controlClientSmokeOptions{
-		Target:      controlClientTargetOptions{Host: hostServer.URL},
-		WorkspaceID: workspace.ID,
-		Path:        ".",
-		ExecCommand: "echo smoke",
-		Terminal:    runTerminal,
+		Target:          controlClientTargetOptions{Host: hostServer.URL},
+		WorkspaceID:     workspace.ID,
+		Path:            ".",
+		StreamPath:      "stream.txt",
+		StreamChunkSize: 5,
+		ExecCommand:     "echo smoke",
+		Terminal:        runTerminal,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +131,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if result.Target != hostServer.URL || result.HostDeviceID != hostApp.store.deviceIdentity.DeviceID {
 		t.Fatalf("smoke result target = %#v", result)
 	}
-	wantSteps := []string{"workspaces", "workspace_files_read", "workspace_exec"}
+	wantSteps := []string{"workspaces", "workspace_files_read", "workspace_files_stream", "workspace_exec"}
 	if runTerminal {
 		wantSteps = append(wantSteps, "terminal_open", "terminal_close")
 	}
@@ -139,6 +148,17 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if int(numberValue(execStep.Summary["exit_code"])) != 0 {
 		t.Fatalf("workspace_exec summary = %#v, want exit_code 0", execStep.Summary)
 	}
+	streamStep, _ := smokeStepByName(result, "workspace_files_stream")
+	if int64(numberValue(streamStep.Summary["bytes"])) != int64(len(streamBody)) || int(numberValue(streamStep.Summary["chunks"])) < 2 {
+		t.Fatalf("workspace_files_stream summary = %#v, want streamed bytes and multiple chunks", streamStep.Summary)
+	}
+	wire, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), string(streamBody)) {
+		t.Fatalf("smoke result leaked streamed file content: %s", string(wire))
+	}
 	if runTerminal && countKind(hostApp.store.queryEvents(workspace.ID, "", 0), "control.terminal.closed") != 1 {
 		t.Fatalf("host events = %#v, want terminal close event", eventKinds(hostApp.store.queryEvents(workspace.ID, "", 0)))
 	}
@@ -152,6 +172,10 @@ func TestControlClientSmokeRequiresWorkspaceForOptionalChecks(t *testing.T) {
 	_, err = runControlClientSmoke(st, controlClientSmokeOptions{Path: "README.md"})
 	if err == nil || !strings.Contains(err.Error(), "--workspace-id") {
 		t.Fatalf("err = %v, want workspace requirement for path", err)
+	}
+	_, err = runControlClientSmoke(st, controlClientSmokeOptions{StreamPath: "large.bin"})
+	if err == nil || !strings.Contains(err.Error(), "--workspace-id") {
+		t.Fatalf("err = %v, want workspace requirement for stream path", err)
 	}
 	_, err = runControlClientSmoke(st, controlClientSmokeOptions{ExecCommand: "echo smoke"})
 	if err == nil || !strings.Contains(err.Error(), "--workspace-id") {

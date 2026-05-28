@@ -153,6 +153,8 @@ func runControlDevClientCommand(args []string) error {
 		lanTimeout := fs.Duration("lan-timeout", 2*time.Second, "LAN host validation and handshake timeout")
 		workspaceID := fs.String("workspace-id", "", "workspace id for workspace/terminal checks")
 		path := fs.String("path", ".", "workspace path to read when --workspace-id is set")
+		streamPath := fs.String("stream-path", "", "optional workspace path to read via workspace.files.stream")
+		streamChunkSize := fs.Int("stream-chunk-size", 64*1024, "workspace.files.stream chunk size")
 		execCommand := fs.String("exec-command", "", "optional workspace.exec command to run")
 		terminal := fs.Bool("terminal", false, "open and close a Host-owned terminal session")
 		if err := fs.Parse(args[1:]); err != nil {
@@ -167,10 +169,12 @@ func runControlDevClientCommand(args []string) error {
 				DiscoveryTimeout: *discoveryTimeout,
 				LANTimeout:       *lanTimeout,
 			},
-			WorkspaceID: *workspaceID,
-			Path:        *path,
-			ExecCommand: *execCommand,
-			Terminal:    *terminal,
+			WorkspaceID:     *workspaceID,
+			Path:            *path,
+			StreamPath:      *streamPath,
+			StreamChunkSize: *streamChunkSize,
+			ExecCommand:     *execCommand,
+			Terminal:        *terminal,
 		})
 		if err != nil {
 			return err
@@ -197,11 +201,13 @@ type controlClientTarget struct {
 }
 
 type controlClientSmokeOptions struct {
-	Target      controlClientTargetOptions
-	WorkspaceID string
-	Path        string
-	ExecCommand string
-	Terminal    bool
+	Target          controlClientTargetOptions
+	WorkspaceID     string
+	Path            string
+	StreamPath      string
+	StreamChunkSize int
+	ExecCommand     string
+	Terminal        bool
 }
 
 type controlClientSmokeResult struct {
@@ -266,6 +272,9 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 	if opts.WorkspaceID == "" && strings.TrimSpace(opts.Path) != "." {
 		return controlClientSmokeResult{}, fmt.Errorf("--workspace-id is required for --path")
 	}
+	if opts.WorkspaceID == "" && strings.TrimSpace(opts.StreamPath) != "" {
+		return controlClientSmokeResult{}, fmt.Errorf("--workspace-id is required for --stream-path")
+	}
 	if opts.WorkspaceID == "" && (strings.TrimSpace(opts.ExecCommand) != "" || opts.Terminal) {
 		return controlClientSmokeResult{}, fmt.Errorf("--workspace-id is required for --exec-command or --terminal")
 	}
@@ -295,6 +304,14 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 			return result, err
 		}
 		if err := controlClientSmokeResponseError("workspace_files_read", files); err != nil {
+			return result, err
+		}
+	}
+
+	if opts.WorkspaceID != "" && strings.TrimSpace(opts.StreamPath) != "" {
+		step, err := controlClientSmokeWorkspaceFileStream(st, target, opts.WorkspaceID, opts.StreamPath, opts.StreamChunkSize)
+		result.Steps = append(result.Steps, step)
+		if err != nil {
 			return result, err
 		}
 	}
@@ -339,6 +356,98 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 		}
 	}
 	return result, nil
+}
+
+func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget, workspaceID, path string, chunkSize int) (controlClientSmokeStep, error) {
+	name := "workspace_files_stream"
+	params := map[string]any{"workspace_id": workspaceID, "path": path}
+	if chunkSize > 0 {
+		params["chunk_size"] = chunkSize
+	}
+	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	if err != nil {
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "connect_failed", Message: err.Error()}}
+		return step, err
+	}
+	defer socket.Close()
+
+	req := ControlRequest{
+		RequestID:  "smoke_" + name,
+		Capability: CapabilityWorkspaceFilesRead,
+		Action:     ControlActionWorkspaceFilesStream,
+		Params:     params,
+	}
+	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req}); err != nil {
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
+		return step, err
+	}
+	plain, err := controlClientReadWithTimeout(socket, cipher, target.Timeout)
+	if err != nil {
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "read_failed", Message: err.Error()}}
+		return step, err
+	}
+	if plain.Response == nil {
+		err := fmt.Errorf("remote did not return a response frame")
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "invalid_response", Message: err.Error()}}
+		return step, err
+	}
+	step := controlClientSmokeStepFromResponse(name, CapabilityWorkspaceFilesRead, ControlActionWorkspaceFilesStream, *plain.Response, controlClientWorkspaceFileStreamSmokeSummary(*plain.Response))
+	if err := controlClientSmokeResponseError(name, *plain.Response); err != nil {
+		return step, err
+	}
+	streamID := stringValue(mapValue(plain.Response.Result)["stream_id"])
+	if streamID == "" {
+		err := fmt.Errorf("smoke step %s failed: stream_id missing", name)
+		step.OK = false
+		step.Error = &ControlError{Code: "stream_id_missing", Message: err.Error()}
+		return step, err
+	}
+
+	var bytesRead int64
+	chunks := 0
+	for {
+		frame, err := controlClientReadWithTimeout(socket, cipher, target.Timeout)
+		if err != nil {
+			step.OK = false
+			step.Error = &ControlError{Code: "stream_read_failed", Message: err.Error()}
+			return step, err
+		}
+		if frame.WorkspaceFile == nil || frame.WorkspaceFile.StreamID != streamID {
+			err := fmt.Errorf("unexpected workspace file stream frame")
+			step.OK = false
+			step.Error = &ControlError{Code: "unexpected_stream_frame", Message: err.Error()}
+			return step, err
+		}
+		switch frame.Type {
+		case workspaceFileStreamFrameChunk:
+			body, err := base64.StdEncoding.DecodeString(frame.WorkspaceFile.DataBase64)
+			if err != nil {
+				step.OK = false
+				step.Error = &ControlError{Code: "stream_chunk_invalid", Message: err.Error()}
+				return step, err
+			}
+			chunks++
+			bytesRead += int64(len(body))
+		case workspaceFileStreamFrameComplete:
+			if step.Summary == nil {
+				step.Summary = map[string]any{}
+			}
+			step.Summary["chunks"] = chunks
+			step.Summary["bytes"] = bytesRead
+			step.Summary["final_offset"] = frame.WorkspaceFile.Offset
+			return step, nil
+		case workspaceFileStreamFrameError:
+			err := fmt.Errorf("workspace file stream failed: %s", frame.WorkspaceFile.ErrorMessage)
+			step.OK = false
+			step.Error = &ControlError{Code: firstString(frame.WorkspaceFile.ErrorCode, "stream_error"), Message: err.Error()}
+			return step, err
+		default:
+			err := fmt.Errorf("unexpected workspace file stream frame type %q", frame.Type)
+			step.OK = false
+			step.Error = &ControlError{Code: "unexpected_stream_frame", Message: err.Error()}
+			return step, err
+		}
+	}
 }
 
 func controlClientSmokeRequest(st *store, target controlClientTarget, requestID, capability, action string, params map[string]any) (ControlResponse, error) {
@@ -396,6 +505,19 @@ func controlClientWorkspaceExecSmokeSummary(response ControlResponse) map[string
 		"workspace_id": stringValue(result["workspace_id"]),
 		"exit_code":    int(numberValue(result["exit_code"])),
 		"duration_ms":  int(numberValue(result["duration_ms"])),
+	}
+}
+
+func controlClientWorkspaceFileStreamSmokeSummary(response ControlResponse) map[string]any {
+	result := mapValue(response.Result)
+	return map[string]any{
+		"workspace_id": stringValue(result["workspace_id"]),
+		"path":         stringValue(result["path"]),
+		"kind":         stringValue(result["kind"]),
+		"target":       stringValue(result["target"]),
+		"size":         int64(numberValue(result["size"])),
+		"offset":       int64(numberValue(result["offset"])),
+		"chunk_size":   int(numberValue(result["chunk_size"])),
 	}
 }
 
@@ -643,6 +765,15 @@ func controlClientRead(socket *websocket.Conn, cipher *controlCipher) (controlPl
 		return controlPlainFrame{}, err
 	}
 	return cipher.open(sealed)
+}
+
+func controlClientReadWithTimeout(socket *websocket.Conn, cipher *controlCipher, timeout time.Duration) (controlPlainFrame, error) {
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	_ = socket.SetReadDeadline(time.Now().Add(timeout))
+	defer socket.SetReadDeadline(time.Time{})
+	return controlClientRead(socket, cipher)
 }
 
 func controlHTTPURL(host, path string) string {
