@@ -1682,6 +1682,37 @@ func TestControlWebSocketWorkspaceExecRequestResponseIsEncrypted(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketDisconnectCancelsWorkspaceExec(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("disconnect cancellation exec test uses POSIX shell tools")
+	}
+	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceExec)
+	started := filepath.Join(workspace.LocalCWD, "exec-started.txt")
+	marker := filepath.Join(workspace.LocalCWD, "should-not-run.txt")
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "workspace_exec_disconnect",
+			Capability: CapabilityWorkspaceExec,
+			Action:     ControlActionWorkspaceExec,
+			Params: map[string]any{
+				"workspace_id": workspace.ID,
+				"command":      "printf started > exec-started.txt; sleep 1; printf ran > should-not-run.txt",
+				"timeout_ms":   5000,
+			},
+		},
+	})
+	waitForPath(t, started)
+	_ = client.Close()
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("disconnected control connection command created marker, stat err = %v", err)
+	}
+}
+
 func TestControlWebSocketWorkspaceExecRequireApprovalIsEncrypted(t *testing.T) {
 	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceExec)
 	if _, err := app.store.trustDevice(trustDeviceRequest{
@@ -3255,6 +3286,20 @@ func waitForEventKindCount(t *testing.T, app *app, workspaceID, kind string, wan
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("%s count did not reach %d; events = %#v", kind, want, eventKinds(app.store.queryEvents(workspaceID, "", 0)))
+}
+
+func waitForPath(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for path %s", path)
 }
 
 func waitForTerminalClosedReason(t *testing.T, app *app, workspaceID, terminalID, reason string) {

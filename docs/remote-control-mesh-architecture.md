@@ -1096,6 +1096,8 @@ sealed
 
 Host control WebSocket 必须设置 read limit：hello 只允许小型握手帧，sealed frame 只允许能承载当前同步能力上限的有限 payload。超过上限的请求应关闭 control connection；大文件、大媒体和持续输出必须使用对应 chunk/stream/PTY 能力，不能把单个 E2EE WebSocket message 做成无限大上传。
 
+Host 必须独立监听 control transport 的 close/read error，而不能等当前同步 action 返回后才发现断线。断线、close frame、非法 encrypted frame 或 trust revoke 都要立即取消该 connection context，并向所有绑定在这条连接上的 Host-owned action 传播取消。
+
 Host 本地维护 active control sessions。撤销某个 Controller trust grant 时，Host 必须发送加密 close frame 并关闭该 Controller 的所有 active control sessions。
 
 云端 signaling 负责协商连接。Relay 只转发加密帧。

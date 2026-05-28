@@ -69,6 +69,12 @@ type controlSealedFrame struct {
 	Ciphertext string `json:"ciphertext"`
 }
 
+type controlFrameRead struct {
+	plain        controlPlainFrame
+	err          error
+	invalidFrame bool
+}
+
 type controlWSConn struct {
 	app                *app
 	socket             *websocket.Conn
@@ -227,23 +233,20 @@ func (c *controlWSConn) validateControllerPublicKey(grant TrustGrant, value stri
 
 func (c *controlWSConn) serve() {
 	defer c.shutdown()
-	for {
-		_, body, err := c.socket.ReadMessage()
-		if err != nil {
+	for frame := range c.readControlFrames() {
+		if frame.err != nil {
+			if frame.invalidFrame {
+				c.writeEncryptedClose("invalid_frame", "invalid encrypted control frame")
+			}
 			return
 		}
-		plain, err := c.openSealedMessage(body)
-		if err != nil {
-			c.writeEncryptedClose("invalid_frame", "invalid encrypted control frame")
-			return
-		}
-		switch plain.Type {
+		switch frame.plain.Type {
 		case "request":
-			if plain.Request == nil {
+			if frame.plain.Request == nil {
 				c.writePlain(controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_request", "missing request")})
 				continue
 			}
-			response, after := c.handleRequest(*plain.Request)
+			response, after := c.handleRequest(*frame.plain.Request)
 			c.writePlain(controlPlainFrame{Type: "response", Response: response})
 			if after != nil {
 				go after()
@@ -253,6 +256,48 @@ func (c *controlWSConn) serve() {
 		default:
 			c.writePlain(controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_frame", "unsupported control frame type")})
 		}
+	}
+}
+
+func (c *controlWSConn) readControlFrames() <-chan controlFrameRead {
+	frames := make(chan controlFrameRead, 16)
+	go func() {
+		defer close(frames)
+		for {
+			_, body, err := c.socket.ReadMessage()
+			if err != nil {
+				c.cancelControlSession()
+				c.sendControlFrameRead(frames, controlFrameRead{err: err})
+				return
+			}
+			plain, err := c.openSealedMessage(body)
+			if err != nil {
+				c.cancelControlSession()
+				c.sendControlFrameRead(frames, controlFrameRead{err: err, invalidFrame: true})
+				return
+			}
+			if plain.Type == "close" {
+				c.cancelControlSession()
+			}
+			if !c.sendControlFrameRead(frames, controlFrameRead{plain: plain}) {
+				return
+			}
+		}
+	}()
+	return frames
+}
+
+func (c *controlWSConn) sendControlFrameRead(frames chan<- controlFrameRead, frame controlFrameRead) bool {
+	select {
+	case frames <- frame:
+		return true
+	default:
+	}
+	select {
+	case frames <- frame:
+		return true
+	case <-c.requestContext().Done():
+		return false
 	}
 }
 
