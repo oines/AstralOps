@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -644,6 +645,38 @@ func TestControlGatewayExecutesWorkspaceCommand(t *testing.T) {
 	}
 	if result.ExitCode != 0 || result.Stdout != "exec body" || result.CWD != "" || result.ApprovalPolicy != WorkspaceExecPolicyTrusted {
 		t.Fatalf("exec result = %#v", result)
+	}
+}
+
+func TestControlGatewayWorkspaceExecTruncatesLargeOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("large shell output test uses POSIX tools")
+	}
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceExec)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityWorkspaceExec,
+		Action:             ControlActionWorkspaceExec,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"command":      fmt.Sprintf("yes x | head -c %d", workspaceExecOutputMaxBytes+128),
+			"timeout_ms":   5000,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response.Result.(workspaceExecResult)
+	if !ok {
+		t.Fatalf("exec result = %#v, want workspaceExecResult", response.Result)
+	}
+	if result.ExitCode != 0 || len(result.Stdout) != workspaceExecOutputMaxBytes || !result.StdoutTruncated {
+		t.Fatalf("exec result = exit %d stdout len %d truncated %v", result.ExitCode, len(result.Stdout), result.StdoutTruncated)
+	}
+	if result.StderrTruncated || result.OutputTruncated || result.OutputBytesLimit != workspaceExecOutputMaxBytes {
+		t.Fatalf("exec truncation metadata = %#v", result)
 	}
 }
 

@@ -756,6 +756,10 @@ export type WorkspaceExecResult = {
   stdout: string;
   stderr: string;
   output?: string;
+  stdout_truncated?: boolean;
+  stderr_truncated?: boolean;
+  output_truncated?: boolean;
+  output_bytes_limit?: number;
   duration_ms: number;
   failure?: string;
 };

@@ -1151,6 +1151,7 @@ workspace.files.stream
 workspace.files.stream.cancel
 workspace.exec
 workspace.exec approval policy gate
+workspace.exec bounded stdout/stderr/output metadata
 local workspace root confinement
 SSH workspace Host-initiated read/range-read/write/delete/move/exec
 E2EE request/response frames
@@ -1170,6 +1171,8 @@ async workspace.exec approval interaction, if product needs per-command confirma
 `workspace.files.stream` v1 用于大文件读取：普通 `workspace.files.read` 仍负责目录列表和中小文件 base64 response；超过普通 response 适合承载的内容由 Controller 请求 `workspace.files.stream`，Host 返回 stream metadata 后在同一 encrypted control connection 上发送 `workspace_file.chunk` / `workspace_file.completed` / `workspace_file.error` frame。Controller 可以通过 offset 重新请求来恢复读取，也可以用 `workspace.files.stream.cancel` 取消当前 control connection 上的 active stream。SSH workspace 通过 proxy helper 的 `read_range` 从远端按 chunk 读取，Host 只转发密文 frame，不生成可被 relay 或云端读取的明文 URL。
 
 `workspace.exec` v1 由 Host trust grant 的 `workspace_exec_policy` 决定是否执行。默认 `trusted` 表示 `workspace.exec` capability 本身就是执行授权；`require_approval` 会同步拒绝执行并返回 `workspace_exec_approval_required`，不会启动本地或 SSH command；`disabled` 直接拒绝为 `workspace_exec_disabled`。这先把 command approval policy 放进 Core/daemon 决策层，避免 Controller 自行判断或把 gateway command 伪装成 Claude/Codex 原生 approval。若未来需要逐条命令确认，应该在这个 policy gate 之上新增 Host-owned async interaction，而不是让客户端绕过策略。
+
+`workspace.exec` v1 是同步 request/response 能力，不是长输出流。Host 必须限制 stdout/stderr/output 的响应大小，并在结果里返回 `stdout_truncated` / `stderr_truncated` / `output_truncated` / `output_bytes_limit` 这类 metadata。需要持续输出、交互输入或大输出的场景应该使用 Host-owned PTY/terminal 能力，而不是把同步 exec response 扩成无限大 payload。
 
 ### Phase 9 - PTY Attach Manager
 

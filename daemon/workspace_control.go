@@ -21,6 +21,7 @@ const (
 	workspaceFileHardMaxBytes        = 25 * 1024 * 1024
 	workspaceExecDefaultTimeout      = 60 * time.Second
 	workspaceExecMaxTimeout          = 120 * time.Second
+	workspaceExecOutputMaxBytes      = 1024 * 1024
 	workspaceFileStreamFrameChunk    = "workspace_file.chunk"
 	workspaceFileStreamFrameComplete = "workspace_file.completed"
 	workspaceFileStreamFrameError    = "workspace_file.error"
@@ -180,17 +181,21 @@ type workspaceFileStreamFrame struct {
 }
 
 type workspaceExecResult struct {
-	WorkspaceID    string `json:"workspace_id"`
-	Target         string `json:"target"`
-	Command        string `json:"command"`
-	CWD            string `json:"cwd"`
-	ApprovalPolicy string `json:"approval_policy"`
-	ExitCode       int    `json:"exit_code"`
-	Stdout         string `json:"stdout"`
-	Stderr         string `json:"stderr"`
-	Output         string `json:"output,omitempty"`
-	DurationMS     int64  `json:"duration_ms"`
-	Failure        string `json:"failure,omitempty"`
+	WorkspaceID      string `json:"workspace_id"`
+	Target           string `json:"target"`
+	Command          string `json:"command"`
+	CWD              string `json:"cwd"`
+	ApprovalPolicy   string `json:"approval_policy"`
+	ExitCode         int    `json:"exit_code"`
+	Stdout           string `json:"stdout"`
+	Stderr           string `json:"stderr"`
+	Output           string `json:"output,omitempty"`
+	StdoutTruncated  bool   `json:"stdout_truncated,omitempty"`
+	StderrTruncated  bool   `json:"stderr_truncated,omitempty"`
+	OutputTruncated  bool   `json:"output_truncated,omitempty"`
+	OutputBytesLimit int    `json:"output_bytes_limit,omitempty"`
+	DurationMS       int64  `json:"duration_ms"`
+	Failure          string `json:"failure,omitempty"`
 }
 
 func (a *app) controlWorkspace(workspaceID string) (Workspace, error) {
@@ -906,9 +911,10 @@ func executeLocalControlWorkspaceCommand(parent context.Context, ws Workspace, c
 	defer cancel()
 	cmd := localShellCommand(ctx, command)
 	cmd.Dir = cwd
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := &workspaceExecOutputBuffer{limit: workspaceExecOutputMaxBytes}
+	stderr := &workspaceExecOutputBuffer{limit: workspaceExecOutputMaxBytes}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	err = cmd.Run()
 	exitCode := 0
 	if err != nil {
@@ -922,15 +928,18 @@ func executeLocalControlWorkspaceCommand(parent context.Context, ws Workspace, c
 		}
 	}
 	return workspaceExecResult{
-		WorkspaceID:    ws.ID,
-		Target:         ws.Target,
-		Command:        command,
-		CWD:            rel,
-		ApprovalPolicy: approvalPolicy,
-		ExitCode:       exitCode,
-		Stdout:         stdout.String(),
-		Stderr:         stderr.String(),
-		DurationMS:     time.Since(start).Milliseconds(),
+		WorkspaceID:      ws.ID,
+		Target:           ws.Target,
+		Command:          command,
+		CWD:              rel,
+		ApprovalPolicy:   approvalPolicy,
+		ExitCode:         exitCode,
+		Stdout:           stdout.String(),
+		Stderr:           stderr.String(),
+		StdoutTruncated:  stdout.Truncated(),
+		StderrTruncated:  stderr.Truncated(),
+		OutputBytesLimit: workspaceExecOutputMaxBytes,
+		DurationMS:       time.Since(start).Milliseconds(),
 	}, nil
 }
 
@@ -949,18 +958,25 @@ func (a *app) executeRemoteControlWorkspaceCommand(parent context.Context, ws Wo
 	if err != nil {
 		return workspaceExecResult{}, newActionError(http.StatusBadRequest, "workspace_exec_failed", err.Error())
 	}
+	stdout, stdoutTruncated := truncateWorkspaceExecOutput(stringValue(out["stdout"]))
+	stderr, stderrTruncated := truncateWorkspaceExecOutput(stringValue(out["stderr"]))
+	output, outputTruncated := truncateWorkspaceExecOutput(stringValue(out["output"]))
 	return workspaceExecResult{
-		WorkspaceID:    ws.ID,
-		Target:         ws.Target,
-		Command:        firstString(out["command"], command),
-		CWD:            rel,
-		ApprovalPolicy: approvalPolicy,
-		ExitCode:       int(numberValue(out["exit_code"])),
-		Stdout:         stringValue(out["stdout"]),
-		Stderr:         stringValue(out["stderr"]),
-		Output:         stringValue(out["output"]),
-		DurationMS:     int64(numberValue(out["duration_ms"])),
-		Failure:        stringValue(out["failure"]),
+		WorkspaceID:      ws.ID,
+		Target:           ws.Target,
+		Command:          firstString(out["command"], command),
+		CWD:              rel,
+		ApprovalPolicy:   approvalPolicy,
+		ExitCode:         int(numberValue(out["exit_code"])),
+		Stdout:           stdout,
+		Stderr:           stderr,
+		Output:           output,
+		StdoutTruncated:  stdoutTruncated,
+		StderrTruncated:  stderrTruncated,
+		OutputTruncated:  outputTruncated,
+		OutputBytesLimit: workspaceExecOutputMaxBytes,
+		DurationMS:       int64(numberValue(out["duration_ms"])),
+		Failure:          stringValue(out["failure"]),
 	}, nil
 }
 
@@ -1279,6 +1295,48 @@ func workspaceExecPolicyMessage(command, requestedCWD, prefix string) string {
 		return prefix + ": " + command + " (cwd " + cwd + ")"
 	}
 	return prefix + ": " + command
+}
+
+type workspaceExecOutputBuffer struct {
+	buffer    bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (b *workspaceExecOutputBuffer) Write(chunk []byte) (int, error) {
+	written := len(chunk)
+	if b.limit <= 0 {
+		return written, nil
+	}
+	remaining := b.limit - b.buffer.Len()
+	if remaining <= 0 {
+		if written > 0 {
+			b.truncated = true
+		}
+		return written, nil
+	}
+	if len(chunk) > remaining {
+		_, _ = b.buffer.Write(chunk[:remaining])
+		b.truncated = true
+		return written, nil
+	}
+	_, _ = b.buffer.Write(chunk)
+	return written, nil
+}
+
+func (b *workspaceExecOutputBuffer) String() string {
+	return b.buffer.String()
+}
+
+func (b *workspaceExecOutputBuffer) Truncated() bool {
+	return b.truncated
+}
+
+func truncateWorkspaceExecOutput(value string) (string, bool) {
+	if len(value) <= workspaceExecOutputMaxBytes {
+		return value, false
+	}
+	return value[:workspaceExecOutputMaxBytes], true
 }
 
 func allowCreateParents(value *bool) bool {
