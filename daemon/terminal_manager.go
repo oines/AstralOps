@@ -99,9 +99,10 @@ type terminalOpenResult struct {
 }
 
 type terminalAckResult struct {
-	TerminalID string `json:"terminal_id"`
-	Status     string `json:"status"`
-	OutputSeq  int64  `json:"output_seq"`
+	TerminalID     string `json:"terminal_id"`
+	Status         string `json:"status"`
+	OutputSeq      int64  `json:"output_seq"`
+	WriterDeviceID string `json:"writer_device_id,omitempty"`
 }
 
 type terminalAttachResult struct {
@@ -395,10 +396,42 @@ func (m *terminalManager) writerSession(controllerDeviceID, terminalID string) (
 	if session.status != terminalStatusOpen {
 		return nil, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
 	}
+	if session.writerDeviceID == "" {
+		session.writerDeviceID = controllerDeviceID
+		session.updatedAt = time.Now().UTC()
+		return session, nil
+	}
 	if session.writerDeviceID != controllerDeviceID {
 		return nil, newActionError(http.StatusForbidden, "terminal_writer_denied", "controller is not the terminal active writer")
 	}
 	return session, nil
+}
+
+func (m *terminalManager) releaseWriterForDevice(controllerDeviceID string) int {
+	m.mu.Lock()
+	sessions := make([]*terminalSession, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		sessions = append(sessions, session)
+	}
+	m.mu.Unlock()
+
+	released := 0
+	for _, session := range sessions {
+		if session.releaseWriter(controllerDeviceID) {
+			released++
+		}
+	}
+	return released
+}
+
+func (a *app) releaseTerminalWritersForDevice(controllerDeviceID string) int {
+	a.terminalMu.Lock()
+	manager := a.terminals
+	a.terminalMu.Unlock()
+	if manager == nil {
+		return 0
+	}
+	return manager.releaseWriterForDevice(controllerDeviceID)
 }
 
 func newTerminalSession(workspaceID string, agent AgentKind, target, cwd, shell, writerDeviceID string) *terminalSession {
@@ -486,6 +519,17 @@ func (s *terminalSession) detachViewer(connectionID string) (terminalAttachResul
 		delete(s.viewers, connectionID)
 	}
 	return s.attachResultLocked(connectionID, viewerDeviceID), viewer
+}
+
+func (s *terminalSession) releaseWriter(controllerDeviceID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status != terminalStatusOpen || s.writerDeviceID != controllerDeviceID {
+		return false
+	}
+	s.writerDeviceID = ""
+	s.updatedAt = time.Now().UTC()
+	return true
 }
 
 func (s *terminalSession) sendToViewers(frame terminalStreamFrame, viewers []*terminalViewer) {
@@ -664,7 +708,7 @@ func (s *terminalSession) openResult() terminalOpenResult {
 func (s *terminalSession) ack() terminalAckResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return terminalAckResult{TerminalID: s.id, Status: s.status, OutputSeq: s.outputSeq}
+	return terminalAckResult{TerminalID: s.id, Status: s.status, OutputSeq: s.outputSeq, WriterDeviceID: s.writerDeviceID}
 }
 
 func (s *terminalSession) lifecycle(reason string) map[string]any {

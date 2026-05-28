@@ -770,6 +770,7 @@ export type TerminalAckResult = {
   terminal_id: string;
   status: "open" | "closed";
   output_seq: number;
+  writer_device_id?: string;
 };
 
 export type TerminalAttachResult = {

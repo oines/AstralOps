@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -145,6 +147,54 @@ func TestTerminalManagerKeepsSingleActiveWriter(t *testing.T) {
 		},
 	})
 	assertActionError(t, err, http.StatusForbidden, "terminal_writer_denied")
+}
+
+func TestTrustRevocationReleasesTerminalWriterForNextTrustedController(t *testing.T) {
+	t.Setenv("SHELL", terminalManagerTestShell(t))
+
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_a", CapabilityTerminalOpen, CapabilityTerminalInput)
+	trustControlDevice(t, app, "device_b", CapabilityTerminalInput)
+
+	open := openTerminalForTest(t, app, "device_a", workspace.ID)
+	marker := filepath.Join(t.TempDir(), "terminal-writer-claimed")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/trust/devices/device_a/revoke", nil)
+	rr := httptest.NewRecorder()
+	app.handleTrustDeviceAction(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("revoke status = %d body = %s", rr.Code, rr.Body.String())
+	}
+	revokeResult := map[string]any{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &revokeResult); err != nil {
+		t.Fatal(err)
+	}
+	if numberValue(revokeResult["released_terminal_writers"]) != 1 {
+		t.Fatalf("revoke response = %#v, want one released terminal writer", revokeResult)
+	}
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_b",
+		Capability:         CapabilityTerminalInput,
+		Action:             ControlActionTerminalInput,
+		Params: map[string]any{
+			"terminal_id": open.TerminalID,
+			"data":        "printf claimed > " + shellSingleQuote(marker) + "\n",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack, ok := response.Result.(terminalAckResult)
+	if !ok {
+		t.Fatalf("input result = %#v, want terminalAckResult", response.Result)
+	}
+	if ack.WriterDeviceID != "device_b" {
+		t.Fatalf("writer device = %q, want device_b", ack.WriterDeviceID)
+	}
+	waitForFileContent(t, marker, "claimed")
+
+	_, _ = app.terminalManager().close(context.Background(), "device_b", terminalCloseParams{TerminalID: open.TerminalID})
 }
 
 func openTerminalForTest(t *testing.T, app *app, deviceID, workspaceID string) terminalOpenResult {

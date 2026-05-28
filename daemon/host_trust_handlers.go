@@ -56,16 +56,18 @@ func (a *app) handleTrustDeviceAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "trusted device not found"})
 			return
 		}
+		releasedWriters := a.releaseTerminalWritersForDevice(grant.ControllerDeviceID)
 		a.emit(AstralEvent{
 			Kind: "control.trust.revoked",
 			Normalized: map[string]any{
-				"host_device_id":       grant.HostDeviceID,
-				"controller_device_id": grant.ControllerDeviceID,
-				"revoked_at":           grant.RevokedAt,
+				"host_device_id":            grant.HostDeviceID,
+				"controller_device_id":      grant.ControllerDeviceID,
+				"revoked_at":                grant.RevokedAt,
+				"released_terminal_writers": releasedWriters,
 			},
 		})
 		closed := a.closeControlSessionsForDevice(grant.ControllerDeviceID, "trust_revoked")
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "grant": grant, "closed_control_sessions": closed})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "grant": grant, "closed_control_sessions": closed, "released_terminal_writers": releasedWriters})
 		return
 	}
 	w.WriteHeader(http.StatusNotFound)

@@ -524,7 +524,7 @@ POST /v1/trust/devices/:device_id/revoke
 3. 对每个 session 发送 encrypted close frame，reason=trust_revoked。
 4. 关闭 transport。
 5. 清理该设备的 event subscription、pending request、PTY attach。
-6. 如果该设备是某个 PTY 的 active writer，释放 writer lock。
+6. 如果该设备是某个 PTY 的 active writer，释放 writer lock，并让下一台仍可信且具备 `terminal.input` 能力的 Controller 由 Host 在 input/resize/close 时重新认领。
 7. append 本地 audit event，例如 control.trust.revoked。
 8. 通知云端同步 trust metadata。
 ```
@@ -825,6 +825,7 @@ terminal.output stream over E2EE control channel
 single active writer
 multi viewer
 opened/attached/detached/closed lifecycle events only
+trust revocation releases active writer lock
 ```
 
 这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.attach` 必须发生在已完成握手的 encrypted control WebSocket 上，因为 PTY 输出只能回到这条 E2EE channel。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。PTY 输出不进入 JSONL，只有 opened、attached、detached、closed lifecycle event 会落盘。
@@ -836,6 +837,7 @@ Host 可以在短时间 retention window 内保留 PTY session。
 Controller 重连后可以重新 attach。
 多个 viewer 可以 attach。
 默认只有一个 Controller 拥有 active input。
+撤销 trusted device 会清空该设备持有的 writer_device_id；释放后的 writer 只能由下一台仍可信且具备 terminal.input capability 的 Controller 经 Host/Core 认领。
 没有 viewer 的 terminal session 会启动 retention timeout。
 retention 到期后 Host 关闭 PTY 并记录 closed(reason=retention_timeout)。
 ```
@@ -1122,6 +1124,7 @@ terminal.output stream
 single active writer
 multi viewer
 retention timeout
+trust revocation releases active writer lock
 lifecycle event only, no ANSI output JSONL storage
 
 待落地:
