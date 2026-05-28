@@ -440,12 +440,37 @@ export type QueueControlResult = {
   queue_id: string;
 };
 
+export type OkResult = {
+  ok: boolean;
+};
+
+export type SessionReferenceParams = {
+  session_id: string;
+};
+
+export type SessionsReadParams = {
+  workspace_id?: string;
+};
+
+export type SessionInputControlParams = SessionInputRequest & {
+  session_id: string;
+};
+
 export type EditLastUserMessageRequest = {
   event_seq: number;
   input: string;
   model?: string;
   reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
   permission_mode?: "default" | "auto" | "plan" | "bypassPermissions";
+};
+
+export type SessionEditParams = EditLastUserMessageRequest & {
+  session_id: string;
+};
+
+export type InteractionRespondParams = {
+  interaction_id: string;
+  response: Record<string, unknown>;
 };
 
 export type MediaReadParams = {
@@ -862,12 +887,12 @@ export type TerminalStreamFrame = {
   reason?: string;
 };
 
-export type ControlRequest = {
+export type ControlRequest<A extends ControlAction = ControlAction> = {
   request_id?: string;
   controller_device_id: string;
   capability: ControlCapability;
-  action: ControlAction;
-  params?: Record<string, unknown>;
+  action: A;
+  params?: ControlActionParams<A>;
 };
 
 export type ControlError = {
@@ -876,10 +901,10 @@ export type ControlError = {
   message: string;
 };
 
-export type ControlResponse = {
+export type ControlResponse<A extends ControlAction = ControlAction> = {
   request_id?: string;
   ok: boolean;
-  result?: unknown;
+  result?: ControlActionResult<A>;
   error?: ControlError;
 };
 
@@ -1076,6 +1101,102 @@ export type SessionDeleteResult = {
   ok: boolean;
   session_id: string;
 };
+
+export type ControlActionParamMap = {
+  "core.read.session_view": SessionReferenceParams;
+  "core.read.sessions": SessionsReadParams;
+  "core.read.workspaces": undefined;
+  "core.read.events": EventWindowParams;
+  "core.subscribe.events": EventSubscriptionParams;
+  "core.unsubscribe.events": EventSubscriptionCancelParams;
+  "core.control.session_input": SessionInputControlParams;
+  "core.control.interrupt": SessionReferenceParams;
+  "core.control.queue.cancel": QueueControlParams;
+  "core.control.queue.steer": QueueControlParams;
+  "core.control.session.fork": SessionForkControlParams;
+  "core.control.session.delete": SessionDeleteParams;
+  "interaction.respond": InteractionRespondParams;
+  "session.edit": SessionEditParams;
+  "attachment.ingest": AttachmentIngestParams;
+  "attachment.ingest.start": AttachmentIngestStartParams;
+  "attachment.ingest.chunk": AttachmentIngestChunkParams;
+  "attachment.ingest.finish": AttachmentIngestFinishParams;
+  "media.read": MediaReadParams;
+  "media.download": MediaDownloadParams;
+  "media.stream": MediaStreamParams;
+  "media.stream.cancel": MediaStreamCancelParams;
+  "workspace.files.read": WorkspaceFilesReadParams;
+  "workspace.files.write": WorkspaceFilesWriteParams;
+  "workspace.files.apply_patch": WorkspaceFilesApplyPatchParams;
+  "workspace.files.delete": WorkspaceFilesDeleteParams;
+  "workspace.files.move": WorkspaceFilesMoveParams;
+  "workspace.files.stream": WorkspaceFilesStreamParams;
+  "workspace.files.stream.cancel": WorkspaceFilesStreamCancelParams;
+  "workspace.exec": WorkspaceExecParams;
+  "terminal.open": TerminalOpenParams;
+  "terminal.attach": TerminalAttachParams;
+  "terminal.detach": TerminalDetachParams;
+  "terminal.input": TerminalInputParams;
+  "terminal.resize": TerminalResizeParams;
+  "terminal.close": TerminalCloseParams;
+  "host.trust.list": undefined;
+  "host.trust.revoke": HostTrustRevokeParams;
+};
+
+export type ControlActionResultMap = {
+  "core.read.session_view": SessionView;
+  "core.read.sessions": Session[];
+  "core.read.workspaces": Workspace[];
+  "core.read.events": AstralEvent[];
+  "core.subscribe.events": EventSubscriptionResult;
+  "core.unsubscribe.events": EventSubscriptionCancelResult;
+  "core.control.session_input": SessionInputResult;
+  "core.control.interrupt": OkResult;
+  "core.control.queue.cancel": QueueControlResult;
+  "core.control.queue.steer": QueueControlResult;
+  "core.control.session.fork": SessionForkResponse;
+  "core.control.session.delete": SessionDeleteResult;
+  "interaction.respond": OkResult;
+  "session.edit": OkResult;
+  "attachment.ingest": AttachmentIngestResult;
+  "attachment.ingest.start": AttachmentIngestStartResult;
+  "attachment.ingest.chunk": AttachmentIngestChunkResult;
+  "attachment.ingest.finish": AttachmentIngestFinishResult;
+  "media.read": MediaReadResult;
+  "media.download": MediaReadResult;
+  "media.stream": MediaStreamResult;
+  "media.stream.cancel": MediaStreamCancelResult;
+  "workspace.files.read": WorkspaceFilesReadResult;
+  "workspace.files.write": WorkspaceFilesWriteResult;
+  "workspace.files.apply_patch": WorkspaceFilesApplyPatchResult;
+  "workspace.files.delete": WorkspaceFilesDeleteResult;
+  "workspace.files.move": WorkspaceFilesMoveResult;
+  "workspace.files.stream": WorkspaceFileStreamResult;
+  "workspace.files.stream.cancel": WorkspaceFileStreamCancelResult;
+  "workspace.exec": WorkspaceExecResult;
+  "terminal.open": TerminalOpenResult;
+  "terminal.attach": TerminalAttachResult;
+  "terminal.detach": TerminalAttachResult;
+  "terminal.input": TerminalAckResult;
+  "terminal.resize": TerminalAckResult;
+  "terminal.close": TerminalAckResult;
+  "host.trust.list": HostTrustListResult;
+  "host.trust.revoke": HostTrustRevokeResult;
+};
+
+export type KnownControlAction = keyof ControlActionParamMap;
+
+export type ControlActionParams<A extends ControlAction> = A extends keyof ControlActionParamMap
+  ? ControlActionParamMap[A]
+  : Record<string, unknown>;
+
+export type ControlActionResult<A extends ControlAction> = A extends keyof ControlActionResultMap
+  ? ControlActionResultMap[A]
+  : unknown;
+
+export type TypedControlRequest<A extends ControlAction> = ControlRequest<A>;
+
+export type TypedControlResponse<A extends ControlAction> = ControlResponse<A>;
 
 export type SessionCommand = {
   id: string;
