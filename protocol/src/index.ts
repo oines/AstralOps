@@ -411,9 +411,52 @@ export type AttachmentIngestParams = {
   content_base64: string;
 };
 
+export type AttachmentIngestStartParams = {
+  session_id: string;
+  name: string;
+  kind?: "image" | "file" | string;
+  mime_type?: string;
+  detail?: "high" | "original" | string;
+  size?: number;
+  sha256?: string;
+};
+
+export type AttachmentIngestStartResult = {
+  session_id: string;
+  upload_id: string;
+  attachment_id: string;
+  chunk_max_bytes: number;
+  max_bytes: number;
+};
+
+export type AttachmentIngestChunkParams = {
+  session_id: string;
+  upload_id: string;
+  seq: number;
+  offset: number;
+  data_base64: string;
+};
+
+export type AttachmentIngestChunkResult = {
+  session_id: string;
+  upload_id: string;
+  seq: number;
+  offset: number;
+  received_bytes: number;
+};
+
+export type AttachmentIngestFinishParams = {
+  session_id: string;
+  upload_id: string;
+};
+
 export type AttachmentIngestResult = {
   session_id: string;
   attachment: ControlAttachmentHandle;
+};
+
+export type AttachmentIngestFinishResult = AttachmentIngestResult & {
+  upload_id: string;
 };
 
 export type MediaReadResult = {
@@ -550,6 +593,9 @@ export type ControlAction =
   | "interaction.respond"
   | "session.edit"
   | "attachment.ingest"
+  | "attachment.ingest.start"
+  | "attachment.ingest.chunk"
+  | "attachment.ingest.finish"
   | "media.read"
   | "media.download"
   | "media.stream"

@@ -25,26 +25,29 @@ const (
 )
 
 const (
-	ControlActionSessionView         = "core.read.session_view"
-	ControlActionSessions            = "core.read.sessions"
-	ControlActionWorkspaces          = "core.read.workspaces"
-	ControlActionSessionInput        = "core.control.session_input"
-	ControlActionInterrupt           = "core.control.interrupt"
-	ControlActionInteractionRespond  = "interaction.respond"
-	ControlActionSessionEdit         = "session.edit"
-	ControlActionAttachmentIngest    = "attachment.ingest"
-	ControlActionMediaRead           = "media.read"
-	ControlActionMediaDownload       = "media.download"
-	ControlActionMediaStream         = "media.stream"
-	ControlActionWorkspaceFilesRead  = "workspace.files.read"
-	ControlActionWorkspaceFilesWrite = "workspace.files.write"
-	ControlActionWorkspaceExec       = "workspace.exec"
-	ControlActionTerminalOpen        = "terminal.open"
-	ControlActionTerminalAttach      = "terminal.attach"
-	ControlActionTerminalDetach      = "terminal.detach"
-	ControlActionTerminalInput       = "terminal.input"
-	ControlActionTerminalResize      = "terminal.resize"
-	ControlActionTerminalClose       = "terminal.close"
+	ControlActionSessionView            = "core.read.session_view"
+	ControlActionSessions               = "core.read.sessions"
+	ControlActionWorkspaces             = "core.read.workspaces"
+	ControlActionSessionInput           = "core.control.session_input"
+	ControlActionInterrupt              = "core.control.interrupt"
+	ControlActionInteractionRespond     = "interaction.respond"
+	ControlActionSessionEdit            = "session.edit"
+	ControlActionAttachmentIngest       = "attachment.ingest"
+	ControlActionAttachmentIngestStart  = "attachment.ingest.start"
+	ControlActionAttachmentIngestChunk  = "attachment.ingest.chunk"
+	ControlActionAttachmentIngestFinish = "attachment.ingest.finish"
+	ControlActionMediaRead              = "media.read"
+	ControlActionMediaDownload          = "media.download"
+	ControlActionMediaStream            = "media.stream"
+	ControlActionWorkspaceFilesRead     = "workspace.files.read"
+	ControlActionWorkspaceFilesWrite    = "workspace.files.write"
+	ControlActionWorkspaceExec          = "workspace.exec"
+	ControlActionTerminalOpen           = "terminal.open"
+	ControlActionTerminalAttach         = "terminal.attach"
+	ControlActionTerminalDetach         = "terminal.detach"
+	ControlActionTerminalInput          = "terminal.input"
+	ControlActionTerminalResize         = "terminal.resize"
+	ControlActionTerminalClose          = "terminal.close"
 )
 
 type ControlRequest struct {
@@ -105,7 +108,7 @@ func controlActionCapability(action string) string {
 		return CapabilityInteractionRespond
 	case ControlActionSessionEdit:
 		return CapabilitySessionEdit
-	case ControlActionAttachmentIngest:
+	case ControlActionAttachmentIngest, ControlActionAttachmentIngestStart, ControlActionAttachmentIngestChunk, ControlActionAttachmentIngestFinish:
 		return CapabilityAttachmentIngest
 	case ControlActionMediaRead:
 		return CapabilityMediaRead
@@ -216,6 +219,24 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn) (an
 			return nil, err
 		}
 		return a.ingestControlAttachment(params)
+	case ControlActionAttachmentIngestStart:
+		var params attachmentIngestStartParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.startControlAttachmentIngest(params)
+	case ControlActionAttachmentIngestChunk:
+		var params attachmentIngestChunkParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.appendControlAttachmentChunk(params)
+	case ControlActionAttachmentIngestFinish:
+		var params attachmentIngestFinishParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.finishControlAttachmentIngest(params)
 	case ControlActionMediaRead:
 		var params mediaReadParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

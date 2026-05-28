@@ -628,7 +628,7 @@ interaction.respond
   回复 Ask，批准/拒绝 plan，批准/拒绝 command/file/permission request。
 
 attachment.ingest
-  Controller 把本地选择或粘贴的文件通过 E2EE 数据帧发送给 Host。Host 写入自己的 upload store，并返回 Host-owned attachment handle。Controller 不能把自己的本机 path 直接交给远端 Host 当可读路径。
+  Controller 把本地选择或粘贴的文件通过 E2EE control request 发送给 Host。中小附件可单次 ingest；大文件用 start/chunk/finish。Host 写入自己的 upload store，并返回 Host-owned attachment handle。Controller 不能把自己的本机 path 直接交给远端 Host 当可读路径。
 
 media.read
   读取 transcript 中由 event_seq + media_id 引用的 Host-owned 媒体资源。Controller 只能拿到 Host 通过能力检查后返回的媒体内容或预览数据。
@@ -750,7 +750,19 @@ Controller selects file / paste image
   -> core.control send input with Host-owned attachment handle
 ```
 
-`attachment.ingest` v1 使用 encrypted control request 承载 `content_base64`，用于中小附件的基础闭环；大文件上传后续需要独立的 chunked ingest。远程 `core.control.session_input` 只接受 Host-owned attachment handle，不接受 Controller 本地路径。
+`attachment.ingest` v1 支持两种 Host-owned 上传方式：
+
+```text
+中小附件:
+attachment.ingest(content_base64) -> Host-owned attachment handle
+
+大文件:
+attachment.ingest.start(metadata)
+attachment.ingest.chunk(seq, offset, data_base64)
+attachment.ingest.finish(upload_id) -> Host-owned attachment handle
+```
+
+chunked ingest 仍然走 encrypted control request/response，不开放明文 HTTP upload URL。Host 用 seq/offset 校验顺序写入自己的 upload store，finish 后才返回可用于 `core.control.session_input` 的 attachment handle。远程 `core.control.session_input` 只接受 Host-owned attachment handle，不接受 Controller 本地路径。
 
 禁止的模型：
 
@@ -1044,6 +1056,7 @@ same E2EE handshake on LAN and relay
 attachment.ingest
 Host-local upload store for remote attachment ingest
 Host-owned attachment handles for remote session input
+chunked attachment ingest for large uploads
 media.read
 media.download
 media.stream
@@ -1053,7 +1066,6 @@ E2EE response frames
 Host path never exposed in control response
 
 待落地:
-chunked attachment ingest for large uploads
 stream cancellation/resume policy
 ```
 

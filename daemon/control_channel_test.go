@@ -308,6 +308,83 @@ func TestControlWebSocketMediaStreamChunksAreEncrypted(t *testing.T) {
 	}
 }
 
+func TestControlWebSocketChunkedAttachmentIngestIsEncrypted(t *testing.T) {
+	app, _, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityAttachmentIngest)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "attachment_start",
+			Capability: CapabilityAttachmentIngest,
+			Action:     ControlActionAttachmentIngestStart,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"name":       "upload.txt",
+			},
+		},
+	})
+	startPlain := readEncryptedControlFrame(t, client, cipher)
+	if startPlain.Response == nil || !startPlain.Response.OK {
+		t.Fatalf("start response = %#v, want ok", startPlain)
+	}
+	uploadID := stringValue(mapValue(startPlain.Response.Result)["upload_id"])
+	if uploadID == "" {
+		t.Fatalf("start result = %#v, want upload id", startPlain.Response.Result)
+	}
+
+	chunk := []byte("chunk-upload-secret")
+	encoded := base64.StdEncoding.EncodeToString(chunk)
+	sealedRequest := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "attachment_chunk",
+			Capability: CapabilityAttachmentIngest,
+			Action:     ControlActionAttachmentIngestChunk,
+			Params: map[string]any{
+				"session_id":  session.ID,
+				"upload_id":   uploadID,
+				"seq":         1,
+				"offset":      0,
+				"data_base64": encoded,
+			},
+		},
+	})
+	if strings.Contains(string(sealedRequest), string(chunk)) || strings.Contains(string(sealedRequest), encoded) {
+		t.Fatalf("sealed attachment chunk request leaked payload: %s", string(sealedRequest))
+	}
+	chunkPlain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
+	if strings.Contains(string(sealedResponse), string(chunk)) || strings.Contains(string(sealedResponse), encoded) {
+		t.Fatalf("sealed attachment chunk response leaked payload: %s", string(sealedResponse))
+	}
+	if chunkPlain.Response == nil || !chunkPlain.Response.OK {
+		t.Fatalf("chunk response = %#v, want ok", chunkPlain)
+	}
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "attachment_finish",
+			Capability: CapabilityAttachmentIngest,
+			Action:     ControlActionAttachmentIngestFinish,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"upload_id":  uploadID,
+			},
+		},
+	})
+	finishPlain := readEncryptedControlFrame(t, client, cipher)
+	if finishPlain.Response == nil || !finishPlain.Response.OK {
+		t.Fatalf("finish response = %#v, want ok", finishPlain)
+	}
+	attachment := mapValue(mapValue(finishPlain.Response.Result)["attachment"])
+	if stringValue(attachment["id"]) == "" || !boolValue(attachment["host_owned"]) || stringValue(attachment["path"]) != "" {
+		t.Fatalf("finish attachment = %#v", attachment)
+	}
+}
+
 func TestControlWebSocketWorkspaceFileReadResponseIsEncrypted(t *testing.T) {
 	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityWorkspaceFilesRead)
 	if err := os.WriteFile(filepath.Join(workspace.LocalCWD, "secret.txt"), []byte("sealed-workspace-secret"), 0o600); err != nil {
