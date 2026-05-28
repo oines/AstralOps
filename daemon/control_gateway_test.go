@@ -278,6 +278,26 @@ func TestControlGatewayEventsHideHostPrivateMediaPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assistantEvent, err := app.store.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       session.Agent,
+		Kind:        "message.assistant",
+		Normalized: map[string]any{
+			"text": "generated media",
+			"media": []map[string]any{{
+				"media_id":   "media_nested",
+				"kind":       "image",
+				"path":       hostPath,
+				"saved_path": hostPath + ".saved",
+				"name":       "nested.png",
+			}},
+		},
+		Raw: map[string]any{"path": hostPath, "secret": "raw-assistant-media"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	response, err := app.executeControlRequest(ControlRequest{
 		ControllerDeviceID: "device_mobile",
@@ -294,10 +314,10 @@ func TestControlGatewayEventsHideHostPrivateMediaPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, ok := response.Result.([]AstralEvent)
-	if !ok || len(events) != 2 || events[0].Seq != userEvent.Seq || events[1].Seq != mediaEvent.Seq {
+	if !ok || len(events) != 3 || events[0].Seq != userEvent.Seq || events[1].Seq != mediaEvent.Seq || events[2].Seq != assistantEvent.Seq {
 		t.Fatalf("events result = %#v, want sanitized media events", response.Result)
 	}
-	if events[0].Raw != nil || events[1].Raw != nil {
+	if events[0].Raw != nil || events[1].Raw != nil || events[2].Raw != nil {
 		t.Fatalf("remote events leaked raw payloads: %#v", events)
 	}
 	attachment := mapValue(arrayValue(mapValue(events[0].Normalized)["attachments"])[0])
@@ -308,16 +328,37 @@ func TestControlGatewayEventsHideHostPrivateMediaPaths(t *testing.T) {
 	if stringValue(media["path"]) != "" || stringValue(media["filePath"]) != "" || stringValue(media["media_id"]) != "media_1" {
 		t.Fatalf("sanitized media = %#v", media)
 	}
+	nested := mapValue(arrayValue(mapValue(events[2].Normalized)["media"])[0])
+	if stringValue(nested["path"]) != "" || stringValue(nested["saved_path"]) != "" || stringValue(nested["media_id"]) != "media_nested" {
+		t.Fatalf("sanitized nested media = %#v", nested)
+	}
 	var storedUser AstralEvent
+	var storedAssistant AstralEvent
 	for _, event := range app.store.queryEvents(workspace.ID, session.ID, 0) {
 		if event.Seq == userEvent.Seq {
 			storedUser = event
-			break
+		}
+		if event.Seq == assistantEvent.Seq {
+			storedAssistant = event
 		}
 	}
 	storedAttachments := attachmentsFromNormalized(mapValue(storedUser.Normalized)["attachments"])
 	if len(storedAttachments) != 1 || storedAttachments[0].Path != hostPath || storedUser.Raw == nil {
 		t.Fatalf("stored event was mutated: %#v", storedUser)
+	}
+	var storedNested map[string]any
+	switch mediaItems := mapValue(storedAssistant.Normalized)["media"].(type) {
+	case []map[string]any:
+		if len(mediaItems) > 0 {
+			storedNested = mediaItems[0]
+		}
+	case []any:
+		if len(mediaItems) > 0 {
+			storedNested = mapValue(mediaItems[0])
+		}
+	}
+	if stringValue(storedNested["path"]) != hostPath || storedAssistant.Raw == nil {
+		t.Fatalf("stored nested media event was mutated: %#v", storedAssistant)
 	}
 }
 
@@ -338,6 +379,24 @@ func TestControlEventFrameHidesHostPrivateMediaPaths(t *testing.T) {
 	media := mapValue(frame.Event.Normalized)
 	if stringValue(media["path"]) != "" || stringValue(media["media_id"]) != "media_1" {
 		t.Fatalf("event frame media = %#v", media)
+	}
+
+	nestedFrame := controlEventFrame("stream_1", "request_2", AstralEvent{
+		Seq:  8,
+		Kind: "message.assistant",
+		Normalized: map[string]any{
+			"text": "single media",
+			"media": map[string]any{
+				"media_id":  "media_single",
+				"localPath": "/host/private/single.png",
+				"name":      "single.png",
+			},
+		},
+		Raw: map[string]any{"path": "/host/private/single.png"},
+	})
+	nested := mapValue(mapValue(nestedFrame.Event.Normalized)["media"])
+	if nestedFrame.Event.Raw != nil || stringValue(nested["localPath"]) != "" || stringValue(nested["media_id"]) != "media_single" {
+		t.Fatalf("event frame nested media = %#v", nestedFrame.Event)
 	}
 }
 

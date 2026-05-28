@@ -1,5 +1,7 @@
 package main
 
+import "strings"
+
 var controlPrivatePathKeys = map[string]bool{
 	"path":       true,
 	"saved_path": true,
@@ -30,33 +32,40 @@ func sanitizeControlEventNormalized(kind string, normalized any) any {
 	if !ok {
 		return cloned
 	}
-	switch kind {
-	case "message.user":
+	if strings.HasPrefix(kind, "message.") {
 		if attachments, ok := value["attachments"]; ok {
-			value["attachments"] = sanitizeControlEventAttachments(attachments)
+			value["attachments"] = sanitizeControlEventMediaReferences(attachments)
 		}
-	case "message.media":
+		if media, ok := value["media"]; ok {
+			value["media"] = sanitizeControlEventMediaReferences(media)
+		}
+	}
+	if kind == "message.media" {
 		sanitizeControlEventMediaReference(value)
 	}
 	return value
 }
 
-func sanitizeControlEventAttachments(value any) any {
-	items, ok := value.([]any)
-	if !ok {
+func sanitizeControlEventMediaReferences(value any) any {
+	switch items := value.(type) {
+	case []any:
+		out := make([]any, 0, len(items))
+		for _, item := range items {
+			media, ok := item.(map[string]any)
+			if !ok {
+				out = append(out, item)
+				continue
+			}
+			sanitizeControlEventMediaReference(media)
+			out = append(out, media)
+		}
+		return out
+	case map[string]any:
+		sanitizeControlEventMediaReference(items)
+		return value
+	default:
 		return value
 	}
-	out := make([]any, 0, len(items))
-	for _, item := range items {
-		attachment, ok := item.(map[string]any)
-		if !ok {
-			out = append(out, item)
-			continue
-		}
-		sanitizeControlEventMediaReference(attachment)
-		out = append(out, attachment)
-	}
-	return out
 }
 
 func sanitizeControlEventMediaReference(value map[string]any) {
