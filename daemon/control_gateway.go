@@ -32,6 +32,7 @@ const (
 	ControlActionInterrupt          = "core.control.interrupt"
 	ControlActionInteractionRespond = "interaction.respond"
 	ControlActionSessionEdit        = "session.edit"
+	ControlActionAttachmentIngest   = "attachment.ingest"
 	ControlActionMediaRead          = "media.read"
 	ControlActionMediaDownload      = "media.download"
 	ControlActionTerminalOpen       = "terminal.open"
@@ -100,6 +101,8 @@ func controlActionCapability(action string) string {
 		return CapabilityInteractionRespond
 	case ControlActionSessionEdit:
 		return CapabilitySessionEdit
+	case ControlActionAttachmentIngest:
+		return CapabilityAttachmentIngest
 	case ControlActionMediaRead:
 		return CapabilityMediaRead
 	case ControlActionMediaDownload:
@@ -149,11 +152,15 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn) (an
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
+		attachments, err := a.resolveControlInputAttachments(params.SessionID, params.Attachments)
+		if err != nil {
+			return nil, err
+		}
 		return a.startSessionInput(params.SessionID, params.Input, TurnOptions{
 			Model:           params.Model,
 			ReasoningEffort: params.ReasoningEffort,
 			PermissionMode:  params.PermissionMode,
-			Attachments:     params.Attachments,
+			Attachments:     attachments,
 		})
 	case ControlActionInterrupt:
 		var params struct {
@@ -191,6 +198,12 @@ func (a *app) dispatchControlAction(req ControlRequest, conn *controlWSConn) (an
 			ReasoningEffort: params.ReasoningEffort,
 			PermissionMode:  params.PermissionMode,
 		})
+	case ControlActionAttachmentIngest:
+		var params attachmentIngestParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.ingestControlAttachment(params)
 	case ControlActionMediaRead:
 		var params mediaReadParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

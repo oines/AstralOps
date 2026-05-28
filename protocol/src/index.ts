@@ -93,6 +93,11 @@ export type SessionInputAttachment = {
   detail?: "high" | "original" | string;
 };
 
+export type ControlAttachmentHandle = Omit<SessionInputAttachment, "path"> & {
+  media_id: string;
+  host_owned: true;
+};
+
 export type TranscriptMedia = SessionInputAttachment & {
   media_id?: string;
   item_id?: string;
@@ -370,7 +375,7 @@ export type CreateSessionRequest = {
 
 export type SessionInputRequest = {
   input: string;
-  attachments?: SessionInputAttachment[];
+  attachments?: Array<SessionInputAttachment | ControlAttachmentHandle>;
   model?: string;
   reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
   permission_mode?: "default" | "auto" | "plan" | "bypassPermissions";
@@ -391,6 +396,20 @@ export type MediaReadParams = {
 };
 
 export type MediaDownloadParams = MediaReadParams;
+
+export type AttachmentIngestParams = {
+  session_id: string;
+  name: string;
+  kind?: "image" | "file" | string;
+  mime_type?: string;
+  detail?: "high" | "original" | string;
+  content_base64: string;
+};
+
+export type AttachmentIngestResult = {
+  session_id: string;
+  attachment: ControlAttachmentHandle;
+};
 
 export type MediaReadResult = {
   session_id: string;
@@ -429,6 +448,7 @@ export type ControlAction =
   | "core.control.interrupt"
   | "interaction.respond"
   | "session.edit"
+  | "attachment.ingest"
   | "media.read"
   | "media.download"
   | "terminal.open"

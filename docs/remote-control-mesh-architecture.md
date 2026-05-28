@@ -744,11 +744,13 @@ Controller
 ```text
 Controller selects file / paste image
   -> attachment.ingest metadata
-  -> encrypted upload stream
+  -> encrypted upload payload
   -> Host upload store
   -> Host returns attachment_id/media_id
   -> core.control send input with Host-owned attachment handle
 ```
+
+`attachment.ingest` v1 使用 encrypted control request 承载 `content_base64`，用于中小附件的基础闭环；大文件和连续媒体仍然走后续 `media.stream` / chunked E2EE data frames。远程 `core.control.session_input` 只接受 Host-owned attachment handle，不接受 Controller 本地路径。
 
 禁止的模型：
 
@@ -1039,6 +1041,9 @@ same E2EE handshake on LAN and relay
 
 ```text
 已落地:
+attachment.ingest
+Host-local upload store for remote attachment ingest
+Host-owned attachment handles for remote session input
 media.read
 media.download
 event_seq + media_id reference validation
@@ -1046,9 +1051,7 @@ E2EE response frames
 Host path never exposed in control response
 
 待落地:
-attachment.ingest
 media.stream
-Host-local upload store for remote attachment ingest
 chunked E2EE data frames
 ```
 
