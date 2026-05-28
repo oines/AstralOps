@@ -15,19 +15,33 @@ import (
 )
 
 type store struct {
-	mu         sync.Mutex
-	dataDir    string
-	workspaces map[string]Workspace
-	sessions   map[string]Session
-	events     []AstralEvent
-	nextSeq    int64
+	mu               sync.Mutex
+	dataDir          string
+	deviceIdentity   DeviceIdentity
+	devicePrivateKey []byte
+	trustGrants      map[string]TrustGrant
+	workspaces       map[string]Workspace
+	sessions         map[string]Session
+	events           []AstralEvent
+	nextSeq          int64
 }
 
 func loadStore(dataDir string) (*store, error) {
+	identity, privateKey, err := loadDeviceIdentity(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	trustGrants, err := loadTrustGrants(dataDir)
+	if err != nil {
+		return nil, err
+	}
 	st := &store{
-		dataDir:    dataDir,
-		workspaces: map[string]Workspace{},
-		sessions:   map[string]Session{},
+		dataDir:          dataDir,
+		deviceIdentity:   identity,
+		devicePrivateKey: privateKey,
+		trustGrants:      trustGrants,
+		workspaces:       map[string]Workspace{},
+		sessions:         map[string]Session{},
 	}
 	if err := os.MkdirAll(filepath.Join(dataDir, "workspaces"), 0o700); err != nil {
 		return nil, err

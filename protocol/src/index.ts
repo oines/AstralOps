@@ -384,6 +384,149 @@ export type EditLastUserMessageRequest = {
   permission_mode?: "default" | "auto" | "plan" | "bypassPermissions";
 };
 
+export type ControlCapability =
+  | "core.read"
+  | "core.control"
+  | "interaction.respond"
+  | "session.edit"
+  | "attachment.ingest"
+  | "media.read"
+  | "media.download"
+  | "media.stream"
+  | "workspace.files.read"
+  | "workspace.files.write"
+  | "workspace.exec"
+  | "terminal.open"
+  | "terminal.input"
+  | "host.manage"
+  | (string & {});
+
+export type ControlAction =
+  | "core.read.session_view"
+  | "core.read.sessions"
+  | "core.read.workspaces"
+  | "core.control.session_input"
+  | "core.control.interrupt"
+  | "interaction.respond"
+  | "session.edit"
+  | (string & {});
+
+export type ControlRequest = {
+  request_id?: string;
+  controller_device_id: string;
+  capability: ControlCapability;
+  action: ControlAction;
+  params?: Record<string, unknown>;
+};
+
+export type ControlError = {
+  status?: number;
+  code: string;
+  message: string;
+};
+
+export type ControlResponse = {
+  request_id?: string;
+  ok: boolean;
+  result?: unknown;
+  error?: ControlError;
+};
+
+export type DeviceIdentity = {
+  device_id: string;
+  device_name: string;
+  device_kind: "desktop" | "mobile" | string;
+  public_key: string;
+  public_key_fingerprint: string;
+  capabilities: ControlCapability[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type HostInfo = {
+  identity: DeviceIdentity;
+  platform: {
+    os: string;
+    arch: string;
+  };
+  features: {
+    terminal?: {
+      available: boolean;
+      reason?: string;
+    };
+    [key: string]: unknown;
+  };
+  capabilities: ControlCapability[];
+};
+
+export type TrustGrant = {
+  host_device_id: string;
+  controller_device_id: string;
+  controller_device_name?: string;
+  controller_public_key?: string;
+  controller_public_key_fingerprint?: string;
+  scope: "full" | string;
+  status: "trusted" | "revoked" | string;
+  capabilities: ControlCapability[];
+  created_at: string;
+  updated_at: string;
+  revoked_at?: string;
+};
+
+export type TrustDeviceRequest = {
+  controller_device_id: string;
+  controller_device_name?: string;
+  controller_public_key?: string;
+  controller_public_key_fingerprint?: string;
+  scope?: "full" | string;
+  capabilities?: ControlCapability[];
+};
+
+export type ControlHelloFrame = {
+  type: "hello";
+  version: "astralops-control-v1" | string;
+  controller_device_id: string;
+  controller_public_key: string;
+  controller_ephemeral_key: string;
+  client_nonce: string;
+  signature: string;
+};
+
+export type ControlHelloAckFrame = {
+  type: "hello_ack";
+  version: "astralops-control-v1" | string;
+  connection_id: string;
+  host_device_id: string;
+  host_public_key: string;
+  host_ephemeral_key: string;
+  server_nonce: string;
+  signature: string;
+  encryption: "x25519-aes-256-gcm" | string;
+  signature_algorithm: "ed25519" | string;
+};
+
+export type ControlPlainFrame =
+  | {
+      type: "request";
+      request: ControlRequest;
+    }
+  | {
+      type: "response";
+      response: ControlResponse;
+    }
+  | {
+      type: "close";
+      code?: string;
+      reason?: string;
+    };
+
+export type ControlSealedFrame = {
+  type: "sealed";
+  seq: number;
+  nonce: string;
+  ciphertext: string;
+};
+
 export type SessionForkRequest = {
   event_seq: number;
 };

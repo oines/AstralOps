@@ -19,23 +19,12 @@ func (a *app) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	origin, ok, stale := a.findPendingInteractionEvent(id)
-	if stale {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "interaction is no longer pending"})
+	result, err := a.respondInteraction(id, req)
+	if err != nil {
+		writeActionError(w, err)
 		return
 	}
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "interaction not found"})
-		return
-	}
-
-	req = interactionResponseForClientAction(origin, req)
-	if err := a.processInteractionResponse(id, origin, req); err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-		return
-	}
-	a.emit(interactionRespondedEvent(id, origin, req))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *app) processInteractionResponse(id string, origin AstralEvent, req map[string]any) error {

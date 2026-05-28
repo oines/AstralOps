@@ -171,6 +171,29 @@ TXT:
   port
 ```
 
+当前 daemon MVP 通过显式环境变量开启 LAN listener：
+
+```text
+ASTRALOPS_CONTROL_LISTEN=0.0.0.0:43900
+```
+
+LAN listener 只暴露远控所需的最小接口：
+
+```text
+GET /v1/host
+GET /v1/control/ws
+```
+
+它不能暴露完整本地 HTTP API，例如 workspace/session/settings/events 等本地端点。`/v1/host` 只返回 public device identity、platform、features 和 capabilities；业务数据仍必须通过加密 control channel 获取。
+
+开发测试时可以临时打开：
+
+```text
+ASTRALOPS_DEV_REMOTE_PAIRING=1
+```
+
+这只用于两台本机设备在开发环境快速写入 Host trust grant。正式 pairing 必须由账号设备注册、已有可信设备或目标 Host 明确批准驱动，不能留下未授权的 LAN trust 写入口。
+
 mDNS 只用于发现候选地址，不能授予信任。Controller 收到 LAN 广播后，必须用本地 trust store 或云端 device registry 校验 `device_id` 和 public key fingerprint。真正连接成功的条件仍然是：
 
 ```text
@@ -260,6 +283,152 @@ Host 对每个 action 做当前状态和 trust policy 校验。
 PTY 可以支持多个 viewer，但默认只有一个 active writer。
 Host 可以断开或撤销某个 Controller session。
 ```
+
+## Onboarding 流程
+
+Onboarding 分两层：
+
+```text
+账号 onboarding
+设备信任 onboarding
+```
+
+云账号只负责发现设备和发起配对请求。登录账号不等于获得控制权；新设备必须被已有可信设备或目标 Host 明确批准。
+
+### 第一次打开 Desktop
+
+```text
+1. 登录或创建云账号。
+2. 本机生成 device identity keypair。
+3. 用户给这台设备命名。
+4. 注册 device public key 到云端 device registry。
+5. 选择这台 Desktop 是否允许被远程控制。
+6. 如果允许被远程控制：
+   - 启动 Host control listener。
+   - 开启 LAN mDNS 发布。
+   - 准备 relay fallback。
+   - 创建本地 Host trust store。
+7. 创建第一个 workspace。
+8. 进入应用。
+```
+
+如果用户关闭“允许被远程控制”，这台 Desktop 仍然可以作为 Controller 控制其他 Host，但不会接受远程连接。后续可以在本机设置中开启。
+
+### 新增 Mobile Controller
+
+```text
+1. Mobile 登录同一云账号。
+2. Mobile 本机生成 device identity keypair。
+3. Mobile 注册 device public key 到云端。
+4. 云端向已有可信设备或目标 Desktop Host 发出新设备加入请求。
+5. Desktop 显示配对确认：
+   - 设备名
+   - 设备类型
+   - public key fingerprint
+   - 请求的控制范围
+6. 用户批准或拒绝。
+7. 批准后，Host 写入 device-to-device trust grant。
+8. Mobile 设备列表显示可控制的 Desktop Host。
+```
+
+MVP 权限可以只有：
+
+```text
+full control
+denied
+```
+
+后续再扩展：
+
+```text
+view only
+terminal only
+temporary access
+```
+
+### 新增第二台 Desktop
+
+```text
+1. 新 Desktop 登录云账号。
+2. 本机生成 device identity keypair。
+3. 用户给设备命名。
+4. 用户选择：
+   - 允许被远程控制。
+   - 只作为 Controller。
+5. 由已有可信设备或目标 Host 批准加入。
+6. 如果允许被远控，启动 Host listener、mDNS、relay fallback。
+```
+
+Desktop 可以同时是 Controller 和 Host。是否允许被控制是本机选择，不由云端默认开启。
+
+### 配对确认 UI
+
+配对确认必须展示可核验身份，而不是只显示云账号名：
+
+```text
+新设备请求加入
+设备名：Yuxin's iPhone
+类型：Mobile
+指纹：ABCD 1234 EFGH 5678
+
+允许它控制这台 Desktop？
+[允许完整控制] [拒绝]
+```
+
+后续如果支持更细粒度权限，可以在这里选择 capability scope。MVP 不需要复杂权限矩阵。
+
+### 设备列表
+
+账号设备列表展示发现状态，但控制权仍以 Host 本地 trust grant 为准：
+
+```text
+MacBook Pro
+  当前设备
+  可被控制
+  在线
+
+Home PC
+  可被控制
+  在线
+  LAN 可用
+
+iPhone
+  Controller
+  在线
+
+Office Desktop
+  离线
+```
+
+用户可以：
+
+```text
+重命名本机设备
+允许/关闭本机被远控
+查看可信设备
+撤销某个 Controller 对本机的访问
+查看连接路径：LAN / relay
+```
+
+### 远控连接体验
+
+用户选择一个 Desktop Host 后，产品可以显示简化状态：
+
+```text
+正在连接 Home Mac
+  尝试局域网
+  建立加密通道
+  验证设备身份
+  加载 workspace/session
+```
+
+如果 LAN 不可用：
+
+```text
+局域网不可用，正在通过安全中继连接
+```
+
+用户不需要手动选择 LAN 或 relay。系统按 LAN-first relay fallback 自动处理。
 
 ## 踢出设备与立即断开
 
@@ -686,6 +855,8 @@ local private key in OS keychain/keyring
 capabilities
 ```
 
+当前 daemon MVP 可以先把本机 device identity 写入本地 Host 私有文件，并用 0600 权限保护。这个文件仍然只在本机，不进入云端或 relay；后续可以把同一模型的 private key 存储替换成 OS keychain/keyring，不改变 `/v1/host` 和 trust grant 协议。
+
 Desktop daemon 暴露本地 Host info endpoint：
 
 ```text
@@ -727,13 +898,35 @@ revoked_at
 
 Host 在执行任何远程动作前，必须本地强制校验 trust。
 
-### Phase 4 - Remote Encrypted Control Channel
+批准新设备后，Host 可以写入本地审计事件：
+
+```text
+control.trust.granted
+```
+
+### Phase 4 - Onboarding and Pairing UX
+
+实现最小 onboarding：
+
+```text
+Desktop 登录账号
+Desktop 创建设备身份
+Desktop 选择是否允许被远控
+Mobile/Desktop 新设备登录账号
+已有可信设备批准新设备
+设备列表显示 Host 可用状态
+```
+
+登录账号只能发现设备，不能绕过配对授权。
+
+### Phase 5 - Remote Encrypted Control Channel
 
 增加：
 
 ```text
 RemoteCoreClient
 RemoteEncryptedControlChannel
+authenticated device handshake
 encrypted request/response frames
 encrypted event subscription frames
 encrypted attachment/media frames
@@ -741,14 +934,50 @@ encrypted terminal stream frames
 reconnect and resume semantics
 ```
 
+当前 daemon 的最小控制通道入口：
+
+```text
+GET /v1/control/ws
+```
+
+握手和帧语义：
+
+```text
+hello
+  controller_device_id
+  controller_public_key
+  controller_ephemeral_key
+  client_nonce
+  Ed25519 signature
+
+hello_ack
+  host_device_id
+  host_public_key
+  host_ephemeral_key
+  server_nonce
+  connection_id
+  Ed25519 signature
+
+sealed
+  seq
+  nonce
+  AES-GCM ciphertext
+```
+
+会话密钥由 X25519 临时密钥交换派生。`request/response/close` 等业务帧只能放进 `sealed`，不能以明文 JSON 发送。Host 收到 request 后必须覆盖或校验 `controller_device_id`，然后进入 Host Gateway 执行 capability/trust 检查。
+
+Host 本地维护 active control sessions。撤销某个 Controller trust grant 时，Host 必须发送加密 close frame 并关闭该 Controller 的所有 active control sessions。
+
 云端 signaling 负责协商连接。Relay 只转发加密帧。
 
-### Phase 5 - LAN-first Relay Fallback
+### Phase 6 - LAN-first Relay Fallback
 
 实现远控传输 v1：
 
 ```text
 Desktop Host LAN listener
+remote-control-only HTTP surface
+dev-only pairing path
 mDNS publish / discover
 LAN candidate validation
 short LAN connection timeout
@@ -758,7 +987,7 @@ same E2EE handshake on LAN and relay
 
 不实现 NAT punching、WebRTC、STUN/TURN 或 transport migration。
 
-### Phase 6 - Attachment and Media Gateway
+### Phase 7 - Attachment and Media Gateway
 
 把附件和 transcript 媒体收口到 Host gateway：
 
@@ -774,7 +1003,7 @@ E2EE data frames
 
 Local Desktop 可以继续用本地 HTTP URL 渲染媒体，但 RemoteCoreClient 和 Mobile 必须只依赖 capability 和 encrypted media frames。
 
-### Phase 7 - PTY Attach Manager
+### Phase 8 - PTY Attach Manager
 
 把当前“一条 WebSocket 对应一个 PTY”的语义升级成 Host-owned terminal session：
 
@@ -790,7 +1019,7 @@ single active writer
 multi viewer
 ```
 
-### Phase 8 - Mobile Controller
+### Phase 9 - Mobile Controller
 
 Mobile 用同一套远控协议构建完整 Controller UI：
 
@@ -818,6 +1047,7 @@ Mobile 不包含 Host daemon 和 runtime。
 云端 session projection
 本地 event 加密
 把 JSONL 换成 SQLite
+登录云账号后自动信任新设备
 让 Controller 设备直接访问 SSH key 或 Host 文件
 把 PTY 字节输出塞进 AstralEvent JSONL
 把附件或媒体明文上传到云端/relay

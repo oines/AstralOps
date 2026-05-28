@@ -33,6 +33,8 @@ type app struct {
 	runtimes          map[AgentKind]AgentRuntime
 	ssh               *sshManager
 	projections       *sessionProjectionCache
+	controlMu         sync.Mutex
+	controlSessions   map[string]*controlWSConn
 	queueMu           sync.Mutex
 	queues            map[string][]queuedTurn
 	codexExecMu       sync.Mutex
@@ -43,6 +45,9 @@ type app struct {
 
 func main() {
 	if runClaudeRemoteMCPHelper(os.Args[1:]) {
+		return
+	}
+	if runControlDevClient(os.Args[1:]) {
 		return
 	}
 
@@ -95,14 +100,23 @@ func main() {
 	a.runtimes = newRuntimeRegistry(a)
 	a.ssh.restorePersistedConnections(context.Background())
 
-	if err := writeRuntime(dataDir, port, token); err != nil {
+	remoteControlAddr, err := startRemoteControlListener(a)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := writeRuntime(dataDir, port, token, remoteControlAddr); err != nil {
 		log.Fatal(err)
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", a.handleHealth)
+	mux.HandleFunc("/v1/control/ws", a.handleControlWS)
+	mux.HandleFunc("/v1/host", a.auth(a.handleHost))
 	mux.HandleFunc("/v1/settings", a.auth(a.handleSettings))
 	mux.HandleFunc("/v1/settings/", a.auth(a.handleSettingsAction))
+	mux.HandleFunc("/v1/trust/devices", a.auth(a.handleTrustDevices))
+	mux.HandleFunc("/v1/trust/devices/", a.auth(a.handleTrustDeviceAction))
 	mux.HandleFunc("/v1/workspaces", a.auth(a.handleWorkspaces))
 	mux.HandleFunc("/v1/workspaces/", a.auth(a.handleWorkspaceAction))
 	mux.HandleFunc("/v1/codex-exec/", a.auth(a.handleCodexExecServerWS))
@@ -147,15 +161,22 @@ func randomToken() string {
 	return hex.EncodeToString(b[:])
 }
 
-func writeRuntime(dataDir string, port int, token string) error {
+func writeRuntime(dataDir string, port int, token string, remoteControlAddr string) error {
 	path := filepath.Join(dataDir, "runtime", "daemon.json")
-	body, _ := json.MarshalIndent(map[string]any{
+	value := map[string]any{
 		"host":       "127.0.0.1",
 		"port":       port,
 		"token":      token,
 		"pid":        os.Getpid(),
 		"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
-	}, "", "  ")
+	}
+	if remoteControlAddr != "" {
+		value["remote_control"] = map[string]any{
+			"listen_addr": remoteControlAddr,
+			"paths":       []string{"/v1/host", "/v1/control/ws"},
+		}
+	}
+	body, _ := json.MarshalIndent(value, "", "  ")
 	return os.WriteFile(path, body, 0o600)
 }
 
