@@ -53,7 +53,12 @@ func (a *app) handleCloudDevices(w http.ResponseWriter, r *http.Request) {
 		if req.CanControl != nil {
 			canControl = *req.CanControl
 		}
-		record, err := client.RegisterDevice(ctx, a.store.hostInfo().Identity, canHost, canControl, req.RelayURL)
+		_, relayURL, _, err := cloudRelayClientFromCloud(ctx, client)
+		if err != nil {
+			writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+			return
+		}
+		record, err := client.RegisterDevice(ctx, a.store.hostInfo().Identity, canHost, canControl, relayURL)
 		if err != nil {
 			writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
 			return
@@ -81,7 +86,12 @@ func (a *app) handleCloudHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	record, err := client.HeartbeatDevice(ctx, a.store.hostInfo().Identity.DeviceID, req.RelayURL)
+	_, relayURL, _, err := cloudRelayClientFromCloud(ctx, client)
+	if err != nil {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+		return
+	}
+	record, err := client.HeartbeatDevice(ctx, a.store.hostInfo().Identity.DeviceID, relayURL)
 	if err != nil {
 		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
 		return
@@ -135,7 +145,12 @@ func (a *app) handleCloudPairingRequests(w http.ResponseWriter, r *http.Request)
 		self := a.store.hostInfo().Identity
 		if strings.TrimSpace(req.ControllerDeviceID) == self.DeviceID {
 			settings := a.currentSettings()
-			if _, err := client.RegisterDevice(ctx, self, settings.RemoteControl.Enabled, true, ""); err != nil {
+			_, relayURL, _, err := cloudRelayClientFromCloud(ctx, client)
+			if err != nil {
+				writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+				return
+			}
+			if _, err := client.RegisterDevice(ctx, self, settings.RemoteControl.Enabled, true, relayURL); err != nil {
 				writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
 				return
 			}

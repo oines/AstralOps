@@ -418,7 +418,7 @@ type controlClientTarget struct {
 	ExpectedHost       KnownHost
 	HasExpectedHost    bool
 	UseRelay           bool
-	RelayClient        CloudClient
+	RelayClient        RelayClient
 	ControllerDeviceID string
 }
 
@@ -524,6 +524,14 @@ func controlClientCloudRelayTarget(st *store, opts controlClientTargetOptions) (
 	if err != nil {
 		return controlClientTarget{}, err
 	}
+	account, err := client.GetAccount(ctx)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	relayClient, _, ok := relayClientFromCloudAccount(account, cloudToken, nil)
+	if !ok {
+		return controlClientTarget{}, fmt.Errorf("cloud account relay is not configured")
+	}
 	known = normalizeKnownHost(known)
 	for _, device := range devices {
 		if strings.TrimSpace(device.DeviceID) != known.DeviceID {
@@ -550,7 +558,7 @@ func controlClientCloudRelayTarget(st *store, opts controlClientTargetOptions) (
 			}, Capabilities: capabilities},
 			Timeout:            opts.RelayTimeout,
 			UseRelay:           true,
-			RelayClient:        client,
+			RelayClient:        relayClient,
 			ControllerDeviceID: st.deviceIdentity.DeviceID,
 			ExpectedHost:       known,
 			HasExpectedHost:    true,

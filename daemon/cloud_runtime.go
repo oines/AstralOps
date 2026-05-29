@@ -45,6 +45,10 @@ func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings) {
 	if err := a.cloudRegisterAndHeartbeat(ctx, client); err != nil {
 		log.Printf("astralops cloud sync: %v", err)
 	}
+	relayClient, _, hasRelay, err := cloudRelayClientFromCloud(ctx, client)
+	if err != nil {
+		log.Printf("astralops cloud account relay: %v", err)
+	}
 
 	ticker := time.NewTicker(cloudSyncInterval)
 	defer ticker.Stop()
@@ -60,9 +64,19 @@ func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings) {
 			if err := a.cloudRegisterAndHeartbeat(ctx, client); err != nil {
 				log.Printf("astralops cloud sync: %v", err)
 			}
+			nextRelayClient, _, nextHasRelay, err := cloudRelayClientFromCloud(ctx, client)
+			if err != nil {
+				log.Printf("astralops cloud account relay: %v", err)
+			} else {
+				relayClient = nextRelayClient
+				hasRelay = nextHasRelay
+			}
 		case <-relayTicker.C:
+			if !hasRelay {
+				continue
+			}
 			relayCtx, relayCancel := context.WithTimeout(ctx, cloudSyncTimeout)
-			if err := a.cloudPollRelayEnvelopes(relayCtx, client); err != nil {
+			if err := a.cloudPollRelayEnvelopes(relayCtx, relayClient); err != nil {
 				log.Printf("astralops cloud relay: %v", err)
 			}
 			relayCancel()
@@ -73,6 +87,12 @@ func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings) {
 func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient) error {
 	if a == nil || a.store == nil {
 		return nil
+	}
+	accountCtx, accountCancel := context.WithTimeout(ctx, cloudSyncTimeout)
+	relayClient, relayURL, hasRelay, err := cloudRelayClientFromCloud(accountCtx, client)
+	accountCancel()
+	if err != nil {
+		return err
 	}
 	devicesCtx, devicesCancel := context.WithTimeout(ctx, cloudSyncTimeout)
 	devices, err := client.ListDevices(devicesCtx)
@@ -92,13 +112,13 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 	registerCtx, cancel := context.WithTimeout(ctx, cloudSyncTimeout)
 	defer cancel()
 	settings := a.currentSettings()
-	if _, err := client.RegisterDevice(registerCtx, a.store.hostInfo().Identity, settings.RemoteControl.Enabled, true, ""); err != nil {
+	if _, err := client.RegisterDevice(registerCtx, a.store.hostInfo().Identity, settings.RemoteControl.Enabled, true, relayURL); err != nil {
 		return err
 	}
 
 	heartbeatCtx, heartbeatCancel := context.WithTimeout(ctx, cloudSyncTimeout)
 	defer heartbeatCancel()
-	if _, err := client.HeartbeatDevice(heartbeatCtx, a.store.hostInfo().Identity.DeviceID, ""); err != nil {
+	if _, err := client.HeartbeatDevice(heartbeatCtx, a.store.hostInfo().Identity.DeviceID, relayURL); err != nil {
 		return err
 	}
 	approvedCtx, approvedCancel := context.WithTimeout(ctx, cloudSyncTimeout)
@@ -112,13 +132,27 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 		if err := a.cloudSyncPendingPairingRequests(pairingCtx, client); err != nil {
 			return err
 		}
-		relayCtx, relayCancel := context.WithTimeout(ctx, cloudSyncTimeout)
-		defer relayCancel()
-		if err := a.cloudPollRelayEnvelopes(relayCtx, client); err != nil {
-			return err
+		if hasRelay {
+			relayCtx, relayCancel := context.WithTimeout(ctx, cloudSyncTimeout)
+			defer relayCancel()
+			if err := a.cloudPollRelayEnvelopes(relayCtx, relayClient); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+func cloudRelayClientFromCloud(ctx context.Context, client CloudClient) (RelayClient, string, bool, error) {
+	account, err := client.GetAccount(ctx)
+	if err != nil {
+		return RelayClient{}, "", false, err
+	}
+	relayClient, relay, ok := relayClientFromCloudAccount(account, client.Token, client.HTTPClient)
+	if !ok {
+		return RelayClient{}, "", false, nil
+	}
+	return relayClient, relay.RelayURL, true, nil
 }
 
 func (a *app) cloudSyncRevokedDevices(devices []CloudDeviceRecord) (bool, error) {

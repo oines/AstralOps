@@ -80,12 +80,12 @@ type cloudPairingSignalListResponse struct {
 	Requests []CloudPairingSignal `json:"requests"`
 }
 
-type cloudRelayEnvelopeListResponse struct {
-	Envelopes []RelayEnvelope `json:"envelopes"`
-}
-
-type cloudRelayEnvelopeAckInput struct {
-	DeviceID string `json:"device_id"`
+func (c CloudClient) GetAccount(ctx context.Context) (CloudAccount, error) {
+	var out CloudAccount
+	if err := c.do(ctx, http.MethodGet, "/v1/account", nil, &out); err != nil {
+		return CloudAccount{}, err
+	}
+	return out, nil
 }
 
 func (c CloudClient) RegisterDevice(ctx context.Context, identity DeviceIdentity, canHost, canControl bool, relayURL string) (CloudDeviceRecord, error) {
@@ -170,39 +170,34 @@ func (c CloudClient) ResolvePairingSignal(ctx context.Context, requestID, status
 	return out.Request, nil
 }
 
-func (c CloudClient) EnqueueRelayEnvelope(ctx context.Context, envelope RelayEnvelope) (RelayEnvelope, error) {
-	var out RelayEnvelope
-	if err := c.do(ctx, http.MethodPost, "/v1/relay/envelopes", envelope, &out); err != nil {
-		return RelayEnvelope{}, err
-	}
-	return out, nil
-}
-
-func (c CloudClient) ListRelayEnvelopes(ctx context.Context, deviceID string, limit int) ([]RelayEnvelope, error) {
-	path := "/v1/relay/envelopes?device_id=" + queryEscape(deviceID)
-	if limit > 0 {
-		path += "&limit=" + queryEscape(fmt.Sprintf("%d", limit))
-	}
-	var out cloudRelayEnvelopeListResponse
-	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
-		return nil, err
-	}
-	return out.Envelopes, nil
-}
-
-func (c CloudClient) AckRelayEnvelope(ctx context.Context, envelopeID, deviceID string) error {
-	return c.do(ctx, http.MethodPost, "/v1/relay/envelopes/"+pathEscape(envelopeID)+"/ack", cloudRelayEnvelopeAckInput{
-		DeviceID: strings.TrimSpace(deviceID),
-	}, nil)
-}
-
 func (c CloudClient) do(ctx context.Context, method, path string, body any, out any) error {
-	baseURL := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
-	if baseURL == "" {
-		return fmt.Errorf("cloud base url required")
+	return authedJSONRequest(ctx, "cloud", c.BaseURL, c.Token, c.HTTPClient, method, path, body, out)
+}
+
+func relayClientFromCloudAccount(account CloudAccount, token string, httpClient *http.Client) (RelayClient, CloudRelayConfig, bool) {
+	if account.Relay == nil {
+		return RelayClient{}, CloudRelayConfig{}, false
 	}
-	if strings.TrimSpace(c.Token) == "" {
-		return fmt.Errorf("cloud token required")
+	relay := CloudRelayConfig{
+		RelayID:  strings.TrimSpace(account.Relay.RelayID),
+		RelayURL: strings.TrimSpace(account.Relay.RelayURL),
+	}
+	if relay.RelayURL == "" {
+		return RelayClient{}, CloudRelayConfig{}, false
+	}
+	if relay.RelayID == "" {
+		relay.RelayID = "default"
+	}
+	return RelayClient{BaseURL: relay.RelayURL, Token: strings.TrimSpace(token), HTTPClient: httpClient}, relay, true
+}
+
+func authedJSONRequest(ctx context.Context, serviceName, baseURLValue, token string, httpClient *http.Client, method, path string, body any, out any) error {
+	baseURL := strings.TrimRight(strings.TrimSpace(baseURLValue), "/")
+	if baseURL == "" {
+		return fmt.Errorf("%s base url required", serviceName)
+	}
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("%s token required", serviceName)
 	}
 	var reader io.Reader
 	if body != nil {
@@ -216,11 +211,11 @@ func (c CloudClient) do(ctx context.Context, method, path string, body any, out 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := c.HTTPClient
+	client := httpClient
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
@@ -231,7 +226,7 @@ func (c CloudClient) do(ctx context.Context, method, path string, body any, out 
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		payload, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return fmt.Errorf("cloud request failed: %s: %s", res.Status, strings.TrimSpace(string(payload)))
+		return fmt.Errorf("%s request failed: %s: %s", serviceName, res.Status, strings.TrimSpace(string(payload)))
 	}
 	if out == nil {
 		return nil

@@ -16,10 +16,23 @@ const maxJSONBodyBytes int64 = 1 << 20
 type Server struct {
 	store        *FileStore
 	allowedToken map[string]bool
+	defaultRelay *RelayConfig
 	now          func() time.Time
 }
 
+type ServerOptions struct {
+	DefaultRelay RelayConfig
+}
+
 func NewServer(store *FileStore, accountTokens []string) *Server {
+	server, err := NewServerWithOptions(store, accountTokens, ServerOptions{})
+	if err != nil {
+		panic(err)
+	}
+	return server
+}
+
+func NewServerWithOptions(store *FileStore, accountTokens []string, options ServerOptions) (*Server, error) {
 	allowed := map[string]bool{}
 	for _, token := range accountTokens {
 		token = strings.TrimSpace(token)
@@ -28,11 +41,31 @@ func NewServer(store *FileStore, accountTokens []string) *Server {
 		}
 		allowed[accountIDHashFromToken(token)] = true
 	}
+	var defaultRelay *RelayConfig
+	if relay, ok, err := normalizeRelayConfig(options.DefaultRelay); err != nil {
+		return nil, err
+	} else if ok {
+		defaultRelay = &relay
+	}
 	return &Server{
 		store:        store,
 		allowedToken: allowed,
+		defaultRelay: defaultRelay,
 		now:          func() time.Time { return time.Now().UTC() },
+	}, nil
+}
+
+func (s *Server) SetDefaultRelay(config RelayConfig) error {
+	relay, ok, err := normalizeRelayConfig(config)
+	if err != nil {
+		return err
 	}
+	if !ok {
+		s.defaultRelay = nil
+		return nil
+	}
+	s.defaultRelay = &relay
+	return nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -233,11 +266,19 @@ func (s *Server) accountFromRequest(r *http.Request) (Account, error) {
 	if token == "" {
 		return Account{}, apiErr(401, "unauthorized", "missing bearer token")
 	}
-	account := Account{AccountIDHash: accountIDHashFromToken(token)}
+	account := Account{AccountIDHash: accountIDHashFromToken(token), Relay: s.accountRelay()}
 	if len(s.allowedToken) > 0 && !s.allowedToken[account.AccountIDHash] {
 		return Account{}, apiErr(401, "unauthorized", "unknown account token")
 	}
 	return account, nil
+}
+
+func (s *Server) accountRelay() *RelayConfig {
+	if s == nil || s.defaultRelay == nil {
+		return nil
+	}
+	relay := *s.defaultRelay
+	return &relay
 }
 
 func decodeJSON(r *http.Request, out any) error {

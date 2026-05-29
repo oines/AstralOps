@@ -29,7 +29,13 @@ const (
 )
 
 type Account struct {
-	AccountIDHash string `json:"account_id_hash"`
+	AccountIDHash string       `json:"account_id_hash"`
+	Relay         *RelayConfig `json:"relay,omitempty"`
+}
+
+type RelayConfig struct {
+	RelayID  string `json:"relay_id,omitempty"`
+	RelayURL string `json:"relay_url,omitempty"`
 }
 
 type DeviceRecord struct {
@@ -209,6 +215,23 @@ func validateDeviceRecord(record DeviceRecord) error {
 		return APIError{Status: 400, Code: "device_role_required", Message: "device must be able to host or control"}
 	}
 	return nil
+}
+
+func normalizeRelayConfig(config RelayConfig) (RelayConfig, bool, error) {
+	config = RelayConfig{
+		RelayID:  strings.TrimSpace(config.RelayID),
+		RelayURL: strings.TrimSpace(config.RelayURL),
+	}
+	if config.RelayURL == "" {
+		return RelayConfig{}, false, nil
+	}
+	if config.RelayID == "" {
+		config.RelayID = "default"
+	}
+	if _, err := url.ParseRequestURI(config.RelayURL); err != nil {
+		return RelayConfig{}, false, APIError{Status: 400, Code: "relay_url_invalid", Message: "relay_url invalid"}
+	}
+	return config, true, nil
 }
 
 func validateRelayEnvelope(envelope RelayEnvelope) error {

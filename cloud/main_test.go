@@ -32,3 +32,24 @@ func TestCloudAccountTokensRequireLongTokens(t *testing.T) {
 		t.Fatal("short cloud account token was accepted")
 	}
 }
+
+func TestCloudRelayConfigFromEnv(t *testing.T) {
+	t.Setenv("ASTRALOPS_ACCOUNT_RELAY_ID", "us-west")
+	t.Setenv("ASTRALOPS_ACCOUNT_RELAY_URL", "https://relay-us.example.test")
+
+	relay, err := cloudRelayConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relay.RelayID != "us-west" || relay.RelayURL != "https://relay-us.example.test" {
+		t.Fatalf("relay = %#v", relay)
+	}
+}
+
+func TestCloudRelayConfigRejectsInvalidURL(t *testing.T) {
+	t.Setenv("ASTRALOPS_ACCOUNT_RELAY_URL", "://bad")
+
+	if _, err := cloudRelayConfigFromEnv(); err == nil {
+		t.Fatal("invalid relay url was accepted")
+	}
+}

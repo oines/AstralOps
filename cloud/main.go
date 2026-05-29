@@ -5,6 +5,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +34,17 @@ func main() {
 		log.Printf("warning: open account token mode is enabled; use only for local development")
 	}
 
-	server := cloudbroker.NewServer(store, tokens)
+	relay, err := cloudRelayConfigFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+	server, err := cloudbroker.NewServerWithOptions(store, tokens, cloudbroker.ServerOptions{DefaultRelay: relay})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if relay.RelayURL != "" {
+		log.Printf("astralops cloud broker relay account_default=%s url=%s", relay.RelayID, relay.RelayURL)
+	}
 	log.Printf("astralops cloud broker listening on %s data=%s", *addr, storePath)
 	httpServer := &http.Server{
 		Addr:              *addr,
@@ -93,6 +104,21 @@ func cloudAccountTokensFromEnv() ([]string, error) {
 		}
 	}
 	return tokens, nil
+}
+
+func cloudRelayConfigFromEnv() (cloudbroker.RelayConfig, error) {
+	relayURL := strings.TrimSpace(os.Getenv("ASTRALOPS_ACCOUNT_RELAY_URL"))
+	if relayURL == "" {
+		return cloudbroker.RelayConfig{}, nil
+	}
+	relayID := strings.TrimSpace(os.Getenv("ASTRALOPS_ACCOUNT_RELAY_ID"))
+	if relayID == "" {
+		relayID = "default"
+	}
+	if _, err := url.ParseRequestURI(relayURL); err != nil {
+		return cloudbroker.RelayConfig{}, err
+	}
+	return cloudbroker.RelayConfig{RelayID: relayID, RelayURL: relayURL}, nil
 }
 
 func truthyEnv(key string) bool {

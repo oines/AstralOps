@@ -29,7 +29,7 @@ type controlRelaySession struct {
 	id                 string
 	controllerDeviceID string
 	cipher             *controlCipher
-	relayClient        CloudClient
+	relayClient        RelayClient
 	ctx                context.Context
 	cancel             context.CancelFunc
 	writeMu            sync.Mutex
@@ -38,7 +38,7 @@ type controlRelaySession struct {
 	lastSeen           time.Time
 }
 
-func (a *app) cloudPollRelayEnvelopes(ctx context.Context, client CloudClient) error {
+func (a *app) cloudPollRelayEnvelopes(ctx context.Context, client RelayClient) error {
 	if a == nil || a.store == nil {
 		return nil
 	}
@@ -63,7 +63,7 @@ func (a *app) cloudPollRelayEnvelopes(ctx context.Context, client CloudClient) e
 	return nil
 }
 
-func (a *app) handleControlRelayEnvelope(ctx context.Context, client CloudClient, envelope RelayEnvelope) error {
+func (a *app) handleControlRelayEnvelope(ctx context.Context, client RelayClient, envelope RelayEnvelope) error {
 	switch strings.TrimSpace(envelope.PayloadKind) {
 	case relayPayloadKindControlHello:
 		return a.handleControlRelayHello(ctx, client, envelope)
@@ -76,7 +76,7 @@ func (a *app) handleControlRelayEnvelope(ctx context.Context, client CloudClient
 	}
 }
 
-func (a *app) handleControlRelayHello(ctx context.Context, client CloudClient, envelope RelayEnvelope) error {
+func (a *app) handleControlRelayHello(ctx context.Context, client RelayClient, envelope RelayEnvelope) error {
 	payload, err := relayEnvelopePayload(envelope, controlRelayHelloPayloadBytes)
 	if err != nil {
 		return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
@@ -182,7 +182,7 @@ func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySes
 	return session, ack, nil
 }
 
-func (a *app) handleControlRelaySealedFrame(ctx context.Context, client CloudClient, envelope RelayEnvelope) error {
+func (a *app) handleControlRelaySealedFrame(ctx context.Context, client RelayClient, envelope RelayEnvelope) error {
 	session := a.controlRelaySession(envelope.ConnectionID)
 	if session == nil || session.controllerDeviceID != strings.TrimSpace(envelope.FromDeviceID) {
 		return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
@@ -243,7 +243,7 @@ func (s *controlRelaySession) handleRequest(req ControlRequest) (*ControlRespons
 	return controlResponseFromError(req.RequestID, err), nil
 }
 
-func (s *controlRelaySession) writeRelayPlain(ctx context.Context, client CloudClient, frame controlPlainFrame) error {
+func (s *controlRelaySession) writeRelayPlain(ctx context.Context, client RelayClient, frame controlPlainFrame) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if s.cipher == nil {

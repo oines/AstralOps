@@ -225,6 +225,37 @@ func TestCloudBrokerRejectsUnknownAccountTokenWhenAllowlistConfigured(t *testing
 	}
 }
 
+func TestCloudBrokerAccountReturnsDefaultRelay(t *testing.T) {
+	store, err := LoadFileStore(t.TempDir() + "/cloud.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServerWithOptions(store, []string{"test-account-token"}, ServerOptions{DefaultRelay: RelayConfig{
+		RelayID:  "us-west",
+		RelayURL: "https://relay-us.example.test",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res := doJSON(t, server, http.MethodGet, "/v1/account", nil)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", res.Code, res.Body.String())
+	}
+	var account Account
+	if err := json.Unmarshal(res.Body.Bytes(), &account); err != nil {
+		t.Fatal(err)
+	}
+	if account.AccountIDHash == "" || account.Relay == nil || account.Relay.RelayID != "us-west" || account.Relay.RelayURL != "https://relay-us.example.test" {
+		t.Fatalf("account = %#v", account)
+	}
+	for _, forbidden := range []string{"workspace", "session", "prompt", "private_key", "ssh"} {
+		if strings.Contains(res.Body.String(), forbidden) {
+			t.Fatalf("account response leaked forbidden marker %q: %s", forbidden, res.Body.String())
+		}
+	}
+}
+
 func TestCloudBrokerRejectsOversizedRequestBody(t *testing.T) {
 	server := testServer(t)
 	body := strings.NewReader(strings.Repeat("x", int(maxJSONBodyBytes)+1))

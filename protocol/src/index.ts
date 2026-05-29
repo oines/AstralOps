@@ -1079,6 +1079,16 @@ export type HostTrustRevokeResult = {
 
 export type CloudDeviceStatus = "online" | "offline" | "revoked" | string;
 
+export type CloudRelayConfig = {
+  relay_id?: string;
+  relay_url?: string;
+};
+
+export type CloudAccount = {
+  account_id_hash: string;
+  relay?: CloudRelayConfig;
+};
+
 export type CloudDeviceRecord = {
   account_id_hash: string;
   device_id: string;

@@ -15,7 +15,7 @@ import (
 
 func TestControlRelayRoundTripReadsWorkspaces(t *testing.T) {
 	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
-	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 
 	response, err := controlClientRelayRoundTrip(t.Context(), controlClientTarget{
@@ -43,7 +43,7 @@ func TestControlRelayRoundTripReadsWorkspaces(t *testing.T) {
 
 func TestControlRelayRoundTripAcksStaleHelloAckForSameHost(t *testing.T) {
 	hostApp, _, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
-	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
 
 	oldHello, _, err := controlClientRelayHello(controllerStore, hostApp.store.hostInfo())
 	if err != nil {
@@ -104,13 +104,14 @@ func TestControlRelayRoundTripAcksStaleHelloAckForSameHost(t *testing.T) {
 
 func TestControlRelayRejectsUntrustedController(t *testing.T) {
 	hostApp, _, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
-	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	cloudClient := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 	untrustedStore, err := loadStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.RegisterDevice(t.Context(), untrustedStore.hostInfo().Identity, false, true, ""); err != nil {
+	if _, err := cloudClient.RegisterDevice(t.Context(), untrustedStore.hostInfo().Identity, false, true, broker.URL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -140,7 +141,7 @@ func TestControlRelayTerminalStreamsOutput(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 
 	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityTerminalOpen, CapabilityTerminalInput)
-	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 
 	steps, err := controlClientSmokeTerminalFlow(controllerStore, controlClientTarget{
@@ -166,7 +167,7 @@ func TestControlRelayTerminalStreamsOutput(t *testing.T) {
 
 func TestRemoteHostActionFallsBackToCloudRelay(t *testing.T) {
 	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
-	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
 		t.Fatal(err)
@@ -198,7 +199,8 @@ func TestRemoteHostActionFallsBackToCloudRelay(t *testing.T) {
 
 func TestRemoteHostActionUsesApprovedCloudPairingKnownHost(t *testing.T) {
 	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
-	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	cloudClient := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 
 	settings, err := loadSettingsStore(controllerStore.dataDir)
@@ -212,7 +214,7 @@ func TestRemoteHostActionUsesApprovedCloudPairingKnownHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	controllerApp := &app{store: controllerStore, settings: settings, hub: newEventHub()}
-	signal, err := client.SubmitPairingSignal(t.Context(), cloudPairingSignalInput{
+	signal, err := cloudClient.SubmitPairingSignal(t.Context(), cloudPairingSignalInput{
 		HostDeviceID:       hostApp.store.hostInfo().Identity.DeviceID,
 		ControllerDeviceID: controllerStore.deviceIdentity.DeviceID,
 		Scope:              TrustScopeFull,
@@ -221,7 +223,7 @@ func TestRemoteHostActionUsesApprovedCloudPairingKnownHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.ResolvePairingSignal(t.Context(), signal.RequestID, PairingStatusApproved, hostApp.store.hostInfo().Identity.DeviceID); err != nil {
+	if _, err := cloudClient.ResolvePairingSignal(t.Context(), signal.RequestID, PairingStatusApproved, hostApp.store.hostInfo().Identity.DeviceID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -248,7 +250,7 @@ func TestRemoteHostActionUsesApprovedCloudPairingKnownHost(t *testing.T) {
 
 func TestRemoteHostActionCreatesSessionThroughRelay(t *testing.T) {
 	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead, CapabilityCoreControl)
-	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
 		t.Fatal(err)
@@ -319,7 +321,7 @@ func TestControlClientResolveTargetUsesForcedCloudRelay(t *testing.T) {
 
 func TestControlClientSmokeRunsRelayRequestResponseChecks(t *testing.T) {
 	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceFilesWrite, CapabilityWorkspaceExec, CapabilityHostManage)
-	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
 		t.Fatal(err)
@@ -370,7 +372,7 @@ func TestControlClientSmokeRunsRelayRequestResponseChecks(t *testing.T) {
 
 func TestControlClientSmokeRunsRelayStreamingChecks(t *testing.T) {
 	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead, CapabilityWorkspaceFilesRead)
-	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
 		t.Fatal(err)
@@ -416,7 +418,7 @@ func TestControlClientSmokeRunsRelayStreamingChecks(t *testing.T) {
 
 func TestControlRelayMediaStreamReturnsChunks(t *testing.T) {
 	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityMediaStream)
-	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
 	session := hostApp.store.createSession(workspace, AgentCodex)
 	body := []byte("relay media stream body\nsecond chunk\n")
 	media := addControlMediaFixture(t, hostApp, workspace, session, body)
@@ -446,7 +448,11 @@ func newControlRelayTestRig(t *testing.T, capabilities ...string) (*app, Workspa
 	if err != nil {
 		t.Fatal(err)
 	}
-	broker := httptest.NewServer(cloudbroker.NewServer(cloudStore, []string{"account-token"}).Handler())
+	cloudServer := cloudbroker.NewServer(cloudStore, []string{"account-token"})
+	broker := httptest.NewServer(cloudServer.Handler())
+	if err := cloudServer.SetDefaultRelay(cloudbroker.RelayConfig{RelayID: "test", RelayURL: broker.URL}); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(broker.Close)
 
 	hostDir := t.TempDir()
@@ -486,16 +492,16 @@ func newControlRelayTestRig(t *testing.T, capabilities ...string) (*app, Workspa
 		runtimes: map[AgentKind]AgentRuntime{AgentCodex: &recordingRuntime{}},
 	}
 	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
-	if _, err := client.RegisterDevice(t.Context(), hostStore.hostInfo().Identity, true, true, ""); err != nil {
+	if _, err := client.RegisterDevice(t.Context(), hostStore.hostInfo().Identity, true, true, broker.URL); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.RegisterDevice(t.Context(), controllerStore.hostInfo().Identity, false, true, ""); err != nil {
+	if _, err := client.RegisterDevice(t.Context(), controllerStore.hostInfo().Identity, false, true, broker.URL); err != nil {
 		t.Fatal(err)
 	}
 	return hostApp, workspace, controllerStore, broker
 }
 
-func runControlRelayPoller(t *testing.T, app *app, client CloudClient) {
+func runControlRelayPoller(t *testing.T, app *app, client RelayClient) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

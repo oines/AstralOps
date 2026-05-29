@@ -62,6 +62,35 @@ func TestCloudClientRegistersDeviceWithoutPrivateHostData(t *testing.T) {
 	}
 }
 
+func TestCloudClientGetsAccountRelay(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer account-token" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		if r.URL.Path != "/v1/account" || r.Method != http.MethodGet {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(w, http.StatusOK, CloudAccount{
+			AccountIDHash: "acct_hash",
+			Relay:         &CloudRelayConfig{RelayID: "us-west", RelayURL: "https://relay-us.example.test"},
+		})
+	}))
+	defer server.Close()
+
+	client := CloudClient{BaseURL: server.URL, Token: "account-token"}
+	account, err := client.GetAccount(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.AccountIDHash != "acct_hash" || account.Relay == nil || account.Relay.RelayURL != "https://relay-us.example.test" {
+		t.Fatalf("account = %#v", account)
+	}
+	relayClient, relay, ok := relayClientFromCloudAccount(account, "account-token", nil)
+	if !ok || relay.RelayID != "us-west" || relayClient.BaseURL != "https://relay-us.example.test" || relayClient.Token != "account-token" {
+		t.Fatalf("relay client = %#v relay=%#v ok=%v", relayClient, relay, ok)
+	}
+}
+
 func TestCloudClientListsPairingSignals(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/pairing/requests" || r.URL.Query().Get("device_id") != "dev_host" {
@@ -123,7 +152,7 @@ func TestCloudClientRemovesDevice(t *testing.T) {
 	}
 }
 
-func TestCloudClientRelayEnvelopeRoundTripCallsBrokerAPI(t *testing.T) {
+func TestRelayClientEnvelopeRoundTripCallsBrokerAPI(t *testing.T) {
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer account-token" {
@@ -151,7 +180,7 @@ func TestCloudClientRelayEnvelopeRoundTripCallsBrokerAPI(t *testing.T) {
 				PayloadBase64: "aGVsbG8=",
 			}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/relay/envelopes/env_1/ack":
-			var input cloudRelayEnvelopeAckInput
+			var input relayEnvelopeAckInput
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 				t.Fatal(err)
 			}
@@ -165,7 +194,7 @@ func TestCloudClientRelayEnvelopeRoundTripCallsBrokerAPI(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := CloudClient{BaseURL: server.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: server.URL, Token: "account-token"}
 	created, err := client.EnqueueRelayEnvelope(context.Background(), RelayEnvelope{
 		Version:       relayEnvelopeVersion,
 		FromDeviceID:  "dev_phone",

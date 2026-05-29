@@ -663,6 +663,14 @@ func (a *app) remoteHostRelayTarget(known KnownHost) (controlClientTarget, error
 	if err != nil {
 		return controlClientTarget{}, err
 	}
+	account, err := client.GetAccount(ctx)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	relayClient, _, ok := relayClientFromCloudAccount(account, client.Token, client.HTTPClient)
+	if !ok {
+		return controlClientTarget{}, fmt.Errorf("cloud account relay is not configured")
+	}
 	known = normalizeKnownHost(known)
 	for _, device := range devices {
 		if device.DeviceID != known.DeviceID || !device.CanHost || device.Status != cloudDeviceStatusOnline {
@@ -685,7 +693,7 @@ func (a *app) remoteHostRelayTarget(known KnownHost) (controlClientTarget, error
 			}, Capabilities: normalizeCapabilities(device.Capabilities)},
 			Timeout:            controlRelayRoundTripTimeout,
 			UseRelay:           true,
-			RelayClient:        client,
+			RelayClient:        relayClient,
 			ControllerDeviceID: a.store.hostInfo().Identity.DeviceID,
 			ExpectedHost:       known,
 			HasExpectedHost:    true,

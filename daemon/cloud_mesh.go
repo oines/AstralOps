@@ -34,6 +34,16 @@ type CloudDeviceRecord struct {
 	UpdatedAt            string   `json:"updated_at"`
 }
 
+type CloudAccount struct {
+	AccountIDHash string            `json:"account_id_hash"`
+	Relay         *CloudRelayConfig `json:"relay,omitempty"`
+}
+
+type CloudRelayConfig struct {
+	RelayID  string `json:"relay_id,omitempty"`
+	RelayURL string `json:"relay_url,omitempty"`
+}
+
 type RelayEnvelope struct {
 	Version       string `json:"version"`
 	EnvelopeID    string `json:"envelope_id,omitempty"`
