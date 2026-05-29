@@ -667,10 +667,6 @@ class RemoteCoreClient extends LocalCoreClient {
     return Promise.reject(new Error("远端 Host 本地缓存不能由 Controller 清理"));
   }
 
-  createSession(): Promise<Session> {
-    return Promise.reject(new Error("远端创建 session 尚未进入控制协议"));
-  }
-
   workspaceConnection(): Promise<WorkspaceConnection> {
     return Promise.reject(new Error("远端 workspace 连接状态由 Host 投影提供"));
   }

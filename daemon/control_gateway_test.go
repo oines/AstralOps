@@ -310,6 +310,41 @@ func TestControlGatewayCoreReadHidesHostWorkspaceAndSessionInternals(t *testing.
 	}
 }
 
+func TestControlGatewayCreatesSession(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionSessionCreate,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"agent":        AgentClaude,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, ok := response.Result.(Session)
+	if !ok {
+		t.Fatalf("session create result = %#v, want Session", response.Result)
+	}
+	if session.WorkspaceID != workspace.ID || session.Agent != AgentClaude || session.Status != "idle" {
+		t.Fatalf("session = %#v", session)
+	}
+	if session.NativeSessionID != "" || session.NativeThreadID != "" {
+		t.Fatalf("remote session leaked native ids: %#v", session)
+	}
+	stored, ok := app.store.getSession(session.ID)
+	if !ok || stored.NativeSessionID == "" {
+		t.Fatalf("stored session = %#v ok=%v, want Host-owned native id", stored, ok)
+	}
+	if !containsEventKind(app.store.queryEvents("", session.ID, 0), "session.started") {
+		t.Fatalf("events = %#v, want session.started", eventKinds(app.store.queryEvents("", session.ID, 0)))
+	}
+}
+
 func TestControlGatewayReadsEventsWindow(t *testing.T) {
 	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,6 +243,47 @@ func TestRemoteHostActionUsesApprovedCloudPairingKnownHost(t *testing.T) {
 	items, _ := response.Result.([]any)
 	if len(items) != 1 || stringValue(mapValue(items[0])["id"]) != workspace.ID {
 		t.Fatalf("workspaces = %#v, want %s", response.Result, workspace.ID)
+	}
+}
+
+func TestRemoteHostActionCreatesSessionThroughRelay(t *testing.T) {
+	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead, CapabilityCoreControl)
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	runControlRelayPoller(t, hostApp, client)
+	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := loadSettingsStore(controllerStore.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	baseURL := broker.URL
+	token := "account-token"
+	if _, err := settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, settings: settings, hub: newEventHub()}
+
+	body := strings.NewReader(`{"workspace_id":"` + workspace.ID + `","agent":"codex"}`)
+	req := httptest.NewRequest("POST", "/v1/remote/hosts/"+hostApp.store.hostInfo().Identity.DeviceID+"/sessions", body)
+	rr := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(rr, req)
+	if rr.Code != 201 {
+		t.Fatalf("remote session create status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var session Session
+	if err := json.Unmarshal(rr.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	if session.WorkspaceID != workspace.ID || session.Agent != AgentCodex || session.Status != "idle" {
+		t.Fatalf("session = %#v", session)
+	}
+	if session.NativeSessionID != "" || session.NativeThreadID != "" {
+		t.Fatalf("remote session leaked native ids: %#v", session)
+	}
+	if _, ok := hostApp.store.getSession(session.ID); !ok {
+		t.Fatalf("Host store missing created session %s", session.ID)
 	}
 }
 

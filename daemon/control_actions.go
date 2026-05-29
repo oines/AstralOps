@@ -59,6 +59,23 @@ func (a *app) startSessionInput(sessionID, input string, options TurnOptions) (m
 	return map[string]any{"ok": true, "mode": "start"}, nil
 }
 
+func (a *app) createSession(req createSessionRequest) (Session, error) {
+	ws, ok := a.store.getWorkspace(req.WorkspaceID)
+	if !ok {
+		return Session{}, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found")
+	}
+	agent := req.Agent
+	if agent == "" {
+		agent = ws.Agent
+	}
+	if agent != AgentClaude && agent != AgentCodex {
+		return Session{}, newActionError(http.StatusBadRequest, "agent_invalid", "agent must be claude or codex")
+	}
+	session := a.store.createSession(ws, agent)
+	a.emit(AstralEvent{WorkspaceID: ws.ID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: session})
+	return session, nil
+}
+
 func (a *app) tryRunningInput(ss Session, ws Workspace, runtime AgentRuntime, input string, options TurnOptions) (map[string]any, bool, error) {
 	steerer, ok := runtime.(TurnSteerer)
 	if !ok {

@@ -272,6 +272,16 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreRead, ControlActionSessions, map[string]any{
 			"workspace_id": r.URL.Query().Get("workspace_id"),
 		})
+	case len(route) == 1 && route[0] == "sessions" && r.Method == http.MethodPost:
+		var req createSessionRequest
+		if err := decodeJSON(r.Body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreControl, ControlActionSessionCreate, map[string]any{
+			"workspace_id": req.WorkspaceID,
+			"agent":        req.Agent,
+		})
 	case len(route) == 2 && route[0] == "pairing" && route[1] == "requests" && r.Method == http.MethodGet:
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityHostManage, ControlActionHostPairingList, nil)
 	case len(route) == 4 && route[0] == "pairing" && route[1] == "requests" && route[3] == "approve" && r.Method == http.MethodPost:
@@ -778,7 +788,7 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 func writeControlHTTPResult(w http.ResponseWriter, response ControlResponse, action string) {
 	if response.OK {
 		status := http.StatusOK
-		if action == ControlActionSessionFork || action == ControlActionWorkspaceCreate {
+		if action == ControlActionSessionCreate || action == ControlActionSessionFork || action == ControlActionWorkspaceCreate {
 			status = http.StatusCreated
 		}
 		writeJSON(w, status, response.Result)

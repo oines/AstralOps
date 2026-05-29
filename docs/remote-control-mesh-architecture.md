@@ -816,7 +816,7 @@ core.read
   查看 workspace 列表、session 列表、session view、transcript projection、agent 状态、queue、pending interaction。
 
 core.control
-  发送 prompt、中断 turn、取消/steer queued prompt、fork/delete session。发送 prompt 时必须由 Host/Core 明确判定 session input mode，而不是由 Controller UI 自行猜测。queued prompt 管理由 `core.control.queue.cancel` 和 `core.control.queue.steer` 暴露，Controller 只能传 session_id + queue_id；Host 负责确认 queued turn 是否仍存在并落 queue.cancelled / queue.steered 事件。session fork/delete 管理由 `core.control.session.fork` 和 `core.control.session.delete` 暴露，Host 负责复用本地 session 语义创建 fork projection、停止 runtime、清理 queue 并落 session.deleted。
+  创建 session、发送 prompt、中断 turn、取消/steer queued prompt、fork/delete session。发送 prompt 时必须由 Host/Core 明确判定 session input mode，而不是由 Controller UI 自行猜测。queued prompt 管理由 `core.control.queue.cancel` 和 `core.control.queue.steer` 暴露，Controller 只能传 session_id + queue_id；Host 负责确认 queued turn 是否仍存在并落 queue.cancelled / queue.steered 事件。session create/fork/delete 管理由 `core.control.session.create`、`core.control.session.fork` 和 `core.control.session.delete` 暴露，Host 负责复用本地 session 语义创建 session、创建 fork projection、停止 runtime、清理 queue 并落 session.started / session.deleted。
 
 session.edit
   编辑最后一条用户消息并由 Host/Core 执行 rollback/resend。被替换的旧 turn range 必须从 transcript 和 pending interaction projection 中隐藏，旧 approval/ask 响应必须由 Host 拒绝为 stale。
@@ -1339,6 +1339,7 @@ GET /v1/remote/hosts/:host_device_id/pairing/requests
 POST /v1/remote/hosts/:host_device_id/pairing/requests/:request_id/approve
 POST /v1/remote/hosts/:host_device_id/pairing/requests/:request_id/deny
 POST /v1/remote/hosts/:host_device_id/workspaces/:workspace_id/exec
+POST /v1/remote/hosts/:host_device_id/sessions
 POST /v1/remote/hosts/:host_device_id/sessions/:session_id/input
 POST /v1/remote/hosts/:host_device_id/sessions/:session_id/interrupt
 POST /v1/remote/hosts/:host_device_id/sessions/:session_id/fork

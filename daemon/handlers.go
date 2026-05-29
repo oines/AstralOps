@@ -618,21 +618,11 @@ func (a *app) handleSessions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	ws, ok := a.store.getWorkspace(req.WorkspaceID)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+	ss, err := a.createSession(req)
+	if err != nil {
+		writeActionError(w, err)
 		return
 	}
-	agent := req.Agent
-	if agent == "" {
-		agent = ws.Agent
-	}
-	if agent != AgentClaude && agent != AgentCodex {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent must be claude or codex"})
-		return
-	}
-	ss := a.store.createSession(ws, agent)
-	a.emit(AstralEvent{WorkspaceID: ws.ID, SessionID: ss.ID, Agent: ss.Agent, Kind: "session.started", Normalized: ss})
 	writeJSON(w, http.StatusCreated, ss)
 }
 

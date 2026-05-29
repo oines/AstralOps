@@ -514,17 +514,24 @@ export function App(): React.JSX.Element {
   const handleCreateSession = useCallback(
     async (workspaceId: string, agent: AgentKind) => {
       if (!api) return;
-      const workspace = workspaces.find((item) => item.id === workspaceId);
-      if (workspace?.target === "ssh" && workspaceConnections[workspaceId]?.status !== "connected") return;
       setError("");
-      const session = await api.createSession(workspaceId, agent);
-      const view = await api.sessionView(session.id).catch(() => null);
-      const displaySession = view ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session;
-      if (view) storeSessionView(view);
-      setSessions((current) => [displaySession, ...current.filter((item) => item.id !== session.id)]);
-      setActiveWorkspaceId(workspaceId);
-      setActiveSession(displaySession);
-      setLastSessionAgent(agent);
+      try {
+        const workspace = workspaces.find((item) => item.id === workspaceId);
+        if (workspace?.target === "ssh" && workspaceConnections[workspaceId]?.status !== "connected") {
+          setError("SSH 工作区未连接，先连接工作区再创建 session");
+          return;
+        }
+        const session = await api.createSession(workspaceId, agent);
+        const view = await api.sessionView(session.id).catch(() => null);
+        const displaySession = view ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session;
+        if (view) storeSessionView(view);
+        setSessions((current) => [displaySession, ...current.filter((item) => item.id !== session.id)]);
+        setActiveWorkspaceId(workspaceId);
+        setActiveSession(displaySession);
+        setLastSessionAgent(agent);
+      } catch (sessionError) {
+        setError(sessionError instanceof Error ? sessionError.message : String(sessionError));
+      }
     },
     [api, storeSessionView, workspaces, workspaceConnections],
   );
