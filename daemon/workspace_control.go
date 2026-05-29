@@ -397,13 +397,28 @@ func (a *app) readRemoteControlWorkspaceFiles(ctx context.Context, ws Workspace,
 	if err != nil {
 		return workspaceFilesReadResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
 	}
-	var stat map[string]any
-	if err := a.ssh.call(ctx, ws, "stat", map[string]any{"path": target}, &stat); err != nil {
-		return workspaceFilesReadResult{}, newActionError(http.StatusNotFound, "workspace_file_not_found", err.Error())
-	}
 	mode := strings.TrimSpace(params.Mode)
 	if mode == "" {
 		mode = "auto"
+	}
+	if mode == "list" {
+		entries, truncated, err := a.remoteWorkspaceEntries(ctx, ws, root, target)
+		if err != nil {
+			return workspaceFilesReadResult{}, newActionError(http.StatusBadRequest, "workspace_list_failed", err.Error())
+		}
+		return workspaceFilesReadResult{
+			WorkspaceID: ws.ID,
+			Target:      ws.Target,
+			Path:        rel,
+			Kind:        "dir",
+			Name:        remotePathBase(target),
+			Entries:     entries,
+			Truncated:   truncated,
+		}, nil
+	}
+	var stat map[string]any
+	if err := a.ssh.call(ctx, ws, "stat", map[string]any{"path": target}, &stat); err != nil {
+		return workspaceFilesReadResult{}, newActionError(http.StatusNotFound, "workspace_file_not_found", err.Error())
 	}
 	if boolValue(stat["is_dir"]) {
 		if mode == "file" {

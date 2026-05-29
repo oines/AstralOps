@@ -165,6 +165,56 @@ func TestRemoteHelperCandidatesUseRuntimeFallbackOrder(t *testing.T) {
 	}
 }
 
+func TestSSHBrowseSessionKeyReusesEndpointPort(t *testing.T) {
+	ws := Workspace{
+		ID:     "fsbrowse_one",
+		Target: "ssh",
+		SSH:    &SSHConfig{Endpoint: " alice@example.com ", RemoteCWD: "/srv/one"},
+	}
+	sameEndpoint := Workspace{
+		ID:     "fsbrowse_two",
+		Target: "ssh",
+		SSH:    &SSHConfig{Endpoint: "alice@example.com", Port: 22, RemoteCWD: "/srv/two"},
+	}
+	differentPort := Workspace{
+		ID:     "fsbrowse_three",
+		Target: "ssh",
+		SSH:    &SSHConfig{Endpoint: "alice@example.com", Port: 2222, RemoteCWD: "/srv/one"},
+	}
+
+	key := sshBrowseSessionKey(ws)
+	if key == "" {
+		t.Fatal("browse session key is empty")
+	}
+	if key != sshBrowseSessionKey(sameEndpoint) {
+		t.Fatal("same endpoint/default port did not reuse the browse session key")
+	}
+	if key == sshBrowseSessionKey(differentPort) {
+		t.Fatal("different ssh port reused the same browse session key")
+	}
+}
+
+func TestHelperBinaryFreshUsesProxyAgentSources(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proxyDir := filepath.Join(dir, "proxy-agent")
+	if err := os.MkdirAll(proxyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proxyDir, "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if !helperBinaryFresh(dir, time.Now().Add(time.Hour)) {
+		t.Fatal("helper built after sources should be fresh")
+	}
+	if helperBinaryFresh(dir, time.Now().Add(-time.Hour)) {
+		t.Fatal("helper built before sources should be stale")
+	}
+}
+
 func TestProjectionRemoteIOUsesBase64ForBinary(t *testing.T) {
 	body := []byte{0, 1, 2, 0xff, '\n'}
 	params := remoteWriteParams("/root/blob.bin", body)

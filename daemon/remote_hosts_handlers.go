@@ -242,6 +242,7 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 		a.writeRemoteWorkspaceFilesResult(w, hostDeviceID, map[string]any{
 			"workspace_id": route[1],
 			"path":         r.URL.Query().Get("path"),
+			"mode":         "list",
 		})
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "connect" && r.Method == http.MethodPost:
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreControl, ControlActionWorkspaceConnect, map[string]any{"workspace_id": route[1]})

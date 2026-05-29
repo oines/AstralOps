@@ -29,6 +29,7 @@ const (
 	connectionDegraded     = "degraded"
 	connectionFailed       = "failed"
 	sshProxyMaxAttempts    = 5
+	sshBrowseSessionTTL    = 5 * time.Minute
 )
 
 type WorkspaceConnection struct {
@@ -55,9 +56,10 @@ type WorkspaceConnection struct {
 }
 
 type sshManager struct {
-	app *app
-	mu  sync.Mutex
-	by  map[string]*sshTarget
+	app    *app
+	mu     sync.Mutex
+	by     map[string]*sshTarget
+	browse map[string]*sshBrowseSession
 }
 
 type sshTarget struct {
@@ -66,8 +68,14 @@ type sshTarget struct {
 	state     WorkspaceConnection
 }
 
+type sshBrowseSession struct {
+	workspace Workspace
+	proxy     *proxyClient
+	expiresAt time.Time
+}
+
 func newSSHManager(a *app) *sshManager {
-	return &sshManager{app: a, by: map[string]*sshTarget{}}
+	return &sshManager{app: a, by: map[string]*sshTarget{}, browse: map[string]*sshBrowseSession{}}
 }
 
 func (m *sshManager) restorePersistedConnections(ctx context.Context) {
@@ -369,33 +377,74 @@ func (m *sshManager) call(ctx context.Context, ws Workspace, method string, para
 }
 
 func (m *sshManager) callEphemeral(ctx context.Context, ws Workspace, method string, params any, out any) error {
+	proxy, err := m.openEphemeralProxy(ctx, ws)
+	if err != nil {
+		return err
+	}
+	defer proxy.close()
+	return proxy.call(ctx, method, params, out)
+}
+
+func (m *sshManager) callBrowse(ctx context.Context, ws Workspace, method string, params any, out any) error {
+	key := sshBrowseSessionKey(ws)
+	if key == "" {
+		return m.callEphemeral(ctx, ws, method, params, out)
+	}
+	proxy := m.cachedBrowseProxy(key)
+	if proxy != nil {
+		err := proxy.call(ctx, method, params, out)
+		if err == nil {
+			m.extendBrowseSession(key)
+			return nil
+		}
+		if !isProxyTransportError(err) {
+			return err
+		}
+		m.closeBrowseSession(key, proxy)
+	}
+	proxy, err := m.openEphemeralProxy(ctx, ws)
+	if err != nil {
+		return err
+	}
+	if err := proxy.call(ctx, method, params, out); err != nil {
+		if !isProxyTransportError(err) {
+			m.storeBrowseProxy(key, ws, proxy)
+			return err
+		}
+		_ = proxy.close()
+		return err
+	}
+	m.storeBrowseProxy(key, ws, proxy)
+	return nil
+}
+
+func (m *sshManager) openEphemeralProxy(ctx context.Context, ws Workspace) (*proxyClient, error) {
 	if ws.Target != "ssh" {
-		return errors.New("workspace is not ssh")
+		return nil, errors.New("workspace is not ssh")
 	}
 	if ws.SSH == nil {
-		return errors.New("ssh workspace is missing ssh config")
+		return nil, errors.New("ssh workspace is missing ssh config")
 	}
 	probe, err := m.probe(ctx, ws)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	localHelper, err := m.localHelperBinary(ctx, probe)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	localSum, err := fileSHA256(localHelper)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	attempts := []remoteHelperAttempt{}
 	for _, candidate := range remoteHelperCandidates(ws, probe) {
 		_, proxy, _, err := m.tryRemoteHelperCandidate(ctx, ws, probe, candidate, localHelper, localSum, false)
 		if err == nil {
-			defer proxy.close()
-			return proxy.call(ctx, method, params, out)
+			return proxy, nil
 		}
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 		attempts = append(attempts, remoteHelperAttempt{Candidate: candidate, Err: err})
 		var noFallback remoteHelperNoFallbackError
@@ -403,11 +452,118 @@ func (m *sshManager) callEphemeral(ctx context.Context, ws Workspace, method str
 			break
 		}
 	}
-	return remoteHelperAttemptsError(attempts)
+	return nil, remoteHelperAttemptsError(attempts)
 }
 
 func (m *sshManager) startPTY(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
 	return m.startEventProcess(ctx, ws, id, "pty_start", params)
+}
+
+func sshBrowseSessionKey(ws Workspace) string {
+	if ws.Target != "ssh" || ws.SSH == nil {
+		return ""
+	}
+	endpoint := strings.TrimSpace(ws.SSH.Endpoint)
+	if endpoint == "" {
+		return ""
+	}
+	return strings.Join([]string{endpoint, strconv.Itoa(sshPort(ws))}, "\x00")
+}
+
+func (m *sshManager) cachedBrowseProxy(key string) *proxyClient {
+	now := time.Now()
+	m.mu.Lock()
+	session := m.browse[key]
+	if session == nil || session.proxy == nil || !session.proxy.isAlive() || now.After(session.expiresAt) {
+		if session != nil {
+			delete(m.browse, key)
+		}
+		m.mu.Unlock()
+		if session != nil && session.proxy != nil {
+			_ = session.proxy.close()
+		}
+		return nil
+	}
+	session.expiresAt = now.Add(sshBrowseSessionTTL)
+	proxy := session.proxy
+	m.mu.Unlock()
+	return proxy
+}
+
+func (m *sshManager) storeBrowseProxy(key string, ws Workspace, proxy *proxyClient) {
+	existing := (*proxyClient)(nil)
+	m.mu.Lock()
+	if current := m.browse[key]; current != nil && current.proxy != proxy {
+		existing = current.proxy
+	}
+	m.browse[key] = &sshBrowseSession{
+		workspace: ws,
+		proxy:     proxy,
+		expiresAt: time.Now().Add(sshBrowseSessionTTL),
+	}
+	m.mu.Unlock()
+	if existing != nil {
+		_ = existing.close()
+	}
+	m.scheduleBrowseSessionCleanup(key)
+}
+
+func (m *sshManager) extendBrowseSession(key string) {
+	m.mu.Lock()
+	if session := m.browse[key]; session != nil {
+		session.expiresAt = time.Now().Add(sshBrowseSessionTTL)
+	}
+	m.mu.Unlock()
+}
+
+func (m *sshManager) closeBrowseSession(key string, proxy *proxyClient) {
+	m.mu.Lock()
+	session := m.browse[key]
+	if session != nil && (proxy == nil || session.proxy == proxy) {
+		delete(m.browse, key)
+	} else {
+		session = nil
+	}
+	m.mu.Unlock()
+	if session != nil && session.proxy != nil {
+		_ = session.proxy.close()
+	}
+}
+
+func (m *sshManager) scheduleBrowseSessionCleanup(key string) {
+	time.AfterFunc(sshBrowseSessionTTL, func() {
+		m.mu.Lock()
+		session := m.browse[key]
+		if session == nil {
+			m.mu.Unlock()
+			return
+		}
+		delay := time.Until(session.expiresAt)
+		if delay > 0 {
+			m.mu.Unlock()
+			time.AfterFunc(delay, func() { m.closeExpiredBrowseSession(key) })
+			return
+		}
+		delete(m.browse, key)
+		m.mu.Unlock()
+		if session.proxy != nil {
+			_ = session.proxy.close()
+		}
+	})
+}
+
+func (m *sshManager) closeExpiredBrowseSession(key string) {
+	m.mu.Lock()
+	session := m.browse[key]
+	if session == nil || time.Now().Before(session.expiresAt) {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.browse, key)
+	m.mu.Unlock()
+	if session.proxy != nil {
+		_ = session.proxy.close()
+	}
 }
 
 func (m *sshManager) startExec(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
@@ -900,6 +1056,9 @@ func (m *sshManager) localHelperBinary(ctx context.Context, probe sshProbe) (str
 	out := filepath.Join(m.app.store.dataDir, "helpers", probe.OS+"-"+probe.Arch, "astral-proxy-agent")
 	root := repoRootGuess()
 	if _, err := os.Stat(filepath.Join(root, "proxy-agent", "main.go")); err == nil {
+		if st, statErr := os.Stat(out); statErr == nil && helperBinaryUsable(st) && helperBinaryFresh(root, st.ModTime()) {
+			return out, nil
+		}
 		return m.buildLocalHelperBinary(ctx, probe, out, root)
 	}
 	if st, err := os.Stat(out); err == nil && helperBinaryUsable(st) {
@@ -921,6 +1080,29 @@ func (m *sshManager) buildLocalHelperBinary(ctx context.Context, probe sshProbe,
 		return "", fmt.Errorf("build proxy helper for %s/%s failed: %s%s", probe.OS, probe.Arch, err.Error(), stderrSuffix(string(body)))
 	}
 	return out, nil
+}
+
+func helperBinaryFresh(root string, builtAt time.Time) bool {
+	latest := time.Time{}
+	for _, path := range []string{filepath.Join(root, "go.mod"), filepath.Join(root, "go.sum")} {
+		if st, err := os.Stat(path); err == nil && st.ModTime().After(latest) {
+			latest = st.ModTime()
+		}
+	}
+	sourceRoot := filepath.Join(root, "proxy-agent")
+	_ = filepath.WalkDir(sourceRoot, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry == nil || entry.IsDir() {
+			return nil
+		}
+		if filepath.Ext(path) != ".go" {
+			return nil
+		}
+		if st, statErr := entry.Info(); statErr == nil && st.ModTime().After(latest) {
+			latest = st.ModTime()
+		}
+		return nil
+	})
+	return !latest.IsZero() && !latest.After(builtAt)
 }
 
 func findBundledProxyAgent(probe sshProbe) string {

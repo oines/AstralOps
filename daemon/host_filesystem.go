@@ -219,7 +219,7 @@ func (a *app) browseSSHHostFileSystem(ctx context.Context, params hostFileSystem
 		SSH:    &ssh,
 	}
 	var raw []map[string]any
-	if err := a.ssh.callEphemeral(ctx, ws, "list", map[string]any{"path": path}, &raw); err != nil {
+	if err := a.ssh.callBrowse(ctx, ws, "list", map[string]any{"path": path}, &raw); err != nil {
 		return hostFileSystemBrowseResult{}, newActionError(http.StatusBadRequest, "host_fs_list_failed", err.Error())
 	}
 	entries := make([]hostFileSystemEntry, 0, len(raw))
