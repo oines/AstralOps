@@ -15,6 +15,7 @@ type SidebarProps = {
   sessionTitles: Record<string, string>;
   width: number;
   workspaces: Workspace[];
+  workspaceActionsDisabled?: boolean;
   workspaceConnections: Record<string, WorkspaceConnection>;
   onCreateSession: (workspaceId: string, agent: AgentKind) => Promise<void>;
   onConnectWorkspace: (workspaceId: string) => void;
@@ -49,6 +50,7 @@ export function Sidebar({
   sessionTitles,
   width,
   workspaces,
+  workspaceActionsDisabled = false,
   workspaceConnections,
   onCreateSession,
   onConnectWorkspace,
@@ -192,8 +194,11 @@ export function Sidebar({
 
       <nav className="grid gap-1 px-3 pb-6">
         <button
-          className="flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-left text-[14px] font-semibold text-[#242426] transition-colors duration-150 ease-out hover:bg-black/5"
+          className={`flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-left text-[14px] font-semibold transition-colors duration-150 ease-out ${
+            workspaceActionsDisabled ? "cursor-default text-[#a0a3a7]" : "text-[#242426] hover:bg-black/5"
+          }`}
           type="button"
+          disabled={workspaceActionsDisabled}
           onClick={onCreateWorkspace}
         >
           <Plus size={18} strokeWidth={2.1} />
@@ -204,11 +209,14 @@ export function Sidebar({
       <nav className="min-h-0 flex-1 overflow-auto px-3 pb-4">
         {workspaces.length === 0 ? (
           <button
-            className="mx-2 mt-1 w-[calc(100%-16px)] rounded-lg border border-dashed border-black/15 px-3 py-2 text-center text-[13px] font-semibold text-[#6b6b70] hover:bg-black/5 hover:text-[#1d1d1f]"
+            className={`mx-2 mt-1 w-[calc(100%-16px)] rounded-lg border border-dashed border-black/15 px-3 py-2 text-center text-[13px] font-semibold ${
+              workspaceActionsDisabled ? "cursor-default text-[#a0a3a7]" : "text-[#6b6b70] hover:bg-black/5 hover:text-[#1d1d1f]"
+            }`}
             type="button"
+            disabled={workspaceActionsDisabled}
             onClick={onCreateWorkspace}
           >
-            创建第一个 workspace
+            {workspaceActionsDisabled ? "等待配对" : "创建第一个 workspace"}
           </button>
         ) : null}
 

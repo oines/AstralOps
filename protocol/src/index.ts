@@ -960,6 +960,8 @@ export type TrustGrant = {
 
 export type PairingRequest = {
   request_id: string;
+  source?: "cloud" | string;
+  cloud_request_id?: string;
   host_device_id: string;
   controller_device_id: string;
   controller_device_name?: string;
@@ -1039,10 +1041,45 @@ export type CloudDeviceRecord = {
   public_key: string;
   public_key_fingerprint: string;
   capabilities?: ControlCapability[];
+  can_host?: boolean;
+  can_control?: boolean;
   status: CloudDeviceStatus;
   relay_url?: string;
   last_seen?: string;
   updated_at: string;
+};
+
+export type CloudPairingSignalInput = {
+  host_device_id: string;
+  controller_device_id: string;
+  scope?: "full" | string;
+  capabilities?: ControlCapability[];
+  workspace_exec_policy?: "trusted" | "require_approval" | "disabled" | string;
+};
+
+export type CloudPairingSignal = {
+  request_id: string;
+  account_id_hash: string;
+  host_device_id: string;
+  host_device_name?: string;
+  host_device_kind?: "desktop" | "mobile" | string;
+  host_public_key_fingerprint?: string;
+  controller_device_id: string;
+  controller_device_name?: string;
+  controller_device_kind?: "desktop" | "mobile" | string;
+  controller_public_key_fingerprint?: string;
+  scope: "full" | string;
+  status: "pending" | "approved" | "denied" | string;
+  capabilities?: ControlCapability[];
+  workspace_exec_policy?: "trusted" | "require_approval" | "disabled" | string;
+  resolver_device_id?: string;
+  created_at: string;
+  updated_at: string;
+  resolved_at?: string;
+};
+
+export type CloudPairingSignalResponse = {
+  request: CloudPairingSignal;
 };
 
 export type RelayPayloadKind = "control.sealed_frame" | string;
@@ -1156,8 +1193,9 @@ export type RemoteHostRecord = {
   device_name?: string;
   device_kind?: "desktop" | "mobile" | string;
   public_key_fingerprint: string;
-  status: "lan" | "offline" | string;
-  connection: "lan" | "relay" | "offline" | string;
+  known_identity?: boolean;
+  status: "online" | "offline" | "lan" | string;
+  connection: "lan" | "cloud" | "relay" | "offline" | string;
   last_base_url?: string;
   lan_base_url?: string;
   capabilities?: ControlCapability[];

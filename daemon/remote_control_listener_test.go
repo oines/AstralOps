@@ -120,6 +120,9 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 	if len(hosts.Hosts) != 1 || hosts.Hosts[0].DeviceID != hostApp.store.deviceIdentity.DeviceID || hosts.Hosts[0].Connection != remoteHostStatusOffline {
 		t.Fatalf("hosts = %#v, want one known offline Host", hosts.Hosts)
 	}
+	if !hosts.Hosts[0].KnownIdentity {
+		t.Fatalf("known host = %#v, want known_identity", hosts.Hosts[0])
+	}
 
 	workspacesReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/workspaces", nil)
 	workspacesResp := httptest.NewRecorder()

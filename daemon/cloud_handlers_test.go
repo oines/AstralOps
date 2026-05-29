@@ -253,6 +253,9 @@ func TestRemoteHostsIncludesCloudHostCandidatesWithoutGrantingControl(t *testing
 	if hosts.Hosts[0].DeviceID != "dev_cloud_host" || hosts.Hosts[0].Connection != remoteHostStatusCloud || hosts.Hosts[0].Status != remoteHostStatusOnline {
 		t.Fatalf("cloud host = %#v", hosts.Hosts[0])
 	}
+	if hosts.Hosts[0].KnownIdentity {
+		t.Fatalf("cloud-only host = %#v, want unknown identity", hosts.Hosts[0])
+	}
 
 	actionReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/dev_cloud_host/workspaces", nil)
 	actionResp := httptest.NewRecorder()

@@ -33,6 +33,7 @@ type remoteHostRecord struct {
 	DeviceName           string   `json:"device_name,omitempty"`
 	DeviceKind           string   `json:"device_kind,omitempty"`
 	PublicKeyFingerprint string   `json:"public_key_fingerprint"`
+	KnownIdentity        bool     `json:"known_identity,omitempty"`
 	Status               string   `json:"status"`
 	Connection           string   `json:"connection"`
 	LastBaseURL          string   `json:"last_base_url,omitempty"`
@@ -152,6 +153,7 @@ func remoteHostRecordFromKnownHost(host KnownHost) remoteHostRecord {
 		DeviceID:             host.DeviceID,
 		DeviceName:           host.DeviceName,
 		PublicKeyFingerprint: host.PublicKeyFingerprint,
+		KnownIdentity:        true,
 		Status:               remoteHostStatusOffline,
 		Connection:           remoteHostStatusOffline,
 		LastBaseURL:          host.LastBaseURL,
@@ -184,6 +186,7 @@ func remoteHostRecordFromHostInfo(info HostInfo, known KnownHost, lanBaseURL str
 		DeviceName:           name,
 		DeviceKind:           identity.DeviceKind,
 		PublicKeyFingerprint: identity.PublicKeyFingerprint,
+		KnownIdentity:        true,
 		Status:               remoteHostStatusLAN,
 		Connection:           remoteHostStatusLAN,
 		LastBaseURL:          known.LastBaseURL,

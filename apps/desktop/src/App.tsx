@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PanelLeft, PanelRight } from "lucide-react";
-import { createLocalCoreClient, createRemoteCoreClient, listRemoteHosts, type CoreClient, type EventSubscription } from "./api";
+import { KeyRound, LoaderCircle, PanelLeft, PanelRight, RefreshCw } from "lucide-react";
+import { createLocalCoreClient, createRemoteCoreClient, listRemoteHosts, requestRemoteHostPairing, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
 import { SettingsView } from "./components/SettingsView";
@@ -75,6 +75,8 @@ export function App(): React.JSX.Element {
   const [localHostInfo, setLocalHostInfo] = useState<HostInfo | null>(null);
   const [remoteHosts, setRemoteHosts] = useState<RemoteHostRecord[]>([]);
   const [selectedHostId, setSelectedHostId] = useState(LOCAL_HOST_ID);
+  const [hostPairingStatus, setHostPairingStatus] = useState<Record<string, string>>({});
+  const [requestingPairingHostId, setRequestingPairingHostId] = useState("");
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [settingsSavingKeys, setSettingsSavingKeys] = useState<Set<string>>(() => new Set());
@@ -115,6 +117,15 @@ export function App(): React.JSX.Element {
   const updateAutoCheckStartedRef = useRef(false);
   const appSettingsRef = useRef<AppSettings>(DEFAULT_APP_SETTINGS);
   const appChromeRef = useRef<HTMLDivElement | null>(null);
+
+  const refreshRemoteHosts = useCallback(async (): Promise<void> => {
+    if (!daemonInfo) {
+      setRemoteHosts([]);
+      return;
+    }
+    const hosts = await listRemoteHosts(daemonInfo, true);
+    setRemoteHosts(hosts);
+  }, [daemonInfo]);
 
   const mergeEvents = useCallback((incoming: AstralEvent[]) => {
     setEventIndex((current) => mergeEventIndex(current, incoming));
@@ -762,7 +773,7 @@ export function App(): React.JSX.Element {
         id: host.device_id,
         name: host.device_name || host.device_id,
         kind: host.device_kind || "desktop",
-        subtitle: host.connection === "lan" ? "远端 Host · LAN" : host.connection === "cloud" ? "远端 Host · 云端" : "远端 Host",
+        subtitle: remoteHostNeedsPairing(host) ? "远端 Host · 未配对" : host.connection === "lan" ? "远端 Host · LAN" : host.connection === "cloud" ? "远端 Host · 云端" : "远端 Host",
         connection: host.connection,
       })),
     ],
@@ -770,6 +781,29 @@ export function App(): React.JSX.Element {
   );
   const activeHostId = hostOptions.some((host) => host.id === selectedHostId) ? selectedHostId : hostOptions[0]?.id || LOCAL_HOST_ID;
   const activeHostIsLocal = activeHostId === (localHostInfo?.identity.device_id || LOCAL_HOST_ID);
+  const activeRemoteHost = useMemo(() => remoteHosts.find((host) => host.device_id === activeHostId) ?? null, [activeHostId, remoteHosts]);
+  const activeHostNeedsPairing = Boolean(activeRemoteHost && remoteHostNeedsPairing(activeRemoteHost));
+  const activeHostPairingStatus = activeRemoteHost ? hostPairingStatus[activeRemoteHost.device_id] || "" : "";
+
+  const handleRequestHostPairing = useCallback(async (host: RemoteHostRecord): Promise<void> => {
+    if (!daemonInfo) return;
+    setRequestingPairingHostId(host.device_id);
+    setError("");
+    try {
+      const result = await requestRemoteHostPairing(daemonInfo, host.device_id);
+      setHostPairingStatus((current) => ({
+        ...current,
+        [host.device_id]: result.request.status === "pending" ? "请求已发送，等待目标 Host 批准" : pairingStatusLabel(result.request.status),
+      }));
+      await refreshRemoteHosts().catch(() => undefined);
+    } catch (pairingError) {
+      const message = pairingError instanceof Error ? pairingError.message : String(pairingError);
+      setHostPairingStatus((current) => ({ ...current, [host.device_id]: message }));
+      setError(message);
+    } finally {
+      setRequestingPairingHostId("");
+    }
+  }, [daemonInfo, refreshRemoteHosts]);
 
   useEffect(() => {
     if (!daemonInfo || !localApi || !activeHostId) return;
@@ -778,6 +812,19 @@ export function App(): React.JSX.Element {
     const client = activeHostIsLocal ? localApi : createRemoteCoreClient(daemonInfo, activeHostId);
 
     async function loadSelectedHost(): Promise<void> {
+      if (activeHostNeedsPairing) {
+        setApi(null);
+        setConnection("connected");
+        setError("");
+        setWorkspaces([]);
+        setWorkspaceConnections({});
+        setSessions([]);
+        setSessionViews({});
+        setEventIndex(EMPTY_EVENT_INDEX);
+        setActiveWorkspaceId("");
+        setActiveSession(null);
+        return;
+      }
       setConnection("booting");
       setError("");
       try {
@@ -833,7 +880,7 @@ export function App(): React.JSX.Element {
       }
       sseQueueRef.current = [];
     };
-  }, [activeHostId, activeHostIsLocal, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, storeSessionView]);
+  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, storeSessionView]);
 
   const sessionTitles = useMemo(
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),
@@ -873,6 +920,7 @@ export function App(): React.JSX.Element {
         sessionTitles={sessionTitles}
         width={sidebarWidth}
         workspaces={workspaces}
+        workspaceActionsDisabled={activeHostNeedsPairing}
         workspaceConnections={workspaceConnections}
         onConnectWorkspace={(workspaceId) => void handleConnectWorkspace(workspaceId)}
         onCreateSession={handleCreateSession}
@@ -899,24 +947,35 @@ export function App(): React.JSX.Element {
           sessionState={sessionState}
           sessionTitle={activeSession ? sessionTitles[activeSession.id] : undefined}
         />
-        <Transcript
-          activeSession={activeSession}
-          composerHeight={composerVisible ? composerHeight : 0}
-          editableUserMessage={activeSessionView?.editable_user_message ?? null}
-          events={visibleEvents}
-          forkingSeq={forkingSeq}
-          hasOlder={activeSessionWindow?.hasOlder ?? false}
-          loadingOlder={activeSessionWindow?.loadingOlder ?? false}
-          scrollToEventSeq={scrollTarget?.sessionId === activeSessionId ? scrollTarget.eventSeq : null}
-          sourceSessionExists={forkSourceSessionExists}
-          onEditUserMessage={handleEditUserMessage}
-          onForkFromEvent={(event) => void handleForkFromEvent(event)}
-          onLoadOlder={() => void loadOlderEvents()}
-          onOpenSourceSession={handleOpenSourceSession}
-          onScrollTargetHandled={() => setScrollTarget(null)}
-          mediaUrl={api?.mediaUrl.bind(api)}
-        />
-        {composerVisible ? (
+        {activeHostNeedsPairing && activeRemoteHost ? (
+          <HostPairingPanel
+            host={activeRemoteHost}
+            requesting={requestingPairingHostId === activeRemoteHost.device_id}
+            status={activeHostPairingStatus}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onRefresh={() => void refreshRemoteHosts()}
+            onRequest={() => void handleRequestHostPairing(activeRemoteHost)}
+          />
+        ) : (
+          <Transcript
+            activeSession={activeSession}
+            composerHeight={composerVisible ? composerHeight : 0}
+            editableUserMessage={activeSessionView?.editable_user_message ?? null}
+            events={visibleEvents}
+            forkingSeq={forkingSeq}
+            hasOlder={activeSessionWindow?.hasOlder ?? false}
+            loadingOlder={activeSessionWindow?.loadingOlder ?? false}
+            scrollToEventSeq={scrollTarget?.sessionId === activeSessionId ? scrollTarget.eventSeq : null}
+            sourceSessionExists={forkSourceSessionExists}
+            onEditUserMessage={handleEditUserMessage}
+            onForkFromEvent={(event) => void handleForkFromEvent(event)}
+            onLoadOlder={() => void loadOlderEvents()}
+            onOpenSourceSession={handleOpenSourceSession}
+            onScrollTargetHandled={() => setScrollTarget(null)}
+            mediaUrl={api?.mediaUrl.bind(api)}
+          />
+        )}
+        {composerVisible && !activeHostNeedsPairing ? (
           <Composer
             commands={activeCommands}
             commandsLoaded={activeCommandsLoaded}
@@ -1032,4 +1091,116 @@ function latestWorkspaceConnection(events: AstralEvent[]): WorkspaceConnection |
     }
   }
   return null;
+}
+
+function HostPairingPanel({
+  host,
+  requesting,
+  status,
+  onOpenSettings,
+  onRefresh,
+  onRequest,
+}: {
+  host: RemoteHostRecord;
+  requesting: boolean;
+  status: string;
+  onOpenSettings: () => void;
+  onRefresh: () => void;
+  onRequest: () => void;
+}): React.JSX.Element {
+  const fingerprint = host.public_key_fingerprint || "未声明";
+  return (
+    <section className="flex min-h-0 flex-1 items-center justify-center bg-white px-8 py-10">
+      <div className="w-full max-w-[560px] rounded-lg border border-[var(--ao-border)] bg-[var(--ao-panel-soft)]">
+        <div className="border-b border-[var(--ao-border)] px-4 py-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-black/[0.045] text-[var(--ao-muted-strong)]">
+              <KeyRound size={18} strokeWidth={1.9} />
+            </span>
+            <div className="min-w-0">
+              <div className="truncate text-[15px] font-bold leading-6 text-[var(--ao-text)]">{host.device_name || host.device_id}</div>
+              <div className="mt-0.5 text-[12px] font-semibold leading-5 text-[var(--ao-muted)]">{hostConnectionLabel(host.connection)}发现，等待 Host 批准</div>
+            </div>
+          </div>
+        </div>
+        <div className="grid border-b border-[var(--ao-border)]">
+          <HostPairingInfoRow label="设备 ID" value={host.device_id} />
+          <HostPairingInfoRow label="设备类型" value={deviceKindLabel(host.device_kind)} />
+          <HostPairingInfoRow label="公钥指纹" value={fingerprint} mono />
+        </div>
+        <div className="grid gap-3 px-4 py-4">
+          <p className="m-0 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
+            {status || "这台设备还不是本机已知 Host。发起请求后，目标 Host 必须在本机信任列表中批准，云端状态不会直接授予控制权。"}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              className="flex h-8 items-center gap-2 rounded-lg bg-[#202124] px-3 text-[13px] font-semibold text-white transition-colors hover:bg-[#343438] disabled:cursor-default disabled:opacity-55"
+              type="button"
+              disabled={requesting}
+              onClick={onRequest}
+            >
+              {requesting ? <LoaderCircle className="animate-spin" size={15} strokeWidth={1.9} /> : <KeyRound size={15} strokeWidth={1.9} />}
+              {requesting ? "发送中" : "请求控制"}
+            </button>
+            <button
+              className="flex h-8 items-center gap-2 rounded-lg bg-black/[0.055] px-3 text-[13px] font-semibold text-[var(--ao-text)] transition-colors hover:bg-black/[0.08]"
+              type="button"
+              onClick={onRefresh}
+            >
+              <RefreshCw size={15} strokeWidth={1.9} />
+              刷新设备
+            </button>
+            <button
+              className="flex h-8 items-center rounded-lg bg-black/[0.055] px-3 text-[13px] font-semibold text-[var(--ao-text)] transition-colors hover:bg-black/[0.08]"
+              type="button"
+              onClick={onOpenSettings}
+            >
+              打开远控设置
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function HostPairingInfoRow({ label, mono = false, value }: { label: string; mono?: boolean; value: string }): React.JSX.Element {
+  return (
+    <div className="grid min-h-[44px] grid-cols-[112px_minmax(0,1fr)] items-center gap-4 border-b border-[var(--ao-border)] px-4 py-2 last:border-b-0">
+      <div className="text-[12px] font-semibold text-[var(--ao-text-soft)]">{label}</div>
+      <div className={`min-w-0 truncate text-right text-[12px] font-semibold text-[var(--ao-muted)] ${mono ? "font-mono" : ""}`} title={value}>{value}</div>
+    </div>
+  );
+}
+
+function remoteHostNeedsPairing(host: RemoteHostRecord): boolean {
+  return host.connection === "cloud" && !host.known_identity;
+}
+
+function pairingStatusLabel(status: string): string {
+  if (status === "pending") return "等待目标 Host 批准";
+  if (status === "approved") return "已批准";
+  if (status === "denied") return "已拒绝";
+  return status || "请求已发送";
+}
+
+function hostConnectionLabel(connection?: string): string {
+  switch (connection) {
+    case "lan":
+      return "局域网";
+    case "cloud":
+      return "云端";
+    case "relay":
+      return "中继";
+    case "offline":
+      return "离线";
+    default:
+      return "远端";
+  }
+}
+
+function deviceKindLabel(kind?: string): string {
+  if (kind === "desktop") return "桌面端";
+  if (kind === "mobile") return "手机端";
+  return kind || "未知";
 }

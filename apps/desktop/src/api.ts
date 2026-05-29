@@ -3,6 +3,7 @@ import type {
   AppSettings,
   AppSettingsPatch,
   ClearMediaCacheResponse,
+  CloudPairingSignalResponse,
   CreateWorkspaceRequest,
   EditLastUserMessageRequest,
   FileListResponse,
@@ -128,6 +129,16 @@ export async function listRemoteHosts(info: DaemonInfo, discover = true): Promis
   const query = discover ? "?discover=1" : "";
   const response = await channel.request<RemoteHostsResponse>("GET", `/v1/remote/hosts${query}`);
   return response.hosts;
+}
+
+export async function requestRemoteHostPairing(info: DaemonInfo, hostDeviceId: string): Promise<CloudPairingSignalResponse> {
+  const channel = new LocalHttpControlChannel(info);
+  const host = await channel.request<HostInfo>("GET", "/v1/host");
+  return channel.request("POST", "/v1/cloud/pairing/requests", {
+    host_device_id: hostDeviceId,
+    controller_device_id: host.identity.device_id,
+    scope: "full",
+  });
 }
 
 export class LocalHttpControlChannel implements ControlChannel {
