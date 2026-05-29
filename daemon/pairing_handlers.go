@@ -32,20 +32,7 @@ func (a *app) handlePairingRequestSubmit(w http.ResponseWriter, r *http.Request)
 		writeActionError(w, err)
 		return
 	}
-	a.emit(AstralEvent{
-		Kind: "control.pairing.requested",
-		Normalized: map[string]any{
-			"request_id":                        request.RequestID,
-			"host_device_id":                    request.HostDeviceID,
-			"controller_device_id":              request.ControllerDeviceID,
-			"controller_device_name":            request.ControllerDeviceName,
-			"controller_device_kind":            request.ControllerDeviceKind,
-			"controller_public_key_fingerprint": request.ControllerPublicKeyFingerprint,
-			"scope":                             request.Scope,
-			"capabilities":                      request.Capabilities,
-			"status":                            request.Status,
-		},
-	})
+	a.emitPairingRequested(request)
 	writeJSON(w, http.StatusAccepted, pairingRequestSubmitResult{Request: request})
 }
 
@@ -131,6 +118,7 @@ func (a *app) approvePairingRequest(requestID string) (pairingRequestResolveResu
 			"status":               request.Status,
 		},
 	})
+	a.syncCloudPairingResolution(request)
 	return pairingRequestResolveResult{Request: request, Grant: &grant}, nil
 }
 
@@ -148,7 +136,32 @@ func (a *app) denyPairingRequest(requestID string) (pairingRequestResolveResult,
 			"status":               request.Status,
 		},
 	})
+	a.syncCloudPairingResolution(request)
 	return pairingRequestResolveResult{Request: request}, nil
+}
+
+func (a *app) emitPairingRequested(request PairingRequest) {
+	normalized := map[string]any{
+		"request_id":                        request.RequestID,
+		"host_device_id":                    request.HostDeviceID,
+		"controller_device_id":              request.ControllerDeviceID,
+		"controller_device_name":            request.ControllerDeviceName,
+		"controller_device_kind":            request.ControllerDeviceKind,
+		"controller_public_key_fingerprint": request.ControllerPublicKeyFingerprint,
+		"scope":                             request.Scope,
+		"capabilities":                      request.Capabilities,
+		"status":                            request.Status,
+	}
+	if request.Source != "" {
+		normalized["source"] = request.Source
+	}
+	if request.CloudRequestID != "" {
+		normalized["cloud_request_id"] = request.CloudRequestID
+	}
+	a.emit(AstralEvent{
+		Kind:       "control.pairing.requested",
+		Normalized: normalized,
+	})
 }
 
 func pairingRequestIDFromPath(path string) (string, bool) {

@@ -106,6 +106,114 @@ func TestCloudRuntimeRegistersCurrentDeviceFromSettings(t *testing.T) {
 	}
 }
 
+func TestCloudRuntimeImportsPendingPairingSignalWithoutGrantingTrust(t *testing.T) {
+	app, broker := testCloudApp(t)
+	defer broker.Close()
+	enableRemoteControlForCloudTest(t, app)
+
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	if err := app.cloudRegisterAndHeartbeat(t.Context(), client); err != nil {
+		t.Fatal(err)
+	}
+	controller := testControllerRegistration(t, "dev_phone")
+	res, err := httpClientPostJSON(broker.URL+"/v1/devices", "account-token", controller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("register controller status = %d", res.StatusCode)
+	}
+
+	signal, err := client.SubmitPairingSignal(t.Context(), cloudPairingSignalInput{
+		HostDeviceID:       app.store.hostInfo().Identity.DeviceID,
+		ControllerDeviceID: controller.DeviceID,
+		Scope:              TrustScopeFull,
+		Capabilities:       []string{CapabilityCoreRead, CapabilityTerminalOpen},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.cloudRegisterAndHeartbeat(t.Context(), client); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := app.store.listPairingRequests()
+	if len(requests) != 1 {
+		t.Fatalf("pairing requests = %#v, want one local pending request", requests)
+	}
+	request := requests[0]
+	if request.Source != PairingRequestSourceCloud || request.CloudRequestID != signal.RequestID {
+		t.Fatalf("request cloud link = %#v, want signal %s", request, signal.RequestID)
+	}
+	if request.Status != PairingStatusPending || request.ControllerDeviceID != controller.DeviceID || request.ControllerPublicKey != controller.PublicKey {
+		t.Fatalf("request = %#v, want controller public identity", request)
+	}
+	if _, ok := app.store.trustedControlGrant(controller.DeviceID); ok {
+		t.Fatal("cloud pending pairing wrote local trust grant")
+	}
+	if !containsEventKind(app.store.queryEvents("", "", 0), "control.pairing.requested") {
+		t.Fatalf("events = %#v, want pairing requested event", eventKinds(app.store.queryEvents("", "", 0)))
+	}
+}
+
+func TestCloudPairingApprovalResolvesCloudSignalAfterLocalTrust(t *testing.T) {
+	app, broker := testCloudApp(t)
+	defer broker.Close()
+	enableRemoteControlForCloudTest(t, app)
+
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	if err := app.cloudRegisterAndHeartbeat(t.Context(), client); err != nil {
+		t.Fatal(err)
+	}
+	controller := testControllerRegistration(t, "dev_phone")
+	res, err := httpClientPostJSON(broker.URL+"/v1/devices", "account-token", controller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("register controller status = %d", res.StatusCode)
+	}
+	signal, err := client.SubmitPairingSignal(t.Context(), cloudPairingSignalInput{
+		HostDeviceID:       app.store.hostInfo().Identity.DeviceID,
+		ControllerDeviceID: controller.DeviceID,
+		Scope:              TrustScopeFull,
+		Capabilities:       []string{CapabilityCoreRead, CapabilityTerminalOpen},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.cloudRegisterAndHeartbeat(t.Context(), client); err != nil {
+		t.Fatal(err)
+	}
+	requests := app.store.listPairingRequests()
+	if len(requests) != 1 {
+		t.Fatalf("pairing requests = %#v, want one local pending request", requests)
+	}
+
+	result, err := app.approvePairingRequest(requests[0].RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Grant == nil || result.Grant.ControllerDeviceID != controller.DeviceID {
+		t.Fatalf("approve result = %#v, want local trust grant", result)
+	}
+	if _, ok := app.store.trustedControlGrant(controller.DeviceID); !ok {
+		t.Fatal("approved cloud pairing did not write local trust grant")
+	}
+	signals, err := client.ListPairingSignals(t.Context(), app.store.hostInfo().Identity.DeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 1 || signals[0].RequestID != signal.RequestID || signals[0].Status != PairingStatusApproved {
+		t.Fatalf("cloud signals = %#v, want approved %s", signals, signal.RequestID)
+	}
+	if signals[0].ResolverDeviceID != app.store.hostInfo().Identity.DeviceID {
+		t.Fatalf("resolver = %q, want Host device id", signals[0].ResolverDeviceID)
+	}
+}
+
 func TestRemoteHostsIncludesCloudHostCandidatesWithoutGrantingControl(t *testing.T) {
 	app, broker := testCloudApp(t)
 	defer broker.Close()
@@ -176,7 +284,15 @@ func testCloudApp(t *testing.T) (*app, *httptest.Server) {
 	if _, err := settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
 		t.Fatal(err)
 	}
-	return &app{store: st, settings: settings}, broker
+	return &app{store: st, settings: settings, hub: newEventHub(), projections: newSessionProjectionCache()}, broker
+}
+
+func enableRemoteControlForCloudTest(t *testing.T, app *app) {
+	t.Helper()
+	enabled := true
+	if _, err := app.settings.patch(appSettingsPatch{RemoteControl: &remoteControlSettingsPatch{Enabled: &enabled}}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func testControllerRegistration(t *testing.T, deviceID string) cloudbroker.DeviceRegistration {

@@ -20,6 +20,8 @@ const (
 
 type PairingRequest struct {
 	RequestID                      string   `json:"request_id"`
+	Source                         string   `json:"source,omitempty"`
+	CloudRequestID                 string   `json:"cloud_request_id,omitempty"`
 	HostDeviceID                   string   `json:"host_device_id"`
 	ControllerDeviceID             string   `json:"controller_device_id"`
 	ControllerDeviceName           string   `json:"controller_device_name,omitempty"`
@@ -127,6 +129,103 @@ func (s *store) submitPairingRequest(input pairingRequestInput) (PairingRequest,
 	return request, nil
 }
 
+func (s *store) upsertCloudPairingRequest(signal CloudPairingSignal, controller CloudDeviceRecord) (PairingRequest, bool, error) {
+	cloudRequestID := strings.TrimSpace(signal.RequestID)
+	if cloudRequestID == "" {
+		return PairingRequest{}, false, newActionError(http.StatusBadRequest, "cloud_pairing_request_required", "cloud pairing request id required")
+	}
+	if strings.TrimSpace(signal.Status) != PairingStatusPending {
+		return PairingRequest{}, false, newActionError(http.StatusBadRequest, "cloud_pairing_status_invalid", "cloud pairing request must be pending")
+	}
+	if strings.TrimSpace(controller.DeviceID) != strings.TrimSpace(signal.ControllerDeviceID) {
+		return PairingRequest{}, false, newActionError(http.StatusBadRequest, "cloud_controller_mismatch", "cloud pairing controller device mismatch")
+	}
+	if !controller.CanControl {
+		return PairingRequest{}, false, newActionError(http.StatusBadRequest, "cloud_controller_role_required", "cloud controller device cannot control hosts")
+	}
+	if signal.ControllerPublicKeyFingerprint != "" && strings.TrimSpace(signal.ControllerPublicKeyFingerprint) != strings.TrimSpace(controller.PublicKeyFingerprint) {
+		return PairingRequest{}, false, newActionError(http.StatusBadRequest, "cloud_controller_fingerprint_mismatch", "cloud controller public key fingerprint mismatch")
+	}
+
+	request, err := s.validatedPairingRequest(pairingRequestInput{
+		ControllerDeviceID:             controller.DeviceID,
+		ControllerDeviceName:           controller.DeviceName,
+		ControllerDeviceKind:           controller.DeviceKind,
+		ControllerPublicKey:            controller.PublicKey,
+		ControllerPublicKeyFingerprint: controller.PublicKeyFingerprint,
+		Scope:                          signal.Scope,
+		Capabilities:                   signal.Capabilities,
+		WorkspaceExecPolicy:            signal.WorkspaceExecPolicy,
+	})
+	if err != nil {
+		return PairingRequest{}, false, err
+	}
+	request.RequestID = localCloudPairingRequestID(cloudRequestID)
+	request.Source = PairingRequestSourceCloud
+	request.CloudRequestID = cloudRequestID
+	if signal.CreatedAt != "" {
+		request.CreatedAt = strings.TrimSpace(signal.CreatedAt)
+	}
+	if signal.UpdatedAt != "" {
+		request.UpdatedAt = strings.TrimSpace(signal.UpdatedAt)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.trustedControlGrantLocked(request.ControllerDeviceID); ok {
+		return request, false, newActionError(http.StatusConflict, "controller_already_trusted", "controller is already trusted")
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if request.CreatedAt == "" {
+		request.CreatedAt = now
+	}
+	if request.UpdatedAt == "" {
+		request.UpdatedAt = now
+	}
+	if s.pairingRequests == nil {
+		s.pairingRequests = map[string]PairingRequest{}
+	}
+
+	if existing, ok := s.pairingRequests[request.RequestID]; ok {
+		if existing.CloudRequestID != "" && existing.CloudRequestID != request.CloudRequestID {
+			return PairingRequest{}, false, newActionError(http.StatusConflict, "pairing_request_id_conflict", "pairing request id conflict")
+		}
+		if existing.Status != PairingStatusPending {
+			return existing, false, nil
+		}
+		request.CreatedAt = existing.CreatedAt
+		if !cloudPairingRequestNeedsUpdate(existing, request) {
+			return existing, false, nil
+		}
+		s.pairingRequests[request.RequestID] = request
+		if err := s.writePairingRequestsLocked(); err != nil {
+			return PairingRequest{}, false, err
+		}
+		return request, false, nil
+	}
+
+	for id, existing := range s.pairingRequests {
+		if existing.Status == PairingStatusPending && existing.ControllerDeviceID == request.ControllerDeviceID && existing.ControllerPublicKey == request.ControllerPublicKey {
+			request.RequestID = existing.RequestID
+			request.CreatedAt = existing.CreatedAt
+			if !cloudPairingRequestNeedsUpdate(existing, request) {
+				return existing, false, nil
+			}
+			s.pairingRequests[id] = request
+			if err := s.writePairingRequestsLocked(); err != nil {
+				return PairingRequest{}, false, err
+			}
+			return request, false, nil
+		}
+	}
+
+	s.pairingRequests[request.RequestID] = request
+	if err := s.writePairingRequestsLocked(); err != nil {
+		return PairingRequest{}, false, err
+	}
+	return request, true, nil
+}
+
 func (s *store) validatedPairingRequest(input pairingRequestInput) (PairingRequest, error) {
 	controllerID := strings.TrimSpace(input.ControllerDeviceID)
 	if controllerID == "" {
@@ -209,6 +308,21 @@ func (s *store) pairingRequest(requestID string) (PairingRequest, bool) {
 	defer s.mu.Unlock()
 	request, ok := s.pairingRequests[requestID]
 	return request, ok
+}
+
+func (s *store) pairingRequestByCloudRequestID(cloudRequestID string) (PairingRequest, bool) {
+	cloudRequestID = strings.TrimSpace(cloudRequestID)
+	if cloudRequestID == "" {
+		return PairingRequest{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, request := range s.pairingRequests {
+		if request.CloudRequestID == cloudRequestID {
+			return request, true
+		}
+	}
+	return PairingRequest{}, false
 }
 
 func (s *store) approvePairingRequest(requestID string) (PairingRequest, TrustGrant, error) {
@@ -308,6 +422,8 @@ func pairingRequestTrustDeviceRequest(request PairingRequest) trustDeviceRequest
 
 func normalizePairingRequest(request PairingRequest) PairingRequest {
 	request.RequestID = strings.TrimSpace(request.RequestID)
+	request.Source = strings.TrimSpace(request.Source)
+	request.CloudRequestID = strings.TrimSpace(request.CloudRequestID)
 	request.HostDeviceID = strings.TrimSpace(request.HostDeviceID)
 	request.ControllerDeviceID = strings.TrimSpace(request.ControllerDeviceID)
 	request.ControllerDeviceName = strings.TrimSpace(request.ControllerDeviceName)
@@ -328,4 +444,40 @@ func normalizePairingRequest(request PairingRequest) PairingRequest {
 		request.WorkspaceExecPolicy = WorkspaceExecPolicyTrusted
 	}
 	return request
+}
+
+const PairingRequestSourceCloud = "cloud"
+
+func localCloudPairingRequestID(cloudRequestID string) string {
+	return "cloud_" + strings.TrimSpace(cloudRequestID)
+}
+
+func cloudPairingRequestNeedsUpdate(existing, next PairingRequest) bool {
+	existing = normalizePairingRequest(existing)
+	next = normalizePairingRequest(next)
+	if existing.RequestID != next.RequestID ||
+		existing.Source != next.Source ||
+		existing.CloudRequestID != next.CloudRequestID ||
+		existing.HostDeviceID != next.HostDeviceID ||
+		existing.ControllerDeviceID != next.ControllerDeviceID ||
+		existing.ControllerDeviceName != next.ControllerDeviceName ||
+		existing.ControllerDeviceKind != next.ControllerDeviceKind ||
+		existing.ControllerPublicKey != next.ControllerPublicKey ||
+		existing.ControllerPublicKeyFingerprint != next.ControllerPublicKeyFingerprint ||
+		existing.Scope != next.Scope ||
+		existing.Status != next.Status ||
+		existing.WorkspaceExecPolicy != next.WorkspaceExecPolicy ||
+		existing.CreatedAt != next.CreatedAt ||
+		existing.UpdatedAt != next.UpdatedAt {
+		return true
+	}
+	if len(existing.Capabilities) != len(next.Capabilities) {
+		return true
+	}
+	for i := range existing.Capabilities {
+		if existing.Capabilities[i] != next.Capabilities[i] {
+			return true
+		}
+	}
+	return false
 }

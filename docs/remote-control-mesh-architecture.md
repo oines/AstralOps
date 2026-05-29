@@ -202,6 +202,8 @@ POST /v1/cloud/pairing/requests/:request_id/resolve
 
 daemon 启动后如果 `cloud.enabled=true`，会自动向 cloud broker 注册当前设备并定时 heartbeat。关闭 cloud settings 时，daemon 会尝试把当前设备标记为 offline。自动同步只发送 public device identity、capabilities、can_host/can_control 和 presence，不发送工作区、session、事件、SSH 或路径数据。
 
+如果本机 `remote_control.enabled=true`，daemon 的 cloud sync 还会拉取 `host_device_id == 本机 device_id` 的 pending pairing request。这个同步只能把云端信令转换成 Host 本地 `PairingRequest(source=cloud, cloud_request_id=...)`，并通过 cloud device registry 取得 Controller 的 public key；它不能直接写入 `TrustGrant`。Host UI 或已有可信 `host.manage` Controller 批准/拒绝本地 request 后，Host 再把同一个 `cloud_request_id` 回写为 approved/denied。云端状态只是信令状态，真正可控条件仍然是 Host 本地 trust store、E2EE 握手和 capability 校验。
+
 `GET /v1/remote/hosts` 会把同账号 cloud devices 中 `can_host=true` 的设备并入远端 Host 候选列表。Cloud 候选只代表“账号下可发现的 Host 设备”，不代表已经获得控制权。真正发起远控 action 前仍必须满足：
 
 ```text
