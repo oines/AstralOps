@@ -192,6 +192,17 @@ POST /v1/cloud/pairing/requests/:request_id/resolve
 
 `/v1/cloud/devices` 注册的是当前 daemon 的 public device identity。默认 `can_control=true`，`can_host` 取本机 `remote_control.enabled`，调用方也可以在注册请求里显式覆盖。这个动作不会自动开启 Host listener；是否允许被远控仍然由本机 `remote_control` settings 决定。
 
+daemon 启动后如果 `cloud.enabled=true`，会自动向 cloud broker 注册当前设备并定时 heartbeat。关闭 cloud settings 时，daemon 会尝试把当前设备标记为 offline。自动同步只发送 public device identity、capabilities、can_host/can_control 和 presence，不发送工作区、session、事件、SSH 或路径数据。
+
+`GET /v1/remote/hosts` 会把同账号 cloud devices 中 `can_host=true` 的设备并入远端 Host 候选列表。Cloud 候选只代表“账号下可发现的 Host 设备”，不代表已经获得控制权。真正发起远控 action 前仍必须满足：
+
+```text
+本地已知 Host identity / known host 匹配
+Host 本地 trust grant 存在且未 revoked
+E2EE control channel 握手成功
+capability 校验通过
+```
+
 这些 API 只能处理云端允许的数据：
 
 ```text

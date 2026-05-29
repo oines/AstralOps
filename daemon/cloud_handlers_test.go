@@ -85,6 +85,75 @@ func TestCloudHandlersPairingSignalDoesNotWriteLocalTrust(t *testing.T) {
 	}
 }
 
+func TestCloudRuntimeRegistersCurrentDeviceFromSettings(t *testing.T) {
+	app, broker := testCloudApp(t)
+	defer broker.Close()
+
+	if err := app.cloudRegisterAndHeartbeat(t.Context(), CloudClient{BaseURL: broker.URL, Token: "account-token"}); err != nil {
+		t.Fatal(err)
+	}
+
+	devices := brokerDevices(t, broker)
+	if len(devices) != 1 {
+		t.Fatalf("devices = %#v, want one device", devices)
+	}
+	device := devices[0]
+	if device.DeviceID != app.store.hostInfo().Identity.DeviceID || device.PublicKeyFingerprint != app.store.hostInfo().Identity.PublicKeyFingerprint {
+		t.Fatalf("device = %#v, want current public identity", device)
+	}
+	if device.CanHost || !device.CanControl || device.Status != cloudDeviceStatusOnline {
+		t.Fatalf("device role/status = %#v", device)
+	}
+}
+
+func TestRemoteHostsIncludesCloudHostCandidatesWithoutGrantingControl(t *testing.T) {
+	app, broker := testCloudApp(t)
+	defer broker.Close()
+
+	host := testCloudDeviceRegistration(t, "dev_cloud_host", "desktop", true, true)
+	res, err := httpClientPostJSON(broker.URL+"/v1/devices", "account-token", host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("register cloud host status = %d", res.StatusCode)
+	}
+	phone := testCloudDeviceRegistration(t, "dev_phone", "mobile", false, true)
+	res, err = httpClientPostJSON(broker.URL+"/v1/devices", "account-token", phone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("register phone status = %d", res.StatusCode)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts", nil)
+	listResp := httptest.NewRecorder()
+	app.handleRemoteHosts(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("remote hosts status = %d body=%s", listResp.Code, listResp.Body.String())
+	}
+	var hosts remoteHostsResponse
+	if err := json.Unmarshal(listResp.Body.Bytes(), &hosts); err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts.Hosts) != 1 {
+		t.Fatalf("hosts = %#v, want only cloud desktop Host candidate", hosts.Hosts)
+	}
+	if hosts.Hosts[0].DeviceID != "dev_cloud_host" || hosts.Hosts[0].Connection != remoteHostStatusCloud || hosts.Hosts[0].Status != remoteHostStatusOnline {
+		t.Fatalf("cloud host = %#v", hosts.Hosts[0])
+	}
+
+	actionReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/dev_cloud_host/workspaces", nil)
+	actionResp := httptest.NewRecorder()
+	app.handleRemoteHostAction(actionResp, actionReq)
+	if actionResp.Code != http.StatusNotFound {
+		t.Fatalf("cloud-only Host action status = %d body=%s, want unknown until paired/known", actionResp.Code, actionResp.Body.String())
+	}
+}
+
 func testCloudApp(t *testing.T) (*app, *httptest.Server) {
 	t.Helper()
 	cloudStore, err := cloudbroker.LoadFileStore(t.TempDir() + "/cloud.json")
@@ -130,6 +199,50 @@ func testControllerRegistration(t *testing.T, deviceID string) cloudbroker.Devic
 		CanHost:              false,
 		CanControl:           true,
 	}
+}
+
+func testCloudDeviceRegistration(t *testing.T, deviceID, kind string, canHost, canControl bool) cloudbroker.DeviceRegistration {
+	t.Helper()
+	st, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := st.hostInfo().Identity
+	identity.DeviceID = deviceID
+	identity.DeviceKind = kind
+	identity.DeviceName = deviceID
+	return cloudbroker.DeviceRegistration{
+		DeviceID:             identity.DeviceID,
+		DeviceName:           identity.DeviceName,
+		DeviceKind:           identity.DeviceKind,
+		PublicKey:            identity.PublicKey,
+		PublicKeyFingerprint: identity.PublicKeyFingerprint,
+		Capabilities:         []string{CapabilityCoreRead, CapabilityTerminalOpen},
+		CanHost:              canHost,
+		CanControl:           canControl,
+	}
+}
+
+func brokerDevices(t *testing.T, broker *httptest.Server) []CloudDeviceRecord {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, broker.URL+"/v1/devices", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer account-token")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("devices status = %d", res.StatusCode)
+	}
+	var out cloudDeviceListResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Devices
 }
 
 func httpClientPostJSON(url, token string, body any) (*http.Response, error) {

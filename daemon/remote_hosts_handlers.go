@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 
 const (
 	remoteHostStatusLAN     = "lan"
+	remoteHostStatusCloud   = "cloud"
+	remoteHostStatusOnline  = "online"
 	remoteHostStatusOffline = "offline"
 	remoteHostDiscoveryTTL  = 1500 * time.Millisecond
 	remoteHostLANTimeout    = 2 * time.Second
@@ -46,6 +49,7 @@ func (a *app) handleRemoteHosts(w http.ResponseWriter, r *http.Request) {
 	for _, known := range a.store.listKnownHosts() {
 		hosts[known.DeviceID] = remoteHostRecordFromKnownHost(known)
 	}
+	a.mergeCloudRemoteHosts(r.Context(), hosts)
 	if truthyQuery(r.URL.Query().Get("discover")) {
 		a.mergeDiscoveredRemoteHosts(hosts)
 	}
@@ -55,13 +59,40 @@ func (a *app) handleRemoteHosts(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Connection != out[j].Connection {
-			return out[i].Connection == remoteHostStatusLAN
+			return remoteHostConnectionRank(out[i].Connection) < remoteHostConnectionRank(out[j].Connection)
 		}
 		left := strings.ToLower(firstString(out[i].DeviceName, out[i].DeviceID))
 		right := strings.ToLower(firstString(out[j].DeviceName, out[j].DeviceID))
 		return left < right
 	})
 	writeJSON(w, http.StatusOK, remoteHostsResponse{Hosts: out})
+}
+
+func (a *app) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remoteHostRecord) {
+	if a == nil || a.store == nil {
+		return
+	}
+	client, err := a.cloudClientFromSettings()
+	if err != nil {
+		return
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, cloudSyncTimeout)
+	defer cancel()
+	devices, err := client.ListDevices(reqCtx)
+	if err != nil {
+		return
+	}
+	selfID := a.store.hostInfo().Identity.DeviceID
+	for _, device := range devices {
+		if device.DeviceID == "" || device.DeviceID == selfID || !device.CanHost {
+			continue
+		}
+		existing := hosts[device.DeviceID]
+		if existing.PublicKeyFingerprint != "" && device.PublicKeyFingerprint != "" && existing.PublicKeyFingerprint != device.PublicKeyFingerprint {
+			continue
+		}
+		hosts[device.DeviceID] = remoteHostRecordFromCloudDevice(device, existing)
+	}
 }
 
 func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
@@ -86,6 +117,36 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 	}
 }
 
+func remoteHostRecordFromCloudDevice(device CloudDeviceRecord, existing remoteHostRecord) remoteHostRecord {
+	record := existing
+	if record.DeviceID == "" {
+		record.DeviceID = device.DeviceID
+	}
+	if record.DeviceName == "" {
+		record.DeviceName = device.DeviceName
+	}
+	if record.DeviceKind == "" {
+		record.DeviceKind = device.DeviceKind
+	}
+	if record.PublicKeyFingerprint == "" {
+		record.PublicKeyFingerprint = device.PublicKeyFingerprint
+	}
+	if len(record.Capabilities) == 0 {
+		record.Capabilities = normalizeCapabilities(device.Capabilities)
+	}
+	if record.Connection == remoteHostStatusLAN {
+		return record
+	}
+	if device.Status == cloudDeviceStatusOnline {
+		record.Status = remoteHostStatusOnline
+		record.Connection = remoteHostStatusCloud
+	} else if record.Connection == "" {
+		record.Status = remoteHostStatusOffline
+		record.Connection = remoteHostStatusOffline
+	}
+	return record
+}
+
 func remoteHostRecordFromKnownHost(host KnownHost) remoteHostRecord {
 	return remoteHostRecord{
 		DeviceID:             host.DeviceID,
@@ -94,6 +155,21 @@ func remoteHostRecordFromKnownHost(host KnownHost) remoteHostRecord {
 		Status:               remoteHostStatusOffline,
 		Connection:           remoteHostStatusOffline,
 		LastBaseURL:          host.LastBaseURL,
+	}
+}
+
+func remoteHostConnectionRank(connection string) int {
+	switch connection {
+	case remoteHostStatusLAN:
+		return 0
+	case remoteHostStatusCloud:
+		return 1
+	case "relay":
+		return 2
+	case remoteHostStatusOffline:
+		return 3
+	default:
+		return 4
 	}
 }
 

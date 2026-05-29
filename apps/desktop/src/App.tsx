@@ -762,7 +762,7 @@ export function App(): React.JSX.Element {
         id: host.device_id,
         name: host.device_name || host.device_id,
         kind: host.device_kind || "desktop",
-        subtitle: host.connection === "lan" ? "远端 Host · LAN" : "远端 Host",
+        subtitle: host.connection === "lan" ? "远端 Host · LAN" : host.connection === "cloud" ? "远端 Host · 云端" : "远端 Host",
         connection: host.connection,
       })),
     ],

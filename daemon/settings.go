@@ -433,15 +433,23 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		settings, err := a.settings.patchWithHook(patch, func(previous, next AppSettings) error {
-			if !remoteControlSettingsChanged(previous.RemoteControl, next.RemoteControl) {
-				return nil
+			if remoteControlSettingsChanged(previous.RemoteControl, next.RemoteControl) {
+				if err := a.applyRemoteControlSettings(next.RemoteControl); err != nil {
+					return err
+				}
+				if err := a.writeRuntimeFile(); err != nil {
+					return err
+				}
 			}
-			if err := a.applyRemoteControlSettings(next.RemoteControl); err != nil {
-				return err
+			if cloudSettingsChanged(previous.Cloud, next.Cloud) {
+				if err := a.applyCloudSettings(next.Cloud); err != nil {
+					return err
+				}
 			}
-			return a.writeRuntimeFile()
+			return nil
 		}, func(previous AppSettings) {
 			_ = a.applyRemoteControlSettings(previous.RemoteControl)
+			_ = a.applyCloudSettings(previous.Cloud)
 			_ = a.writeRuntimeFile()
 		})
 		if err != nil {

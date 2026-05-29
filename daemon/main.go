@@ -48,6 +48,9 @@ type app struct {
 	codexRemoteHome   map[string]string
 	remoteControlMu   sync.Mutex
 	remoteControl     *remoteControlRuntime
+	cloudMu           sync.Mutex
+	cloudCancel       context.CancelFunc
+	cloudSettings     CloudSettings
 }
 
 func main() {
@@ -109,6 +112,9 @@ func main() {
 	a.ssh.restorePersistedConnections(context.Background())
 
 	if err := a.applyRemoteControlSettings(a.currentSettings().RemoteControl); err != nil {
+		log.Fatal(err)
+	}
+	if err := a.applyCloudSettings(a.currentSettings().Cloud); err != nil {
 		log.Fatal(err)
 	}
 
