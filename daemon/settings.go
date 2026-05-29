@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,13 +15,16 @@ import (
 const appSettingsVersion = 1
 
 type AppSettings struct {
-	Version       int                  `json:"version"`
-	General       GeneralSettings      `json:"general"`
-	Appearance    AppearanceSettings   `json:"appearance"`
-	Session       SessionSettings      `json:"session"`
-	Workspace     WorkspaceSettings    `json:"workspace"`
-	Notifications NotificationSettings `json:"notifications"`
-	Updates       UpdateSettings       `json:"updates"`
+	Version       int                   `json:"version"`
+	General       GeneralSettings       `json:"general"`
+	Appearance    AppearanceSettings    `json:"appearance"`
+	Session       SessionSettings       `json:"session"`
+	Workspace     WorkspaceSettings     `json:"workspace"`
+	Notifications NotificationSettings  `json:"notifications"`
+	Diagnostics   DiagnosticSettings    `json:"diagnostics"`
+	RemoteControl RemoteControlSettings `json:"remote_control"`
+	Cloud         CloudSettings         `json:"cloud"`
+	Updates       UpdateSettings        `json:"updates"`
 }
 
 type GeneralSettings struct {
@@ -50,17 +54,36 @@ type NotificationSettings struct {
 	QuietWhenFocused bool `json:"quiet_when_focused"`
 }
 
+type DiagnosticSettings struct {
+	LoggingEnabled bool `json:"logging_enabled"`
+}
+
+type RemoteControlSettings struct {
+	Enabled      bool   `json:"enabled"`
+	ListenAddr   string `json:"listen_addr"`
+	LANDiscovery bool   `json:"lan_discovery"`
+}
+
+type CloudSettings struct {
+	Enabled      bool   `json:"enabled"`
+	BaseURL      string `json:"base_url,omitempty"`
+	AccountToken string `json:"account_token,omitempty"`
+}
+
 type UpdateSettings struct {
 	AutoCheck bool `json:"auto_check"`
 }
 
 type appSettingsPatch struct {
-	General       *generalSettingsPatch      `json:"general,omitempty"`
-	Appearance    *appearanceSettingsPatch   `json:"appearance,omitempty"`
-	Session       *sessionSettingsPatch      `json:"session,omitempty"`
-	Workspace     *workspaceSettingsPatch    `json:"workspace,omitempty"`
-	Notifications *notificationSettingsPatch `json:"notifications,omitempty"`
-	Updates       *updateSettingsPatch       `json:"updates,omitempty"`
+	General       *generalSettingsPatch       `json:"general,omitempty"`
+	Appearance    *appearanceSettingsPatch    `json:"appearance,omitempty"`
+	Session       *sessionSettingsPatch       `json:"session,omitempty"`
+	Workspace     *workspaceSettingsPatch     `json:"workspace,omitempty"`
+	Notifications *notificationSettingsPatch  `json:"notifications,omitempty"`
+	Diagnostics   *diagnosticSettingsPatch    `json:"diagnostics,omitempty"`
+	RemoteControl *remoteControlSettingsPatch `json:"remote_control,omitempty"`
+	Cloud         *cloudSettingsPatch         `json:"cloud,omitempty"`
+	Updates       *updateSettingsPatch        `json:"updates,omitempty"`
 }
 
 type generalSettingsPatch struct {
@@ -88,6 +111,22 @@ type notificationSettingsPatch struct {
 	TaskComplete     *bool `json:"task_complete,omitempty"`
 	RequiresAction   *bool `json:"requires_action,omitempty"`
 	QuietWhenFocused *bool `json:"quiet_when_focused,omitempty"`
+}
+
+type diagnosticSettingsPatch struct {
+	LoggingEnabled *bool `json:"logging_enabled,omitempty"`
+}
+
+type remoteControlSettingsPatch struct {
+	Enabled      *bool   `json:"enabled,omitempty"`
+	ListenAddr   *string `json:"listen_addr,omitempty"`
+	LANDiscovery *bool   `json:"lan_discovery,omitempty"`
+}
+
+type cloudSettingsPatch struct {
+	Enabled      *bool   `json:"enabled,omitempty"`
+	BaseURL      *string `json:"base_url,omitempty"`
+	AccountToken *string `json:"account_token,omitempty"`
 }
 
 type updateSettingsPatch struct {
@@ -125,6 +164,17 @@ func defaultAppSettings() AppSettings {
 			RequiresAction:   true,
 			QuietWhenFocused: false,
 		},
+		Diagnostics: DiagnosticSettings{
+			LoggingEnabled: false,
+		},
+		RemoteControl: RemoteControlSettings{
+			Enabled:      false,
+			ListenAddr:   defaultRemoteControlListenAddr,
+			LANDiscovery: true,
+		},
+		Cloud: CloudSettings{
+			Enabled: false,
+		},
 		Updates: UpdateSettings{
 			AutoCheck: true,
 		},
@@ -158,6 +208,10 @@ func (s *settingsStore) get() AppSettings {
 }
 
 func (s *settingsStore) patch(patch appSettingsPatch) (AppSettings, error) {
+	return s.patchWithHook(patch, nil, nil)
+}
+
+func (s *settingsStore) patchWithHook(patch appSettingsPatch, beforeCommit func(previous, next AppSettings) error, rollback func(previous AppSettings)) (AppSettings, error) {
 	if s == nil {
 		return AppSettings{}, errors.New("settings store is not initialized")
 	}
@@ -170,7 +224,15 @@ func (s *settingsStore) patch(patch appSettingsPatch) (AppSettings, error) {
 	if err := validateAppSettings(next); err != nil {
 		return s.settings, err
 	}
+	if beforeCommit != nil {
+		if err := beforeCommit(s.settings, next); err != nil {
+			return s.settings, err
+		}
+	}
 	if err := writeSettingsFile(s.path, next); err != nil {
+		if rollback != nil {
+			rollback(s.settings)
+		}
 		return s.settings, err
 	}
 	s.settings = next
@@ -222,6 +284,31 @@ func applySettingsPatch(settings *AppSettings, patch appSettingsPatch) {
 			settings.Notifications.QuietWhenFocused = *patch.Notifications.QuietWhenFocused
 		}
 	}
+	if patch.Diagnostics != nil && patch.Diagnostics.LoggingEnabled != nil {
+		settings.Diagnostics.LoggingEnabled = *patch.Diagnostics.LoggingEnabled
+	}
+	if patch.RemoteControl != nil {
+		if patch.RemoteControl.Enabled != nil {
+			settings.RemoteControl.Enabled = *patch.RemoteControl.Enabled
+		}
+		if patch.RemoteControl.ListenAddr != nil {
+			settings.RemoteControl.ListenAddr = strings.TrimSpace(*patch.RemoteControl.ListenAddr)
+		}
+		if patch.RemoteControl.LANDiscovery != nil {
+			settings.RemoteControl.LANDiscovery = *patch.RemoteControl.LANDiscovery
+		}
+	}
+	if patch.Cloud != nil {
+		if patch.Cloud.Enabled != nil {
+			settings.Cloud.Enabled = *patch.Cloud.Enabled
+		}
+		if patch.Cloud.BaseURL != nil {
+			settings.Cloud.BaseURL = strings.TrimSpace(*patch.Cloud.BaseURL)
+		}
+		if patch.Cloud.AccountToken != nil {
+			settings.Cloud.AccountToken = strings.TrimSpace(*patch.Cloud.AccountToken)
+		}
+	}
 	if patch.Updates != nil && patch.Updates.AutoCheck != nil {
 		settings.Updates.AutoCheck = *patch.Updates.AutoCheck
 	}
@@ -247,6 +334,11 @@ func normalizedAppSettings(settings AppSettings) AppSettings {
 	if settings.Workspace.DefaultOpener == "" {
 		settings.Workspace.DefaultOpener = "vscode"
 	}
+	if strings.TrimSpace(settings.RemoteControl.ListenAddr) == "" {
+		settings.RemoteControl.ListenAddr = defaultRemoteControlListenAddr
+	}
+	settings.Cloud.BaseURL = strings.TrimRight(strings.TrimSpace(settings.Cloud.BaseURL), "/")
+	settings.Cloud.AccountToken = strings.TrimSpace(settings.Cloud.AccountToken)
 	return settings
 }
 
@@ -268,6 +360,32 @@ func validateAppSettings(settings AppSettings) error {
 	}
 	if !oneOf(settings.Workspace.DefaultOpener, "vscode", "finder", "terminal") {
 		return fmt.Errorf("invalid workspace.default_opener %q", settings.Workspace.DefaultOpener)
+	}
+	if err := validateRemoteControlListenAddr(settings.RemoteControl.ListenAddr); err != nil {
+		return err
+	}
+	if err := validateCloudSettings(settings.Cloud); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateCloudSettings(settings CloudSettings) error {
+	if !settings.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(settings.BaseURL) == "" {
+		return fmt.Errorf("cloud.base_url required when cloud is enabled")
+	}
+	if strings.TrimSpace(settings.AccountToken) == "" {
+		return fmt.Errorf("cloud.account_token required when cloud is enabled")
+	}
+	parsed, err := url.Parse(settings.BaseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("invalid cloud.base_url %q", settings.BaseURL)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("invalid cloud.base_url %q: scheme must be http or https", settings.BaseURL)
 	}
 	return nil
 }
@@ -330,7 +448,32 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		settings, err := a.settings.patch(patch)
+		settings, err := a.settings.patchWithHook(patch, func(previous, next AppSettings) error {
+			if previous.Diagnostics.LoggingEnabled != next.Diagnostics.LoggingEnabled {
+				if err := configureDaemonDiagnosticLogging(a.store.dataDir, next.Diagnostics.LoggingEnabled, true); err != nil {
+					return err
+				}
+			}
+			if remoteControlSettingsChanged(previous.RemoteControl, next.RemoteControl) {
+				if err := a.applyRemoteControlSettings(next.RemoteControl); err != nil {
+					return err
+				}
+				if err := a.writeRuntimeFile(); err != nil {
+					return err
+				}
+			}
+			if cloudSettingsChanged(previous.Cloud, next.Cloud) {
+				if err := a.applyCloudSettings(next.Cloud); err != nil {
+					return err
+				}
+			}
+			return nil
+		}, func(previous AppSettings) {
+			_ = configureDaemonDiagnosticLogging(a.store.dataDir, previous.Diagnostics.LoggingEnabled, false)
+			_ = a.applyRemoteControlSettings(previous.RemoteControl)
+			_ = a.applyCloudSettings(previous.Cloud)
+			_ = a.writeRuntimeFile()
+		})
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return

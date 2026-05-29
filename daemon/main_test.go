@@ -165,6 +165,56 @@ func TestRemoteHelperCandidatesUseRuntimeFallbackOrder(t *testing.T) {
 	}
 }
 
+func TestSSHBrowseSessionKeyReusesEndpointPort(t *testing.T) {
+	ws := Workspace{
+		ID:     "fsbrowse_one",
+		Target: "ssh",
+		SSH:    &SSHConfig{Endpoint: " alice@example.com ", RemoteCWD: "/srv/one"},
+	}
+	sameEndpoint := Workspace{
+		ID:     "fsbrowse_two",
+		Target: "ssh",
+		SSH:    &SSHConfig{Endpoint: "alice@example.com", Port: 22, RemoteCWD: "/srv/two"},
+	}
+	differentPort := Workspace{
+		ID:     "fsbrowse_three",
+		Target: "ssh",
+		SSH:    &SSHConfig{Endpoint: "alice@example.com", Port: 2222, RemoteCWD: "/srv/one"},
+	}
+
+	key := sshBrowseSessionKey(ws)
+	if key == "" {
+		t.Fatal("browse session key is empty")
+	}
+	if key != sshBrowseSessionKey(sameEndpoint) {
+		t.Fatal("same endpoint/default port did not reuse the browse session key")
+	}
+	if key == sshBrowseSessionKey(differentPort) {
+		t.Fatal("different ssh port reused the same browse session key")
+	}
+}
+
+func TestHelperBinaryFreshUsesProxyAgentSources(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proxyDir := filepath.Join(dir, "proxy-agent")
+	if err := os.MkdirAll(proxyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proxyDir, "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if !helperBinaryFresh(dir, time.Now().Add(time.Hour)) {
+		t.Fatal("helper built after sources should be fresh")
+	}
+	if helperBinaryFresh(dir, time.Now().Add(-time.Hour)) {
+		t.Fatal("helper built before sources should be stale")
+	}
+}
+
 func TestProjectionRemoteIOUsesBase64ForBinary(t *testing.T) {
 	body := []byte{0, 1, 2, 0xff, '\n'}
 	params := remoteWriteParams("/root/blob.bin", body)
@@ -1841,7 +1891,7 @@ func TestValidateProxyHelloRequiresCoreExecutionMethods(t *testing.T) {
 	err = validateProxyHello(map[string]any{
 		"version": "0.1.0",
 		"capabilities": map[string]any{"methods": []string{
-			"hello", "read", "write", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill",
+			"hello", "read", "read_range", "write", "remove", "move", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill",
 		}},
 	})
 	if err != nil {
@@ -4699,6 +4749,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 		t.Fatal(err)
 	}
 	waitForKind(t, app.store, session.ID, "turn.completed")
+	waitForKind(t, app.store, session.ID, "control.notification")
 
 	gotKinds := eventKinds(app.store.queryEvents(workspace.ID, session.ID, 0))
 	wantKinds := []string{"message.user", "turn.started", "session.native", "message.delta", "turn.completed", "control.notification"}
@@ -5235,7 +5286,7 @@ if [[ "$args" == *"exec "*"astral-proxy-agent"* ]]; then
 import os
 for line in sys.stdin:
     req = json.loads(line)
-    methods = ["hello", "read", "write", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill"]
+    methods = ["hello", "read", "read_range", "write", "remove", "move", "list", "stat", "exec_start", "exec_kill", "pty_start", "pty_kill"]
     if os.environ.get("ASTRALOPS_TEST_PROXY_OLD_UNTIL_UPLOAD") == "1" and not os.path.exists(os.environ["ASTRALOPS_TEST_PROXY_UPGRADE_MARKER"]):
         methods = ["hello", "read", "write", "list", "stat"]
     print(json.dumps({"id": req.get("id"), "result": {"shell": "/bin/sh", "user": "root", "hostname": "host", "capabilities": {"methods": methods}}}), flush=True)'
@@ -5338,6 +5389,7 @@ func TestCodexLocalRuntimeStreamsFakeAppServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForKind(t, app.store, session.ID, "turn.completed")
+	waitForKind(t, app.store, session.ID, "control.notification")
 
 	gotKinds := eventKinds(app.store.queryEvents(workspace.ID, session.ID, 0))
 	wantKinds := []string{
@@ -6084,12 +6136,18 @@ for line in sys.stdin:
     result = {}
     error = None
     if method == "hello":
-        result = {"version":"fake","capabilities":{"methods":["hello","read","dirs","write","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
+        result = {"version":"fake","capabilities":{"methods":["hello","read","read_range","dirs","write","remove","move","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
     elif method == "stat":
         result = {"path": params.get("path"), "size": 12}
     elif method == "read":
         body = "remote read\n"
         result = {"path": params.get("path"), "content": body, "dataBase64": base64.b64encode(body.encode()).decode()}
+    elif method == "read_range":
+        body = "remote read\n".encode()
+        offset = int(params.get("offset") or 0)
+        length = int(params.get("length") or 65536)
+        chunk = body[offset:offset + length]
+        result = {"path": params.get("path"), "offset": offset, "bytes": len(chunk), "dataBase64": base64.b64encode(chunk).decode(), "eof": offset + len(chunk) >= len(body)}
     elif method == "glob":
         result = {"matches": ["/remote/project/src/main.go"], "backend": "fake"}
     elif method == "grep":
@@ -6196,10 +6254,16 @@ for line in sys.stdin:
     error = None
     try:
         if method == "hello":
-            result = {"version":"fake","capabilities":{"methods":["hello","read","dirs","write","mkdir","remove","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
+            result = {"version":"fake","capabilities":{"methods":["hello","read","read_range","dirs","write","mkdir","remove","move","list","stat","glob","grep","exec_start","exec_kill","pty_start","pty_kill"]}}
         elif method == "read":
             body = read_file(params.get("path"))
             result = {"path": clean_remote(params.get("path")), "content": body.decode("utf-8", "replace"), "dataBase64": base64.b64encode(body).decode()}
+        elif method == "read_range":
+            body = read_file(params.get("path"))
+            offset = int(params.get("offset") or 0)
+            length = int(params.get("length") or 65536)
+            chunk = body[offset:offset + length]
+            result = {"path": clean_remote(params.get("path")), "offset": offset, "bytes": len(chunk), "dataBase64": base64.b64encode(chunk).decode(), "eof": offset + len(chunk) >= len(body)}
         elif method == "write":
             if params.get("dataBase64"):
                 body = base64.b64decode(params.get("dataBase64"))
@@ -6220,6 +6284,19 @@ for line in sys.stdin:
             elif not params.get("force", True):
                 raise FileNotFoundError(clean_remote(params.get("path")))
             result = {"path": clean_remote(params.get("path"))}
+        elif method == "move":
+            source = local_path(params.get("source"))
+            destination = local_path(params.get("destination"))
+            if params.get("create_parents"):
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+            if os.path.exists(destination):
+                if not params.get("overwrite"):
+                    raise FileExistsError(clean_remote(params.get("destination")))
+                if os.path.isdir(destination):
+                    raise IsADirectoryError(clean_remote(params.get("destination")))
+                os.remove(destination)
+            os.rename(source, destination)
+            result = {"source": clean_remote(params.get("source")), "destination": clean_remote(params.get("destination"))}
         elif method == "dirs":
             dirs, files, truncated = list_dirs(params.get("path") or remote_cwd, int(params.get("limit") or 5000))
             result = {"dirs": dirs, "files": files, "truncated": truncated}
@@ -6318,6 +6395,15 @@ func startTestAppServer(t *testing.T, app *app) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", app.handleHealth)
+	mux.HandleFunc("/v1/control/ws", app.handleControlWS)
+	mux.HandleFunc("/v1/host", app.auth(app.handleHost))
+	mux.HandleFunc("/v1/pairing/requests", app.auth(app.handlePairingRequests))
+	mux.HandleFunc("/v1/pairing/requests/", app.auth(app.handlePairingRequestAction))
+	mux.HandleFunc("/v1/trust/devices", app.auth(app.handleTrustDevices))
+	mux.HandleFunc("/v1/trust/devices/", app.auth(app.handleTrustDeviceAction))
+	mux.HandleFunc("/v1/remote/hosts", app.auth(app.handleRemoteHosts))
+	mux.HandleFunc("/v1/remote/hosts/", app.auth(app.handleRemoteHostAction))
+	mux.HandleFunc("/v1/fs/browse", app.auth(app.handleHostFileSystemBrowse))
 	mux.HandleFunc("/v1/workspaces", app.auth(app.handleWorkspaces))
 	mux.HandleFunc("/v1/workspaces/", app.auth(app.handleWorkspaceAction))
 	mux.HandleFunc("/v1/codex-exec/", app.auth(app.handleCodexExecServerWS))

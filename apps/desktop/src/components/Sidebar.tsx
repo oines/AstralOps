@@ -1,18 +1,21 @@
-import { Bot, Check, ChevronRight, Folder, Link2, LoaderCircle, Plus, Settings, TerminalSquare, Trash2, Unlink2 } from "lucide-react";
+import { Bot, Check, ChevronDown, ChevronRight, Folder, Laptop, Link2, LoaderCircle, Plus, Settings, Smartphone, TerminalSquare, Trash2, Unlink2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AgentKind, Session, Workspace, WorkspaceConnection } from "../types";
 
 type SidebarProps = {
   activeSessionId: string;
+  activeHostId: string;
   collapsed: boolean;
   defaultSessionAgent: AgentKind;
+  hosts: SidebarHost[];
   nativeVibrancy: boolean;
   sessions: Session[];
   sessionStates: Record<string, string>;
   sessionTitles: Record<string, string>;
   width: number;
   workspaces: Workspace[];
+  workspaceActionsDisabled?: boolean;
   workspaceConnections: Record<string, WorkspaceConnection>;
   onCreateSession: (workspaceId: string, agent: AgentKind) => Promise<void>;
   onConnectWorkspace: (workspaceId: string) => void;
@@ -22,20 +25,32 @@ type SidebarProps = {
   onDeleteWorkspace: (workspaceId: string) => void;
   onOpenSettings: () => void;
   onResize: (width: number) => void;
+  onSelectHost: (hostId: string) => void;
   onSelectSession: (sessionId: string) => void;
   onSelectWorkspace: (workspaceId: string) => void;
 };
 
+export type SidebarHost = {
+  connection: "local" | "lan" | "relay" | "offline" | string;
+  id: string;
+  kind: "desktop" | "mobile" | string;
+  name: string;
+  subtitle: string;
+};
+
 export function Sidebar({
   activeSessionId,
+  activeHostId,
   collapsed,
   defaultSessionAgent,
+  hosts,
   nativeVibrancy,
   sessions,
   sessionStates,
   sessionTitles,
   width,
   workspaces,
+  workspaceActionsDisabled = false,
   workspaceConnections,
   onCreateSession,
   onConnectWorkspace,
@@ -45,13 +60,26 @@ export function Sidebar({
   onDeleteWorkspace,
   onOpenSettings,
   onResize,
+  onSelectHost,
   onSelectSession,
 }: SidebarProps): React.JSX.Element {
+  const [hostMenuOpen, setHostMenuOpen] = useState(false);
   const [menuWorkspaceId, setMenuWorkspaceId] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<{ type: "workspace" | "session"; id: string } | null>(null);
   const [collapsedWorkspaceIds, setCollapsedWorkspaceIds] = useState<Set<string>>(new Set());
   const [dragging, setDragging] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const activeHost = hosts.find((host) => host.id === activeHostId) ?? hosts[0] ?? null;
+
+  useEffect(() => {
+    if (!hostMenuOpen) return;
+    function close(event: PointerEvent): void {
+      if ((event.target as Element | null)?.closest("[data-host-selector]")) return;
+      setHostMenuOpen(false);
+    }
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [hostMenuOpen]);
 
   useEffect(() => {
     if (!menuWorkspaceId) return;
@@ -121,10 +149,56 @@ export function Sidebar({
       <div className={`flex h-full flex-col transition-[opacity,transform] duration-180 ease-out ${collapsed ? "pointer-events-none -translate-x-2 opacity-0" : "translate-x-0 opacity-100"}`} style={{ width }}>
       <div className="[-webkit-app-region:drag] h-[52px] shrink-0" />
 
+      <div className="relative px-3 pb-3" data-host-selector>
+        <button
+          className="[-webkit-app-region:no-drag] flex min-h-12 w-full items-center gap-2.5 rounded-lg px-2 text-left text-[#242426] transition-colors duration-150 ease-out hover:bg-black/[0.045]"
+          type="button"
+          aria-expanded={hostMenuOpen}
+          onClick={() => setHostMenuOpen((current) => !current)}
+        >
+          <HostIcon kind={activeHost?.kind} />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[13px] font-bold leading-5">{activeHost?.name || "本机"}</div>
+            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] font-semibold leading-4 text-[var(--ao-muted)]">
+              <span className="truncate">{activeHost?.subtitle || "本机 Host"}</span>
+              <span className="shrink-0 text-[var(--ao-subtle)]">{hostConnectionLabel(activeHost?.connection)}</span>
+            </div>
+          </div>
+          <ChevronDown className={`shrink-0 text-[var(--ao-muted-strong)] transition-transform ${hostMenuOpen ? "rotate-180" : ""}`} size={15} strokeWidth={1.9} />
+        </button>
+        {hostMenuOpen ? (
+          <div className="absolute left-3 right-3 top-[54px] z-[var(--ao-z-chrome-menu)] grid gap-1 rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)] p-1.5 shadow-[var(--ao-shadow-popover)]">
+            {hosts.map((host) => (
+              <button
+                className={`flex h-10 min-w-0 items-center gap-2 rounded-md px-2 text-left transition-colors ${
+                  host.id === activeHost?.id ? "bg-black/[0.06] text-[var(--ao-text)]" : "text-[var(--ao-text-soft)] hover:bg-black/[0.045] hover:text-[var(--ao-text)]"
+                }`}
+                key={host.id}
+                type="button"
+                onClick={() => {
+                  onSelectHost(host.id);
+                  setHostMenuOpen(false);
+                }}
+              >
+                <HostIcon kind={host.kind} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[12px] font-bold leading-4">{host.name}</div>
+                  <div className="truncate text-[11px] font-semibold leading-4 text-[var(--ao-muted)]">{host.subtitle}</div>
+                </div>
+                {host.id === activeHost?.id ? <Check size={14} strokeWidth={2.1} /> : <span className="size-[14px]" />}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
       <nav className="grid gap-1 px-3 pb-6">
         <button
-          className="flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-left text-[14px] font-semibold text-[#242426] transition-colors duration-150 ease-out hover:bg-black/5"
+          className={`flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-left text-[14px] font-semibold transition-colors duration-150 ease-out ${
+            workspaceActionsDisabled ? "cursor-default text-[#a0a3a7]" : "text-[#242426] hover:bg-black/5"
+          }`}
           type="button"
+          disabled={workspaceActionsDisabled}
           onClick={onCreateWorkspace}
         >
           <Plus size={18} strokeWidth={2.1} />
@@ -135,11 +209,14 @@ export function Sidebar({
       <nav className="min-h-0 flex-1 overflow-auto px-3 pb-4">
         {workspaces.length === 0 ? (
           <button
-            className="mx-2 mt-1 w-[calc(100%-16px)] rounded-lg border border-dashed border-black/15 px-3 py-2 text-center text-[13px] font-semibold text-[#6b6b70] hover:bg-black/5 hover:text-[#1d1d1f]"
+            className={`mx-2 mt-1 w-[calc(100%-16px)] rounded-lg border border-dashed border-black/15 px-3 py-2 text-center text-[13px] font-semibold ${
+              workspaceActionsDisabled ? "cursor-default text-[#a0a3a7]" : "text-[#6b6b70] hover:bg-black/5 hover:text-[#1d1d1f]"
+            }`}
             type="button"
+            disabled={workspaceActionsDisabled}
             onClick={onCreateWorkspace}
           >
-            创建第一个 workspace
+            {workspaceActionsDisabled ? "等待配对" : "创建第一个 workspace"}
           </button>
         ) : null}
 
@@ -533,6 +610,32 @@ function SessionRow({
 
 function agentLabel(agent: AgentKind): string {
   return agent === "claude" ? "Claude Code" : "Codex";
+}
+
+function HostIcon({ kind }: { kind?: string }): React.JSX.Element {
+  const Icon = kind === "mobile" ? Smartphone : Laptop;
+  return (
+    <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-black/[0.045] text-[var(--ao-muted-strong)]">
+      <Icon size={16} strokeWidth={1.9} />
+    </span>
+  );
+}
+
+function hostConnectionLabel(connection?: string): string {
+  switch (connection) {
+    case "local":
+      return "本机";
+    case "lan":
+      return "LAN";
+    case "relay":
+      return "Relay";
+    case "cloud":
+      return "云端";
+    case "offline":
+      return "离线";
+    default:
+      return "";
+  }
 }
 
 function relativeSessionTime(timestamp: string | undefined, now: number): string {

@@ -15,50 +15,51 @@ type editLastUserMessageRequest struct {
 }
 
 func (a *app) handleEditLastUserMessage(w http.ResponseWriter, sessionID string, req editLastUserMessageRequest) {
+	result, err := a.editLastUserMessage(sessionID, req)
+	if err != nil {
+		writeActionError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *app) editLastUserMessage(sessionID string, req editLastUserMessageRequest) (map[string]any, error) {
 	input := strings.TrimSpace(req.Input)
 	if input == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "input required"})
-		return
+		return nil, newActionError(http.StatusBadRequest, "input_required", "input required")
 	}
 	ss, ok := a.store.getSession(sessionID)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
-		return
+		return nil, newActionError(http.StatusNotFound, "session_not_found", "session not found")
 	}
 	if ss.Agent != AgentCodex {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "Claude Code does not support editing and resending the last user message"})
-		return
+		return nil, newActionError(http.StatusNotImplemented, "edit_unsupported", "Claude Code does not support editing and resending the last user message")
 	}
 	ws, ok := a.store.getWorkspace(ss.WorkspaceID)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
-		return
+		return nil, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found")
 	}
 	events := a.store.queryEvents("", sessionID, 0)
 	pending := projectPendingInteraction(events)
 	status := projectedSessionStatus(ss, events, pending != nil)
 	editable := projectEditableUserMessage(ss, events, status)
 	if editable == nil || editable.EventSeq != req.EventSeq {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "editable user message is stale"})
-		return
+		return nil, newActionError(http.StatusConflict, "editable_message_stale", "editable user message is stale")
 	}
 	runtime, ok := a.runtimes[ss.Agent]
 	if !ok {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "agent runtime is not implemented"})
-		return
+		return nil, newActionError(http.StatusNotImplemented, "runtime_not_implemented", "agent runtime is not implemented")
 	}
 	editor, ok := runtime.(LastUserMessageEditor)
 	if !ok {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "agent runtime does not support editing and resending the last user message"})
-		return
+		return nil, newActionError(http.StatusNotImplemented, "edit_unsupported", "agent runtime does not support editing and resending the last user message")
 	}
 	if err := editor.EditLastUserMessageAndResend(ss, ws, input, TurnOptions{Model: req.Model, ReasoningEffort: req.ReasoningEffort, PermissionMode: req.PermissionMode}); err != nil {
 		statusCode := http.StatusBadRequest
 		if errors.Is(err, ErrSessionRunning) {
 			statusCode = http.StatusConflict
 		}
-		writeJSON(w, statusCode, map[string]string{"error": err.Error()})
-		return
+		return nil, newActionError(statusCode, "edit_failed", err.Error())
 	}
 	if startSeq, endSeq := userTurnSeqRange(a.store.queryEvents("", sessionID, 0), req.EventSeq); startSeq > 0 && endSeq >= startSeq {
 		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "turn.replaced", Normalized: map[string]any{
@@ -69,7 +70,7 @@ func (a *app) handleEditLastUserMessage(w http.ResponseWriter, sessionID string,
 			"hidden":         true,
 		}})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	return map[string]any{"ok": true}, nil
 }
 
 func userTurnSeqRange(events []AstralEvent, userEventSeq int64) (int64, int64) {

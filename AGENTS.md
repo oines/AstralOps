@@ -73,6 +73,9 @@ If an event is not covered by a fixture, preserve it only as hidden control.raw 
 Do not add "best guess" UI branches for event names that have not been observed locally.
 turn.replaced is an AstralOps/Core-generated semantic event, not a Claude/Codex raw mapping. It marks a replaced transcript seq range after editing and resending the last user message. Normal transcript, pending interaction projection, and interaction responses must treat events in that seq range as stale/hidden.
 message.user attachments and message.media are first-class transcript media surfaces. UI clients render media from AstralEvent.normalized only. Local filesystem paths in normalized media are Host-private references for Core/runtime/media serving; clients must not treat them as directly readable remote paths. Remote controllers must fetch media through Host/Core media capabilities using event_seq + media_id over the encrypted control/data channel.
+Remote control event projection must strip Host/runtime internals such as raw payloads, native session/thread IDs, local workspace paths, SSH config, and private transcript media paths before sending events to Controllers.
+Cloud device registry and relay code may store or route only account/device public metadata, presence, routing metadata, trust/revocation state, and opaque sealed envelopes. Do not add cloud fields for workspace/session/event payloads, prompts, approvals, file trees, PTY output, SSH config, attachments, or media content.
+Session input while a turn is running must be modeled as an explicit Core decision: start, queue, or steer. Controller UI must not independently decide continuation semantics for remote control. Desktop app settings, shell theme/window behavior, notifications, logs, and auto updates are local shell concerns unless a future Host management capability explicitly says otherwise.
 ```
 
 Architecture and fallback rule:
@@ -81,6 +84,12 @@ Architecture and fallback rule:
 Do not add speculative fallback logic, broad catch-all mappings, or redundant defensive branches to make an uncertain case appear handled.
 Every behavior mapping, permission response, state transition, and UI surface must be backed by a real Claude/Codex fixture, source-backed protocol shape, or an explicit rule in this file.
 If a real issue points to an architectural mismatch, stop and identify the architectural fix or refactor boundary for user confirmation instead of layering another patch on top of the mismatch.
+For any active goal or implementation task, if the chosen path starts looking like a dead end, disproportionally complex, or misaligned with the product goal, pause before continuing and reassess whether this route is still worth doing. Compare it against simpler technical choices and the intended architecture, state the route judgment, then continue only when the chosen route is still justified.
+Long-running goals must carry this route-judgment constraint in the goal itself, not only in chat context. If the active goal does not include it, update the goal before continuing infrastructure work.
+Route judgment is part of the task, not optional commentary: when uncertainty or complexity appears, explicitly name the product goal, the simpler alternative, and why continuing or changing course fits the architecture before making more infrastructure edits.
+Do not keep drilling into a complex approach merely because work has already started. Prefer changing course early when a simpler, better-scoped infrastructure choice fits the architecture.
+路线判断原则：当实现开始变得绕、依赖不稳定、测试环境牵扯过多，或技术选型像 LAN discovery/mDNS 这类方向出现明显阻力时，先停止扩写代码，重新比较产品目标、最小可行基础设施、可替代技术选型和维护成本。只有在这条路线仍明显优于更简单方案时才继续；否则及时改道。
+远控基础设施任务开始前必须先做路线判断：明确它服务的产品目标、为什么属于 Host/Core 基础设施而不是 UI/mobile 表面、是否存在更简单的协议或系统能力可用。若当前路线需要过多兼容层、环境假设或 speculative fallback，先改道或向用户确认，不要继续堆代码。
 Prefer deleting or narrowing unsupported branches over preserving "just in case" behavior.
 Temporary compatibility code is allowed only when tied to a specific observed version/shape and documented with the fixture or source evidence that requires it.
 When implementing a requested feature, if you notice clearly problematic code quality elsewhere that is outside the feature scope, do not silently fix or refactor it unless required for the task. Finish the requested feature, then report the observed issue to the user with the relevant file/path and why it matters.
@@ -112,6 +121,7 @@ UI implementation rule:
 Desktop UI visual language, density, spacing, radius, platform integration, settings layout, controls, and transcript display norms are documented in docs/desktop-ui-design-language.md and should be followed for desktop React/Electron UI changes.
 Visible UI copy must not use emoji or decorative Unicode symbols. Use plain text and lucide icons for affordances/status. Keyboard hints must be plain labels such as Enter, Cmd+Enter, or ESC.
 Permission, command, file-change, Ask, MCP elicitation, and plan confirmation surfaces must show the concrete decision target from AstralEvent.normalized, such as command, cwd, tool name, reason, file/change summary, prompt, or params. Do not show generic approval text when normalized data contains a more specific target.
+Pending interaction detail rows must carry machine-readable keys such as `command`, `cwd`, `path`, or `reason`; Core/Gateway logic must branch on those keys, not translated UI labels.
 ```
 
 ## Current event coverage audit

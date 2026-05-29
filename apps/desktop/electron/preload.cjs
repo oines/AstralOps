@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld("astral", {
   getWorkspaceOpeners: () => ipcRenderer.invoke("astral:get-workspace-openers"),
   openWorkspace: (opener, workspace) => ipcRenderer.invoke("astral:open-workspace", opener, workspace),
   openLogsDirectory: () => ipcRenderer.invoke("astral:open-logs-directory"),
+  logClientEvent: (payload) => ipcRenderer.invoke("astral:log-client-event", payload),
+  setDiagnosticsLoggingEnabled: (enabled) => ipcRenderer.invoke("astral:set-diagnostics-logging-enabled", enabled),
   setThemeSource: (theme) => ipcRenderer.invoke("astral:set-theme-source", theme),
   getUpdateStatus: () => ipcRenderer.invoke("astral:get-update-status"),
   checkForUpdates: (options) => ipcRenderer.invoke("astral:check-for-updates", options),

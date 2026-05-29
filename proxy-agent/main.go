@@ -31,10 +31,12 @@ var supportedMethods = []string{
 	"stat",
 	"list",
 	"read",
+	"read_range",
 	"dirs",
 	"write",
 	"mkdir",
 	"remove",
+	"move",
 	"copy",
 	"glob",
 	"grep",
@@ -249,6 +251,12 @@ func dispatch(req request) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"path": path, "content": string(body), "dataBase64": base64.StdEncoding.EncodeToString(body)}, nil
+	case "read_range":
+		var p readRangeParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return readRange(p)
 	case "dirs":
 		var p dirsParams
 		if err := parse(req.Params, &p); err != nil {
@@ -312,6 +320,12 @@ func dispatch(req request) (any, error) {
 			return map[string]any{"path": path}, os.Remove(path)
 		}
 		return map[string]any{"path": path}, os.Remove(path)
+	case "move":
+		var p moveParams
+		if err := parse(req.Params, &p); err != nil {
+			return nil, err
+		}
+		return movePath(p)
 	case "copy":
 		var p copyParams
 		if err := parse(req.Params, &p); err != nil {
@@ -413,6 +427,19 @@ type removeParams struct {
 	Path      string `json:"path"`
 	Recursive *bool  `json:"recursive"`
 	Force     *bool  `json:"force"`
+}
+
+type moveParams struct {
+	Source        string `json:"source"`
+	Destination   string `json:"destination"`
+	Overwrite     bool   `json:"overwrite"`
+	CreateParents bool   `json:"create_parents"`
+}
+
+type readRangeParams struct {
+	Path   string `json:"path"`
+	Offset int64  `json:"offset"`
+	Length int    `json:"length"`
 }
 
 type writeParams struct {
@@ -1093,6 +1120,84 @@ func destinationIsSameOrDescendant(src, dst string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+func movePath(p moveParams) (any, error) {
+	src, err := resolveRemotePath(p.Source)
+	if err != nil {
+		return nil, err
+	}
+	dst, err := resolveRemotePath(p.Destination)
+	if err != nil {
+		return nil, err
+	}
+	if src == dst {
+		return nil, errors.New("source and destination are the same path")
+	}
+	info, err := os.Lstat(src)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() && destinationIsSameOrDescendant(src, dst) {
+		return nil, errors.New("cannot move a directory to itself or a descendant")
+	}
+	if p.CreateParents {
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return nil, err
+		}
+	}
+	dstInfo, err := os.Lstat(dst)
+	if err == nil {
+		if !p.Overwrite {
+			return nil, errors.New("destination already exists")
+		}
+		if dstInfo.IsDir() {
+			return nil, errors.New("destination already exists and is a directory")
+		}
+		if err := os.Remove(dst); err != nil {
+			return nil, err
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return nil, err
+	}
+	return map[string]any{"source": src, "destination": dst}, nil
+}
+
+func readRange(p readRangeParams) (any, error) {
+	path, err := resolveRemotePath(p.Path)
+	if err != nil {
+		return nil, err
+	}
+	if p.Offset < 0 {
+		return nil, errors.New("offset must be >= 0")
+	}
+	length := p.Length
+	if length <= 0 || length > 256*1024 {
+		length = 64 * 1024
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if _, err := file.Seek(p.Offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, length)
+	n, err := file.Read(buf)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return map[string]any{
+		"path":       path,
+		"offset":     p.Offset,
+		"bytes":      n,
+		"dataBase64": base64.StdEncoding.EncodeToString(buf[:n]),
+		"eof":        err == io.EOF,
+	}, nil
 }
 
 func applyPatch(p applyPatchParams) (any, error) {

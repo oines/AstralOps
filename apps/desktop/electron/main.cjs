@@ -32,6 +32,150 @@ function runtimePath() {
   return path.join(dataDir(), "runtime", "daemon.json");
 }
 
+function logsDir() {
+  return path.join(dataDir(), "logs");
+}
+
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
+const LOG_BACKUPS = 4;
+const DESKTOP_LOG_FILE = "desktop.txt";
+const DAEMON_STDIO_LOG_FILE = "daemon-stdio.txt";
+let clientDiagnosticsLoggingEnabled = false;
+
+function backupLogPath(filePath, index) {
+  const parsed = path.parse(filePath);
+  return path.join(parsed.dir, `${parsed.name}.${index}${parsed.ext}`);
+}
+
+function rotateLogFile(filePath) {
+  try {
+    if (!fs.existsSync(filePath) || fs.statSync(filePath).size < LOG_MAX_BYTES) return;
+    startNewLogFile(filePath);
+  } catch (error) {
+    console.error(`rotate log ${filePath}:`, error);
+  }
+}
+
+function startNewLogFile(filePath) {
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    for (let index = LOG_BACKUPS - 1; index >= 1; index -= 1) {
+      const from = backupLogPath(filePath, index);
+      const to = backupLogPath(filePath, index + 1);
+      if (fs.existsSync(to)) fs.rmSync(to, { force: true });
+      if (fs.existsSync(from)) fs.renameSync(from, to);
+    }
+    if (fs.existsSync(filePath)) {
+      const firstBackup = backupLogPath(filePath, 1);
+      if (fs.existsSync(firstBackup)) fs.rmSync(firstBackup, { force: true });
+      fs.renameSync(filePath, firstBackup);
+    }
+    fs.writeFileSync(filePath, "", { mode: 0o600 });
+  } catch (error) {
+    console.error(`start log ${filePath}:`, error);
+  }
+}
+
+function startNewClientLogs() {
+  startNewLogFile(path.join(logsDir(), DESKTOP_LOG_FILE));
+  startNewLogFile(path.join(logsDir(), DAEMON_STDIO_LOG_FILE));
+}
+
+function readDiagnosticsLoggingEnabled() {
+  try {
+    const body = fs.readFileSync(path.join(dataDir(), "settings.json"), "utf8");
+    const settings = JSON.parse(body);
+    return settings?.diagnostics?.logging_enabled === true;
+  } catch {
+    return false;
+  }
+}
+
+function setClientDiagnosticsLoggingEnabled(enabled, reset = false) {
+  const next = enabled === true;
+  if (!next && clientDiagnosticsLoggingEnabled) {
+    appendLogLine(DESKTOP_LOG_FILE, {
+      level: "info",
+      source: "desktop",
+      event: "diagnostics.logging_configured",
+      details: { enabled: false, reset: false },
+    });
+  }
+  if (next && (!clientDiagnosticsLoggingEnabled || reset)) {
+    startNewClientLogs();
+  }
+  clientDiagnosticsLoggingEnabled = next;
+  if (clientDiagnosticsLoggingEnabled) {
+    appendLogLine(DESKTOP_LOG_FILE, {
+      level: "info",
+      source: "desktop",
+      event: "diagnostics.logging_configured",
+      details: { enabled: true, reset },
+    });
+  }
+}
+
+function scrubLogText(value) {
+  return String(value)
+    .replace(/(Authorization:\s*Bearer\s+)[^\s"']+/gi, "$1[redacted]")
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]{16,}/gi, "$1[redacted]")
+    .replace(/(ASTRALOPS_TOKEN=)[^\s"']+/g, "$1[redacted]")
+    .replace(/(["']?(?:token|account_token|private_key|password)["']?\s*[:=]\s*["']?)[^"',\s}]+/gi, "$1[redacted]");
+}
+
+function scrubLogValue(value) {
+  if (typeof value === "string") return scrubLogText(value);
+  if (Array.isArray(value)) return value.map((item) => scrubLogValue(item));
+  if (!value || typeof value !== "object") return value;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (/token|secret|password|private_key|authorization/i.test(key)) {
+      out[key] = "[redacted]";
+    } else {
+      out[key] = scrubLogValue(item);
+    }
+  }
+  return out;
+}
+
+function appendLogLine(fileName, entry) {
+  try {
+    const dir = logsDir();
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const filePath = path.join(dir, fileName);
+    rotateLogFile(filePath);
+    const line = `${JSON.stringify(scrubLogValue({ ts: new Date().toISOString(), ...entry }))}\n`;
+    fs.appendFileSync(filePath, line, { mode: 0o600 });
+  } catch (error) {
+    console.error(`write ${fileName}:`, error);
+  }
+}
+
+function logDesktopEvent(event, details = {}, level = "info") {
+  if (!clientDiagnosticsLoggingEnabled) return;
+  appendLogLine(DESKTOP_LOG_FILE, {
+    level,
+    source: "desktop",
+    event,
+    details,
+  });
+}
+
+function logDaemonChunk(stream, chunk) {
+  if (!clientDiagnosticsLoggingEnabled) return;
+  const text = scrubLogText(chunk.toString("utf8"));
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    if (!line) continue;
+    appendLogLine(DAEMON_STDIO_LOG_FILE, {
+      level: stream === "stderr" ? "error" : "info",
+      source: "daemon",
+      stream,
+      message: line,
+    });
+  }
+}
+
 function appIconPath() {
   return assetPath("AstralOps-AppIcon.png");
 }
@@ -406,19 +550,33 @@ function startDaemon() {
   const bundled = bundledDaemonPath();
   const useBundled = app.isPackaged || Boolean(process.env.ASTRALOPS_DAEMON);
   if (useBundled && !bundled) {
+    logDesktopEvent("daemon.start_failed", { reason: "bundled_daemon_not_found", binary: daemonBinaryName() }, "error");
     throw new Error(`Bundled daemon not found (${daemonBinaryName()})`);
   }
   const command = useBundled && bundled ? bundled : "go";
   const args = useBundled && bundled ? [] : ["run", "./daemon"];
+  logDesktopEvent("daemon.start", {
+    command: useBundled && bundled ? path.basename(command) : command,
+    args,
+    cwd: useBundled && bundled ? path.dirname(bundled) : repoRoot(),
+    packaged: app.isPackaged,
+  });
   daemonProcess = spawn(command, args, {
     cwd: useBundled && bundled ? path.dirname(bundled) : repoRoot(),
     env: desktopEnv(),
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
-  daemonProcess.stdout.on("data", (chunk) => console.log(`[astralopsd] ${chunk}`));
-  daemonProcess.stderr.on("data", (chunk) => console.error(`[astralopsd] ${chunk}`));
+  daemonProcess.stdout.on("data", (chunk) => {
+    logDaemonChunk("stdout", chunk);
+    console.log(`[astralopsd] ${chunk}`);
+  });
+  daemonProcess.stderr.on("data", (chunk) => {
+    logDaemonChunk("stderr", chunk);
+    console.error(`[astralopsd] ${chunk}`);
+  });
   daemonProcess.on("exit", (code) => {
+    logDesktopEvent("daemon.exit", { code }, code === 0 ? "info" : "error");
     console.log(`astralopsd exited with ${code}`);
     daemonProcess = undefined;
     daemonInfo = undefined;
@@ -670,34 +828,67 @@ autoUpdater.on("error", (error) => {
   setUpdateStatus({ status: "error", error: updateErrorMessage(error) });
 });
 
+ipcMain.handle("astral:log-client-event", async (_event, payload) => {
+  if (!clientDiagnosticsLoggingEnabled) return { ok: true, skipped: true };
+  if (!payload || typeof payload !== "object") return { ok: false, error: "invalid log payload" };
+  const event = typeof payload.event === "string" && payload.event.trim() ? payload.event.trim() : "event";
+  const level = payload.level === "error" || payload.level === "warn" || payload.level === "info" ? payload.level : "info";
+  const details = payload.details && typeof payload.details === "object" ? payload.details : {};
+  logDesktopEvent(`client.${event}`, details, level);
+  return { ok: true };
+});
+
+ipcMain.handle("astral:set-diagnostics-logging-enabled", async (_event, enabled) => {
+  setClientDiagnosticsLoggingEnabled(enabled === true, false);
+  return { ok: true };
+});
+
 ipcMain.handle("astral:get-daemon-info", async () => {
-  if (daemonInfo) return daemonInfo;
+  logDesktopEvent("ipc.get_daemon_info");
+  if (daemonInfo) {
+    try {
+      const raw = fs.readFileSync(runtimePath(), "utf8");
+      daemonInfo = JSON.parse(raw);
+      return daemonInfo;
+    } catch {
+      return daemonInfo;
+    }
+  }
   return waitForDaemon();
 });
 
 ipcMain.handle("astral:choose-directory", async () => {
+  logDesktopEvent("ipc.choose_directory.start");
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ["openDirectory", "createDirectory"],
   });
+  logDesktopEvent("ipc.choose_directory.completed", { cancelled: result.canceled, selected_count: result.filePaths.length });
   if (result.canceled) return null;
   return result.filePaths[0] || null;
 });
 
 ipcMain.handle("astral:choose-files", async () => {
+  logDesktopEvent("ipc.choose_files.start");
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ["openFile", "multiSelections"],
   });
+  logDesktopEvent("ipc.choose_files.completed", { cancelled: result.canceled, selected_count: result.filePaths.length });
   if (result.canceled) return [];
   return result.filePaths;
 });
 
 ipcMain.handle("astral:ingest-files", async (_event, sessionId, filePaths) => {
+  logDesktopEvent("ipc.ingest_files.start", { session_id: sessionId, file_count: Array.isArray(filePaths) ? filePaths.length : 0 });
   return ingestFiles(sessionId, Array.isArray(filePaths) ? filePaths : []);
 });
 
 ipcMain.handle("astral:ingest-clipboard-image", async (_event, sessionId) => {
+  logDesktopEvent("ipc.ingest_clipboard_image.start", { session_id: sessionId });
   const image = clipboard.readImage();
-  if (!image || image.isEmpty()) return null;
+  if (!image || image.isEmpty()) {
+    logDesktopEvent("ipc.ingest_clipboard_image.completed", { session_id: sessionId, attached: false });
+    return null;
+  }
   const id = attachmentID();
   const dir = uploadDir(sessionId, id);
   await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
@@ -705,30 +896,45 @@ ipcMain.handle("astral:ingest-clipboard-image", async (_event, sessionId) => {
   const target = path.join(dir, name);
   const body = image.toPNG();
   await fs.promises.writeFile(target, body, { mode: 0o600 });
+  logDesktopEvent("ipc.ingest_clipboard_image.completed", { session_id: sessionId, attachment_id: id, bytes: body.length, attached: true });
   return attachmentRecord({ id, kind: "image", filePath: target, name, mimeType: "image/png", size: body.length });
 });
 
 ipcMain.handle("astral:get-workspace-openers", async () => {
+  logDesktopEvent("ipc.workspace_openers.list");
   return workspaceOpeners();
 });
 
 ipcMain.handle("astral:open-workspace", async (_event, opener, workspace) => {
+  const normalized = (() => {
+    try {
+      return normalizeWorkspacePayload(workspace);
+    } catch {
+      return {};
+    }
+  })();
+  logDesktopEvent("ipc.workspace.open.start", { opener, ...normalized });
   try {
     await openWorkspaceWith(opener, workspace);
+    logDesktopEvent("ipc.workspace.open.completed", { opener, ok: true, ...normalized });
     return { ok: true };
   } catch (openError) {
+    logDesktopEvent("ipc.workspace.open.failed", { opener, ok: false, error: openError instanceof Error ? openError.message : String(openError), ...normalized }, "error");
     return { ok: false, error: openError instanceof Error ? openError.message : String(openError) };
   }
 });
 
 ipcMain.handle("astral:open-logs-directory", async () => {
   try {
-    const logsDir = path.join(dataDir(), "logs");
-    await fs.promises.mkdir(logsDir, { recursive: true, mode: 0o700 });
-    const error = await shell.openPath(logsDir);
+    const dir = logsDir();
+    await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+    logDesktopEvent("ipc.logs.open.start", { logs_dir: dir });
+    const error = await shell.openPath(dir);
+    logDesktopEvent("ipc.logs.open.completed", { ok: !error, error: error || undefined });
     if (error) return { ok: false, error };
     return { ok: true };
   } catch (openError) {
+    logDesktopEvent("ipc.logs.open.failed", { error: openError instanceof Error ? openError.message : String(openError) }, "error");
     return { ok: false, error: openError instanceof Error ? openError.message : String(openError) };
   }
 });
@@ -799,6 +1005,8 @@ ipcMain.handle("astral:show-notification", async (_event, payload) => {
 });
 
 app.whenReady().then(async () => {
+  setClientDiagnosticsLoggingEnabled(readDiagnosticsLoggingEnabled(), true);
+  logDesktopEvent("app.start", { version: app.getVersion(), packaged: app.isPackaged, platform: process.platform });
   nativeTheme.themeSource = "system";
   if (process.platform !== "darwin") {
     Menu.setApplicationMenu(null);

@@ -62,16 +62,24 @@ func (a *app) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		ws, err := a.store.createWorkspace(req)
+		ws, err := a.createWorkspace(req)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		a.emit(AstralEvent{WorkspaceID: ws.ID, SessionID: "", Agent: ws.Agent, Kind: "workspace.created", Normalized: ws})
 		writeJSON(w, http.StatusCreated, ws)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (a *app) createWorkspace(req createWorkspaceRequest) (Workspace, error) {
+	ws, err := a.store.createWorkspace(req)
+	if err != nil {
+		return Workspace{}, err
+	}
+	a.emit(AstralEvent{WorkspaceID: ws.ID, SessionID: "", Agent: ws.Agent, Kind: "workspace.created", Normalized: ws})
+	return ws, nil
 }
 
 func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
@@ -631,14 +639,10 @@ func (a *app) handleSessions(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/sessions/"), "/")
 	if len(parts) == 1 && r.Method == http.MethodDelete {
-		ss, ok := a.store.getSession(parts[0])
-		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+		if _, err := a.deleteSessionByID(parts[0]); err != nil {
+			writeActionError(w, err)
 			return
 		}
-		a.stopSessionRuntime(ss, "session deleted")
-		a.store.deleteSession(parts[0])
-		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "session.deleted", Normalized: map[string]any{"session_id": ss.ID}})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
@@ -712,90 +716,21 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleSessionInput(w http.ResponseWriter, sessionID, input string, options TurnOptions) {
-	input = strings.TrimSpace(input)
-	options.Attachments = sanitizeInputAttachments(options.Attachments)
-	if input == "" && len(options.Attachments) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "input required"})
+	result, err := a.startSessionInput(sessionID, input, options)
+	if err != nil {
+		writeActionError(w, err)
 		return
 	}
-
-	ss, ok := a.store.getSession(sessionID)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
-		return
-	}
-	ws, ok := a.store.getWorkspace(ss.WorkspaceID)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
-		return
-	}
-	runtime, ok := a.runtimes[ss.Agent]
-	if !ok {
-		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": "agent runtime is not implemented"}})
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "agent runtime is not implemented"})
-		return
-	}
-	if ss.Status == "running" && a.handleRunningInput(w, ss, ws, runtime, input, options) {
-		return
-	}
-	if err := runtime.StartTurn(ss, ws, input, options); err != nil {
-		if errors.Is(err, ErrSessionRunning) {
-			if a.handleRunningInput(w, ss, ws, runtime, input, options) {
-				return
-			}
-			turn := a.enqueueTurn(ss, input, options)
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "queued": true, "queue_id": turn.ID})
-			return
-		}
-		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": err.Error()}})
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (a *app) handleRunningInput(w http.ResponseWriter, ss Session, ws Workspace, runtime AgentRuntime, input string, options TurnOptions) bool {
-	steerer, ok := runtime.(TurnSteerer)
-	if !ok {
-		return false
-	}
-	if steerErr := steerer.Steer(ss.ID, input, options); steerErr == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "steered": true})
-		return true
-	} else if errors.Is(steerErr, ErrSessionIdle) {
-		if retryErr := runtime.StartTurn(ss, ws, input, options); retryErr == nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-			return true
-		} else if errors.Is(retryErr, ErrSessionRunning) {
-			return false
-		} else {
-			a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": retryErr.Error()}})
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": retryErr.Error()})
-			return true
-		}
-	} else {
-		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": steerErr.Error()}})
-		writeJSON(w, http.StatusConflict, map[string]string{"error": steerErr.Error()})
-		return true
-	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *app) handleSessionInterrupt(w http.ResponseWriter, sessionID string) {
-	ss, ok := a.store.getSession(sessionID)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+	result, err := a.interruptSession(sessionID)
+	if err != nil {
+		writeActionError(w, err)
 		return
 	}
-	runtime, ok := a.runtimes[ss.Agent]
-	if !ok {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "agent runtime is not implemented"})
-		return
-	}
-	if err := runtime.Interrupt(sessionID); err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *app) handleEvents(w http.ResponseWriter, r *http.Request) {

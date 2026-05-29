@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +23,15 @@ func TestSettingsDefaultWhenFileMissing(t *testing.T) {
 	if !settings.General.RestoreOnLaunch || settings.Appearance.Theme != "system" || settings.Session.DefaultAgent != "remember" {
 		t.Fatalf("default settings = %#v", settings)
 	}
+	if settings.RemoteControl.Enabled || settings.RemoteControl.ListenAddr != defaultRemoteControlListenAddr || !settings.RemoteControl.LANDiscovery {
+		t.Fatalf("remote control defaults = %#v", settings.RemoteControl)
+	}
+	if settings.Cloud.Enabled || settings.Cloud.BaseURL != "" || settings.Cloud.AccountToken != "" {
+		t.Fatalf("cloud defaults = %#v", settings.Cloud)
+	}
+	if settings.Diagnostics.LoggingEnabled {
+		t.Fatalf("diagnostic logging default = true, want false")
+	}
 }
 
 func TestSettingsPatchPersistsAndReloads(t *testing.T) {
@@ -30,22 +43,31 @@ func TestSettingsPatchPersistsAndReloads(t *testing.T) {
 	theme := "dark"
 	permission := "auto"
 	reconnect := false
+	remoteEnabled := true
+	remoteAddr := "127.0.0.1:43900"
+	cloudEnabled := true
+	cloudBaseURL := "https://cloud.example.test/"
+	cloudToken := "account-token"
+	diagnosticLogging := true
 	updated, err := store.patch(appSettingsPatch{
-		Appearance: &appearanceSettingsPatch{Theme: &theme},
-		Session:    &sessionSettingsPatch{DefaultPermissionMode: &permission},
-		Workspace:  &workspaceSettingsPatch{SSHAutoReconnect: &reconnect},
+		Appearance:    &appearanceSettingsPatch{Theme: &theme},
+		Session:       &sessionSettingsPatch{DefaultPermissionMode: &permission},
+		Workspace:     &workspaceSettingsPatch{SSHAutoReconnect: &reconnect},
+		Diagnostics:   &diagnosticSettingsPatch{LoggingEnabled: &diagnosticLogging},
+		RemoteControl: &remoteControlSettingsPatch{Enabled: &remoteEnabled, ListenAddr: &remoteAddr},
+		Cloud:         &cloudSettingsPatch{Enabled: &cloudEnabled, BaseURL: &cloudBaseURL, AccountToken: &cloudToken},
 	})
 	if err != nil {
 		t.Fatalf("patch settings = %v", err)
 	}
-	if updated.Appearance.Theme != "dark" || updated.Session.DefaultPermissionMode != "auto" || updated.Workspace.SSHAutoReconnect {
+	if updated.Appearance.Theme != "dark" || updated.Session.DefaultPermissionMode != "auto" || updated.Workspace.SSHAutoReconnect || !updated.Diagnostics.LoggingEnabled || !updated.RemoteControl.Enabled || updated.RemoteControl.ListenAddr != remoteAddr || !updated.Cloud.Enabled || updated.Cloud.BaseURL != "https://cloud.example.test" || updated.Cloud.AccountToken != cloudToken {
 		t.Fatalf("patched settings = %#v", updated)
 	}
 	reloaded, err := loadSettingsStore(dir)
 	if err != nil {
 		t.Fatalf("reload settings = %v", err)
 	}
-	if reloaded.get().Appearance.Theme != "dark" || reloaded.get().Session.DefaultPermissionMode != "auto" || reloaded.get().Workspace.SSHAutoReconnect {
+	if reloaded.get().Appearance.Theme != "dark" || reloaded.get().Session.DefaultPermissionMode != "auto" || reloaded.get().Workspace.SSHAutoReconnect || !reloaded.get().Diagnostics.LoggingEnabled || !reloaded.get().RemoteControl.Enabled || reloaded.get().RemoteControl.ListenAddr != remoteAddr || !reloaded.get().Cloud.Enabled || reloaded.get().Cloud.BaseURL != "https://cloud.example.test" || reloaded.get().Cloud.AccountToken != cloudToken {
 		t.Fatalf("reloaded settings = %#v", reloaded.get())
 	}
 }
@@ -61,6 +83,92 @@ func TestSettingsInvalidPatchDoesNotPolluteCurrentValue(t *testing.T) {
 	}
 	if got := store.get().Appearance.Theme; got != "system" {
 		t.Fatalf("theme after invalid patch = %q, want system", got)
+	}
+	badAddr := "not a listen address"
+	if _, err := store.patch(appSettingsPatch{RemoteControl: &remoteControlSettingsPatch{ListenAddr: &badAddr}}); err == nil {
+		t.Fatal("patch invalid remote_control.listen_addr succeeded")
+	}
+	if got := store.get().RemoteControl.ListenAddr; got != defaultRemoteControlListenAddr {
+		t.Fatalf("remote control listen addr after invalid patch = %q, want default", got)
+	}
+	cloudEnabled := true
+	badCloudURL := "ftp://cloud.example.test"
+	if _, err := store.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &cloudEnabled, BaseURL: &badCloudURL}}); err == nil {
+		t.Fatal("patch invalid cloud settings succeeded")
+	}
+	if store.get().Cloud.Enabled {
+		t.Fatalf("cloud settings after invalid patch = %#v", store.get().Cloud)
+	}
+}
+
+func TestSettingsRemoteControlLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatalf("load store = %v", err)
+	}
+	settings, err := loadSettingsStore(dir)
+	if err != nil {
+		t.Fatalf("load settings = %v", err)
+	}
+	app := &app{
+		store:       st,
+		settings:    settings,
+		token:       "test-token",
+		addr:        "127.0.0.1:12345",
+		runtimePort: 12345,
+		hub:         newEventHub(),
+	}
+
+	listenAddr := "127.0.0.1:0"
+	enableReq := httptest.NewRequest(http.MethodPatch, "/v1/settings", strings.NewReader(`{"remote_control":{"enabled":true,"listen_addr":"`+listenAddr+`"}}`))
+	enableRR := httptest.NewRecorder()
+	app.handleSettings(enableRR, enableReq)
+	if enableRR.Code != http.StatusOK {
+		t.Fatalf("enable status = %d body = %s", enableRR.Code, enableRR.Body.String())
+	}
+	var updated AppSettings
+	if err := json.Unmarshal(enableRR.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if !updated.RemoteControl.Enabled || updated.RemoteControl.ListenAddr != listenAddr {
+		t.Fatalf("settings = %#v, want remote control enabled", updated.RemoteControl)
+	}
+	remoteAddr := app.remoteControlListenAddr()
+	if remoteAddr == "" {
+		t.Fatal("remote control listener address is empty")
+	}
+	resp, err := http.Get("http://" + remoteAddr + "/v1/host")
+	if err != nil {
+		t.Fatalf("host info through remote listener = %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("host status = %d, want 200", resp.StatusCode)
+	}
+	runtimeBody, err := os.ReadFile(filepath.Join(dir, "runtime", "daemon.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(runtimeBody), remoteAddr) {
+		t.Fatalf("runtime file = %s, want remote control addr %s", string(runtimeBody), remoteAddr)
+	}
+
+	disableReq := httptest.NewRequest(http.MethodPatch, "/v1/settings", strings.NewReader(`{"remote_control":{"enabled":false}}`))
+	disableRR := httptest.NewRecorder()
+	app.handleSettings(disableRR, disableReq)
+	if disableRR.Code != http.StatusOK {
+		t.Fatalf("disable status = %d body = %s", disableRR.Code, disableRR.Body.String())
+	}
+	if app.remoteControlListenAddr() != "" {
+		t.Fatalf("remote control listener still active at %s", app.remoteControlListenAddr())
+	}
+	runtimeBody, err = os.ReadFile(filepath.Join(dir, "runtime", "daemon.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(runtimeBody), "remote_control") {
+		t.Fatalf("runtime file = %s, want remote control removed", string(runtimeBody))
 	}
 }
 

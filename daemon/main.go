@@ -27,22 +27,37 @@ type app struct {
 	settings          *settingsStore
 	token             string
 	addr              string
+	runtimePort       int
 	hub               *eventHub
 	upgrader          websocket.Upgrader
 	agents            map[AgentKind]agentInfo
 	runtimes          map[AgentKind]AgentRuntime
 	ssh               *sshManager
 	projections       *sessionProjectionCache
+	controlHelloLimit int64
+	controlFrameLimit int64
+	controlMu         sync.Mutex
+	controlSessions   map[string]*controlWSConn
+	terminalMu        sync.Mutex
+	terminals         *terminalManager
 	queueMu           sync.Mutex
 	queues            map[string][]queuedTurn
 	codexExecMu       sync.Mutex
 	codexExec         map[string]codexExecCommand
 	codexRemoteHomeMu sync.Mutex
 	codexRemoteHome   map[string]string
+	remoteControlMu   sync.Mutex
+	remoteControl     *remoteControlRuntime
+	cloudMu           sync.Mutex
+	cloudCancel       context.CancelFunc
+	cloudSettings     CloudSettings
 }
 
 func main() {
 	if runClaudeRemoteMCPHelper(os.Args[1:]) {
+		return
+	}
+	if runControlDevClient(os.Args[1:]) {
 		return
 	}
 
@@ -62,6 +77,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := setupDaemonLogging(dataDir, settings.get().Diagnostics.LoggingEnabled); err != nil {
+		log.Fatal(err)
+	}
+	if settings.get().Diagnostics.LoggingEnabled {
+		log.Printf("daemon starting data_dir=%q version=%q", dataDir, version)
+	}
 
 	token := randomToken()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -75,6 +96,7 @@ func main() {
 		settings:    settings,
 		token:       token,
 		addr:        localTCPHostPort(ln.Addr().String()),
+		runtimePort: port,
 		hub:         newEventHub(),
 		agents:      discoverAgents(),
 		projections: newSessionProjectionCache(),
@@ -95,14 +117,34 @@ func main() {
 	a.runtimes = newRuntimeRegistry(a)
 	a.ssh.restorePersistedConnections(context.Background())
 
-	if err := writeRuntime(dataDir, port, token); err != nil {
+	if err := a.applyRemoteControlSettings(a.currentSettings().RemoteControl); err != nil {
+		log.Fatal(err)
+	}
+	if err := a.applyCloudSettings(a.currentSettings().Cloud); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := a.writeRuntimeFile(); err != nil {
 		log.Fatal(err)
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", a.handleHealth)
+	mux.HandleFunc("/v1/control/ws", a.handleControlWS)
+	mux.HandleFunc("/v1/host", a.auth(a.handleHost))
 	mux.HandleFunc("/v1/settings", a.auth(a.handleSettings))
 	mux.HandleFunc("/v1/settings/", a.auth(a.handleSettingsAction))
+	mux.HandleFunc("/v1/cloud/devices", a.auth(a.handleCloudDevices))
+	mux.HandleFunc("/v1/cloud/heartbeat", a.auth(a.handleCloudHeartbeat))
+	mux.HandleFunc("/v1/cloud/pairing/requests", a.auth(a.handleCloudPairingRequests))
+	mux.HandleFunc("/v1/cloud/pairing/requests/", a.auth(a.handleCloudPairingRequestAction))
+	mux.HandleFunc("/v1/pairing/requests", a.auth(a.handlePairingRequests))
+	mux.HandleFunc("/v1/pairing/requests/", a.auth(a.handlePairingRequestAction))
+	mux.HandleFunc("/v1/trust/devices", a.auth(a.handleTrustDevices))
+	mux.HandleFunc("/v1/trust/devices/", a.auth(a.handleTrustDeviceAction))
+	mux.HandleFunc("/v1/remote/hosts", a.auth(a.handleRemoteHosts))
+	mux.HandleFunc("/v1/remote/hosts/", a.auth(a.handleRemoteHostAction))
+	mux.HandleFunc("/v1/fs/browse", a.auth(a.handleHostFileSystemBrowse))
 	mux.HandleFunc("/v1/workspaces", a.auth(a.handleWorkspaces))
 	mux.HandleFunc("/v1/workspaces/", a.auth(a.handleWorkspaceAction))
 	mux.HandleFunc("/v1/codex-exec/", a.auth(a.handleCodexExecServerWS))
@@ -111,7 +153,7 @@ func main() {
 	mux.HandleFunc("/v1/approvals/", a.auth(a.handleApprovalAction))
 	mux.HandleFunc("/v1/events", a.auth(a.handleEvents))
 
-	handler := withCORS(mux)
+	handler := withCORS(a.diagnosticHTTPLogger(mux))
 	log.Printf("astralopsd listening on 127.0.0.1:%d", port)
 	if err := http.Serve(ln, handler); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
@@ -147,16 +189,33 @@ func randomToken() string {
 	return hex.EncodeToString(b[:])
 }
 
-func writeRuntime(dataDir string, port int, token string) error {
+func writeRuntime(dataDir string, port int, token string, remoteControlAddr string) error {
 	path := filepath.Join(dataDir, "runtime", "daemon.json")
-	body, _ := json.MarshalIndent(map[string]any{
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	value := map[string]any{
 		"host":       "127.0.0.1",
 		"port":       port,
 		"token":      token,
 		"pid":        os.Getpid(),
 		"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
-	}, "", "  ")
+	}
+	if remoteControlAddr != "" {
+		value["remote_control"] = map[string]any{
+			"listen_addr": remoteControlAddr,
+			"paths":       []string{"/v1/host", "/v1/control/ws"},
+		}
+	}
+	body, _ := json.MarshalIndent(value, "", "  ")
 	return os.WriteFile(path, body, 0o600)
+}
+
+func (a *app) writeRuntimeFile() error {
+	if a == nil || a.store == nil {
+		return errors.New("store is not initialized")
+	}
+	return writeRuntime(a.store.dataDir, a.runtimePort, a.token, a.remoteControlListenAddr())
 }
 
 func (a *app) codexExecServerURL(workspaceID string) string {
