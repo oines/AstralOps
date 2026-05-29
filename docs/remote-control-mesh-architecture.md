@@ -180,6 +180,7 @@ GET  /v1/pairing/requests/:request_id
 POST /v1/pairing/requests/:request_id/resolve
 GET  /v1/relay/envelopes?device_id=<device_id>
 POST /v1/relay/envelopes
+POST /v1/relay/envelopes/:envelope_id/ack
 ```
 
 Desktop daemon 通过本机 authenticated API 接入 cloud broker。这个 API 只读写本机 daemon settings 并调用 cloud broker，不暴露给远程 Host listener：
@@ -259,14 +260,15 @@ Relay envelope 只允许：
 ```json
 {
   "version": "astralops-relay-envelope-v1",
+  "connection_id": "ctrl_...",
   "from_device_id": "dev_controller",
   "to_device_id": "dev_host",
-  "payload_kind": "control.sealed_frame",
+  "payload_kind": "control.hello | control.hello_ack | control.sealed_frame",
   "payload_base64": "..."
 }
 ```
 
-`payload_base64` 是设备层 E2EE 后的 sealed frame。cloud broker 只能存储和转发，不能解析业务协议。
+`control.hello` 和 `control.hello_ack` 是现有设备级 E2EE 握手帧的 relay 投递形态，用于在没有直连 WebSocket 时完成同一套签名校验和会话密钥派生。握手完成后，业务 `request/response/stream` 只能放进 `control.sealed_frame`。cloud broker 只能存储、投递、ack 并按账号/设备做路由和限流，不能解析业务协议。
 
 ## 端到端加密控制通道
 
@@ -1183,14 +1185,24 @@ Relay envelope 是不透明转发信封：
 
 ```text
 version: astralops-relay-envelope-v1
+connection_id
 from_device_id
 to_device_id
-payload_kind: control.sealed_frame
+payload_kind: control.hello | control.hello_ack | control.sealed_frame
 payload_base64
 created_at
 ```
 
-`payload_base64` 必须是 Controller 和 Host 已完成设备级 E2EE 后产生的 sealed frame。Cloud/relay 可以按 `from_device_id` / `to_device_id` 路由、按账号和设备状态限流或断开，但不能解析 payload，也不能把 workspace/session/event payload 提升成云端字段。
+`payload_base64` 对 cloud/relay 始终是不透明 bytes。`control.hello` / `control.hello_ack` 只能承载现有握手帧；`control.sealed_frame` 必须是 Controller 和 Host 已完成设备级 E2EE 后产生的 sealed frame。`connection_id` 是 relay routing metadata：`control.hello` 尚未产生连接 ID，可为空；`control.hello_ack` 和 `control.sealed_frame` 必须携带连接 ID，用来区分同一对设备之间的并发控制会话。Cloud/relay 可以按 `from_device_id` / `to_device_id` / `connection_id` 路由、按账号和设备状态限流、投递确认或断开，但不能解析 payload，也不能把 workspace/session/event payload 提升成云端字段。
+
+relay envelope 被目标设备成功处理后必须调用：
+
+```text
+POST /v1/relay/envelopes/:envelope_id/ack
+body: { "device_id": "<to_device_id>" }
+```
+
+broker 只在 `device_id == to_device_id` 时删除该 envelope。客户端不能把 `GET /v1/relay/envelopes` 当作历史查询接口；它是待投递队列视图，未 ack 的 envelope 会继续出现。
 
 ### Phase 3 - Pairing and Trust
 

@@ -1127,11 +1127,12 @@ export type CloudPairingSignalResponse = {
   request: CloudPairingSignal;
 };
 
-export type RelayPayloadKind = "control.sealed_frame" | string;
+export type RelayPayloadKind = "control.hello" | "control.hello_ack" | "control.sealed_frame";
 
 export type RelayEnvelope = {
   version: "astralops-relay-envelope-v1" | string;
   envelope_id?: string;
+  connection_id?: string;
   from_device_id: string;
   to_device_id: string;
   payload_kind: RelayPayloadKind;

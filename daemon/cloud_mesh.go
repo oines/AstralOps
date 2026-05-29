@@ -13,6 +13,8 @@ const (
 	cloudDeviceStatusRevoked = "revoked"
 
 	relayEnvelopeVersion               = "astralops-relay-envelope-v1"
+	relayPayloadKindControlHello       = "control.hello"
+	relayPayloadKindControlHelloAck    = "control.hello_ack"
 	relayPayloadKindControlSealedFrame = "control.sealed_frame"
 )
 
@@ -35,6 +37,7 @@ type CloudDeviceRecord struct {
 type RelayEnvelope struct {
 	Version       string `json:"version"`
 	EnvelopeID    string `json:"envelope_id,omitempty"`
+	ConnectionID  string `json:"connection_id,omitempty"`
 	FromDeviceID  string `json:"from_device_id"`
 	ToDeviceID    string `json:"to_device_id"`
 	PayloadKind   string `json:"payload_kind"`
@@ -110,8 +113,12 @@ func validateRelayEnvelope(envelope RelayEnvelope) error {
 	if strings.TrimSpace(envelope.ToDeviceID) == "" {
 		return fmt.Errorf("to_device_id required")
 	}
-	if strings.TrimSpace(envelope.PayloadKind) != relayPayloadKindControlSealedFrame {
+	payloadKind := strings.TrimSpace(envelope.PayloadKind)
+	if !isAllowedRelayPayloadKind(payloadKind) {
 		return fmt.Errorf("relay payload kind invalid")
+	}
+	if payloadKind != relayPayloadKindControlHello && strings.TrimSpace(envelope.ConnectionID) == "" {
+		return fmt.Errorf("connection_id required")
 	}
 	payload := strings.TrimSpace(envelope.PayloadBase64)
 	if payload == "" {
@@ -121,4 +128,13 @@ func validateRelayEnvelope(envelope RelayEnvelope) error {
 		return fmt.Errorf("payload_base64 invalid")
 	}
 	return nil
+}
+
+func isAllowedRelayPayloadKind(kind string) bool {
+	switch strings.TrimSpace(kind) {
+	case relayPayloadKindControlHello, relayPayloadKindControlHelloAck, relayPayloadKindControlSealedFrame:
+		return true
+	default:
+		return false
+	}
 }

@@ -80,6 +80,14 @@ type cloudPairingSignalListResponse struct {
 	Requests []CloudPairingSignal `json:"requests"`
 }
 
+type cloudRelayEnvelopeListResponse struct {
+	Envelopes []RelayEnvelope `json:"envelopes"`
+}
+
+type cloudRelayEnvelopeAckInput struct {
+	DeviceID string `json:"device_id"`
+}
+
 func (c CloudClient) RegisterDevice(ctx context.Context, identity DeviceIdentity, canHost, canControl bool, relayURL string) (CloudDeviceRecord, error) {
 	req := cloudDeviceRegistration{
 		DeviceID:             identity.DeviceID,
@@ -152,6 +160,32 @@ func (c CloudClient) ResolvePairingSignal(ctx context.Context, requestID, status
 		return CloudPairingSignal{}, err
 	}
 	return out.Request, nil
+}
+
+func (c CloudClient) EnqueueRelayEnvelope(ctx context.Context, envelope RelayEnvelope) (RelayEnvelope, error) {
+	var out RelayEnvelope
+	if err := c.do(ctx, http.MethodPost, "/v1/relay/envelopes", envelope, &out); err != nil {
+		return RelayEnvelope{}, err
+	}
+	return out, nil
+}
+
+func (c CloudClient) ListRelayEnvelopes(ctx context.Context, deviceID string, limit int) ([]RelayEnvelope, error) {
+	path := "/v1/relay/envelopes?device_id=" + queryEscape(deviceID)
+	if limit > 0 {
+		path += "&limit=" + queryEscape(fmt.Sprintf("%d", limit))
+	}
+	var out cloudRelayEnvelopeListResponse
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Envelopes, nil
+}
+
+func (c CloudClient) AckRelayEnvelope(ctx context.Context, envelopeID, deviceID string) error {
+	return c.do(ctx, http.MethodPost, "/v1/relay/envelopes/"+pathEscape(envelopeID)+"/ack", cloudRelayEnvelopeAckInput{
+		DeviceID: strings.TrimSpace(deviceID),
+	}, nil)
 }
 
 func (c CloudClient) do(ctx context.Context, method, path string, body any, out any) error {

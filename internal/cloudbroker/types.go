@@ -23,6 +23,8 @@ const (
 	PairingStatusDenied   = "denied"
 
 	RelayEnvelopeVersion               = "astralops-relay-envelope-v1"
+	RelayPayloadKindControlHello       = "control.hello"
+	RelayPayloadKindControlHelloAck    = "control.hello_ack"
 	RelayPayloadKindControlSealedFrame = "control.sealed_frame"
 )
 
@@ -113,6 +115,7 @@ type RelayEnvelope struct {
 	AccountIDHash string `json:"account_id_hash,omitempty"`
 	Version       string `json:"version"`
 	EnvelopeID    string `json:"envelope_id,omitempty"`
+	ConnectionID  string `json:"connection_id,omitempty"`
 	FromDeviceID  string `json:"from_device_id"`
 	ToDeviceID    string `json:"to_device_id"`
 	PayloadKind   string `json:"payload_kind"`
@@ -122,6 +125,10 @@ type RelayEnvelope struct {
 
 type RelayEnvelopeListResponse struct {
 	Envelopes []RelayEnvelope `json:"envelopes"`
+}
+
+type RelayEnvelopeAckInput struct {
+	DeviceID string `json:"device_id"`
 }
 
 type APIError struct {
@@ -214,8 +221,12 @@ func validateRelayEnvelope(envelope RelayEnvelope) error {
 	if strings.TrimSpace(envelope.ToDeviceID) == "" {
 		return APIError{Status: 400, Code: "to_device_required", Message: "to_device_id required"}
 	}
-	if strings.TrimSpace(envelope.PayloadKind) != RelayPayloadKindControlSealedFrame {
+	payloadKind := strings.TrimSpace(envelope.PayloadKind)
+	if !isAllowedRelayPayloadKind(payloadKind) {
 		return APIError{Status: 400, Code: "relay_payload_kind_invalid", Message: "relay payload kind invalid"}
+	}
+	if payloadKind != RelayPayloadKindControlHello && strings.TrimSpace(envelope.ConnectionID) == "" {
+		return APIError{Status: 400, Code: "relay_connection_id_required", Message: "connection_id required"}
 	}
 	payload := strings.TrimSpace(envelope.PayloadBase64)
 	if payload == "" {
@@ -225,6 +236,15 @@ func validateRelayEnvelope(envelope RelayEnvelope) error {
 		return APIError{Status: 400, Code: "relay_payload_invalid", Message: "payload_base64 invalid"}
 	}
 	return nil
+}
+
+func isAllowedRelayPayloadKind(kind string) bool {
+	switch strings.TrimSpace(kind) {
+	case RelayPayloadKindControlHello, RelayPayloadKindControlHelloAck, RelayPayloadKindControlSealedFrame:
+		return true
+	default:
+		return false
+	}
 }
 
 func decodeDevicePublicKey(value string) (ed25519.PublicKey, error) {

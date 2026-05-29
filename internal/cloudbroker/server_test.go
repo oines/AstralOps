@@ -65,23 +65,33 @@ func TestCloudBrokerPairingSignalRequiresRegisteredDevices(t *testing.T) {
 	}
 }
 
-func TestCloudBrokerRelayAcceptsOnlyOpaqueSealedFrames(t *testing.T) {
+func TestCloudBrokerRelayAcceptsOnlyControlTransportFrames(t *testing.T) {
 	server := testServer(t)
 	registerDevice(t, server, testDeviceRegistration(t, "dev_host", "desktop", true, true))
 	registerDevice(t, server, testDeviceRegistration(t, "dev_phone", "mobile", false, true))
 
-	res := doJSON(t, server, http.MethodPost, "/v1/relay/envelopes", RelayEnvelope{
-		Version:       RelayEnvelopeVersion,
-		FromDeviceID:  "dev_phone",
-		ToDeviceID:    "dev_host",
-		PayloadKind:   RelayPayloadKindControlSealedFrame,
-		PayloadBase64: base64.StdEncoding.EncodeToString([]byte("sealed-control-frame")),
-	})
-	if res.Code != http.StatusAccepted {
-		t.Fatalf("status = %d body=%s", res.Code, res.Body.String())
+	for _, kind := range []string{
+		RelayPayloadKindControlHello,
+		RelayPayloadKindControlHelloAck,
+		RelayPayloadKindControlSealedFrame,
+	} {
+		envelope := RelayEnvelope{
+			Version:       RelayEnvelopeVersion,
+			FromDeviceID:  "dev_phone",
+			ToDeviceID:    "dev_host",
+			PayloadKind:   kind,
+			PayloadBase64: base64.StdEncoding.EncodeToString([]byte(kind)),
+		}
+		if kind != RelayPayloadKindControlHello {
+			envelope.ConnectionID = "ctrl_1"
+		}
+		res := doJSON(t, server, http.MethodPost, "/v1/relay/envelopes", envelope)
+		if res.Code != http.StatusAccepted {
+			t.Fatalf("kind %s status = %d body=%s", kind, res.Code, res.Body.String())
+		}
 	}
 
-	res = doJSON(t, server, http.MethodPost, "/v1/relay/envelopes", RelayEnvelope{
+	res := doJSON(t, server, http.MethodPost, "/v1/relay/envelopes", RelayEnvelope{
 		Version:       RelayEnvelopeVersion,
 		FromDeviceID:  "dev_phone",
 		ToDeviceID:    "dev_host",
@@ -90,6 +100,57 @@ func TestCloudBrokerRelayAcceptsOnlyOpaqueSealedFrames(t *testing.T) {
 	})
 	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "payload kind") {
 		t.Fatalf("status = %d body=%s, want payload kind rejection", res.Code, res.Body.String())
+	}
+
+	res = doJSON(t, server, http.MethodPost, "/v1/relay/envelopes", RelayEnvelope{
+		Version:       RelayEnvelopeVersion,
+		FromDeviceID:  "dev_phone",
+		ToDeviceID:    "dev_host",
+		PayloadKind:   RelayPayloadKindControlSealedFrame,
+		PayloadBase64: base64.StdEncoding.EncodeToString([]byte("sealed-control-frame")),
+	})
+	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "connection_id") {
+		t.Fatalf("status = %d body=%s, want connection_id rejection", res.Code, res.Body.String())
+	}
+}
+
+func TestCloudBrokerRelayAckDeletesOnlyReceiverEnvelope(t *testing.T) {
+	server := testServer(t)
+	registerDevice(t, server, testDeviceRegistration(t, "dev_host", "desktop", true, true))
+	registerDevice(t, server, testDeviceRegistration(t, "dev_phone", "mobile", false, true))
+
+	create := doJSON(t, server, http.MethodPost, "/v1/relay/envelopes", RelayEnvelope{
+		Version:       RelayEnvelopeVersion,
+		FromDeviceID:  "dev_phone",
+		ToDeviceID:    "dev_host",
+		PayloadKind:   RelayPayloadKindControlHello,
+		PayloadBase64: base64.StdEncoding.EncodeToString([]byte("hello")),
+	})
+	if create.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", create.Code, create.Body.String())
+	}
+	var envelope RelayEnvelope
+	if err := json.Unmarshal(create.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+
+	list := doJSON(t, server, http.MethodGet, "/v1/relay/envelopes?device_id=dev_host", nil)
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), envelope.EnvelopeID) {
+		t.Fatalf("list status = %d body=%s, want envelope", list.Code, list.Body.String())
+	}
+
+	deny := doJSON(t, server, http.MethodPost, "/v1/relay/envelopes/"+envelope.EnvelopeID+"/ack", RelayEnvelopeAckInput{DeviceID: "dev_phone"})
+	if deny.Code != http.StatusForbidden {
+		t.Fatalf("ack wrong receiver status = %d body=%s", deny.Code, deny.Body.String())
+	}
+
+	ack := doJSON(t, server, http.MethodPost, "/v1/relay/envelopes/"+envelope.EnvelopeID+"/ack", RelayEnvelopeAckInput{DeviceID: "dev_host"})
+	if ack.Code != http.StatusOK {
+		t.Fatalf("ack status = %d body=%s", ack.Code, ack.Body.String())
+	}
+	list = doJSON(t, server, http.MethodGet, "/v1/relay/envelopes?device_id=dev_host", nil)
+	if list.Code != http.StatusOK || strings.Contains(list.Body.String(), envelope.EnvelopeID) {
+		t.Fatalf("list after ack status = %d body=%s, want envelope removed", list.Code, list.Body.String())
 	}
 }
 

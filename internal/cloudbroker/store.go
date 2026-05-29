@@ -320,6 +320,32 @@ func (s *FileStore) ListRelayEnvelopes(account Account, deviceID string, limit i
 	return out
 }
 
+func (s *FileStore) AckRelayEnvelope(account Account, envelopeID, deviceID string) error {
+	envelopeID = strings.TrimSpace(envelopeID)
+	deviceID = strings.TrimSpace(deviceID)
+	if envelopeID == "" {
+		return apiErr(400, "relay_envelope_id_required", "relay envelope id required")
+	}
+	if deviceID == "" {
+		return apiErr(400, "device_id_required", "device_id required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, envelope := range s.state.RelayEnvelopes {
+		if envelope.AccountIDHash == account.AccountIDHash && envelope.EnvelopeID == envelopeID {
+			if envelope.ToDeviceID != deviceID {
+				return apiErr(403, "relay_envelope_receiver_mismatch", "relay envelope receiver mismatch")
+			}
+			s.state.RelayEnvelopes = append(s.state.RelayEnvelopes[:i], s.state.RelayEnvelopes[i+1:]...)
+			if err := s.writeLocked(); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+	return apiErr(404, "relay_envelope_not_found", "relay envelope not found")
+}
+
 func (s *FileStore) deviceLocked(accountIDHash, deviceID string) (DeviceRecord, bool) {
 	for _, device := range s.state.Devices {
 		if device.AccountIDHash == accountIDHash && device.DeviceID == deviceID {

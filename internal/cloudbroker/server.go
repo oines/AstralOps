@@ -44,6 +44,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/pairing/requests", s.withAccount(s.handlePairingRequests))
 	mux.HandleFunc("/v1/pairing/requests/", s.withAccount(s.handlePairingRequestAction))
 	mux.HandleFunc("/v1/relay/envelopes", s.withAccount(s.handleRelayEnvelopes))
+	mux.HandleFunc("/v1/relay/envelopes/", s.withAccount(s.handleRelayEnvelopeAction))
 	return withSecurityHeaders(withRequestBodyLimit(withCORS(mux)))
 }
 
@@ -185,6 +186,24 @@ func (s *Server) handleRelayEnvelopes(account Account, w http.ResponseWriter, r 
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleRelayEnvelopeAction(account Account, w http.ResponseWriter, r *http.Request) {
+	parts := pathParts(strings.TrimPrefix(r.URL.Path, "/v1/relay/envelopes/"))
+	if len(parts) != 2 || parts[1] != "ack" || r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	var input RelayEnvelopeAckInput
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.store.AckRelayEnvelope(account, parts[0], input.DeviceID); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) withAccount(next func(Account, http.ResponseWriter, *http.Request)) http.HandlerFunc {
