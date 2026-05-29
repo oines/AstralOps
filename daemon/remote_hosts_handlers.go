@@ -81,12 +81,16 @@ func (a *app) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remote
 	if err != nil {
 		return
 	}
+	_ = a.cloudSyncApprovedPairingKnownHosts(reqCtx, client, devices)
 	selfID := a.store.hostInfo().Identity.DeviceID
 	for _, device := range devices {
 		if device.DeviceID == "" || device.DeviceID == selfID || !device.CanHost {
 			continue
 		}
 		existing := hosts[device.DeviceID]
+		if known, ok := a.store.knownHost(device.DeviceID); ok {
+			existing = remoteHostRecordFromKnownHost(known)
+		}
 		if existing.PublicKeyFingerprint != "" && device.PublicKeyFingerprint != "" && existing.PublicKeyFingerprint != device.PublicKeyFingerprint {
 			continue
 		}

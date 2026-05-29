@@ -85,6 +85,42 @@ func TestCloudHandlersPairingSignalDoesNotWriteLocalTrust(t *testing.T) {
 	}
 }
 
+func TestCloudPairingSubmitRegistersCurrentControllerDevice(t *testing.T) {
+	app, broker := testCloudApp(t)
+	defer broker.Close()
+
+	hostStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	if _, err := client.RegisterDevice(t.Context(), hostStore.hostInfo().Identity, true, true, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	controllerID := app.store.hostInfo().Identity.DeviceID
+	body := `{"host_device_id":"` + hostStore.hostInfo().Identity.DeviceID + `","controller_device_id":"` + controllerID + `","scope":"full"}`
+	pairRR := httptest.NewRecorder()
+	app.handleCloudPairingRequests(pairRR, httptest.NewRequest(http.MethodPost, "/v1/cloud/pairing/requests", strings.NewReader(body)))
+	if pairRR.Code != http.StatusAccepted {
+		t.Fatalf("pair status = %d body=%s", pairRR.Code, pairRR.Body.String())
+	}
+
+	devices := brokerDevices(t, broker)
+	foundController := false
+	for _, device := range devices {
+		if device.DeviceID == controllerID {
+			foundController = true
+			if !device.CanControl || device.CanHost {
+				t.Fatalf("controller device role = %#v, want control-only registration", device)
+			}
+		}
+	}
+	if !foundController {
+		t.Fatalf("devices = %#v, want current controller registered before pairing submit", devices)
+	}
+}
+
 func TestCloudRuntimeRegistersCurrentDeviceFromSettings(t *testing.T) {
 	app, broker := testCloudApp(t)
 	defer broker.Close()
@@ -211,6 +247,59 @@ func TestCloudPairingApprovalResolvesCloudSignalAfterLocalTrust(t *testing.T) {
 	}
 	if signals[0].ResolverDeviceID != app.store.hostInfo().Identity.DeviceID {
 		t.Fatalf("resolver = %q, want Host device id", signals[0].ResolverDeviceID)
+	}
+}
+
+func TestRemoteHostsImportsApprovedCloudPairingAsKnownHost(t *testing.T) {
+	app, broker := testCloudApp(t)
+	defer broker.Close()
+
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	if err := app.cloudRegisterAndHeartbeat(t.Context(), client); err != nil {
+		t.Fatal(err)
+	}
+	hostStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.RegisterDevice(t.Context(), hostStore.hostInfo().Identity, true, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	signal, err := client.SubmitPairingSignal(t.Context(), cloudPairingSignalInput{
+		HostDeviceID:       hostStore.hostInfo().Identity.DeviceID,
+		ControllerDeviceID: app.store.hostInfo().Identity.DeviceID,
+		Scope:              TrustScopeFull,
+		Capabilities:       []string{CapabilityCoreRead, CapabilityTerminalOpen},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ResolvePairingSignal(t.Context(), signal.RequestID, PairingStatusApproved, hostStore.hostInfo().Identity.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts", nil)
+	listResp := httptest.NewRecorder()
+	app.handleRemoteHosts(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("remote hosts status = %d body=%s", listResp.Code, listResp.Body.String())
+	}
+	known, ok := app.store.knownHost(hostStore.hostInfo().Identity.DeviceID)
+	if !ok {
+		t.Fatal("approved cloud pairing did not import Host public identity into known hosts")
+	}
+	if known.PublicKeyFingerprint != hostStore.hostInfo().Identity.PublicKeyFingerprint {
+		t.Fatalf("known host = %#v, want fingerprint %s", known, hostStore.hostInfo().Identity.PublicKeyFingerprint)
+	}
+	if _, ok := app.store.trustedControlGrant(hostStore.hostInfo().Identity.DeviceID); ok {
+		t.Fatal("approved cloud pairing imported Host identity as local trust grant")
+	}
+	var hosts remoteHostsResponse
+	if err := json.Unmarshal(listResp.Body.Bytes(), &hosts); err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts.Hosts) != 1 || hosts.Hosts[0].DeviceID != hostStore.hostInfo().Identity.DeviceID || !hosts.Hosts[0].KnownIdentity {
+		t.Fatalf("remote hosts = %#v, want approved cloud Host as known identity", hosts.Hosts)
 	}
 }
 

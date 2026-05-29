@@ -195,6 +195,56 @@ func TestRemoteHostActionFallsBackToCloudRelay(t *testing.T) {
 	}
 }
 
+func TestRemoteHostActionUsesApprovedCloudPairingKnownHost(t *testing.T) {
+	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	runControlRelayPoller(t, hostApp, client)
+
+	settings, err := loadSettingsStore(controllerStore.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	baseURL := broker.URL
+	token := "account-token"
+	if _, err := settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, settings: settings, hub: newEventHub()}
+	signal, err := client.SubmitPairingSignal(t.Context(), cloudPairingSignalInput{
+		HostDeviceID:       hostApp.store.hostInfo().Identity.DeviceID,
+		ControllerDeviceID: controllerStore.deviceIdentity.DeviceID,
+		Scope:              TrustScopeFull,
+		Capabilities:       []string{CapabilityCoreRead},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ResolvePairingSignal(t.Context(), signal.RequestID, PairingStatusApproved, hostApp.store.hostInfo().Identity.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+
+	hostsRR := httptest.NewRecorder()
+	controllerApp.handleRemoteHosts(hostsRR, httptest.NewRequest("GET", "/v1/remote/hosts", nil))
+	if hostsRR.Code != 200 {
+		t.Fatalf("remote hosts status = %d body=%s", hostsRR.Code, hostsRR.Body.String())
+	}
+	if _, ok := controllerStore.knownHost(hostApp.store.hostInfo().Identity.DeviceID); !ok {
+		t.Fatal("approved cloud pairing did not import known Host before remote action")
+	}
+	response, err := controllerApp.remoteControlResponse(hostApp.store.hostInfo().Identity.DeviceID, CapabilityCoreRead, ControlActionWorkspaces, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("response = %#v", response)
+	}
+	items, _ := response.Result.([]any)
+	if len(items) != 1 || stringValue(mapValue(items[0])["id"]) != workspace.ID {
+		t.Fatalf("workspaces = %#v, want %s", response.Result, workspace.ID)
+	}
+}
+
 func TestControlClientResolveTargetUsesForcedCloudRelay(t *testing.T) {
 	hostApp, _, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
 	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {

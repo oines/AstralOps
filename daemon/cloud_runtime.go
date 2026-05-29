@@ -86,6 +86,11 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 	if _, err := client.HeartbeatDevice(heartbeatCtx, a.store.hostInfo().Identity.DeviceID, ""); err != nil {
 		return err
 	}
+	approvedCtx, approvedCancel := context.WithTimeout(ctx, cloudSyncTimeout)
+	defer approvedCancel()
+	if err := a.cloudSyncApprovedPairingKnownHosts(approvedCtx, client, nil); err != nil {
+		return err
+	}
 	if settings.RemoteControl.Enabled {
 		pairingCtx, pairingCancel := context.WithTimeout(ctx, cloudSyncTimeout)
 		defer pairingCancel()
@@ -99,6 +104,85 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 		}
 	}
 	return nil
+}
+
+func (a *app) cloudSyncApprovedPairingKnownHosts(ctx context.Context, client CloudClient, devices []CloudDeviceRecord) error {
+	if a == nil || a.store == nil {
+		return nil
+	}
+	self := a.store.hostInfo().Identity.DeviceID
+	if strings.TrimSpace(self) == "" {
+		return nil
+	}
+	signals, err := client.ListPairingSignals(ctx, self)
+	if err != nil {
+		return err
+	}
+	needsDevices := false
+	for _, signal := range signals {
+		if strings.TrimSpace(signal.ControllerDeviceID) == self && strings.TrimSpace(signal.Status) == PairingStatusApproved {
+			needsDevices = true
+			break
+		}
+	}
+	if !needsDevices {
+		return nil
+	}
+	if devices == nil {
+		devices, err = client.ListDevices(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	devicesByID := map[string]CloudDeviceRecord{}
+	for _, device := range devices {
+		devicesByID[strings.TrimSpace(device.DeviceID)] = device
+	}
+	for _, signal := range signals {
+		if strings.TrimSpace(signal.ControllerDeviceID) != self || strings.TrimSpace(signal.Status) != PairingStatusApproved {
+			continue
+		}
+		hostID := strings.TrimSpace(signal.HostDeviceID)
+		if hostID == "" || hostID == self {
+			continue
+		}
+		host, ok := devicesByID[hostID]
+		if !ok {
+			return fmt.Errorf("approved cloud pairing Host %s not found", hostID)
+		}
+		if !host.CanHost || normalizeCloudDeviceStatus(host.Status) == cloudDeviceStatusRevoked {
+			continue
+		}
+		if signal.HostPublicKeyFingerprint != "" && host.PublicKeyFingerprint != "" && signal.HostPublicKeyFingerprint != host.PublicKeyFingerprint {
+			return fmt.Errorf("approved cloud pairing Host public key fingerprint mismatch for %s", hostID)
+		}
+		if known, ok := a.store.knownHost(hostID); ok {
+			if normalizeKnownHost(known).PublicKeyFingerprint != strings.TrimSpace(host.PublicKeyFingerprint) {
+				return fmt.Errorf("known Host public key fingerprint mismatch for approved cloud pairing %s", hostID)
+			}
+			continue
+		}
+		if _, err := a.store.rememberKnownHost(hostInfoFromCloudDevice(host), ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hostInfoFromCloudDevice(device CloudDeviceRecord) HostInfo {
+	return HostInfo{
+		Identity: DeviceIdentity{
+			DeviceID:             strings.TrimSpace(device.DeviceID),
+			DeviceName:           strings.TrimSpace(device.DeviceName),
+			DeviceKind:           strings.TrimSpace(device.DeviceKind),
+			PublicKey:            strings.TrimSpace(device.PublicKey),
+			PublicKeyFingerprint: strings.TrimSpace(device.PublicKeyFingerprint),
+			Capabilities:         normalizeCapabilities(device.Capabilities),
+			CreatedAt:            strings.TrimSpace(device.UpdatedAt),
+			UpdatedAt:            strings.TrimSpace(device.UpdatedAt),
+		},
+		Capabilities: normalizeCapabilities(device.Capabilities),
+	}
 }
 
 func (a *app) cloudSyncPendingPairingRequests(ctx context.Context, client CloudClient) error {

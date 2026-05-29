@@ -111,6 +111,14 @@ func (a *app) handleCloudPairingRequests(w http.ResponseWriter, r *http.Request)
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		self := a.store.hostInfo().Identity
+		if strings.TrimSpace(req.ControllerDeviceID) == self.DeviceID {
+			settings := a.currentSettings()
+			if _, err := client.RegisterDevice(ctx, self, settings.RemoteControl.Enabled, true, ""); err != nil {
+				writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+				return
+			}
+		}
 		request, err := client.SubmitPairingSignal(ctx, req)
 		if err != nil {
 			writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
