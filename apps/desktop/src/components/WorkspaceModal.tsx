@@ -264,8 +264,8 @@ type DirectoryBrowserProps = {
 function DirectoryBrowser({ canBrowse, error, loading, result, selectedPath, target, onBrowse, onChoose }: DirectoryBrowserProps): React.JSX.Element {
   const roots = result?.roots ?? [];
   return (
-    <div className="grid overflow-hidden rounded-lg border border-[#e7e5e0]">
-      <div className="flex min-h-10 items-center gap-2 border-b border-[#e7e5e0] bg-[#faf9f6] px-3">
+    <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-[#e7e5e0]">
+      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[#e7e5e0] bg-[#faf9f6] px-3">
         <button
           className="grid size-7 shrink-0 place-items-center rounded-md text-[var(--ao-muted-strong)] hover:bg-black/[0.055] disabled:cursor-default disabled:opacity-35"
           type="button"
@@ -287,13 +287,13 @@ function DirectoryBrowser({ canBrowse, error, loading, result, selectedPath, tar
         </button>
       </div>
       {roots.length > 0 ? (
-        <div className="flex gap-1.5 overflow-x-auto border-b border-[#e7e5e0] px-3 py-2">
+        <div className="flex h-11 shrink-0 items-center gap-1.5 overflow-x-auto overflow-y-hidden border-b border-[#e7e5e0] px-3">
           {roots.map((root) => (
             <RootButton key={`${root.id}:${root.path}`} root={root} onClick={() => onBrowse(root.path)} />
           ))}
         </div>
       ) : null}
-      <div className="max-h-[260px] min-h-[188px] overflow-auto bg-white">
+      <div className="max-h-[260px] min-h-[188px] overflow-y-auto bg-white">
         {loading ? (
           <div className="grid h-[188px] place-items-center text-[13px] font-semibold text-[var(--ao-muted)]">
             <span className="flex items-center gap-2">
