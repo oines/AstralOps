@@ -981,6 +981,34 @@ export type HostTrustRevokeResult = {
   revoked_at?: string;
 };
 
+export type CloudDeviceStatus = "online" | "offline" | "revoked" | string;
+
+export type CloudDeviceRecord = {
+  account_id_hash: string;
+  device_id: string;
+  device_name?: string;
+  device_kind: "desktop" | "mobile" | string;
+  public_key: string;
+  public_key_fingerprint: string;
+  capabilities?: ControlCapability[];
+  status: CloudDeviceStatus;
+  relay_url?: string;
+  last_seen?: string;
+  updated_at: string;
+};
+
+export type RelayPayloadKind = "control.sealed_frame" | string;
+
+export type RelayEnvelope = {
+  version: "astralops-relay-envelope-v1" | string;
+  envelope_id?: string;
+  from_device_id: string;
+  to_device_id: string;
+  payload_kind: RelayPayloadKind;
+  payload_base64: string;
+  created_at?: string;
+};
+
 export type ControlProtocolVersion = "astralops-control-v1" | string;
 
 export type ControlHelloFrame = {

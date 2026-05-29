@@ -986,17 +986,33 @@ GET /v1/host
 云端保存设备和在线状态：
 
 ```text
-account_id
+account_id_hash
 device_id
 device_name
-kind
+device_kind
 public_key
+public_key_fingerprint
 capabilities
 online_status
+relay_url
 last_seen
+updated_at
 ```
 
-不上传 workspace/session/event 数据。
+云端 device registry 只保存 public metadata 和路由元数据。它不能保存 device private key、Host local cwd、SSH config、workspace/session/event 数据、prompt、approval 内容、文件树、附件或媒体明文。
+
+Relay envelope 是不透明转发信封：
+
+```text
+version: astralops-relay-envelope-v1
+from_device_id
+to_device_id
+payload_kind: control.sealed_frame
+payload_base64
+created_at
+```
+
+`payload_base64` 必须是 Controller 和 Host 已完成设备级 E2EE 后产生的 sealed frame。Cloud/relay 可以按 `from_device_id` / `to_device_id` 路由、按账号和设备状态限流或断开，但不能解析 payload，也不能把 workspace/session/event payload 提升成云端字段。
 
 ### Phase 3 - Pairing and Trust
 
