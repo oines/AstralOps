@@ -60,6 +60,9 @@ func (s *FileStore) RegisterDevice(account Account, input DeviceRegistration, no
 			break
 		}
 	}
+	if existing != nil && existing.Status == DeviceStatusRevoked {
+		return DeviceRecord{}, apiErr(403, "device_revoked", "device has been removed from mesh")
+	}
 	record, err := validateDeviceRegistration(account.AccountIDHash, input, existing, now)
 	if err != nil {
 		return DeviceRecord{}, err
@@ -102,6 +105,55 @@ func (s *FileStore) MarkDeviceOffline(account Account, deviceID string, now time
 	return s.updateDeviceStatus(account, deviceID, DeviceStatusOffline, "", now)
 }
 
+func (s *FileStore) RemoveDevice(account Account, deviceID string, now time.Time) (DeviceRecord, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return DeviceRecord{}, apiErr(400, "device_id_required", "device_id required")
+	}
+	nowText := now.Format(time.RFC3339Nano)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, device := range s.state.Devices {
+		if device.AccountIDHash != account.AccountIDHash || device.DeviceID != deviceID {
+			continue
+		}
+		device.Status = DeviceStatusRevoked
+		device.RelayURL = ""
+		device.UpdatedAt = nowText
+		if err := validateDeviceRecord(device); err != nil {
+			return DeviceRecord{}, err
+		}
+		s.state.Devices[i] = device
+		for j, request := range s.state.PairingRequests {
+			if request.AccountIDHash != account.AccountIDHash || request.Status != PairingStatusPending {
+				continue
+			}
+			if request.HostDeviceID != deviceID && request.ControllerDeviceID != deviceID {
+				continue
+			}
+			request.Status = PairingStatusDenied
+			request.ResolverDeviceID = deviceID
+			request.ResolvedAt = nowText
+			request.UpdatedAt = nowText
+			s.state.PairingRequests[j] = request
+		}
+		s.state.RelayEnvelopes = filterRelayEnvelopes(s.state.RelayEnvelopes, func(envelope RelayEnvelope) bool {
+			if envelope.AccountIDHash != account.AccountIDHash {
+				return true
+			}
+			return envelope.FromDeviceID != deviceID && envelope.ToDeviceID != deviceID
+		})
+		if err := s.writeLocked(); err != nil {
+			return DeviceRecord{}, err
+		}
+		return device, nil
+	}
+	return DeviceRecord{}, apiErr(404, "device_not_found", "device not found")
+}
+
 func (s *FileStore) updateDeviceStatus(account Account, deviceID, status, relayURL string, now time.Time) (DeviceRecord, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -111,6 +163,9 @@ func (s *FileStore) updateDeviceStatus(account Account, deviceID, status, relayU
 	for i, device := range s.state.Devices {
 		if device.AccountIDHash != account.AccountIDHash || device.DeviceID != strings.TrimSpace(deviceID) {
 			continue
+		}
+		if device.Status == DeviceStatusRevoked && status != DeviceStatusRevoked {
+			return DeviceRecord{}, apiErr(403, "device_revoked", "device has been removed from mesh")
 		}
 		device.Status = status
 		if status == DeviceStatusOnline {
@@ -151,6 +206,9 @@ func (s *FileStore) CreatePairingRequest(account Account, input PairingRequestIn
 	controller, controllerOK := s.deviceLocked(account.AccountIDHash, controllerID)
 	if !hostOK || !controllerOK {
 		return PairingRequest{}, apiErr(404, "pairing_device_not_found", "host or controller device not found")
+	}
+	if host.Status == DeviceStatusRevoked || controller.Status == DeviceStatusRevoked {
+		return PairingRequest{}, apiErr(403, "pairing_device_revoked", "host or controller device has been removed from mesh")
 	}
 	if !host.CanHost {
 		return PairingRequest{}, apiErr(400, "host_role_required", "host device cannot accept remote control")
@@ -290,8 +348,16 @@ func (s *FileStore) EnqueueRelayEnvelope(account Account, envelope RelayEnvelope
 	if _, ok := s.deviceLocked(account.AccountIDHash, envelope.FromDeviceID); !ok {
 		return RelayEnvelope{}, apiErr(404, "from_device_not_found", "from device not found")
 	}
-	if _, ok := s.deviceLocked(account.AccountIDHash, envelope.ToDeviceID); !ok {
+	fromDevice, _ := s.deviceLocked(account.AccountIDHash, envelope.FromDeviceID)
+	if fromDevice.Status == DeviceStatusRevoked {
+		return RelayEnvelope{}, apiErr(403, "from_device_revoked", "from device has been removed from mesh")
+	}
+	toDevice, ok := s.deviceLocked(account.AccountIDHash, envelope.ToDeviceID)
+	if !ok {
 		return RelayEnvelope{}, apiErr(404, "to_device_not_found", "to device not found")
+	}
+	if toDevice.Status == DeviceStatusRevoked {
+		return RelayEnvelope{}, apiErr(403, "to_device_revoked", "to device has been removed from mesh")
 	}
 	s.state.RelayEnvelopes = append(s.state.RelayEnvelopes, envelope)
 	if err := s.writeLocked(); err != nil {
@@ -353,6 +419,16 @@ func (s *FileStore) deviceLocked(accountIDHash, deviceID string) (DeviceRecord, 
 		}
 	}
 	return DeviceRecord{}, false
+}
+
+func filterRelayEnvelopes(envelopes []RelayEnvelope, keep func(RelayEnvelope) bool) []RelayEnvelope {
+	out := envelopes[:0]
+	for _, envelope := range envelopes {
+		if keep(envelope) {
+			out = append(out, envelope)
+		}
+	}
+	return out
 }
 
 func (s *FileStore) normalizeLocked() {

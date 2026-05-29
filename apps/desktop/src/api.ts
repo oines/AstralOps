@@ -3,6 +3,8 @@ import type {
   AppSettings,
   AppSettingsPatch,
   ClearMediaCacheResponse,
+  CloudDeviceListResponse,
+  CloudDeviceRecord,
   CloudPairingSignalResponse,
   CreateWorkspaceRequest,
   EditLastUserMessageRequest,
@@ -82,6 +84,8 @@ export interface CoreClient {
   settings(): Promise<AppSettings>;
   patchSettings(patch: AppSettingsPatch): Promise<AppSettings>;
   clearMediaCache(): Promise<ClearMediaCacheResponse>;
+  listCloudDevices(): Promise<CloudDeviceRecord[]>;
+  removeCloudDevice(deviceId: string): Promise<CloudDeviceRecord>;
   listWorkspaces(): Promise<Workspace[]>;
   createWorkspace(input: CreateWorkspaceRequest): Promise<Workspace>;
   browseHostFileSystem(input: HostFileSystemBrowseParams): Promise<HostFileSystemBrowseResult>;
@@ -191,6 +195,8 @@ function requestAction(method: RequestMethod, pathname: string): string {
   if (parts[1] === "approvals" && parts[3] === "respond") return "interaction.respond";
   if (pathname === "/v1/events") return method === "GET" ? "events.read" : "events";
   if (pathname === "/v1/remote/hosts") return "remote.hosts.list";
+  if (pathname === "/v1/cloud/devices") return "cloud.devices.list";
+  if (method === "POST" && parts[1] === "cloud" && parts[2] === "devices" && parts[4] === "remove") return "cloud.device.remove";
   if (pathname === "/v1/cloud/pairing/requests") return "cloud.pairing.request";
   if (pathname === "/v1/settings") return method === "PATCH" ? "settings.patch" : "settings.read";
   if (pathname === "/v1/settings/actions/clear-media-cache") return "settings.clear_media_cache";
@@ -537,6 +543,18 @@ export class LocalCoreClient implements CoreClient {
     return this.channel.request("POST", "/v1/settings/actions/clear-media-cache", {});
   }
 
+  async listCloudDevices(): Promise<CloudDeviceRecord[]> {
+    const result = await this.channel.request<CloudDeviceListResponse>("GET", "/v1/cloud/devices");
+    if (!Array.isArray(result.devices)) {
+      throw new Error("cloud device list response missing devices");
+    }
+    return result.devices;
+  }
+
+  removeCloudDevice(deviceId: string): Promise<CloudDeviceRecord> {
+    return this.channel.request("POST", `/v1/cloud/devices/${encodeURIComponent(deviceId)}/remove`, {});
+  }
+
   listWorkspaces(): Promise<Workspace[]> {
     return this.channel.request("GET", "/v1/workspaces");
   }
@@ -674,6 +692,14 @@ class RemoteCoreClient extends LocalCoreClient {
 
   clearMediaCache(): Promise<ClearMediaCacheResponse> {
     return Promise.reject(new Error("远端 Host 本地缓存不能由 Controller 清理"));
+  }
+
+  listCloudDevices(): Promise<CloudDeviceRecord[]> {
+    return Promise.reject(new Error("远端 Host cloud 设备列表不能由 Controller 读取"));
+  }
+
+  removeCloudDevice(): Promise<CloudDeviceRecord> {
+    return Promise.reject(new Error("远端 Host cloud 设备不能由 Controller 移除"));
   }
 
   workspaceConnection(): Promise<WorkspaceConnection> {

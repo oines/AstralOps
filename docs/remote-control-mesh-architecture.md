@@ -174,6 +174,7 @@ GET  /v1/devices
 POST /v1/devices
 POST /v1/devices/:device_id/heartbeat
 POST /v1/devices/:device_id/offline
+POST /v1/devices/:device_id/remove
 GET  /v1/pairing/requests?device_id=<device_id>
 POST /v1/pairing/requests
 GET  /v1/pairing/requests/:request_id
@@ -602,8 +603,22 @@ Office Desktop
 允许/关闭本机被远控
 查看可信设备
 撤销某个 Controller 对本机的访问
+从账号 Mesh 移除设备
 查看连接路径：LAN / relay
 ```
+
+账号 Mesh 的设备移除是 cloud registry 层动作：
+
+```text
+POST /v1/devices/:device_id/remove
+  -> device.status = revoked
+  -> relay_url 清空
+  -> 相关 pending pairing request 标记 denied
+  -> 相关 relay envelope 删除
+  -> 同一个 device_id 后续 register/heartbeat/relay/pairing 被拒绝
+```
+
+它不会替代 Host 本地 trust revoke。mesh 注册状态只决定“账号里是否还能发现和中继这个设备”，真正能不能控制某台 Host 仍由那台 Host 本地 trust store 和当前 E2EE control session 决定。如果要让正在控制某台 Host 的设备立即断开，仍必须对目标 Host 执行 `POST /v1/trust/devices/:device_id/revoke` 或等价的 `host.trust.revoke` 控制动作。
 
 ### 远控连接体验
 

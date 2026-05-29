@@ -89,6 +89,27 @@ func (a *app) handleCloudHeartbeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, record)
 }
 
+func (a *app) handleCloudDeviceAction(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/cloud/devices/"), "/"), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] != "remove" || r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	client, err := a.cloudClientFromSettings()
+	if err != nil {
+		writeActionError(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	record, err := client.RemoveDevice(ctx, parts[0])
+	if err != nil {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, record)
+}
+
 func (a *app) handleCloudPairingRequests(w http.ResponseWriter, r *http.Request) {
 	client, err := a.cloudClientFromSettings()
 	if err != nil {

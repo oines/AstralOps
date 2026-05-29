@@ -131,6 +131,14 @@ func (c CloudClient) MarkDeviceOffline(ctx context.Context, deviceID string) (Cl
 	return out, nil
 }
 
+func (c CloudClient) RemoveDevice(ctx context.Context, deviceID string) (CloudDeviceRecord, error) {
+	var out CloudDeviceRecord
+	if err := c.do(ctx, http.MethodPost, "/v1/devices/"+pathEscape(deviceID)+"/remove", map[string]any{}, &out); err != nil {
+		return CloudDeviceRecord{}, err
+	}
+	return out, nil
+}
+
 func (c CloudClient) SubmitPairingSignal(ctx context.Context, input cloudPairingSignalInput) (CloudPairingSignal, error) {
 	var out cloudPairingSignalResponse
 	if err := c.do(ctx, http.MethodPost, "/v1/pairing/requests", input, &out); err != nil {

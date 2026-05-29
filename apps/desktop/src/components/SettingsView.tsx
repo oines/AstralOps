@@ -20,7 +20,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import type { CoreClient } from "../api";
-import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, DaemonInfo, HealthResponse, HostInfo, PairingRequest, TrustGrant } from "../types";
+import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, CloudDeviceRecord, DaemonInfo, HealthResponse, HostInfo, PairingRequest, TrustGrant } from "../types";
 
 type SettingsCategoryId =
   | "general"
@@ -624,11 +624,14 @@ function RemoteControlContent({
   const [host, setHost] = useState<HostInfo | null>(null);
   const [grants, setGrants] = useState<TrustGrant[]>([]);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
+  const [cloudDevices, setCloudDevices] = useState<CloudDeviceRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [confirmRevokeId, setConfirmRevokeId] = useState("");
+  const [confirmCloudRemoveId, setConfirmCloudRemoveId] = useState("");
   const [revokingId, setRevokingId] = useState("");
+  const [removingCloudDeviceId, setRemovingCloudDeviceId] = useState("");
   const [resolvingPairingId, setResolvingPairingId] = useState("");
 
   const trustedGrants = useMemo(() => grants.filter((grant) => grant.status === "trusted"), [grants]);
@@ -640,6 +643,7 @@ function RemoteControlContent({
       setHost(null);
       setGrants([]);
       setPairingRequests([]);
+      setCloudDevices([]);
       setError("Core 未连接");
       setStatus("");
       return;
@@ -647,17 +651,27 @@ function RemoteControlContent({
     setLoading(true);
     try {
       const [hostInfo, trustList, pairingList] = await Promise.all([core.hostInfo(), core.listTrustedDevices(), core.listPairingRequests()]);
+      let nextCloudDevices: CloudDeviceRecord[] = [];
+      let cloudError = "";
+      if (settings.cloud.enabled) {
+        try {
+          nextCloudDevices = await core.listCloudDevices();
+        } catch (loadCloudError) {
+          cloudError = loadCloudError instanceof Error ? loadCloudError.message : String(loadCloudError);
+        }
+      }
       setHost(hostInfo);
       setGrants(sortTrustGrants(trustList.grants));
       setPairingRequests(sortPairingRequests(pairingList.requests));
-      setError("");
-      setStatus("已刷新");
+      setCloudDevices(sortCloudDevices(nextCloudDevices, hostInfo.identity.device_id));
+      setError(cloudError);
+      setStatus(cloudError ? "账号设备读取失败" : "已刷新");
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
       setLoading(false);
     }
-  }, [core]);
+  }, [core, settings.cloud.account_token, settings.cloud.base_url, settings.cloud.enabled]);
 
   useEffect(() => {
     void loadRemoteControl();
@@ -714,6 +728,27 @@ function RemoteControlContent({
     }
   }
 
+  async function removeCloudDevice(device: CloudDeviceRecord): Promise<void> {
+    if (!core || device.status === "revoked") return;
+    if (confirmCloudRemoveId !== device.device_id) {
+      setConfirmCloudRemoveId(device.device_id);
+      setStatus("再次点击确认从账号 Mesh 移除");
+      return;
+    }
+    setRemovingCloudDeviceId(device.device_id);
+    setError("");
+    try {
+      await core.removeCloudDevice(device.device_id);
+      setStatus("已从账号 Mesh 移除设备");
+      setConfirmCloudRemoveId("");
+      await loadRemoteControl();
+    } catch (removeError) {
+      setError(removeError instanceof Error ? removeError.message : String(removeError));
+    } finally {
+      setRemovingCloudDeviceId("");
+    }
+  }
+
   return (
     <div className="grid gap-8">
       <SettingsSection title="本机 Host">
@@ -757,6 +792,25 @@ function RemoteControlContent({
           }
         />
         <SettingRow title="远程终端" description="远端渲染工作区 PTY，输入和 resize 走加密控制通道" control={<StatusPill label={terminalFeatureLabel(host)} tone={terminalFeatureAvailable(host) ? "good" : "muted"} icon={TerminalSquare} />} />
+      </SettingsSection>
+
+      <SettingsSection title="账号 Mesh">
+        {!settings.cloud.enabled ? (
+          <EmptySettingsRow title="云账号未开启" description="开启账号后，本机和其他设备会出现在这里" />
+        ) : cloudDevices.length > 0 ? (
+          cloudDevices.map((device) => (
+            <CloudDeviceRow
+              confirmRemoveId={confirmCloudRemoveId}
+              currentDeviceId={host?.identity.device_id || ""}
+              device={device}
+              key={device.device_id}
+              removingId={removingCloudDeviceId}
+              onRemove={removeCloudDevice}
+            />
+          ))
+        ) : (
+          <EmptySettingsRow title="暂无账号设备" description="本机注册到云账号后会显示账号 Mesh 设备" />
+        )}
       </SettingsSection>
 
       <SettingsSection title="可信设备">
@@ -988,6 +1042,52 @@ function PairingRequestRow({
   );
 }
 
+function CloudDeviceRow({
+  confirmRemoveId,
+  currentDeviceId,
+  device,
+  removingId,
+  onRemove,
+}: {
+  confirmRemoveId: string;
+  currentDeviceId: string;
+  device: CloudDeviceRecord;
+  removingId: string;
+  onRemove: (device: CloudDeviceRecord) => Promise<void>;
+}): React.JSX.Element {
+  const current = device.device_id === currentDeviceId;
+  const revoked = device.status === "revoked";
+  const removing = removingId === device.device_id;
+  const confirming = confirmRemoveId === device.device_id;
+  const name = device.device_name || device.device_id;
+  return (
+    <div className="grid min-h-[92px] grid-cols-[minmax(0,1fr)_auto] items-center gap-5 border-b border-[var(--ao-border)] px-4 py-3 last:border-b-0">
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <MonitorCog size={15} strokeWidth={1.9} className={revoked ? "text-[var(--ao-muted)]" : "text-[var(--ao-text-soft)]"} />
+          <span className="truncate text-[13px] font-bold leading-5 text-[var(--ao-text)]">{name}</span>
+          <StatusPill label={current ? "本机" : cloudDeviceStatusLabel(device.status)} tone={device.status === "online" ? "good" : revoked ? "muted" : "warning"} />
+        </div>
+        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
+          <span className="truncate">ID {device.device_id}</span>
+          <span>{deviceKindLabel(device.device_kind)}</span>
+          <span>{cloudDeviceRoleLabel(device)}</span>
+          <span className="inline-flex min-w-0 items-center gap-1">
+            <KeyRound size={12} strokeWidth={1.9} />
+            <span className="truncate">{device.public_key_fingerprint}</span>
+          </span>
+          <span>{`更新于 ${formatTimestamp(device.updated_at || device.last_seen)}`}</span>
+        </div>
+      </div>
+      <ButtonControl
+        disabled={current || revoked || removing}
+        label={current ? "本机" : revoked ? "已移除" : removing ? "移除中" : confirming ? "确认移除" : "移除"}
+        onClick={() => onRemove(device)}
+      />
+    </div>
+  );
+}
+
 function StatusPill({ icon: Icon, label, tone = "muted" }: { icon?: LucideIcon; label: string; tone?: "good" | "muted" | "warning" }): React.JSX.Element {
   const toneClass = tone === "good" ? "text-[var(--ao-green)]" : tone === "warning" ? "text-[var(--ao-warning)]" : "text-[var(--ao-muted-strong)]";
   return (
@@ -1184,6 +1284,22 @@ function sortPairingRequests(requests: PairingRequest[]): PairingRequest[] {
   });
 }
 
+function sortCloudDevices(devices: CloudDeviceRecord[], currentDeviceId: string): CloudDeviceRecord[] {
+  return [...devices].sort((left, right) => {
+    if (left.device_id === currentDeviceId && right.device_id !== currentDeviceId) return -1;
+    if (left.device_id !== currentDeviceId && right.device_id === currentDeviceId) return 1;
+    if (left.status !== right.status) return cloudDeviceStatusRank(left.status) - cloudDeviceStatusRank(right.status);
+    return timestampValue(right.updated_at || right.last_seen) - timestampValue(left.updated_at || left.last_seen);
+  });
+}
+
+function cloudDeviceStatusRank(status: string): number {
+  if (status === "online") return 0;
+  if (status === "offline") return 1;
+  if (status === "revoked") return 2;
+  return 3;
+}
+
 function timestampValue(value?: string): number {
   if (!value) return 0;
   const parsed = Date.parse(value);
@@ -1217,6 +1333,20 @@ function deviceKindLabel(kind?: string): string {
   if (kind === "desktop") return "桌面端";
   if (kind === "mobile") return "手机端";
   return kind || "未加载";
+}
+
+function cloudDeviceStatusLabel(status: string): string {
+  if (status === "online") return "在线";
+  if (status === "offline") return "离线";
+  if (status === "revoked") return "已移除";
+  return status || "未知";
+}
+
+function cloudDeviceRoleLabel(device: CloudDeviceRecord): string {
+  if (device.can_host && device.can_control) return "Host / Controller";
+  if (device.can_host) return "Host";
+  if (device.can_control) return "Controller";
+  return "未声明角色";
 }
 
 function trustStatusLabel(status: string): string {

@@ -154,6 +154,60 @@ func TestCloudBrokerRelayAckDeletesOnlyReceiverEnvelope(t *testing.T) {
 	}
 }
 
+func TestCloudBrokerRemoveDeviceRevokesAndPurgesMeshState(t *testing.T) {
+	server := testServer(t)
+	registerDevice(t, server, testDeviceRegistration(t, "dev_host", "desktop", true, true))
+	registerDevice(t, server, testDeviceRegistration(t, "dev_phone", "mobile", false, true))
+
+	pair := doJSON(t, server, http.MethodPost, "/v1/pairing/requests", PairingRequestInput{
+		HostDeviceID:       "dev_host",
+		ControllerDeviceID: "dev_phone",
+		Scope:              "full",
+	})
+	if pair.Code != http.StatusAccepted {
+		t.Fatalf("pair status = %d body=%s", pair.Code, pair.Body.String())
+	}
+	envelope := RelayEnvelope{
+		Version:       RelayEnvelopeVersion,
+		FromDeviceID:  "dev_phone",
+		ToDeviceID:    "dev_host",
+		PayloadKind:   RelayPayloadKindControlHello,
+		PayloadBase64: base64.StdEncoding.EncodeToString([]byte("hello")),
+	}
+	if relay := doJSON(t, server, http.MethodPost, "/v1/relay/envelopes", envelope); relay.Code != http.StatusAccepted {
+		t.Fatalf("relay status = %d body=%s", relay.Code, relay.Body.String())
+	}
+
+	remove := doJSON(t, server, http.MethodPost, "/v1/devices/dev_phone/remove", map[string]any{})
+	if remove.Code != http.StatusOK {
+		t.Fatalf("remove status = %d body=%s", remove.Code, remove.Body.String())
+	}
+	var removed DeviceRecord
+	if err := json.Unmarshal(remove.Body.Bytes(), &removed); err != nil {
+		t.Fatal(err)
+	}
+	if removed.Status != DeviceStatusRevoked || removed.RelayURL != "" {
+		t.Fatalf("removed = %#v, want revoked with no relay url", removed)
+	}
+
+	requests := doJSON(t, server, http.MethodGet, "/v1/pairing/requests?device_id=dev_phone", nil)
+	if requests.Code != http.StatusOK || !strings.Contains(requests.Body.String(), PairingStatusDenied) {
+		t.Fatalf("pairing requests after remove status = %d body=%s, want denied", requests.Code, requests.Body.String())
+	}
+	relayList := doJSON(t, server, http.MethodGet, "/v1/relay/envelopes?device_id=dev_host", nil)
+	if relayList.Code != http.StatusOK || strings.Contains(relayList.Body.String(), "dev_phone") {
+		t.Fatalf("relay list after remove status = %d body=%s, want purged", relayList.Code, relayList.Body.String())
+	}
+	heartbeat := doJSON(t, server, http.MethodPost, "/v1/devices/dev_phone/heartbeat", DeviceHeartbeat{})
+	if heartbeat.Code != http.StatusForbidden || !strings.Contains(heartbeat.Body.String(), "device_revoked") {
+		t.Fatalf("heartbeat status = %d body=%s, want revoked rejection", heartbeat.Code, heartbeat.Body.String())
+	}
+	register := doJSON(t, server, http.MethodPost, "/v1/devices", testDeviceRegistration(t, "dev_phone", "mobile", false, true))
+	if register.Code != http.StatusForbidden || !strings.Contains(register.Body.String(), "device_revoked") {
+		t.Fatalf("register status = %d body=%s, want revoked rejection", register.Code, register.Body.String())
+	}
+}
+
 func TestCloudBrokerRejectsUnknownAccountTokenWhenAllowlistConfigured(t *testing.T) {
 	store, err := LoadFileStore(t.TempDir() + "/cloud.json")
 	if err != nil {

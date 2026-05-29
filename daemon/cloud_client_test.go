@@ -90,6 +90,39 @@ func TestCloudClientListsPairingSignals(t *testing.T) {
 	}
 }
 
+func TestCloudClientRemovesDevice(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer account-token" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		if r.URL.Path != "/v1/devices/dev_phone/remove" || r.Method != http.MethodPost {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"account_id_hash":        "acct_hash",
+			"device_id":              "dev_phone",
+			"device_name":            "Phone",
+			"device_kind":            "mobile",
+			"public_key":             "ignored-by-client-test",
+			"public_key_fingerprint": "sha256:test",
+			"can_host":               false,
+			"can_control":            true,
+			"status":                 "revoked",
+			"updated_at":             time.Now().UTC().Format(time.RFC3339Nano),
+		})
+	}))
+	defer server.Close()
+
+	client := CloudClient{BaseURL: server.URL, Token: "account-token"}
+	removed, err := client.RemoveDevice(context.Background(), "dev_phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.DeviceID != "dev_phone" || removed.Status != cloudDeviceStatusRevoked {
+		t.Fatalf("removed = %#v", removed)
+	}
+}
+
 func TestCloudClientRelayEnvelopeRoundTripCallsBrokerAPI(t *testing.T) {
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

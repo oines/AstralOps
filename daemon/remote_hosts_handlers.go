@@ -84,6 +84,10 @@ func (a *app) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remote
 	_ = a.cloudSyncApprovedPairingKnownHosts(reqCtx, client, devices)
 	selfID := a.store.hostInfo().Identity.DeviceID
 	for _, device := range devices {
+		if normalizeCloudDeviceStatus(device.Status) == cloudDeviceStatusRevoked {
+			delete(hosts, device.DeviceID)
+			continue
+		}
 		if device.DeviceID == "" || device.DeviceID == selfID || !device.CanHost {
 			continue
 		}

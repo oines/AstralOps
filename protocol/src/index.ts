@@ -1095,6 +1095,10 @@ export type CloudDeviceRecord = {
   updated_at: string;
 };
 
+export type CloudDeviceListResponse = {
+  devices: CloudDeviceRecord[];
+};
+
 export type CloudPairingSignalInput = {
   host_device_id: string;
   controller_device_id: string;

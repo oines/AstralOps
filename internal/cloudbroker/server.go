@@ -112,6 +112,13 @@ func (s *Server) handleDeviceAction(account Account, w http.ResponseWriter, r *h
 			return
 		}
 		writeJSON(w, http.StatusOK, record)
+	case "remove":
+		record, err := s.store.RemoveDevice(account, deviceID, s.now())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, record)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}

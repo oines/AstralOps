@@ -43,6 +43,34 @@ func TestCloudHandlersRegisterAndListCurrentDevice(t *testing.T) {
 	}
 }
 
+func TestCloudHandlersRemoveDevice(t *testing.T) {
+	app, broker := testCloudApp(t)
+	defer broker.Close()
+
+	controller := testControllerRegistration(t, "dev_phone")
+	res, err := httpClientPostJSON(broker.URL+"/v1/devices", "account-token", controller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("register controller status = %d", res.StatusCode)
+	}
+
+	removeRR := httptest.NewRecorder()
+	app.handleCloudDeviceAction(removeRR, httptest.NewRequest(http.MethodPost, "/v1/cloud/devices/dev_phone/remove", nil))
+	if removeRR.Code != http.StatusOK {
+		t.Fatalf("remove status = %d body=%s", removeRR.Code, removeRR.Body.String())
+	}
+	var removed CloudDeviceRecord
+	if err := json.Unmarshal(removeRR.Body.Bytes(), &removed); err != nil {
+		t.Fatal(err)
+	}
+	if removed.DeviceID != "dev_phone" || removed.Status != cloudDeviceStatusRevoked {
+		t.Fatalf("removed = %#v", removed)
+	}
+}
+
 func TestCloudHandlersPairingSignalDoesNotWriteLocalTrust(t *testing.T) {
 	app, broker := testCloudApp(t)
 	defer broker.Close()
@@ -351,6 +379,22 @@ func TestRemoteHostsIncludesCloudHostCandidatesWithoutGrantingControl(t *testing
 	app.handleRemoteHostAction(actionResp, actionReq)
 	if actionResp.Code != http.StatusNotFound {
 		t.Fatalf("cloud-only Host action status = %d body=%s, want unknown until paired/known", actionResp.Code, actionResp.Body.String())
+	}
+
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	if _, err := client.RemoveDevice(t.Context(), "dev_cloud_host"); err != nil {
+		t.Fatal(err)
+	}
+	listResp = httptest.NewRecorder()
+	app.handleRemoteHosts(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("remote hosts after remove status = %d body=%s", listResp.Code, listResp.Body.String())
+	}
+	if err := json.Unmarshal(listResp.Body.Bytes(), &hosts); err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts.Hosts) != 0 {
+		t.Fatalf("hosts after cloud remove = %#v, want revoked Host hidden from selector", hosts.Hosts)
 	}
 }
 
