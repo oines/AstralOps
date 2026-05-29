@@ -1310,6 +1310,10 @@ reconnect and resume semantics
 GET /v1/control/ws
 ```
 
+当前 relay MVP 已落地 Host 侧 envelope polling 和 Controller 侧 request/response fallback：当 LAN discovery/direct WebSocket 不可用且目标 Host 是已知可信设备、cloud registry 显示在线时，本机 daemon 可以通过 cloud broker 投递 `control.hello` / `control.hello_ack` / `control.sealed_frame` 完成同一套 E2EE 握手并执行同步 control action。relay MVP 只覆盖 request/response 型能力，例如 workspaces、sessions、session view、workspace files read/write、workspace exec、host trust/pairing 管理等。
+
+`core.subscribe.events`、`media.stream`、`workspace.files.stream` 和 remote PTY 仍需要长生命周期 transport abstraction；在完成 `controlWSConn` 到通用 encrypted control transport 的重构前，这些流式能力不能伪装成 relay 可用。UI/facade 遇到 relay-only Host 时必须保持不可用或返回明确错误，不能降级成明文 HTTP 或云端业务代理。
+
 Desktop Controller 不直接在 React/Electron renderer 内实现远控握手，也不持有远控私钥。当前桌面端先通过本机 daemon 暴露 controller-side 代理 API，再由本机 daemon 复用同一套 Host identity、known_hosts、LAN discovery 和 E2EE control channel：
 
 ```text

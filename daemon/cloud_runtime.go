@@ -48,6 +48,8 @@ func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings) {
 
 	ticker := time.NewTicker(cloudSyncInterval)
 	defer ticker.Stop()
+	relayTicker := time.NewTicker(controlRelayPollInterval)
+	defer relayTicker.Stop()
 	defer a.cloudMarkOffline(settings)
 
 	for {
@@ -58,6 +60,12 @@ func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings) {
 			if err := a.cloudRegisterAndHeartbeat(ctx, client); err != nil {
 				log.Printf("astralops cloud sync: %v", err)
 			}
+		case <-relayTicker.C:
+			relayCtx, relayCancel := context.WithTimeout(ctx, cloudSyncTimeout)
+			if err := a.cloudPollRelayEnvelopes(relayCtx, client); err != nil {
+				log.Printf("astralops cloud relay: %v", err)
+			}
+			relayCancel()
 		}
 	}
 }
@@ -82,6 +90,11 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 		pairingCtx, pairingCancel := context.WithTimeout(ctx, cloudSyncTimeout)
 		defer pairingCancel()
 		if err := a.cloudSyncPendingPairingRequests(pairingCtx, client); err != nil {
+			return err
+		}
+		relayCtx, relayCancel := context.WithTimeout(ctx, cloudSyncTimeout)
+		defer relayCancel()
+		if err := a.cloudPollRelayEnvelopes(relayCtx, client); err != nil {
 			return err
 		}
 	}

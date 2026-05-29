@@ -23,34 +23,35 @@ import (
 var version = "dev"
 
 type app struct {
-	store             *store
-	settings          *settingsStore
-	token             string
-	addr              string
-	runtimePort       int
-	hub               *eventHub
-	upgrader          websocket.Upgrader
-	agents            map[AgentKind]agentInfo
-	runtimes          map[AgentKind]AgentRuntime
-	ssh               *sshManager
-	projections       *sessionProjectionCache
-	controlHelloLimit int64
-	controlFrameLimit int64
-	controlMu         sync.Mutex
-	controlSessions   map[string]*controlWSConn
-	terminalMu        sync.Mutex
-	terminals         *terminalManager
-	queueMu           sync.Mutex
-	queues            map[string][]queuedTurn
-	codexExecMu       sync.Mutex
-	codexExec         map[string]codexExecCommand
-	codexRemoteHomeMu sync.Mutex
-	codexRemoteHome   map[string]string
-	remoteControlMu   sync.Mutex
-	remoteControl     *remoteControlRuntime
-	cloudMu           sync.Mutex
-	cloudCancel       context.CancelFunc
-	cloudSettings     CloudSettings
+	store                *store
+	settings             *settingsStore
+	token                string
+	addr                 string
+	runtimePort          int
+	hub                  *eventHub
+	upgrader             websocket.Upgrader
+	agents               map[AgentKind]agentInfo
+	runtimes             map[AgentKind]AgentRuntime
+	ssh                  *sshManager
+	projections          *sessionProjectionCache
+	controlHelloLimit    int64
+	controlFrameLimit    int64
+	controlMu            sync.Mutex
+	controlSessions      map[string]*controlWSConn
+	controlRelaySessions map[string]*controlRelaySession
+	terminalMu           sync.Mutex
+	terminals            *terminalManager
+	queueMu              sync.Mutex
+	queues               map[string][]queuedTurn
+	codexExecMu          sync.Mutex
+	codexExec            map[string]codexExecCommand
+	codexRemoteHomeMu    sync.Mutex
+	codexRemoteHome      map[string]string
+	remoteControlMu      sync.Mutex
+	remoteControl        *remoteControlRuntime
+	cloudMu              sync.Mutex
+	cloudCancel          context.CancelFunc
+	cloudSettings        CloudSettings
 }
 
 func main() {

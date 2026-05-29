@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -397,12 +398,15 @@ type controlClientTargetOptions struct {
 }
 
 type controlClientTarget struct {
-	BaseURL         string
-	HostInfo        HostInfo
-	Timeout         time.Duration
-	FallbackHost    string
-	ExpectedHost    KnownHost
-	HasExpectedHost bool
+	BaseURL            string
+	HostInfo           HostInfo
+	Timeout            time.Duration
+	FallbackHost       string
+	ExpectedHost       KnownHost
+	HasExpectedHost    bool
+	UseRelay           bool
+	RelayClient        CloudClient
+	ControllerDeviceID string
 }
 
 type controlClientSmokeOptions struct {
@@ -1774,8 +1778,18 @@ func controlClientRequest(host string, st *store, req ControlRequest) (ControlRe
 }
 
 func controlClientRequestToTarget(target controlClientTarget, st *store, req ControlRequest) (ControlResponse, error) {
+	if target.UseRelay {
+		target.ControllerDeviceID = st.deviceIdentity.DeviceID
+		return controlClientRelayRoundTrip(context.Background(), target, st, req)
+	}
 	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
 	if err != nil {
+		if target.RelayClient.BaseURL != "" && target.RelayClient.Token != "" {
+			relayTarget := target
+			relayTarget.UseRelay = true
+			relayTarget.ControllerDeviceID = st.deviceIdentity.DeviceID
+			return controlClientRelayRoundTrip(context.Background(), relayTarget, st, req)
+		}
 		return ControlResponse{}, err
 	}
 	defer socket.Close()
@@ -1827,6 +1841,9 @@ func controlClientDial(host string, st *store, hostInfo HostInfo) (*websocket.Co
 }
 
 func controlClientDialTarget(target controlClientTarget, st *store) (*websocket.Conn, *controlCipher, controlClientTarget, error) {
+	if target.UseRelay {
+		return nil, nil, target, fmt.Errorf("relay streaming transport is not implemented")
+	}
 	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
 	if err == nil {
 		return socket, cipher, target, nil

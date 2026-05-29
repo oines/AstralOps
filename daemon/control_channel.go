@@ -217,18 +217,7 @@ func (c *controlWSConn) acceptHello() error {
 }
 
 func (c *controlWSConn) validateControllerPublicKey(grant TrustGrant, value string) (ed25519.PublicKey, error) {
-	publicKey, err := decodeDevicePublicKey(value)
-	if err != nil {
-		return nil, err
-	}
-	if grant.ControllerPublicKey != "" && grant.ControllerPublicKey != strings.TrimSpace(value) {
-		return nil, errors.New("controller public key does not match trusted grant")
-	}
-	fingerprint := devicePublicKeyFingerprint(publicKey)
-	if grant.ControllerPublicKeyFingerprint != "" && grant.ControllerPublicKeyFingerprint != fingerprint {
-		return nil, errors.New("controller public key fingerprint does not match trusted grant")
-	}
-	return publicKey, nil
+	return validateControlControllerPublicKey(grant, value)
 }
 
 func (c *controlWSConn) serve() {
@@ -550,7 +539,7 @@ func (a *app) closeControlSessionsForDeviceExcept(controllerDeviceID, reason, ex
 		conn.writeEncryptedClose("trust_revoked", reason)
 		_ = conn.socket.Close()
 	}
-	return len(sessions)
+	return len(sessions) + a.closeControlRelaySessionsForDevice(controllerDeviceID)
 }
 
 func (a *app) activeControlSessionCountForDevice(controllerDeviceID string) int {
@@ -559,6 +548,11 @@ func (a *app) activeControlSessionCountForDevice(controllerDeviceID string) int 
 	count := 0
 	for _, conn := range a.controlSessions {
 		if conn.controllerDeviceID == controllerDeviceID {
+			count++
+		}
+	}
+	for _, session := range a.controlRelaySessions {
+		if session.controllerDeviceID == controllerDeviceID {
 			count++
 		}
 	}

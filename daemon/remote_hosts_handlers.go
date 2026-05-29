@@ -562,7 +562,7 @@ func (a *app) remoteHostTarget(hostDeviceID string) (controlClientTarget, error)
 	if !ok {
 		return controlClientTarget{}, newActionError(http.StatusNotFound, "remote_host_unknown", "remote Host is not known; pair the Host first")
 	}
-	return controlClientResolveTarget(a.store, controlClientTargetOptions{
+	target, err := controlClientResolveTarget(a.store, controlClientTargetOptions{
 		Host:             known.LastBaseURL,
 		Discover:         true,
 		HostDeviceID:     hostDeviceID,
@@ -570,6 +570,59 @@ func (a *app) remoteHostTarget(hostDeviceID string) (controlClientTarget, error)
 		DiscoveryTimeout: remoteHostDiscoveryTTL,
 		LANTimeout:       remoteHostLANTimeout,
 	})
+	if err == nil {
+		if relay, relayErr := a.remoteHostRelayTarget(known); relayErr == nil {
+			target.RelayClient = relay.RelayClient
+			target.ControllerDeviceID = relay.ControllerDeviceID
+		}
+		return target, nil
+	}
+	if relay, relayErr := a.remoteHostRelayTarget(known); relayErr == nil {
+		return relay, nil
+	}
+	return controlClientTarget{}, err
+}
+
+func (a *app) remoteHostRelayTarget(known KnownHost) (controlClientTarget, error) {
+	client, err := a.cloudClientFromSettings()
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cloudSyncTimeout)
+	defer cancel()
+	devices, err := client.ListDevices(ctx)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	known = normalizeKnownHost(known)
+	for _, device := range devices {
+		if device.DeviceID != known.DeviceID || !device.CanHost || device.Status != cloudDeviceStatusOnline {
+			continue
+		}
+		if device.PublicKey != "" && device.PublicKey != known.PublicKey {
+			return controlClientTarget{}, fmt.Errorf("cloud Host public key mismatch for %s", known.DeviceID)
+		}
+		if device.PublicKeyFingerprint != "" && device.PublicKeyFingerprint != known.PublicKeyFingerprint {
+			return controlClientTarget{}, fmt.Errorf("cloud Host public key fingerprint mismatch for %s", known.DeviceID)
+		}
+		return controlClientTarget{
+			HostInfo: HostInfo{Identity: DeviceIdentity{
+				DeviceID:             known.DeviceID,
+				DeviceName:           firstString(device.DeviceName, known.DeviceName),
+				DeviceKind:           device.DeviceKind,
+				PublicKey:            known.PublicKey,
+				PublicKeyFingerprint: known.PublicKeyFingerprint,
+				Capabilities:         normalizeCapabilities(device.Capabilities),
+			}, Capabilities: normalizeCapabilities(device.Capabilities)},
+			Timeout:            controlRelayRoundTripTimeout,
+			UseRelay:           true,
+			RelayClient:        client,
+			ControllerDeviceID: a.store.hostInfo().Identity.DeviceID,
+			ExpectedHost:       known,
+			HasExpectedHost:    true,
+		}, nil
+	}
+	return controlClientTarget{}, fmt.Errorf("cloud Host %s is not online for relay", known.DeviceID)
 }
 
 func (a *app) writeRemoteControlResult(w http.ResponseWriter, hostDeviceID, capability, action string, params map[string]any) {
