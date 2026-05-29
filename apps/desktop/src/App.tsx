@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { KeyRound, LoaderCircle, PanelLeft, PanelRight, RefreshCw } from "lucide-react";
+import { AlertTriangle, KeyRound, LoaderCircle, PanelLeft, PanelRight, RefreshCw, X } from "lucide-react";
 import { createLocalCoreClient, createRemoteCoreClient, listRemoteHosts, requestRemoteHostPairing, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
@@ -593,19 +593,23 @@ export function App(): React.JSX.Element {
     async (workspaceId: string) => {
       if (!api) return;
       setError("");
-      await api.deleteWorkspace(workspaceId);
-      setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
-      setWorkspaceConnections((current) => {
-        const next = { ...current };
-        delete next[workspaceId];
-        return next;
-      });
-      setSessions((current) => current.filter((session) => session.workspace_id !== workspaceId));
-      setSessionViews((current) => Object.fromEntries(Object.entries(current).filter(([, view]) => view.session.workspace_id !== workspaceId)));
-      setEventIndex((current) => removeWorkspaceEvents(current, workspaceId));
-      if (activeWorkspaceId === workspaceId) {
-        setActiveWorkspaceId("");
-        setActiveSession(null);
+      try {
+        await api.deleteWorkspace(workspaceId);
+        setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
+        setWorkspaceConnections((current) => {
+          const next = { ...current };
+          delete next[workspaceId];
+          return next;
+        });
+        setSessions((current) => current.filter((session) => session.workspace_id !== workspaceId));
+        setSessionViews((current) => Object.fromEntries(Object.entries(current).filter(([, view]) => view.session.workspace_id !== workspaceId)));
+        setEventIndex((current) => removeWorkspaceEvents(current, workspaceId));
+        if (activeWorkspaceId === workspaceId) {
+          setActiveWorkspaceId("");
+          setActiveSession(null);
+        }
+      } catch (deleteError) {
+        setError(deleteError instanceof Error ? deleteError.message : String(deleteError));
       }
     },
     [activeWorkspaceId, api],
@@ -616,20 +620,24 @@ export function App(): React.JSX.Element {
     const targetSession = sessionId ? sessions.find((session) => session.id === sessionId) : activeSession;
     if (!targetSession) return;
     setError("");
-    await api.deleteSession(targetSession.id);
-    setSessions((current) => current.filter((session) => session.id !== targetSession.id));
-    setSessionViews((current) => {
-      const next = { ...current };
-      delete next[targetSession.id];
-      return next;
-    });
-    setEventIndex((current) => removeSessionEvents(current, targetSession.id));
-    setSessionWindows((current) => {
-      const next = { ...current };
-      delete next[targetSession.id];
-      return next;
-    });
-    setActiveSession((current) => (current?.id === targetSession.id ? sessions.find((session) => session.workspace_id === targetSession.workspace_id && session.id !== targetSession.id) ?? null : current));
+    try {
+      await api.deleteSession(targetSession.id);
+      setSessions((current) => current.filter((session) => session.id !== targetSession.id));
+      setSessionViews((current) => {
+        const next = { ...current };
+        delete next[targetSession.id];
+        return next;
+      });
+      setEventIndex((current) => removeSessionEvents(current, targetSession.id));
+      setSessionWindows((current) => {
+        const next = { ...current };
+        delete next[targetSession.id];
+        return next;
+      });
+      setActiveSession((current) => (current?.id === targetSession.id ? sessions.find((session) => session.workspace_id === targetSession.workspace_id && session.id !== targetSession.id) ?? null : current));
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : String(deleteError));
+    }
   }, [activeSession, api, sessions]);
 
   const handleChooseFiles = useCallback(async () => {
@@ -964,6 +972,7 @@ export function App(): React.JSX.Element {
           sessionState={sessionState}
           sessionTitle={activeSession ? sessionTitles[activeSession.id] : undefined}
         />
+        <AppErrorBanner message={error} onDismiss={() => setError("")} />
         {activeHostNeedsPairing && activeRemoteHost ? (
           <HostPairingPanel
             host={activeRemoteHost}
@@ -1097,6 +1106,27 @@ export function App(): React.JSX.Element {
       </button>
         </>
       )}
+    </div>
+  );
+}
+
+function AppErrorBanner({ message, onDismiss }: { message: string; onDismiss: () => void }): React.JSX.Element | null {
+  if (!message) return null;
+  return (
+    <div className="pointer-events-none absolute left-1/2 top-[62px] z-40 w-[560px] max-w-[calc(100%-48px)] -translate-x-1/2">
+      <div className="pointer-events-auto flex min-h-10 items-start gap-2 rounded-lg border border-[#f0c8a7] bg-[#fff7ed]/95 px-3 py-2 text-[#8a3b12] shadow-[0_12px_32px_rgba(0,0,0,0.10),0_2px_8px_rgba(0,0,0,0.05)] backdrop-blur-xl">
+        <AlertTriangle className="mt-0.5 shrink-0" size={16} strokeWidth={2} />
+        <div className="min-w-0 flex-1 text-[13px] font-semibold leading-5">{message}</div>
+        <button
+          className="grid size-6 shrink-0 place-items-center rounded-md text-[#a66a3f] transition-colors hover:bg-[#f3dfcc]"
+          type="button"
+          aria-label="关闭错误"
+          title="关闭错误"
+          onClick={onDismiss}
+        >
+          <X size={14} strokeWidth={2} />
+        </button>
+      </div>
     </div>
   );
 }
