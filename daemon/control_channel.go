@@ -44,6 +44,7 @@ type controlHelloAckFrame struct {
 	HostDeviceID       string `json:"host_device_id"`
 	HostPublicKey      string `json:"host_public_key"`
 	HostEphemeralKey   string `json:"host_ephemeral_key"`
+	ClientNonce        string `json:"client_nonce"`
 	ServerNonce        string `json:"server_nonce"`
 	Signature          string `json:"signature"`
 	Encryption         string `json:"encryption"`
@@ -205,6 +206,7 @@ func (c *controlWSConn) acceptHello() error {
 		HostDeviceID:       c.app.store.deviceIdentity.DeviceID,
 		HostPublicKey:      c.app.store.deviceIdentity.PublicKey,
 		HostEphemeralKey:   hostEphemeralKey,
+		ClientNonce:        hello.ClientNonce,
 		ServerNonce:        serverNonce,
 		Encryption:         "x25519-aes-256-gcm",
 		SignatureAlgorithm: "ed25519",

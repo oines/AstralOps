@@ -376,8 +376,8 @@ go run ./daemon control-client smoke --discover --host-device-id <host_device_id
 go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --workspace-id <workspace_id> --path . --stream-path large.log --workspace-write-smoke --exec-command "pwd" --terminal
 go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --session-id <session_id> --attachment-path ./clip.png
 go run ./daemon control-client smoke --discover --host-device-id <host_device_id> --session-id <session_id> --media-event-seq <event_seq> --media-id <media_id>
-go run ./daemon control-client smoke --relay --cloud-base-url <broker_url> --cloud-token <account_token> --host-device-id <host_device_id>
-go run ./daemon control-client smoke --relay --cloud-base-url <broker_url> --cloud-token <account_token> --host-device-id <host_device_id> --workspace-id <workspace_id> --path . --workspace-write-smoke --exec-command "pwd" --sessions --events --trust-list
+go run ./daemon control-client smoke --relay --relay-timeout 60s --cloud-base-url <broker_url> --cloud-token <account_token> --host-device-id <host_device_id>
+go run ./daemon control-client smoke --relay --relay-timeout 60s --cloud-base-url <broker_url> --cloud-token <account_token> --host-device-id <host_device_id> --workspace-id <workspace_id> --path . --workspace-write-smoke --exec-command "pwd" --sessions --events --trust-list
 ```
 
 开发客户端可以同时传 `--discover --host <relay_or_host_url>`。这种模式会先按 `host_device_id` 尝试已知 Host 的 LAN candidate；LAN discovery、短超时 Host identity validation 或 control channel dial/handshake 失败时，回退到显式 `--host`。`--host` 在当前 MVP 里可以是手填远控 URL，后续也可以是 relay URL；fallback 不改变 E2EE 握手和 Host trust store 校验，并且 fallback Host identity 必须匹配本地 known host 中的目标 `device_id + public_key`。没有 known host 身份时不能使用 fallback。
@@ -1197,7 +1197,7 @@ payload_base64
 created_at
 ```
 
-`payload_base64` 对 cloud/relay 始终是不透明 bytes。`control.hello` / `control.hello_ack` 只能承载现有握手帧；`control.sealed_frame` 必须是 Controller 和 Host 已完成设备级 E2EE 后产生的 sealed frame。`connection_id` 是 relay routing metadata：`control.hello` 尚未产生连接 ID，可为空；`control.hello_ack` 和 `control.sealed_frame` 必须携带连接 ID，用来区分同一对设备之间的并发控制会话。Cloud/relay 可以按 `from_device_id` / `to_device_id` / `connection_id` 路由、按账号和设备状态限流、投递确认或断开，但不能解析 payload，也不能把 workspace/session/event payload 提升成云端字段。
+`payload_base64` 对 cloud/relay 始终是不透明 bytes。`control.hello` / `control.hello_ack` 只能承载现有握手帧；`control.sealed_frame` 必须是 Controller 和 Host 已完成设备级 E2EE 后产生的 sealed frame。`connection_id` 是 relay routing metadata：`control.hello` 尚未产生连接 ID，可为空；`control.hello_ack` 和 `control.sealed_frame` 必须携带连接 ID，用来区分同一对设备之间的并发控制会话。`control.hello_ack` 必须回显 `hello.client_nonce`，并且该 nonce 进入 Host 签名 payload；Controller 用它识别和 ack 已过期的旧 hello_ack envelope，避免超时重试后 relay 队列堆积。Cloud/relay 可以按 `from_device_id` / `to_device_id` / `connection_id` 路由、按账号和设备状态限流、投递确认或断开，但不能解析 payload，也不能把 workspace/session/event payload 提升成云端字段。
 
 relay envelope 被目标设备成功处理后必须调用：
 
@@ -1366,6 +1366,7 @@ hello_ack
   host_device_id
   host_public_key
   host_ephemeral_key
+  client_nonce
   server_nonce
   connection_id
   Ed25519 signature

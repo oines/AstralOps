@@ -100,7 +100,7 @@ func dialControlChannelAs(t *testing.T, serverURL string, app *app, controllerDe
 	if err := client.ReadJSON(&ack); err != nil {
 		t.Fatal(err)
 	}
-	if ack.Type != "hello_ack" || ack.Version != controlProtocolVersion || ack.ConnectionID == "" {
+	if ack.Type != "hello_ack" || ack.Version != controlProtocolVersion || ack.ConnectionID == "" || ack.ClientNonce != hello.ClientNonce {
 		t.Fatalf("ack = %#v, want hello_ack", ack)
 	}
 	hostPublicKey, err := decodeDevicePublicKey(ack.HostPublicKey)

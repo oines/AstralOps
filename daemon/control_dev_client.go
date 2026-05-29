@@ -2031,6 +2031,10 @@ func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, tim
 		socket.Close()
 		return nil, nil, fmt.Errorf("remote Host identity changed during handshake")
 	}
+	if ack.ClientNonce != hello.ClientNonce {
+		socket.Close()
+		return nil, nil, fmt.Errorf("invalid control hello_ack client nonce")
+	}
 	hostPublicKey, err := decodeDevicePublicKey(ack.HostPublicKey)
 	if err != nil {
 		socket.Close()

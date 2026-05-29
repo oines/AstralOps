@@ -169,6 +169,7 @@ func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySes
 		HostDeviceID:       a.store.deviceIdentity.DeviceID,
 		HostPublicKey:      a.store.deviceIdentity.PublicKey,
 		HostEphemeralKey:   hostEphemeralKey,
+		ClientNonce:        hello.ClientNonce,
 		ServerNonce:        serverNonce,
 		Encryption:         "x25519-aes-256-gcm",
 		SignatureAlgorithm: "ed25519",
@@ -515,6 +516,10 @@ func controlClientRelayWaitHelloAck(ctx context.Context, target controlClientTar
 				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
 				continue
 			}
+			if ack.ClientNonce != "" && ack.ClientNonce != hello.ClientNonce {
+				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
+				continue
+			}
 			if err := validateControlRelayHelloAck(target.HostInfo, hello, ack); err != nil {
 				continue
 			}
@@ -535,6 +540,9 @@ func validateControlRelayHelloAck(hostInfo HostInfo, hello controlHelloFrame, ac
 	}
 	if ack.HostDeviceID != hostInfo.Identity.DeviceID || ack.HostPublicKey != hostInfo.Identity.PublicKey {
 		return fmt.Errorf("remote Host identity changed during relay handshake")
+	}
+	if ack.ClientNonce != hello.ClientNonce {
+		return fmt.Errorf("invalid control hello_ack client nonce")
 	}
 	hostPublicKey, err := decodeDevicePublicKey(ack.HostPublicKey)
 	if err != nil {

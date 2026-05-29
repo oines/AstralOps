@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -35,6 +37,67 @@ func TestControlRelayRoundTripReadsWorkspaces(t *testing.T) {
 	items, _ := response.Result.([]any)
 	if len(items) != 1 || stringValue(mapValue(items[0])["id"]) != workspace.ID {
 		t.Fatalf("workspaces = %#v, want %s", response.Result, workspace.ID)
+	}
+}
+
+func TestControlRelayRoundTripAcksStaleHelloAckForSameHost(t *testing.T) {
+	hostApp, _, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+
+	oldHello, _, err := controlClientRelayHello(controllerStore, hostApp.store.hostInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleSession, staleAck, err := hostApp.acceptControlRelayHello(oldHello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		staleSession.cancelControlSession()
+		hostApp.unregisterControlRelaySession(staleSession.id)
+	})
+	body, err := json.Marshal(staleAck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleEnvelope, err := client.EnqueueRelayEnvelope(t.Context(), RelayEnvelope{
+		Version:       relayEnvelopeVersion,
+		ConnectionID:  staleAck.ConnectionID,
+		FromDeviceID:  hostApp.store.hostInfo().Identity.DeviceID,
+		ToDeviceID:    controllerStore.deviceIdentity.DeviceID,
+		PayloadKind:   relayPayloadKindControlHelloAck,
+		PayloadBase64: base64.StdEncoding.EncodeToString(body),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runControlRelayPoller(t, hostApp, client)
+
+	response, err := controlClientRelayRoundTrip(t.Context(), controlClientTarget{
+		HostInfo:           hostApp.store.hostInfo(),
+		Timeout:            3 * time.Second,
+		UseRelay:           true,
+		RelayClient:        client,
+		ControllerDeviceID: controllerStore.deviceIdentity.DeviceID,
+	}, controllerStore, ControlRequest{
+		RequestID:  "relay_workspaces",
+		Capability: CapabilityCoreRead,
+		Action:     ControlActionWorkspaces,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("response = %#v", response)
+	}
+	pending, err := client.ListRelayEnvelopes(t.Context(), controllerStore.deviceIdentity.DeviceID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, envelope := range pending {
+		if envelope.EnvelopeID == staleEnvelope.EnvelopeID {
+			t.Fatalf("stale hello_ack envelope was not acked: %#v", envelope)
+		}
 	}
 }
 
