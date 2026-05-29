@@ -8,20 +8,21 @@ import (
 )
 
 const (
-	CapabilityCoreRead            = "core.read"
-	CapabilityCoreControl         = "core.control"
-	CapabilityInteractionRespond  = "interaction.respond"
-	CapabilitySessionEdit         = "session.edit"
-	CapabilityAttachmentIngest    = "attachment.ingest"
-	CapabilityMediaRead           = "media.read"
-	CapabilityMediaDownload       = "media.download"
-	CapabilityMediaStream         = "media.stream"
-	CapabilityWorkspaceFilesRead  = "workspace.files.read"
-	CapabilityWorkspaceFilesWrite = "workspace.files.write"
-	CapabilityWorkspaceExec       = "workspace.exec"
-	CapabilityTerminalOpen        = "terminal.open"
-	CapabilityTerminalInput       = "terminal.input"
-	CapabilityHostManage          = "host.manage"
+	CapabilityCoreRead             = "core.read"
+	CapabilityCoreControl          = "core.control"
+	CapabilityInteractionRespond   = "interaction.respond"
+	CapabilitySessionEdit          = "session.edit"
+	CapabilityAttachmentIngest     = "attachment.ingest"
+	CapabilityMediaRead            = "media.read"
+	CapabilityMediaDownload        = "media.download"
+	CapabilityMediaStream          = "media.stream"
+	CapabilityWorkspaceFilesRead   = "workspace.files.read"
+	CapabilityWorkspaceFilesWrite  = "workspace.files.write"
+	CapabilityWorkspaceExec        = "workspace.exec"
+	CapabilityTerminalOpen         = "terminal.open"
+	CapabilityTerminalInput        = "terminal.input"
+	CapabilityHostFileSystemBrowse = "host.fs.browse"
+	CapabilityHostManage           = "host.manage"
 )
 
 const (
@@ -35,6 +36,9 @@ const (
 	ControlActionInterrupt                  = "core.control.interrupt"
 	ControlActionQueueCancel                = "core.control.queue.cancel"
 	ControlActionQueueSteer                 = "core.control.queue.steer"
+	ControlActionWorkspaceCreate            = "core.control.workspace.create"
+	ControlActionWorkspaceConnect           = "core.control.workspace.connect"
+	ControlActionWorkspaceDisconnect        = "core.control.workspace.disconnect"
 	ControlActionSessionFork                = "core.control.session.fork"
 	ControlActionSessionDelete              = "core.control.session.delete"
 	ControlActionInteractionRespond         = "interaction.respond"
@@ -61,6 +65,7 @@ const (
 	ControlActionTerminalInput              = "terminal.input"
 	ControlActionTerminalResize             = "terminal.resize"
 	ControlActionTerminalClose              = "terminal.close"
+	ControlActionHostFileSystemBrowse       = "host.fs.browse"
 	ControlActionHostTrustList              = "host.trust.list"
 	ControlActionHostTrustRevoke            = "host.trust.revoke"
 	ControlActionHostPairingList            = "host.pairing.list"
@@ -128,7 +133,7 @@ func controlActionCapability(action string) string {
 	switch action {
 	case ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
 		return CapabilityCoreRead
-	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionSessionFork, ControlActionSessionDelete:
+	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionWorkspaceCreate, ControlActionWorkspaceConnect, ControlActionWorkspaceDisconnect, ControlActionSessionFork, ControlActionSessionDelete:
 		return CapabilityCoreControl
 	case ControlActionInteractionRespond:
 		return CapabilityInteractionRespond
@@ -152,6 +157,8 @@ func controlActionCapability(action string) string {
 		return CapabilityTerminalOpen
 	case ControlActionTerminalInput, ControlActionTerminalResize, ControlActionTerminalClose:
 		return CapabilityTerminalInput
+	case ControlActionHostFileSystemBrowse:
+		return CapabilityHostFileSystemBrowse
 	case ControlActionHostTrustList, ControlActionHostTrustRevoke, ControlActionHostPairingList, ControlActionHostPairingApprove, ControlActionHostPairingDeny:
 		return CapabilityHostManage
 	default:
@@ -260,6 +267,36 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 			return nil, err
 		}
 		return a.steerControlQueuedTurn(params)
+	case ControlActionWorkspaceCreate:
+		var params createWorkspaceRequest
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		workspace, err := a.createWorkspace(params)
+		if err != nil {
+			return nil, err
+		}
+		return sanitizeControlWorkspace(workspace), nil
+	case ControlActionWorkspaceConnect:
+		var params workspaceReferenceParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		workspace, err := a.controlWorkspace(params.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		return a.ssh.connect(ctx, workspace)
+	case ControlActionWorkspaceDisconnect:
+		var params workspaceReferenceParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		workspace, err := a.controlWorkspace(params.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		return a.ssh.disconnect(workspace), nil
 	case ControlActionSessionFork:
 		var params sessionForkControlParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
@@ -452,6 +489,12 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 			return nil, err
 		}
 		return a.terminalManager().close(ctx, req.ControllerDeviceID, params)
+	case ControlActionHostFileSystemBrowse:
+		var params hostFileSystemBrowseParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.browseHostFileSystem(ctx, params)
 	case ControlActionHostTrustList:
 		return hostTrustListResult{Grants: a.store.listTrustGrants()}, nil
 	case ControlActionHostTrustRevoke:

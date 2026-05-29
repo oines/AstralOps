@@ -6353,6 +6353,7 @@ func startTestAppServer(t *testing.T, app *app) *httptest.Server {
 	mux.HandleFunc("/v1/trust/devices/", app.auth(app.handleTrustDeviceAction))
 	mux.HandleFunc("/v1/remote/hosts", app.auth(app.handleRemoteHosts))
 	mux.HandleFunc("/v1/remote/hosts/", app.auth(app.handleRemoteHostAction))
+	mux.HandleFunc("/v1/fs/browse", app.auth(app.handleHostFileSystemBrowse))
 	mux.HandleFunc("/v1/workspaces", app.auth(app.handleWorkspaces))
 	mux.HandleFunc("/v1/workspaces/", app.auth(app.handleWorkspaceAction))
 	mux.HandleFunc("/v1/codex-exec/", app.auth(app.handleCodexExecServerWS))

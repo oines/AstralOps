@@ -62,16 +62,24 @@ func (a *app) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		ws, err := a.store.createWorkspace(req)
+		ws, err := a.createWorkspace(req)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		a.emit(AstralEvent{WorkspaceID: ws.ID, SessionID: "", Agent: ws.Agent, Kind: "workspace.created", Normalized: ws})
 		writeJSON(w, http.StatusCreated, ws)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (a *app) createWorkspace(req createWorkspaceRequest) (Workspace, error) {
+	ws, err := a.store.createWorkspace(req)
+	if err != nil {
+		return Workspace{}, err
+	}
+	a.emit(AstralEvent{WorkspaceID: ws.ID, SessionID: "", Agent: ws.Agent, Kind: "workspace.created", Normalized: ws})
+	return ws, nil
 }
 
 func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {

@@ -196,6 +196,7 @@ func defaultHostCapabilities() []string {
 		CapabilityWorkspaceExec,
 		CapabilityTerminalOpen,
 		CapabilityTerminalInput,
+		CapabilityHostFileSystemBrowse,
 		CapabilityHostManage,
 	}
 }

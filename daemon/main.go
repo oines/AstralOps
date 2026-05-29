@@ -138,6 +138,7 @@ func main() {
 	mux.HandleFunc("/v1/trust/devices/", a.auth(a.handleTrustDeviceAction))
 	mux.HandleFunc("/v1/remote/hosts", a.auth(a.handleRemoteHosts))
 	mux.HandleFunc("/v1/remote/hosts/", a.auth(a.handleRemoteHostAction))
+	mux.HandleFunc("/v1/fs/browse", a.auth(a.handleHostFileSystemBrowse))
 	mux.HandleFunc("/v1/workspaces", a.auth(a.handleWorkspaces))
 	mux.HandleFunc("/v1/workspaces/", a.auth(a.handleWorkspaceAction))
 	mux.HandleFunc("/v1/codex-exec/", a.auth(a.handleCodexExecServerWS))

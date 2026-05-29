@@ -81,6 +81,10 @@ type workspaceFileStreamCancelParams struct {
 	StreamID string `json:"stream_id"`
 }
 
+type workspaceReferenceParams struct {
+	WorkspaceID string `json:"workspace_id"`
+}
+
 type workspaceExecParams struct {
 	WorkspaceID string `json:"workspace_id"`
 	Command     string `json:"command"`

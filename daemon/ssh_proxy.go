@@ -368,6 +368,44 @@ func (m *sshManager) call(ctx context.Context, ws Workspace, method string, para
 	return errors.New(message)
 }
 
+func (m *sshManager) callEphemeral(ctx context.Context, ws Workspace, method string, params any, out any) error {
+	if ws.Target != "ssh" {
+		return errors.New("workspace is not ssh")
+	}
+	if ws.SSH == nil {
+		return errors.New("ssh workspace is missing ssh config")
+	}
+	probe, err := m.probe(ctx, ws)
+	if err != nil {
+		return err
+	}
+	localHelper, err := m.localHelperBinary(ctx, probe)
+	if err != nil {
+		return err
+	}
+	localSum, err := fileSHA256(localHelper)
+	if err != nil {
+		return err
+	}
+	attempts := []remoteHelperAttempt{}
+	for _, candidate := range remoteHelperCandidates(ws, probe) {
+		_, proxy, _, err := m.tryRemoteHelperCandidate(ctx, ws, probe, candidate, localHelper, localSum, false)
+		if err == nil {
+			defer proxy.close()
+			return proxy.call(ctx, method, params, out)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		attempts = append(attempts, remoteHelperAttempt{Candidate: candidate, Err: err})
+		var noFallback remoteHelperNoFallbackError
+		if errors.As(err, &noFallback) {
+			break
+		}
+	}
+	return remoteHelperAttemptsError(attempts)
+}
+
 func (m *sshManager) startPTY(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
 	return m.startEventProcess(ctx, ws, id, "pty_start", params)
 }

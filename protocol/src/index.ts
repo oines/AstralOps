@@ -408,9 +408,49 @@ export type CreateWorkspaceRequest = {
   };
 };
 
+export type HostFileSystemRoot = {
+  id: string;
+  label: string;
+  path: string;
+  kind: "home" | "drive" | "volume" | "root" | "custom" | string;
+};
+
+export type HostFileSystemEntry = {
+  name: string;
+  path: string;
+  kind: "dir" | "file" | "symlink" | "other" | string;
+  size?: number;
+  mod_time?: string;
+};
+
+export type HostFileSystemBrowseParams = {
+  target: WorkspaceTarget;
+  path?: string;
+  ssh?: {
+    endpoint: string;
+    port: number;
+    remote_cwd?: string;
+  };
+};
+
+export type HostFileSystemBrowseResult = {
+  target: WorkspaceTarget;
+  platform: string;
+  separator: string;
+  path: string;
+  parent_path?: string;
+  roots: HostFileSystemRoot[];
+  entries: HostFileSystemEntry[];
+  truncated?: boolean;
+};
+
 export type CreateSessionRequest = {
   workspace_id: string;
   agent?: AgentKind;
+};
+
+export type WorkspaceReferenceParams = {
+  workspace_id: string;
 };
 
 export type SessionInputRequest = {
@@ -779,6 +819,7 @@ export type ControlCapability =
   | "workspace.exec"
   | "terminal.open"
   | "terminal.input"
+  | "host.fs.browse"
   | "host.manage"
   | (string & {});
 
@@ -793,6 +834,9 @@ export type ControlAction =
   | "core.control.interrupt"
   | "core.control.queue.cancel"
   | "core.control.queue.steer"
+  | "core.control.workspace.create"
+  | "core.control.workspace.connect"
+  | "core.control.workspace.disconnect"
   | "core.control.session.fork"
   | "core.control.session.delete"
   | "interaction.respond"
@@ -819,6 +863,7 @@ export type ControlAction =
   | "terminal.input"
   | "terminal.resize"
   | "terminal.close"
+  | "host.fs.browse"
   | "host.trust.list"
   | "host.trust.revoke"
   | "host.pairing.list"
@@ -1248,6 +1293,9 @@ export type ControlActionParamMap = {
   "core.control.interrupt": SessionReferenceParams;
   "core.control.queue.cancel": QueueControlParams;
   "core.control.queue.steer": QueueControlParams;
+  "core.control.workspace.create": CreateWorkspaceRequest;
+  "core.control.workspace.connect": WorkspaceReferenceParams;
+  "core.control.workspace.disconnect": WorkspaceReferenceParams;
   "core.control.session.fork": SessionForkControlParams;
   "core.control.session.delete": SessionDeleteParams;
   "interaction.respond": InteractionRespondParams;
@@ -1274,6 +1322,7 @@ export type ControlActionParamMap = {
   "terminal.input": TerminalInputParams;
   "terminal.resize": TerminalResizeParams;
   "terminal.close": TerminalCloseParams;
+  "host.fs.browse": HostFileSystemBrowseParams;
   "host.trust.list": undefined;
   "host.trust.revoke": HostTrustRevokeParams;
   "host.pairing.list": undefined;
@@ -1292,6 +1341,9 @@ export type ControlActionResultMap = {
   "core.control.interrupt": OkResult;
   "core.control.queue.cancel": QueueControlResult;
   "core.control.queue.steer": QueueControlResult;
+  "core.control.workspace.create": Workspace;
+  "core.control.workspace.connect": WorkspaceConnection;
+  "core.control.workspace.disconnect": WorkspaceConnection;
   "core.control.session.fork": SessionForkResponse;
   "core.control.session.delete": SessionDeleteResult;
   "interaction.respond": OkResult;
@@ -1318,6 +1370,7 @@ export type ControlActionResultMap = {
   "terminal.input": TerminalAckResult;
   "terminal.resize": TerminalAckResult;
   "terminal.close": TerminalAckResult;
+  "host.fs.browse": HostFileSystemBrowseResult;
   "host.trust.list": HostTrustListResult;
   "host.trust.revoke": HostTrustRevokeResult;
   "host.pairing.list": PairingRequestListResult;

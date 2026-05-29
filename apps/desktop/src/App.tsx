@@ -31,6 +31,8 @@ import type {
   CreateWorkspaceRequest,
   DaemonInfo,
   HealthResponse,
+  HostFileSystemBrowseParams,
+  HostFileSystemBrowseResult,
   HostInfo,
   PermissionMode,
   ReasoningEffort,
@@ -455,12 +457,13 @@ export function App(): React.JSX.Element {
       setActiveWorkspaceId(workspace.id);
       setActiveSession(null);
       setWorkspaceOpen(false);
-      if (workspace.target === "ssh") {
+      const createdOnLocalHost = selectedHostId === LOCAL_HOST_ID || selectedHostId === localHostInfo?.identity.device_id;
+      if (workspace.target === "ssh" && createdOnLocalHost) {
         const state = await api.connectWorkspace(workspace.id);
         setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
       }
     },
-    [api],
+    [api, localHostInfo?.identity.device_id, selectedHostId],
   );
 
   const handleConnectWorkspace = useCallback(
@@ -616,10 +619,6 @@ export function App(): React.JSX.Element {
     });
     setActiveSession((current) => (current?.id === targetSession.id ? sessions.find((session) => session.workspace_id === targetSession.workspace_id && session.id !== targetSession.id) ?? null : current));
   }, [activeSession, api, sessions]);
-
-  const handleChooseDirectory = useCallback(async () => {
-    return window.astral.chooseDirectory();
-  }, []);
 
   const handleChooseFiles = useCallback(async () => {
     if (!activeSession) return [];
@@ -780,10 +779,16 @@ export function App(): React.JSX.Element {
     [daemonInfo?.remote_control?.listen_addr, localHostInfo, remoteHosts],
   );
   const activeHostId = hostOptions.some((host) => host.id === selectedHostId) ? selectedHostId : hostOptions[0]?.id || LOCAL_HOST_ID;
+  const activeHostOption = hostOptions.find((host) => host.id === activeHostId) ?? hostOptions[0] ?? null;
   const activeHostIsLocal = activeHostId === (localHostInfo?.identity.device_id || LOCAL_HOST_ID);
   const activeRemoteHost = useMemo(() => remoteHosts.find((host) => host.device_id === activeHostId) ?? null, [activeHostId, remoteHosts]);
   const activeHostNeedsPairing = Boolean(activeRemoteHost && remoteHostNeedsPairing(activeRemoteHost));
   const activeHostPairingStatus = activeRemoteHost ? hostPairingStatus[activeRemoteHost.device_id] || "" : "";
+
+  const handleBrowseHostFileSystem = useCallback(async (input: HostFileSystemBrowseParams): Promise<HostFileSystemBrowseResult> => {
+    if (!api) throw new Error("Core 未连接");
+    return api.browseHostFileSystem(input);
+  }, [api]);
 
   const handleRequestHostPairing = useCallback(async (host: RemoteHostRecord): Promise<void> => {
     if (!daemonInfo) return;
@@ -1027,8 +1032,9 @@ export function App(): React.JSX.Element {
       />
 
       <WorkspaceModal
+        hostName={activeHostOption?.name || "本机"}
         open={workspaceOpen}
-        onChooseDirectory={handleChooseDirectory}
+        onBrowseFileSystem={handleBrowseHostFileSystem}
         onClose={() => setWorkspaceOpen(false)}
         onCreate={handleCreateWorkspace}
       />

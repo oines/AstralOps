@@ -835,6 +835,9 @@ workspace.files.read
 workspace.files.write
   通过 Host 创建、覆盖、精确文本编辑、删除或移动 workspace root 内的文件路径。SSH workspace 中，由 Host 发起 SSH 写入、删除或移动。复杂大文件流式读写仍作为独立能力后续扩展，不塞进普通 write response。
 
+host.fs.browse
+  用于创建 workspace 前浏览“当前所选 Host”的目录，只返回 root、当前目录和一层目录项元数据，不读取文件内容，不落事件日志，也不进入云端字段。本机 local、远端 local 都使用 Host 原生路径模型；Windows Host 必须返回 drive root 和反斜杠路径，Controller 只展示并原样回传路径，不能自行拼接或 normalize。SSH 模式由所选 Host 使用它自己的 SSH 配置和网络去浏览 SSH 目录，所以 remote ssh 是“远端 Desktop 去连 SSH”，不是 Controller 本机去连。
+
 workspace.exec
   通过 Host 在 workspace root 内执行 command。SSH workspace 中，由 Host 发起 SSH exec。是否允许执行由 Host/Core 的 `workspace_exec_policy` 判断，Controller 不能自行绕过。
 
@@ -1300,7 +1303,11 @@ Desktop Controller 不直接在 React/Electron renderer 内实现远控握手，
 ```text
 GET /v1/remote/hosts?discover=1
 GET /v1/remote/hosts/:host_device_id/host
+POST /v1/remote/hosts/:host_device_id/fs/browse
 GET /v1/remote/hosts/:host_device_id/workspaces
+POST /v1/remote/hosts/:host_device_id/workspaces
+POST /v1/remote/hosts/:host_device_id/workspaces/:workspace_id/connect
+POST /v1/remote/hosts/:host_device_id/workspaces/:workspace_id/disconnect
 GET /v1/remote/hosts/:host_device_id/sessions
 GET /v1/remote/hosts/:host_device_id/sessions/:session_id/view
 GET /v1/remote/hosts/:host_device_id/events
@@ -1323,7 +1330,7 @@ POST /v1/remote/hosts/:host_device_id/approvals/:interaction_id/respond
 
 这些 endpoint 是本机 daemon 的 controller-side facade，不是 Host remote listener。它们必须只对本机 authenticated Desktop 开放；真正的远端执行仍然通过目标 Host 的 `/v1/control/ws`，并且只允许已知 Host identity。`discover=1` 只把 LAN 上匹配 known host fingerprint 且通过 `/v1/host` 校验的 Host 标为 `lan`，未知设备不能自动出现在可控列表里。
 
-当前 Desktop 的 Host selector 使用这个 facade 拉取远端 Host 和 Host-scoped workspaces/sessions/events。远程 PTY 通过本机 daemon WebSocket facade 接入：Desktop 仍打开 `/v1/remote/hosts/:host_device_id/workspaces/:workspace_id/pty`，本机 daemon 再通过目标 Host 的 encrypted control WebSocket 转发 `terminal.open/attach/input/resize/close`，并把 `terminal.output` / `terminal.closed` frame 映射回本地终端 UI 的 ready/output/exit 消息。远端 Host 的 pending pairing request 管理由本机 daemon facade 转成 `host.pairing.*` E2EE action，Desktop renderer 不直接持有远控密钥。尚未进入 control protocol 的本地 app 设置、workspace/session 创建和 session command 列表不能在 UI 里伪造；下一步应为这些能力补明确协议 action 或保持不可用状态。
+当前 Desktop 的 Host selector 使用这个 facade 拉取远端 Host 和 Host-scoped workspaces/sessions/events。创建 workspace 使用同一套 Host-scoped 目录选择器：本机 local、远端 local、本机 ssh、远端 ssh 都先通过当前 CoreClient 调用 `host.fs.browse`，再用 `core.control.workspace.create` 在所选 Host 上创建；SSH workspace 的 connect/disconnect 也通过 Host 侧 `core.control.workspace.connect/disconnect` 执行。远程 PTY 通过本机 daemon WebSocket facade 接入：Desktop 仍打开 `/v1/remote/hosts/:host_device_id/workspaces/:workspace_id/pty`，本机 daemon 再通过目标 Host 的 encrypted control WebSocket 转发 `terminal.open/attach/input/resize/close`，并把 `terminal.output` / `terminal.closed` frame 映射回本地终端 UI 的 ready/output/exit 消息。远端 Host 的 pending pairing request 管理由本机 daemon facade 转成 `host.pairing.*` E2EE action，Desktop renderer 不直接持有远控密钥。尚未进入 control protocol 的本地 app 设置和 session command 列表不能在 UI 里伪造；下一步应为这些能力补明确协议 action 或保持不可用状态。
 
 握手和帧语义：
 

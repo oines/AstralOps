@@ -214,11 +214,39 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, target.HostInfo)
 	case len(route) == 1 && route[0] == "workspaces" && r.Method == http.MethodGet:
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreRead, ControlActionWorkspaces, nil)
+	case len(route) == 1 && route[0] == "workspaces" && r.Method == http.MethodPost:
+		var req createWorkspaceRequest
+		if err := decodeJSON(r.Body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreControl, ControlActionWorkspaceCreate, map[string]any{
+			"name":      req.Name,
+			"target":    req.Target,
+			"agent":     req.Agent,
+			"local_cwd": req.LocalCWD,
+			"ssh":       req.SSH,
+		})
+	case len(route) == 2 && route[0] == "fs" && route[1] == "browse" && r.Method == http.MethodPost:
+		var req hostFileSystemBrowseParams
+		if err := decodeJSON(r.Body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityHostFileSystemBrowse, ControlActionHostFileSystemBrowse, map[string]any{
+			"target": req.Target,
+			"path":   req.Path,
+			"ssh":    req.SSH,
+		})
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "files" && r.Method == http.MethodGet:
 		a.writeRemoteWorkspaceFilesResult(w, hostDeviceID, map[string]any{
 			"workspace_id": route[1],
 			"path":         r.URL.Query().Get("path"),
 		})
+	case len(route) == 3 && route[0] == "workspaces" && route[2] == "connect" && r.Method == http.MethodPost:
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreControl, ControlActionWorkspaceConnect, map[string]any{"workspace_id": route[1]})
+	case len(route) == 3 && route[0] == "workspaces" && route[2] == "disconnect" && r.Method == http.MethodPost:
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreControl, ControlActionWorkspaceDisconnect, map[string]any{"workspace_id": route[1]})
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "pty" && strings.EqualFold(r.Header.Get("Upgrade"), "websocket"):
 		a.handleRemoteHostWorkspacePTY(w, r, hostDeviceID, route[1])
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "exec" && r.Method == http.MethodPost:
@@ -694,7 +722,7 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 func writeControlHTTPResult(w http.ResponseWriter, response ControlResponse, action string) {
 	if response.OK {
 		status := http.StatusOK
-		if action == ControlActionSessionFork {
+		if action == ControlActionSessionFork || action == ControlActionWorkspaceCreate {
 			status = http.StatusCreated
 		}
 		writeJSON(w, status, response.Result)

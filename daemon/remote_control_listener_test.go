@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -157,6 +161,66 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 	}
 	if files.Root != "" || files.Path != "" {
 		t.Fatalf("files = %#v, want CoreClient-compatible root without Host-private path", files)
+	}
+}
+
+func TestRemoteHostProxyCreatesWorkspaceAndBrowsesHostFilesystem(t *testing.T) {
+	hostApp, _ := newRemoteControlHandlerTestApp(t)
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
+	defer hostServer.Close()
+
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreControl, CapabilityHostFileSystemBrowse}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+
+	hostDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(hostDir, "marker.txt"), []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	browseBody := []byte(`{"target":"local","path":` + strconv.Quote(hostDir) + `}`)
+	browseReq := httptest.NewRequest(http.MethodPost, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/fs/browse", bytes.NewReader(browseBody))
+	browseResp := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(browseResp, browseReq)
+	if browseResp.Code != http.StatusOK {
+		t.Fatalf("remote fs browse status = %d body = %s", browseResp.Code, browseResp.Body.String())
+	}
+	var browse hostFileSystemBrowseResult
+	if err := json.Unmarshal(browseResp.Body.Bytes(), &browse); err != nil {
+		t.Fatal(err)
+	}
+	if browse.Path != hostDir {
+		t.Fatalf("browse path = %q, want %q", browse.Path, hostDir)
+	}
+	if len(browse.Entries) != 1 || browse.Entries[0].Name != "marker.txt" {
+		t.Fatalf("browse entries = %#v, want marker", browse.Entries)
+	}
+
+	createBody := []byte(`{"name":"Remote Created","target":"local","local_cwd":` + strconv.Quote(hostDir) + `}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/workspaces", bytes.NewReader(createBody))
+	createResp := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("remote create workspace status = %d body = %s", createResp.Code, createResp.Body.String())
+	}
+	var workspace Workspace
+	if err := json.Unmarshal(createResp.Body.Bytes(), &workspace); err != nil {
+		t.Fatal(err)
+	}
+	if workspace.ID == "" || workspace.Name != "Remote Created" || workspace.LocalCWD != "" || workspace.LocalProjectionRoot != "" {
+		t.Fatalf("created workspace response = %#v, want sanitized remote workspace", workspace)
+	}
+	stored, ok := hostApp.store.getWorkspace(workspace.ID)
+	if !ok {
+		t.Fatalf("created workspace %s not stored on host", workspace.ID)
+	}
+	if stored.LocalCWD != hostDir {
+		t.Fatalf("stored workspace cwd = %q, want %q", stored.LocalCWD, hostDir)
 	}
 }
 

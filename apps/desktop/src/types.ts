@@ -1,4 +1,4 @@
-import type { AgentKind, AppSettings, AppSettingsPatch, AstralEvent, ClearMediaCacheResponse, CreateWorkspaceRequest, HealthResponse, HostInfo, HostTrustListResult, HostTrustRevokeResult, ModelInfo, PairingRequest, PairingRequestListResult, PairingRequestResolveResult, PendingInteractionView, QueuedInputView, RemoteHostRecord, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, TrustGrant, Workspace, WorkspaceConnection } from "@astralops/protocol";
+import type { AgentKind, AppSettings, AppSettingsPatch, AstralEvent, ClearMediaCacheResponse, CreateWorkspaceRequest, HealthResponse, HostFileSystemBrowseParams, HostFileSystemBrowseResult, HostFileSystemEntry, HostFileSystemRoot, HostInfo, HostTrustListResult, HostTrustRevokeResult, ModelInfo, PairingRequest, PairingRequestListResult, PairingRequestResolveResult, PendingInteractionView, QueuedInputView, RemoteHostRecord, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, TrustGrant, Workspace, WorkspaceConnection } from "@astralops/protocol";
 
 export type DaemonInfo = {
   host: string;
@@ -53,4 +53,4 @@ export type WorkspaceCommandResponse = {
   duration_ms: number;
 };
 
-export type { AgentKind, AppSettings, AppSettingsPatch, AstralEvent, ClearMediaCacheResponse, CreateWorkspaceRequest, HealthResponse, HostInfo, HostTrustListResult, HostTrustRevokeResult, ModelInfo, PairingRequest, PairingRequestListResult, PairingRequestResolveResult, QueuedInputView, RemoteHostRecord, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, TrustGrant, Workspace, WorkspaceConnection };
+export type { AgentKind, AppSettings, AppSettingsPatch, AstralEvent, ClearMediaCacheResponse, CreateWorkspaceRequest, HealthResponse, HostFileSystemBrowseParams, HostFileSystemBrowseResult, HostFileSystemEntry, HostFileSystemRoot, HostInfo, HostTrustListResult, HostTrustRevokeResult, ModelInfo, PairingRequest, PairingRequestListResult, PairingRequestResolveResult, QueuedInputView, RemoteHostRecord, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, TrustGrant, Workspace, WorkspaceConnection };

@@ -8,6 +8,8 @@ import type {
   EditLastUserMessageRequest,
   FileListResponse,
   HealthResponse,
+  HostFileSystemBrowseParams,
+  HostFileSystemBrowseResult,
   HostInfo,
   HostTrustListResult,
   HostTrustRevokeResult,
@@ -82,6 +84,7 @@ export interface CoreClient {
   clearMediaCache(): Promise<ClearMediaCacheResponse>;
   listWorkspaces(): Promise<Workspace[]>;
   createWorkspace(input: CreateWorkspaceRequest): Promise<Workspace>;
+  browseHostFileSystem(input: HostFileSystemBrowseParams): Promise<HostFileSystemBrowseResult>;
   workspaceConnection(id: string): Promise<WorkspaceConnection>;
   connectWorkspace(id: string): Promise<WorkspaceConnection>;
   disconnectWorkspace(id: string): Promise<WorkspaceConnection>;
@@ -358,6 +361,10 @@ export class LocalCoreClient implements CoreClient {
     return this.channel.request("POST", "/v1/workspaces", input);
   }
 
+  browseHostFileSystem(input: HostFileSystemBrowseParams): Promise<HostFileSystemBrowseResult> {
+    return this.channel.request("POST", "/v1/fs/browse", input);
+  }
+
   workspaceConnection(id: string): Promise<WorkspaceConnection> {
     return this.channel.request("GET", `/v1/workspaces/${id}/connection`);
   }
@@ -485,24 +492,12 @@ class RemoteCoreClient extends LocalCoreClient {
     return Promise.reject(new Error("远端 Host 本地缓存不能由 Controller 清理"));
   }
 
-  createWorkspace(): Promise<Workspace> {
-    return Promise.reject(new Error("远端创建 workspace 尚未进入控制协议"));
-  }
-
   createSession(): Promise<Session> {
     return Promise.reject(new Error("远端创建 session 尚未进入控制协议"));
   }
 
   workspaceConnection(): Promise<WorkspaceConnection> {
     return Promise.reject(new Error("远端 workspace 连接状态由 Host 投影提供"));
-  }
-
-  connectWorkspace(): Promise<WorkspaceConnection> {
-    return Promise.reject(new Error("远端 SSH 连接由 Host 管理"));
-  }
-
-  disconnectWorkspace(): Promise<WorkspaceConnection> {
-    return Promise.reject(new Error("远端 SSH 连接由 Host 管理"));
   }
 
   deleteWorkspace(): Promise<{ ok: boolean }> {
