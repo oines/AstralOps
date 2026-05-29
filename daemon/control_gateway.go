@@ -63,6 +63,9 @@ const (
 	ControlActionTerminalClose              = "terminal.close"
 	ControlActionHostTrustList              = "host.trust.list"
 	ControlActionHostTrustRevoke            = "host.trust.revoke"
+	ControlActionHostPairingList            = "host.pairing.list"
+	ControlActionHostPairingApprove         = "host.pairing.approve"
+	ControlActionHostPairingDeny            = "host.pairing.deny"
 )
 
 type ControlRequest struct {
@@ -149,7 +152,7 @@ func controlActionCapability(action string) string {
 		return CapabilityTerminalOpen
 	case ControlActionTerminalInput, ControlActionTerminalResize, ControlActionTerminalClose:
 		return CapabilityTerminalInput
-	case ControlActionHostTrustList, ControlActionHostTrustRevoke:
+	case ControlActionHostTrustList, ControlActionHostTrustRevoke, ControlActionHostPairingList, ControlActionHostPairingApprove, ControlActionHostPairingDeny:
 		return CapabilityHostManage
 	default:
 		return ""
@@ -461,6 +464,20 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 			exceptConnectionID = conn.id
 		}
 		return a.revokeTrustedControlDevice(params.ControllerDeviceID, exceptConnectionID)
+	case ControlActionHostPairingList:
+		return pairingRequestListResult{Requests: a.store.listPairingRequests()}, nil
+	case ControlActionHostPairingApprove:
+		var params pairingRequestResolveParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.approvePairingRequest(params.RequestID)
+	case ControlActionHostPairingDeny:
+		var params pairingRequestResolveParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.denyPairingRequest(params.RequestID)
 	default:
 		return nil, newActionError(http.StatusNotFound, "control_action_unknown", "control action not found")
 	}

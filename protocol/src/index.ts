@@ -821,6 +821,9 @@ export type ControlAction =
   | "terminal.close"
   | "host.trust.list"
   | "host.trust.revoke"
+  | "host.pairing.list"
+  | "host.pairing.approve"
+  | "host.pairing.deny"
   | (string & {});
 
 export type TerminalOpenParams = {
@@ -953,6 +956,51 @@ export type TrustGrant = {
   created_at: string;
   updated_at: string;
   revoked_at?: string;
+};
+
+export type PairingRequest = {
+  request_id: string;
+  host_device_id: string;
+  controller_device_id: string;
+  controller_device_name?: string;
+  controller_device_kind?: "desktop" | "mobile" | string;
+  controller_public_key: string;
+  controller_public_key_fingerprint: string;
+  scope: "full" | string;
+  status: "pending" | "approved" | "denied" | string;
+  capabilities: ControlCapability[];
+  workspace_exec_policy?: "trusted" | "require_approval" | "disabled" | string;
+  created_at: string;
+  updated_at: string;
+  resolved_at?: string;
+};
+
+export type PairingRequestInput = {
+  controller_device_id: string;
+  controller_device_name?: string;
+  controller_device_kind?: "desktop" | "mobile" | string;
+  controller_public_key: string;
+  controller_public_key_fingerprint?: string;
+  scope?: "full" | string;
+  capabilities?: ControlCapability[];
+  workspace_exec_policy?: "trusted" | "require_approval" | "disabled" | string;
+};
+
+export type PairingRequestListResult = {
+  requests: PairingRequest[];
+};
+
+export type PairingRequestSubmitResult = {
+  request: PairingRequest;
+};
+
+export type PairingRequestResolveParams = {
+  request_id: string;
+};
+
+export type PairingRequestResolveResult = {
+  request: PairingRequest;
+  grant?: TrustGrant;
 };
 
 export type TrustDeviceRequest = {
@@ -1103,6 +1151,22 @@ export type LanHostCandidate = {
   addresses: string[];
 };
 
+export type RemoteHostRecord = {
+  device_id: string;
+  device_name?: string;
+  device_kind?: "desktop" | "mobile" | string;
+  public_key_fingerprint: string;
+  status: "lan" | "offline" | string;
+  connection: "lan" | "relay" | "offline" | string;
+  last_base_url?: string;
+  lan_base_url?: string;
+  capabilities?: ControlCapability[];
+};
+
+export type RemoteHostsResponse = {
+  hosts: RemoteHostRecord[];
+};
+
 export type ControlDiscoveryRequest = {
   type: "astralops.discovery.request";
   version: ControlProtocolVersion;
@@ -1174,6 +1238,9 @@ export type ControlActionParamMap = {
   "terminal.close": TerminalCloseParams;
   "host.trust.list": undefined;
   "host.trust.revoke": HostTrustRevokeParams;
+  "host.pairing.list": undefined;
+  "host.pairing.approve": PairingRequestResolveParams;
+  "host.pairing.deny": PairingRequestResolveParams;
 };
 
 export type ControlActionResultMap = {
@@ -1215,6 +1282,9 @@ export type ControlActionResultMap = {
   "terminal.close": TerminalAckResult;
   "host.trust.list": HostTrustListResult;
   "host.trust.revoke": HostTrustRevokeResult;
+  "host.pairing.list": PairingRequestListResult;
+  "host.pairing.approve": PairingRequestResolveResult;
+  "host.pairing.deny": PairingRequestResolveResult;
 };
 
 export type KnownControlAction = keyof ControlActionParamMap;

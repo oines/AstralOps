@@ -10,6 +10,10 @@ import type {
   HostInfo,
   HostTrustListResult,
   HostTrustRevokeResult,
+  PairingRequestListResult,
+  PairingRequestResolveResult,
+  RemoteHostRecord,
+  RemoteHostsResponse,
   Session,
   SessionCommandListResponse,
   SessionCommandResponse,
@@ -69,6 +73,9 @@ export interface CoreClient {
   hostInfo(): Promise<HostInfo>;
   listTrustedDevices(): Promise<HostTrustListResult>;
   revokeTrustedDevice(controllerDeviceId: string): Promise<HostTrustRevokeResult>;
+  listPairingRequests(): Promise<PairingRequestListResult>;
+  approvePairingRequest(requestId: string): Promise<PairingRequestResolveResult>;
+  denyPairingRequest(requestId: string): Promise<PairingRequestResolveResult>;
   settings(): Promise<AppSettings>;
   patchSettings(patch: AppSettingsPatch): Promise<AppSettings>;
   clearMediaCache(): Promise<ClearMediaCacheResponse>;
@@ -110,6 +117,17 @@ export interface ControlChannel {
 
 export function createLocalCoreClient(info: DaemonInfo): CoreClient {
   return new LocalCoreClient(new LocalHttpControlChannel(info));
+}
+
+export function createRemoteCoreClient(info: DaemonInfo, hostDeviceId: string): CoreClient {
+  return new RemoteCoreClient(new RemoteDaemonControlChannel(info, hostDeviceId));
+}
+
+export async function listRemoteHosts(info: DaemonInfo, discover = true): Promise<RemoteHostRecord[]> {
+  const channel = new LocalHttpControlChannel(info);
+  const query = discover ? "?discover=1" : "";
+  const response = await channel.request<RemoteHostsResponse>("GET", `/v1/remote/hosts${query}`);
+  return response.hosts;
 }
 
 export class LocalHttpControlChannel implements ControlChannel {
@@ -190,6 +208,86 @@ export class LocalHttpControlChannel implements ControlChannel {
   }
 }
 
+class RemoteDaemonControlChannel implements ControlChannel {
+  private readonly baseUrl: string;
+  private readonly hostDeviceId: string;
+  private readonly token: string;
+
+  constructor(info: DaemonInfo, hostDeviceId: string) {
+    this.baseUrl = `http://${info.host}:${info.port}`;
+    this.hostDeviceId = hostDeviceId;
+    this.token = info.token;
+  }
+
+  async request<T>(method: "GET" | "PATCH" | "POST" | "DELETE", path: string, body?: unknown, auth = true): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${this.remotePath(path)}`, {
+      method,
+      headers: {
+        ...this.headers(auth),
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return this.parse<T>(res);
+  }
+
+  subscribeEvents(afterSeq: number, handlers: EventSubscriptionHandlers): EventSubscription {
+    const params = new URLSearchParams({
+      token: this.token,
+      stream: "1",
+      after_seq: String(afterSeq),
+    });
+    const source = new EventSource(`${this.baseUrl}${this.remotePath("/v1/events")}?${params.toString()}`);
+    source.addEventListener("astral-event", (message) => {
+      try {
+        handlers.onEvent(JSON.parse((message as MessageEvent).data) as AstralEvent);
+      } catch (error) {
+        handlers.onError?.(error);
+      }
+    });
+    source.addEventListener("remote-error", (message) => {
+      handlers.onError?.(new Error((message as MessageEvent).data));
+    });
+    source.onopen = () => handlers.onOpen?.();
+    source.onerror = (event) => handlers.onError?.(event);
+    return { close: () => source.close() };
+  }
+
+  openSocket(path: string): WebSocket {
+    const params = new URLSearchParams({ token: this.token });
+    const remotePath = this.remotePath(path);
+    const separator = remotePath.includes("?") ? "&" : "?";
+    return new WebSocket(`${this.baseUrl.replace(/^http/, "ws")}${remotePath}${separator}${params.toString()}`);
+  }
+
+  private remotePath(path: string): string {
+    const suffix = path.replace(/^\/v1/, "");
+    return `/v1/remote/hosts/${encodeURIComponent(this.hostDeviceId)}${suffix}`;
+  }
+
+  private headers(auth: boolean): HeadersInit {
+    return auth ? { Authorization: `Bearer ${this.token}` } : {};
+  }
+
+  private async parse<T>(res: Response): Promise<T> {
+    if (!res.ok) {
+      const text = await res.text();
+      try {
+        const payload = JSON.parse(text) as { error?: unknown };
+        if (typeof payload.error === "string" && payload.error) {
+          throw new Error(payload.error);
+        }
+      } catch (parseOrPayloadError) {
+        if (parseOrPayloadError instanceof Error && parseOrPayloadError.name !== "SyntaxError") {
+          throw parseOrPayloadError;
+        }
+      }
+      throw new Error(text || `${res.status} ${res.statusText}`);
+    }
+    return (await res.json()) as T;
+  }
+}
+
 export class LocalCoreClient implements CoreClient {
   readonly terminal: TerminalClient;
 
@@ -215,6 +313,18 @@ export class LocalCoreClient implements CoreClient {
 
   revokeTrustedDevice(controllerDeviceId: string): Promise<HostTrustRevokeResult> {
     return this.channel.request("POST", `/v1/trust/devices/${encodeURIComponent(controllerDeviceId)}/revoke`, {});
+  }
+
+  listPairingRequests(): Promise<PairingRequestListResult> {
+    return this.channel.request("GET", "/v1/pairing/requests");
+  }
+
+  approvePairingRequest(requestId: string): Promise<PairingRequestResolveResult> {
+    return this.channel.request("POST", `/v1/pairing/requests/${encodeURIComponent(requestId)}/approve`, {});
+  }
+
+  denyPairingRequest(requestId: string): Promise<PairingRequestResolveResult> {
+    return this.channel.request("POST", `/v1/pairing/requests/${encodeURIComponent(requestId)}/deny`, {});
   }
 
   settings(): Promise<AppSettings> {
@@ -344,6 +454,60 @@ export class LocalCoreClient implements CoreClient {
   mediaUrl(sessionId: string, eventSeq: number, mediaId: string, download = false): string {
     if (!(this.channel instanceof LocalHttpControlChannel)) return "";
     return this.channel.url(`/v1/sessions/${sessionId}/media/${eventSeq}/${encodeURIComponent(mediaId)}`, download ? { download: 1 } : {});
+  }
+}
+
+class RemoteCoreClient extends LocalCoreClient {
+  health(): Promise<HealthResponse> {
+    return Promise.reject(new Error("远端 Host health 尚未进入控制协议"));
+  }
+
+  settings(): Promise<AppSettings> {
+    return Promise.reject(new Error("远端 Host settings 尚未进入控制协议"));
+  }
+
+  patchSettings(): Promise<AppSettings> {
+    return Promise.reject(new Error("远端 Host settings 尚未进入控制协议"));
+  }
+
+  clearMediaCache(): Promise<ClearMediaCacheResponse> {
+    return Promise.reject(new Error("远端 Host 本地缓存不能由 Controller 清理"));
+  }
+
+  createWorkspace(): Promise<Workspace> {
+    return Promise.reject(new Error("远端创建 workspace 尚未进入控制协议"));
+  }
+
+  createSession(): Promise<Session> {
+    return Promise.reject(new Error("远端创建 session 尚未进入控制协议"));
+  }
+
+  workspaceConnection(): Promise<WorkspaceConnection> {
+    return Promise.reject(new Error("远端 workspace 连接状态由 Host 投影提供"));
+  }
+
+  connectWorkspace(): Promise<WorkspaceConnection> {
+    return Promise.reject(new Error("远端 SSH 连接由 Host 管理"));
+  }
+
+  disconnectWorkspace(): Promise<WorkspaceConnection> {
+    return Promise.reject(new Error("远端 SSH 连接由 Host 管理"));
+  }
+
+  deleteWorkspace(): Promise<{ ok: boolean }> {
+    return Promise.reject(new Error("远端删除 workspace 尚未进入控制协议"));
+  }
+
+  sessionCommands(): Promise<SessionCommandListResponse> {
+    return Promise.resolve({ commands: [] });
+  }
+
+  runSessionCommand(): Promise<SessionCommandResponse> {
+    return Promise.reject(new Error("远端 session command 尚未进入控制协议"));
+  }
+
+  mediaUrl(): string {
+    return "";
   }
 }
 

@@ -32,7 +32,7 @@ func runControlDevClient(args []string) bool {
 
 func runControlDevClientCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: control-client <identity|known-hosts|discover|pair|workspaces|sessions|session-view|events|trust-list|request|smoke>")
+		return fmt.Errorf("usage: control-client <identity|known-hosts|discover|pair|pair-request|pair-status|workspaces|sessions|session-view|events|trust-list|request|smoke>")
 	}
 	st, err := loadStore(defaultDataDir())
 	if err != nil {
@@ -70,6 +70,36 @@ func runControlDevClientCommand(args []string) error {
 			return err
 		}
 		return writePrettyJSON(os.Stdout, grant)
+	case "pair-request":
+		fs := flag.NewFlagSet("control-client pair-request", flag.ContinueOnError)
+		host := fs.String("host", "", "remote Host base URL, for example http://10.0.0.10:43900")
+		capabilityList := fs.String("capabilities", strings.Join(defaultHostCapabilities(), ","), "comma-separated capabilities")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *host == "" {
+			return fmt.Errorf("--host is required")
+		}
+		result, err := controlClientSubmitPairingRequest(*host, st, parseCapabilityList(*capabilityList))
+		if err != nil {
+			return err
+		}
+		return writePrettyJSON(os.Stdout, result)
+	case "pair-status":
+		fs := flag.NewFlagSet("control-client pair-status", flag.ContinueOnError)
+		host := fs.String("host", "", "remote Host base URL, for example http://10.0.0.10:43900")
+		requestID := fs.String("request-id", "", "pairing request id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *host == "" || *requestID == "" {
+			return fmt.Errorf("--host and --request-id are required")
+		}
+		result, err := controlClientPairingRequestStatus(*host, *requestID)
+		if err != nil {
+			return err
+		}
+		return writePrettyJSON(os.Stdout, result)
 	case "workspaces":
 		fs := flag.NewFlagSet("control-client workspaces", flag.ContinueOnError)
 		host := fs.String("host", "", "remote Host base URL")
@@ -1679,6 +1709,60 @@ func controlClientPair(host string, st *store, capabilities []string) (TrustGran
 		return TrustGrant{}, err
 	}
 	return grant, nil
+}
+
+func controlClientSubmitPairingRequest(host string, st *store, capabilities []string) (pairingRequestSubmitResult, error) {
+	hostInfo, err := controlClientHostInfo(host)
+	if err != nil {
+		return pairingRequestSubmitResult{}, err
+	}
+	identity := st.deviceIdentity
+	req := pairingRequestInput{
+		ControllerDeviceID:             identity.DeviceID,
+		ControllerDeviceName:           identity.DeviceName,
+		ControllerDeviceKind:           identity.DeviceKind,
+		ControllerPublicKey:            identity.PublicKey,
+		ControllerPublicKeyFingerprint: identity.PublicKeyFingerprint,
+		Capabilities:                   capabilities,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return pairingRequestSubmitResult{}, err
+	}
+	httpResp, err := http.Post(controlHTTPURL(host, "/v1/pairing/requests"), "application/json", bytes.NewReader(body))
+	if err != nil {
+		return pairingRequestSubmitResult{}, err
+	}
+	defer httpResp.Body.Close()
+	responseBody, _ := io.ReadAll(httpResp.Body)
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		return pairingRequestSubmitResult{}, fmt.Errorf("pairing request failed: status %d: %s", httpResp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	var result pairingRequestSubmitResult
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		return pairingRequestSubmitResult{}, err
+	}
+	if _, err := st.rememberKnownHost(hostInfo, host); err != nil {
+		return pairingRequestSubmitResult{}, err
+	}
+	return result, nil
+}
+
+func controlClientPairingRequestStatus(host, requestID string) (pairingRequestResolveResult, error) {
+	resp, err := http.Get(controlHTTPURL(host, "/v1/pairing/requests/"+requestID))
+	if err != nil {
+		return pairingRequestResolveResult{}, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return pairingRequestResolveResult{}, fmt.Errorf("pairing status failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var result pairingRequestResolveResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		return pairingRequestResolveResult{}, err
+	}
+	return result, nil
 }
 
 func controlClientRequest(host string, st *store, req ControlRequest) (ControlResponse, error) {

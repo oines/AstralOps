@@ -216,10 +216,12 @@ go run ./daemon control-client discover --timeout 3s --port 43900
 
 discover 只返回 `LanHostCandidate`，例如 device id、public key fingerprint、LAN 地址和端口。它不能自动授信、不能自动 pair、不能绕过 Host Gateway。后续连接仍必须进入 `/v1/control/ws` 并完成 E2EE 握手。
 
-当前开发客户端在 `pair` 成功后，会把 Host public identity 记入本机 `known_hosts.json`。这只是 Controller 侧的 Host 身份缓存，用来校验后续 LAN discovery candidate；真正的执行授权仍然由 Host 本地 trust store 决定。
+当前开发客户端在 `pair` 或 `pair-request` 成功后，会把 Host public identity 记入本机 `known_hosts.json`。这只是 Controller 侧的 Host 身份缓存，用来校验后续 LAN discovery candidate；真正的执行授权仍然由 Host 本地 trust store 决定。`pair` 是 dev-only trust 直写；`pair-request` 是正式流程的最小本地 smoke，会在 Host 上创建 pending request，等待本机 Host UI 或已有可信 `host.manage` Controller 批准。
 
 ```text
 go run ./daemon control-client known-hosts
+go run ./daemon control-client pair-request --host http://<host>:43900
+go run ./daemon control-client pair-status --host http://<host>:43900 --request-id <request_id>
 go run ./daemon control-client workspaces --discover --host-device-id <host_device_id>
 go run ./daemon control-client sessions --discover --host-device-id <host_device_id> --workspace-id <workspace_id>
 go run ./daemon control-client session-view --discover --host-device-id <host_device_id> --session-id <session_id>
@@ -370,7 +372,7 @@ Onboarding 分两层：
    - public key fingerprint
    - 请求的控制范围
 6. 用户批准或拒绝。
-7. 批准后，Host 写入 device-to-device trust grant。
+7. 批准后，Host 写入 device-to-device trust grant，并把 pairing request 标记为 approved。
 8. Mobile 设备列表显示可控制的 Desktop Host。
 ```
 
@@ -700,7 +702,7 @@ terminal.input
   向 Host 拥有的 PTY 发送原始按键输入。
 
 host.manage
-  管理 Host-owned 控制面能力。v1 先只开放 `host.trust.list` 和 `host.trust.revoke`，用于通过 E2EE control channel 查看 trusted devices、撤销某个 Controller，并触发 Host 本地立即断开和 terminal writer lock 释放。创建/删除 workspace、连接/断开 SSH workspace、settings 和 updates 不塞进这个 v1 action。
+  管理 Host-owned 控制面能力。v1 开放 `host.trust.list`、`host.trust.revoke`、`host.pairing.list`、`host.pairing.approve`、`host.pairing.deny`，用于通过 E2EE control channel 查看 trusted devices、撤销某个 Controller、批准/拒绝 pending pairing request，并触发 Host 本地立即断开和 terminal writer lock 释放。创建/删除 workspace、连接/断开 SSH workspace、settings 和 updates 不塞进这个 v1 action。
 ```
 
 UI 可以展示更简单的模式：
@@ -1060,11 +1062,47 @@ revoked_at
 
 Host 在执行任何远程动作前，必须本地强制校验 trust。
 
+正式 pairing 不是直接写 trust grant。未可信设备只能提交 Host-owned pairing request：
+
+```text
+POST /v1/pairing/requests
+GET /v1/pairing/requests/:request_id
+```
+
+请求必须包含：
+
+```text
+controller_device_id
+controller_device_name
+controller_device_kind
+controller_public_key
+controller_public_key_fingerprint
+requested capabilities / scope
+```
+
+`POST /v1/pairing/requests` 可以暴露在 Host remote listener 上，因为它只创建 pending request，不授予控制权。它必须校验 controller public key 和 fingerprint，不能接受缺失 public key 的正式配对请求。Host 不能因为同账号、LAN 可见或 relay 可达就自动批准。
+
+批准/拒绝只能由本机 authenticated Host UI 或已经可信且具备 `host.manage` capability 的 Controller 执行：
+
+```text
+GET /v1/pairing/requests
+POST /v1/pairing/requests/:request_id/approve
+POST /v1/pairing/requests/:request_id/deny
+
+host.pairing.list
+host.pairing.approve
+host.pairing.deny
+```
+
+批准会把 pending request 转成本地 trust grant，并写入 `control.trust.granted` / `control.pairing.approved` audit event；拒绝只写入 `control.pairing.denied`，不会写 trust grant。已经 resolved 的 pairing request 不能再次批准。
+
 当前 daemon 已落地：
 
 ```text
 host.trust.list over E2EE control channel
 host.trust.revoke over E2EE control channel
+host.pairing.list/approve/deny over E2EE control channel
+local pairing request submit/list/approve/deny HTTP endpoints
 local trust revoke HTTP endpoint
 immediate active control session close
 terminal active writer release on revoke
@@ -1085,7 +1123,7 @@ Desktop 登录账号
 Desktop 创建设备身份
 Desktop 选择是否允许被远控
 Mobile/Desktop 新设备登录账号
-已有可信设备批准新设备
+本机 Host 或已有可信设备批准新设备
 设备列表显示 Host 可用状态
 ```
 
@@ -1113,6 +1151,36 @@ reconnect and resume semantics
 ```text
 GET /v1/control/ws
 ```
+
+Desktop Controller 不直接在 React/Electron renderer 内实现远控握手，也不持有远控私钥。当前桌面端先通过本机 daemon 暴露 controller-side 代理 API，再由本机 daemon 复用同一套 Host identity、known_hosts、LAN discovery 和 E2EE control channel：
+
+```text
+GET /v1/remote/hosts?discover=1
+GET /v1/remote/hosts/:host_device_id/host
+GET /v1/remote/hosts/:host_device_id/workspaces
+GET /v1/remote/hosts/:host_device_id/sessions
+GET /v1/remote/hosts/:host_device_id/sessions/:session_id/view
+GET /v1/remote/hosts/:host_device_id/events
+GET /v1/remote/hosts/:host_device_id/events?stream=1
+GET /v1/remote/hosts/:host_device_id/workspaces/:workspace_id/files
+GET /v1/remote/hosts/:host_device_id/workspaces/:workspace_id/pty
+GET /v1/remote/hosts/:host_device_id/pairing/requests
+POST /v1/remote/hosts/:host_device_id/pairing/requests/:request_id/approve
+POST /v1/remote/hosts/:host_device_id/pairing/requests/:request_id/deny
+POST /v1/remote/hosts/:host_device_id/workspaces/:workspace_id/exec
+POST /v1/remote/hosts/:host_device_id/sessions/:session_id/input
+POST /v1/remote/hosts/:host_device_id/sessions/:session_id/interrupt
+POST /v1/remote/hosts/:host_device_id/sessions/:session_id/fork
+POST /v1/remote/hosts/:host_device_id/sessions/:session_id/edit-last-user-message
+DELETE /v1/remote/hosts/:host_device_id/sessions/:session_id
+POST /v1/remote/hosts/:host_device_id/sessions/:session_id/queue/:queue_id/cancel
+POST /v1/remote/hosts/:host_device_id/sessions/:session_id/queue/:queue_id/steer
+POST /v1/remote/hosts/:host_device_id/approvals/:interaction_id/respond
+```
+
+这些 endpoint 是本机 daemon 的 controller-side facade，不是 Host remote listener。它们必须只对本机 authenticated Desktop 开放；真正的远端执行仍然通过目标 Host 的 `/v1/control/ws`，并且只允许已知 Host identity。`discover=1` 只把 LAN 上匹配 known host fingerprint 且通过 `/v1/host` 校验的 Host 标为 `lan`，未知设备不能自动出现在可控列表里。
+
+当前 Desktop 的 Host selector 使用这个 facade 拉取远端 Host 和 Host-scoped workspaces/sessions/events。远程 PTY 通过本机 daemon WebSocket facade 接入：Desktop 仍打开 `/v1/remote/hosts/:host_device_id/workspaces/:workspace_id/pty`，本机 daemon 再通过目标 Host 的 encrypted control WebSocket 转发 `terminal.open/attach/input/resize/close`，并把 `terminal.output` / `terminal.closed` frame 映射回本地终端 UI 的 ready/output/exit 消息。远端 Host 的 pending pairing request 管理由本机 daemon facade 转成 `host.pairing.*` E2EE action，Desktop renderer 不直接持有远控密钥。尚未进入 control protocol 的本地 app 设置、workspace/session 创建和 session command 列表不能在 UI 里伪造；下一步应为这些能力补明确协议 action 或保持不可用状态。
 
 握手和帧语义：
 

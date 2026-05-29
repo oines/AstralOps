@@ -186,6 +186,8 @@ func validateRemoteControlListenAddr(addr string) error {
 func remoteControlHandler(a *app, devPairing bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/host", a.handleHost)
+	mux.HandleFunc("/v1/pairing/requests", a.handlePairingRequestSubmit)
+	mux.HandleFunc("/v1/pairing/requests/", a.handlePairingRequestStatus)
 	mux.HandleFunc("/v1/control/ws", a.handleControlWS)
 	if devPairing {
 		mux.HandleFunc("/v1/trust/devices", a.handleTrustDevices)

@@ -15,11 +15,12 @@ import {
   SlidersHorizontal,
   TerminalSquare,
   Wifi,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import type { CoreClient } from "../api";
-import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, DaemonInfo, HealthResponse, HostInfo, TrustGrant } from "../types";
+import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, DaemonInfo, HealthResponse, HostInfo, PairingRequest, TrustGrant } from "../types";
 
 type SettingsCategoryId =
   | "general"
@@ -609,28 +610,33 @@ function RemoteControlContent({
 }): React.JSX.Element {
   const [host, setHost] = useState<HostInfo | null>(null);
   const [grants, setGrants] = useState<TrustGrant[]>([]);
+  const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [confirmRevokeId, setConfirmRevokeId] = useState("");
   const [revokingId, setRevokingId] = useState("");
+  const [resolvingPairingId, setResolvingPairingId] = useState("");
 
   const trustedGrants = useMemo(() => grants.filter((grant) => grant.status === "trusted"), [grants]);
   const revokedGrants = useMemo(() => grants.filter((grant) => grant.status === "revoked"), [grants]);
+  const pendingPairingRequests = useMemo(() => pairingRequests.filter((request) => request.status === "pending"), [pairingRequests]);
 
   const loadRemoteControl = useCallback(async (): Promise<void> => {
     if (!core) {
       setHost(null);
       setGrants([]);
+      setPairingRequests([]);
       setError("Core 未连接");
       setStatus("");
       return;
     }
     setLoading(true);
     try {
-      const [hostInfo, trustList] = await Promise.all([core.hostInfo(), core.listTrustedDevices()]);
+      const [hostInfo, trustList, pairingList] = await Promise.all([core.hostInfo(), core.listTrustedDevices(), core.listPairingRequests()]);
       setHost(hostInfo);
       setGrants(sortTrustGrants(trustList.grants));
+      setPairingRequests(sortPairingRequests(pairingList.requests));
       setError("");
       setStatus("已刷新");
     } catch (loadError) {
@@ -662,6 +668,36 @@ function RemoteControlContent({
       setError(revokeError instanceof Error ? revokeError.message : String(revokeError));
     } finally {
       setRevokingId("");
+    }
+  }
+
+  async function approvePairingRequest(request: PairingRequest): Promise<void> {
+    if (!core || request.status !== "pending") return;
+    setResolvingPairingId(request.request_id);
+    setError("");
+    try {
+      await core.approvePairingRequest(request.request_id);
+      setStatus("已允许设备控制本机");
+      await loadRemoteControl();
+    } catch (approveError) {
+      setError(approveError instanceof Error ? approveError.message : String(approveError));
+    } finally {
+      setResolvingPairingId("");
+    }
+  }
+
+  async function denyPairingRequest(request: PairingRequest): Promise<void> {
+    if (!core || request.status !== "pending") return;
+    setResolvingPairingId(request.request_id);
+    setError("");
+    try {
+      await core.denyPairingRequest(request.request_id);
+      setStatus("已拒绝设备加入");
+      await loadRemoteControl();
+    } catch (denyError) {
+      setError(denyError instanceof Error ? denyError.message : String(denyError));
+    } finally {
+      setResolvingPairingId("");
     }
   }
 
@@ -711,6 +747,15 @@ function RemoteControlContent({
       </SettingsSection>
 
       <SettingsSection title="可信设备">
+        {pendingPairingRequests.map((request) => (
+          <PairingRequestRow
+            key={request.request_id}
+            request={request}
+            resolvingId={resolvingPairingId}
+            onApprove={approvePairingRequest}
+            onDeny={denyPairingRequest}
+          />
+        ))}
         {trustedGrants.length > 0 ? (
           trustedGrants.map((grant) => (
             <TrustGrantRow
@@ -721,9 +766,9 @@ function RemoteControlContent({
               onRevoke={revokeGrant}
             />
           ))
-        ) : (
+        ) : pendingPairingRequests.length === 0 ? (
           <EmptySettingsRow title="暂无可信控制设备" description="手机、桌面端或其他控制端完成配对后会显示在这里" />
-        )}
+        ) : null}
       </SettingsSection>
 
       {revokedGrants.length > 0 ? (
@@ -885,6 +930,47 @@ function TrustGrantRow({
         label={!trusted ? "已撤销" : revoking ? "撤销中" : confirming ? "确认撤销" : "撤销"}
         onClick={() => onRevoke(grant)}
       />
+    </div>
+  );
+}
+
+function PairingRequestRow({
+  request,
+  resolvingId,
+  onApprove,
+  onDeny,
+}: {
+  request: PairingRequest;
+  resolvingId: string;
+  onApprove: (request: PairingRequest) => Promise<void>;
+  onDeny: (request: PairingRequest) => Promise<void>;
+}): React.JSX.Element {
+  const resolving = resolvingId === request.request_id;
+  const name = request.controller_device_name || "未命名设备";
+  return (
+    <div className="grid min-h-[92px] grid-cols-[minmax(0,1fr)_auto] items-center gap-5 border-b border-[var(--ao-border)] px-4 py-3 last:border-b-0">
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <KeyRound size={15} strokeWidth={1.9} className="text-[var(--ao-warning)]" />
+          <span className="truncate text-[13px] font-bold leading-5 text-[var(--ao-text)]">{name}</span>
+          <StatusPill label="等待批准" tone="warning" />
+        </div>
+        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
+          <span className="truncate">ID {request.controller_device_id}</span>
+          <span>{deviceKindLabel(request.controller_device_kind)}</span>
+          <span className="inline-flex min-w-0 items-center gap-1">
+            <KeyRound size={12} strokeWidth={1.9} />
+            <span className="truncate">{request.controller_public_key_fingerprint}</span>
+          </span>
+          <span>{policyLabel(request.workspace_exec_policy)}</span>
+          <span>{`请求于 ${formatTimestamp(request.created_at)}`}</span>
+        </div>
+        <CapabilityList capabilities={request.capabilities} align="left" />
+      </div>
+      <div className="flex items-center gap-2">
+        <ButtonControl disabled={resolving} icon={Check} label={resolving ? "处理中" : "允许"} onClick={() => onApprove(request)} />
+        <ButtonControl disabled={resolving} icon={X} label="拒绝" onClick={() => onDeny(request)} />
+      </div>
     </div>
   );
 }
@@ -1073,6 +1159,14 @@ function sortTrustGrants(grants: TrustGrant[]): TrustGrant[] {
   return [...grants].sort((left, right) => {
     if (left.status === "trusted" && right.status !== "trusted") return -1;
     if (left.status !== "trusted" && right.status === "trusted") return 1;
+    return timestampValue(right.updated_at) - timestampValue(left.updated_at);
+  });
+}
+
+function sortPairingRequests(requests: PairingRequest[]): PairingRequest[] {
+  return [...requests].sort((left, right) => {
+    if (left.status === "pending" && right.status !== "pending") return -1;
+    if (left.status !== "pending" && right.status === "pending") return 1;
     return timestampValue(right.updated_at) - timestampValue(left.updated_at);
   });
 }

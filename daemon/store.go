@@ -20,6 +20,7 @@ type store struct {
 	deviceIdentity   DeviceIdentity
 	devicePrivateKey []byte
 	trustGrants      map[string]TrustGrant
+	pairingRequests  map[string]PairingRequest
 	knownHosts       map[string]KnownHost
 	workspaces       map[string]Workspace
 	sessions         map[string]Session
@@ -36,6 +37,10 @@ func loadStore(dataDir string) (*store, error) {
 	if err != nil {
 		return nil, err
 	}
+	pairingRequests, err := loadPairingRequests(dataDir)
+	if err != nil {
+		return nil, err
+	}
 	knownHosts, err := loadKnownHosts(dataDir)
 	if err != nil {
 		return nil, err
@@ -45,6 +50,7 @@ func loadStore(dataDir string) (*store, error) {
 		deviceIdentity:   identity,
 		devicePrivateKey: privateKey,
 		trustGrants:      trustGrants,
+		pairingRequests:  pairingRequests,
 		knownHosts:       knownHosts,
 		workspaces:       map[string]Workspace{},
 		sessions:         map[string]Session{},

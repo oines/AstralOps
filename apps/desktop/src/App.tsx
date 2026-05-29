@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanelLeft, PanelRight } from "lucide-react";
-import { createLocalCoreClient, type CoreClient, type EventSubscription } from "./api";
+import { createLocalCoreClient, createRemoteCoreClient, listRemoteHosts, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
 import { SettingsView } from "./components/SettingsView";
@@ -34,6 +34,7 @@ import type {
   HostInfo,
   PermissionMode,
   ReasoningEffort,
+  RemoteHostRecord,
   RunMode,
   Session,
   SessionInputAttachment,
@@ -68,8 +69,10 @@ function sessionTimestamp(session: Session): number {
 export function App(): React.JSX.Element {
   const [connection, setConnection] = useState<ConnectionState>("booting");
   const [api, setApi] = useState<CoreClient | null>(null);
+  const [localApi, setLocalApi] = useState<CoreClient | null>(null);
   const [daemonInfo, setDaemonInfo] = useState<DaemonInfo | null>(null);
   const [localHostInfo, setLocalHostInfo] = useState<HostInfo | null>(null);
+  const [remoteHosts, setRemoteHosts] = useState<RemoteHostRecord[]>([]);
   const [selectedHostId, setSelectedHostId] = useState(LOCAL_HOST_ID);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
@@ -272,25 +275,28 @@ export function App(): React.JSX.Element {
     storeSessionView,
   });
 
-  const loadInitialState = useCallback(async (client: CoreClient) => {
-    const [healthResponse, settingsResponse, hostResponse, workspaceResponse, sessionResponse, recentEvents] = await Promise.all([
-      client.health(),
-      client.settings(),
+  const loadHostState = useCallback(async (
+    client: CoreClient,
+    options: { includeWorkspaceConnections?: boolean; restoreOnLaunch?: boolean; updateLocalHostInfo?: boolean } = {},
+  ) => {
+    const [hostResponse, workspaceResponse, sessionResponse, recentEvents] = await Promise.all([
       client.hostInfo(),
       client.listWorkspaces(),
       client.listSessions(),
       client.events({ limit: EVENT_WINDOW_SIZE }),
     ]);
-    const connectionResults = await Promise.allSettled(
-      workspaceResponse
-        .filter((workspace) => workspace.target === "ssh")
-        .map(async (workspace) => client.workspaceConnection(workspace.id)),
-    );
+    const connectionResults = options.includeWorkspaceConnections
+      ? await Promise.allSettled(
+          workspaceResponse
+            .filter((workspace) => workspace.target === "ssh")
+            .map(async (workspace) => client.workspaceConnection(workspace.id)),
+        )
+      : [];
     const connectionMap: Record<string, WorkspaceConnection> = {};
     for (const result of connectionResults) {
       if (result.status === "fulfilled") connectionMap[result.value.workspace_id] = result.value;
     }
-    const initialSession = settingsResponse.general.restore_on_launch ? sessionResponse[0] ?? null : null;
+    const initialSession = options.restoreOnLaunch ? sessionResponse[0] ?? null : null;
     const sessionEvents = initialSession ? await client.events({ session_id: initialSession.id, limit: EVENT_WINDOW_SIZE }) : [];
     const viewResults = await Promise.allSettled(sessionResponse.map((session) => client.sessionView(session.id)));
     const viewMap: Record<string, SessionView> = {};
@@ -298,10 +304,7 @@ export function App(): React.JSX.Element {
       if (result.status === "fulfilled") viewMap[result.value.session.id] = result.value;
     }
     const eventResponse = [...recentEvents, ...sessionEvents];
-    setHealth(healthResponse);
-    setLocalHostInfo(hostResponse);
-    setAppSettings(settingsResponse);
-    appSettingsRef.current = settingsResponse;
+    if (options.updateLocalHostInfo) setLocalHostInfo(hostResponse);
     setLastSessionAgent(sessionResponse[0]?.agent ?? "claude");
     setWorkspaces(workspaceResponse);
     setWorkspaceConnections(connectionMap);
@@ -314,13 +317,12 @@ export function App(): React.JSX.Element {
     if (initialSession) {
       setSessionWindows((current) => updateWindowAfterLatest(current, initialSession.id, sessionEvents, EVENT_WINDOW_SIZE));
     }
-    setActiveWorkspaceId((current) => current || initialSession?.workspace_id || sessionResponse[0]?.workspace_id || workspaceResponse[0]?.id || "");
-    setActiveSession((current) => current ?? initialSession);
+    setActiveWorkspaceId(initialSession?.workspace_id || sessionResponse[0]?.workspace_id || workspaceResponse[0]?.id || "");
+    setActiveSession(initialSession);
     return eventResponse;
   }, []);
 
   useEffect(() => {
-    let subscription: EventSubscription | null = null;
     let cancelled = false;
 
     async function boot(): Promise<void> {
@@ -329,31 +331,15 @@ export function App(): React.JSX.Element {
         if (cancelled) return;
         setDaemonInfo(info);
         const client = createLocalCoreClient(info);
-        const initialEvents = await loadInitialState(client);
+        setLocalApi(client);
+        const [healthResponse, settingsResponse] = await Promise.all([
+          client.health(),
+          client.settings(),
+        ]);
         if (cancelled) return;
-        const afterSeq = Math.max(0, ...initialEvents.map((event) => event.seq));
-        subscription = client.subscribeEvents(afterSeq, {
-          onEvent: (event) => {
-            if (event.kind === "workspace.connection") {
-              const state = event.normalized as WorkspaceConnection;
-              setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
-            }
-            if (event.session_id) {
-              void client.sessionView(event.session_id).then((view) => {
-                if (!cancelled) storeSessionView(view);
-              }).catch(() => undefined);
-            }
-            maybeNotifyLiveEvent(event);
-            queueLiveEvent(event);
-          },
-          onOpen: () => setConnection("connected"),
-          onError: (event) => {
-            if (event instanceof SyntaxError) setError("bad SSE event payload");
-            setConnection("reconnecting");
-          },
-        });
-        setApi(client);
-        setConnection("connected");
+        setHealth(healthResponse);
+        setAppSettings(settingsResponse);
+        appSettingsRef.current = settingsResponse;
       } catch (bootError) {
         setError(bootError instanceof Error ? bootError.message : String(bootError));
         setConnection("failed");
@@ -368,9 +354,28 @@ export function App(): React.JSX.Element {
         sseFrameRef.current = null;
       }
       sseQueueRef.current = [];
-      subscription?.close();
     };
-  }, [loadInitialState, maybeNotifyLiveEvent, queueLiveEvent, storeSessionView]);
+  }, []);
+
+  useEffect(() => {
+    if (!daemonInfo) return;
+    const info = daemonInfo;
+    let cancelled = false;
+    async function refresh(): Promise<void> {
+      try {
+        const hosts = await listRemoteHosts(info, true);
+        if (!cancelled) setRemoteHosts(hosts);
+      } catch {
+        if (!cancelled) setRemoteHosts([]);
+      }
+    }
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [daemonInfo]);
 
   useEffect(() => {
     if (!modelOverride) return;
@@ -382,12 +387,12 @@ export function App(): React.JSX.Element {
 
   const patchAppSettings = useCallback(
     async (patch: AppSettingsPatch, key: string) => {
-      if (!api) return;
+      if (!localApi) return;
       setSettingsError("");
       setSettingsSavingKeys((current) => new Set(current).add(key));
       const previous = appSettingsRef.current;
       try {
-        const next = await api.patchSettings(patch);
+        const next = await localApi.patchSettings(patch);
         appSettingsRef.current = next;
         setAppSettings(next);
         void window.astral.getDaemonInfo().then(setDaemonInfo).catch(() => undefined);
@@ -404,13 +409,13 @@ export function App(): React.JSX.Element {
         });
       }
     },
-    [api],
+    [localApi],
   );
 
   const clearMediaCache = useCallback(async (): Promise<ClearMediaCacheResponse> => {
-    if (!api) return { ok: false, removed_bytes: 0 };
-    return api.clearMediaCache();
-  }, [api]);
+    if (!localApi) return { ok: false, removed_bytes: 0 };
+    return localApi.clearMediaCache();
+  }, [localApi]);
 
   const openLogsDirectory = useCallback(async (): Promise<void> => {
     const result = await window.astral.openLogsDirectory();
@@ -752,10 +757,83 @@ export function App(): React.JSX.Element {
         subtitle: daemonInfo?.remote_control?.listen_addr ? `本机 Host · ${daemonInfo.remote_control.listen_addr}` : "本机 Host",
         connection: "local" as const,
       },
+      ...remoteHosts.map((host) => ({
+        id: host.device_id,
+        name: host.device_name || host.device_id,
+        kind: host.device_kind || "desktop",
+        subtitle: host.connection === "lan" ? "远端 Host · LAN" : "远端 Host",
+        connection: host.connection,
+      })),
     ],
-    [daemonInfo?.remote_control?.listen_addr, localHostInfo],
+    [daemonInfo?.remote_control?.listen_addr, localHostInfo, remoteHosts],
   );
   const activeHostId = hostOptions.some((host) => host.id === selectedHostId) ? selectedHostId : hostOptions[0]?.id || LOCAL_HOST_ID;
+  const activeHostIsLocal = activeHostId === (localHostInfo?.identity.device_id || LOCAL_HOST_ID);
+
+  useEffect(() => {
+    if (!daemonInfo || !localApi || !activeHostId) return;
+    let subscription: EventSubscription | null = null;
+    let cancelled = false;
+    const client = activeHostIsLocal ? localApi : createRemoteCoreClient(daemonInfo, activeHostId);
+
+    async function loadSelectedHost(): Promise<void> {
+      setConnection("booting");
+      setError("");
+      try {
+        const initialEvents = await loadHostState(client, {
+          includeWorkspaceConnections: activeHostIsLocal,
+          restoreOnLaunch: appSettingsRef.current.general.restore_on_launch,
+          updateLocalHostInfo: activeHostIsLocal,
+        });
+        if (cancelled) return;
+        const afterSeq = Math.max(0, ...initialEvents.map((event) => event.seq));
+        subscription = client.subscribeEvents(afterSeq, {
+          onEvent: (event) => {
+            if (cancelled) return;
+            if (activeHostIsLocal && event.kind === "workspace.connection") {
+              const state = event.normalized as WorkspaceConnection;
+              setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
+            }
+            if (event.session_id) {
+              void client.sessionView(event.session_id).then((view) => {
+                if (!cancelled) storeSessionView(view);
+              }).catch(() => undefined);
+            }
+            if (activeHostIsLocal) maybeNotifyLiveEvent(event);
+            queueLiveEvent(event);
+          },
+          onOpen: () => {
+            if (!cancelled) setConnection("connected");
+          },
+          onError: (event) => {
+            if (cancelled) return;
+            if (event instanceof SyntaxError) setError("bad SSE event payload");
+            setConnection("reconnecting");
+          },
+        });
+        setApi(client);
+        setConnection("connected");
+      } catch (hostError) {
+        if (!cancelled) {
+          setApi(client);
+          setError(hostError instanceof Error ? hostError.message : String(hostError));
+          setConnection("failed");
+        }
+      }
+    }
+
+    void loadSelectedHost();
+    return () => {
+      cancelled = true;
+      subscription?.close();
+      if (sseFrameRef.current !== null) {
+        window.cancelAnimationFrame(sseFrameRef.current);
+        sseFrameRef.current = null;
+      }
+      sseQueueRef.current = [];
+    };
+  }, [activeHostId, activeHostIsLocal, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, storeSessionView]);
+
   const sessionTitles = useMemo(
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),
     [sessionViews, sessions],
@@ -775,7 +853,7 @@ export function App(): React.JSX.Element {
           nativeVibrancy={nativeVibrancy}
           onBack={() => setSettingsOpen(false)}
           onClearMediaCache={clearMediaCache}
-          core={api}
+          core={localApi}
           daemonInfo={daemonInfo}
           onOpenLogs={openLogsDirectory}
           onPatchSettings={patchAppSettings}
