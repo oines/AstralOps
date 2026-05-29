@@ -106,7 +106,15 @@ func (a *app) executeControlRequestWithConnection(req ControlRequest, conn *cont
 	return a.executeControlRequestWithContext(ctx, req, conn)
 }
 
-func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlRequest, conn *controlWSConn) (ControlResponse, error) {
+func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlRequest, conn *controlWSConn) (response ControlResponse, err error) {
+	startedAt := logControlActionStart(req)
+	defer func() {
+		if err != nil {
+			logControlActionFailed(req, startedAt, err)
+			return
+		}
+		logControlActionCompleted(req, startedAt)
+	}()
 	requiredCapability := controlActionCapability(req.Action)
 	if requiredCapability == "" {
 		return ControlResponse{RequestID: req.RequestID}, newActionError(http.StatusNotFound, "control_action_unknown", "control action not found")

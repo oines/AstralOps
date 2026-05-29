@@ -42,6 +42,8 @@ declare global {
       getWorkspaceOpeners: () => Promise<WorkspaceOpenerInfo[]>;
       openWorkspace: (opener: WorkspaceOpenerId, workspace: unknown) => Promise<{ ok: boolean; error?: string }>;
       openLogsDirectory: () => Promise<{ ok: boolean; error?: string }>;
+      logClientEvent: (payload: { event: string; level?: "info" | "warn" | "error"; details?: Record<string, unknown> }) => Promise<{ ok: boolean; error?: string }>;
+      setDiagnosticsLoggingEnabled: (enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
       setThemeSource: (theme: "system" | "light" | "dark") => Promise<{ ok: boolean; error?: string }>;
       getUpdateStatus: () => Promise<AppUpdateStatus>;
       checkForUpdates: (options?: { automatic?: boolean }) => Promise<AppUpdateStatus>;

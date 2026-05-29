@@ -754,12 +754,9 @@ type sshProbe struct {
 func (m *sshManager) probe(ctx context.Context, ws Workspace) (sshProbe, error) {
 	remoteCWD := strings.TrimSpace(ws.SSH.RemoteCWD)
 	script := remoteProbeScript(remoteCWD)
-	cmd := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, script)...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	out, stderr, err := runSSHOutput(ctx, ws, "probe", script, map[string]any{"remote_cwd": remoteCWD})
 	if err != nil {
-		return sshProbe{}, fmt.Errorf("ssh probe failed: %s%s", err.Error(), stderrSuffix(stderr.String()))
+		return sshProbe{}, fmt.Errorf("ssh probe failed: %s%s", err.Error(), stderrSuffix(stderr))
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	probe := sshProbe{}
@@ -867,25 +864,37 @@ func (m *sshManager) tryRemoteHelperCandidate(ctx context.Context, ws Workspace,
 	return helper, proxy, hello, err
 }
 
-func (m *sshManager) tryRemoteHelperCandidateOnce(ctx context.Context, ws Workspace, candidate remoteHelperCandidate, localHelper, localSum string, forceUpload bool) (helperUpload, *proxyClient, map[string]any, error) {
-	helper, err := m.ensureHelperAt(ctx, ws, candidate, localHelper, localSum, forceUpload)
+func (m *sshManager) tryRemoteHelperCandidateOnce(ctx context.Context, ws Workspace, candidate remoteHelperCandidate, localHelper, localSum string, forceUpload bool) (helper helperUpload, proxy *proxyClient, hello map[string]any, err error) {
+	candidateStartedAt := logDiagnosticSpanStart("ssh.helper.candidate", sshHelperCandidateLogFields(ws, candidate, forceUpload, helper))
+	defer func() {
+		fields := sshHelperCandidateLogFields(ws, candidate, forceUpload, helper)
+		if err != nil {
+			logDiagnosticSpanFailed("ssh.helper.candidate", candidateStartedAt, err, fields)
+			return
+		}
+		logDiagnosticSpanCompleted("ssh.helper.candidate", candidateStartedAt, fields)
+	}()
+	helper, err = m.ensureHelperAt(ctx, ws, candidate, localHelper, localSum, forceUpload)
 	if err != nil {
-		return helper, nil, nil, err
+		return
 	}
-	proxy, err := startProxyClient(ws, helper)
+	proxy, err = startProxyClient(ws, helper)
 	if err != nil {
-		return helper, nil, nil, remoteHelperNoFallbackError{err: err}
+		err = remoteHelperNoFallbackError{err: err}
+		return
 	}
-	hello, err := proxy.hello(ctx)
+	hello, err = proxy.hello(ctx)
 	if err != nil {
 		_ = proxy.close()
-		return helper, nil, nil, remoteHelperNoFallbackError{err: err}
+		err = remoteHelperNoFallbackError{err: err}
+		return
 	}
-	if err = validateProxyHello(hello); err != nil {
+	if validateErr := validateProxyHello(hello); validateErr != nil {
 		_ = proxy.close()
-		return helper, nil, nil, remoteHelperValidationError{err: err}
+		err = remoteHelperValidationError{err: validateErr}
+		return
 	}
-	return helper, proxy, hello, nil
+	return
 }
 
 type remoteHelperValidationError struct {
@@ -923,7 +932,11 @@ func (m *sshManager) ensureHelperAt(ctx context.Context, ws Workspace, candidate
 	remotePath := remoteDir + "/astral-proxy-agent"
 	helper := helperUpload{LocalPath: local, RemoteDir: remoteDir, RemotePath: remotePath}
 	mkdir := "mkdir -p " + shellQuote(candidate.BaseDir) + " " + shellQuote(remoteDir) + " && chmod 700 " + shellQuote(candidate.BaseDir) + " " + shellQuote(remoteDir)
-	if out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, mkdir)...).CombinedOutput(); err != nil {
+	if out, err := runSSHCombinedOutput(ctx, ws, "helper.mkdir", mkdir, map[string]any{
+		"candidate":  candidate.Label,
+		"base_dir":   candidate.BaseDir,
+		"remote_dir": remoteDir,
+	}); err != nil {
 		return helper, fmt.Errorf("create remote helper dir failed: %s%s", err.Error(), stderrSuffix(string(out)))
 	}
 	uploaded := false
@@ -935,15 +948,26 @@ func (m *sshManager) ensureHelperAt(ctx context.Context, ws Workspace, candidate
 		}
 		uploaded = true
 		install := "chmod 700 " + shellQuote(remoteTemp) + " && mv -f " + shellQuote(remoteTemp) + " " + shellQuote(remotePath)
-		if out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, install)...).CombinedOutput(); err != nil {
+		if out, err := runSSHCombinedOutput(ctx, ws, "helper.install", install, map[string]any{
+			"candidate":   candidate.Label,
+			"remote_path": remotePath,
+			"remote_temp": remoteTemp,
+		}); err != nil {
 			cleanup := "rm -f " + shellQuote(remoteTemp)
-			_, _ = exec.CommandContext(context.Background(), "ssh", append(sshArgs(ws), ws.SSH.Endpoint, cleanup)...).CombinedOutput()
+			_, _ = runSSHCombinedOutput(context.Background(), ws, "helper.cleanup", cleanup, map[string]any{
+				"candidate":   candidate.Label,
+				"remote_temp": remoteTemp,
+			})
 			return helper, fmt.Errorf("install remote helper failed: %s%s", err.Error(), stderrSuffix(string(out)))
 		}
 	}
 	helper.Uploaded = uploaded
 	verify := "exec " + shellQuote(remotePath) + " --self-test"
-	if out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, verify)...).CombinedOutput(); err != nil {
+	if out, err := runSSHCombinedOutput(ctx, ws, "helper.self_test", verify, map[string]any{
+		"candidate":   candidate.Label,
+		"remote_path": remotePath,
+		"uploaded":    uploaded,
+	}); err != nil {
 		return helper, fmt.Errorf("verify remote helper failed: %s%s", err.Error(), stderrSuffix(string(out)))
 	}
 	return helper, nil
@@ -1013,7 +1037,7 @@ func remoteHelperAttemptsError(attempts []remoteHelperAttempt) error {
 
 func (m *sshManager) remoteHelperSHA256(ctx context.Context, ws Workspace, remotePath string) string {
 	script := "if command -v sha256sum >/dev/null 2>&1; then sha256sum " + shellQuote(remotePath) + " 2>/dev/null | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 " + shellQuote(remotePath) + " 2>/dev/null | awk '{print $1}'; fi"
-	out, err := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, script)...).Output()
+	out, _, err := runSSHOutput(ctx, ws, "helper.hash", script, map[string]any{"remote_path": remotePath})
 	if err != nil {
 		return ""
 	}
@@ -1027,12 +1051,16 @@ func uploadRemoteFile(ctx context.Context, ws Workspace, localPath, remotePath s
 	}
 	defer file.Close()
 
-	cmd := exec.CommandContext(ctx, "ssh", append(sshArgs(ws), ws.SSH.Endpoint, "cat > "+shellQuote(remotePath))...)
-	cmd.Stdin = file
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s%s", err.Error(), stderrSuffix(stderr.String()))
+	details := map[string]any{
+		"local_path":  localPath,
+		"remote_path": remotePath,
+	}
+	if stat, statErr := file.Stat(); statErr == nil {
+		details["bytes"] = stat.Size()
+	}
+	stderr, err := runSSHWithInput(ctx, ws, "helper.upload", "cat > "+shellQuote(remotePath), file, details)
+	if err != nil {
+		return fmt.Errorf("%s%s", err.Error(), stderrSuffix(stderr))
 	}
 	return nil
 }
@@ -1076,7 +1104,12 @@ func (m *sshManager) buildLocalHelperBinary(ctx context.Context, probe sshProbe,
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", out, "./proxy-agent")
 	cmd.Env = env
 	cmd.Dir = root
-	if body, err := cmd.CombinedOutput(); err != nil {
+	if body, err := runLocalCombinedOutput(cmd, "helper.build", map[string]any{
+		"os":   probe.OS,
+		"arch": probe.Arch,
+		"out":  out,
+		"root": root,
+	}); err != nil {
 		return "", fmt.Errorf("build proxy helper for %s/%s failed: %s%s", probe.OS, probe.Arch, err.Error(), stderrSuffix(string(body)))
 	}
 	return out, nil
@@ -1203,25 +1236,240 @@ func shouldRestoreSSHConnection(status string) bool {
 	}
 }
 
+func runSSHOutput(ctx context.Context, ws Workspace, operation string, remoteCommand string, details map[string]any) ([]byte, string, error) {
+	cmd := exec.CommandContext(ctx, "ssh", sshOneShotCommandArgs(ws, remoteCommand)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	fields := sshCommandLogFields(ws, operation, details)
+	fields["ssh_verbose"] = daemonDiagnosticLoggingEnabled()
+	startedAt := logDiagnosticSpanStart("ssh.command", fields)
+	out, err := cmd.Output()
+	doneFields := sshCommandLogFields(ws, operation, details)
+	doneFields["ssh_verbose"] = daemonDiagnosticLoggingEnabled()
+	doneFields["stdout_bytes"] = len(out)
+	if stderr.Len() > 0 {
+		doneFields["stderr_bytes"] = stderr.Len()
+	}
+	if err != nil {
+		if stderr.Len() > 0 {
+			doneFields["stderr_tail"] = diagnosticLogTail(stderr.String())
+		}
+		logDiagnosticSpanFailed("ssh.command", startedAt, err, doneFields)
+		return out, userSSHStderr(stderr.String()), err
+	}
+	logDiagnosticSpanCompleted("ssh.command", startedAt, doneFields)
+	return out, userSSHStderr(stderr.String()), nil
+}
+
+func runSSHCombinedOutput(ctx context.Context, ws Workspace, operation string, remoteCommand string, details map[string]any) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "ssh", sshOneShotCommandArgs(ws, remoteCommand)...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	fields := sshCommandLogFields(ws, operation, details)
+	fields["ssh_verbose"] = daemonDiagnosticLoggingEnabled()
+	startedAt := logDiagnosticSpanStart("ssh.command", fields)
+	err := cmd.Run()
+	doneFields := sshCommandLogFields(ws, operation, details)
+	doneFields["ssh_verbose"] = daemonDiagnosticLoggingEnabled()
+	doneFields["stdout_bytes"] = stdout.Len()
+	if stderr.Len() > 0 {
+		doneFields["stderr_bytes"] = stderr.Len()
+	}
+	if err != nil {
+		if stdout.Len() > 0 {
+			doneFields["stdout_tail"] = diagnosticLogTail(stdout.String())
+		}
+		if stderr.Len() > 0 {
+			doneFields["stderr_tail"] = diagnosticLogTail(stderr.String())
+		}
+		logDiagnosticSpanFailed("ssh.command", startedAt, err, doneFields)
+		return combinedCommandOutput(stdout.String(), userSSHStderr(stderr.String())), err
+	}
+	logDiagnosticSpanCompleted("ssh.command", startedAt, doneFields)
+	return stdout.Bytes(), nil
+}
+
+func runSSHWithInput(ctx context.Context, ws Workspace, operation string, remoteCommand string, input io.Reader, details map[string]any) (string, error) {
+	cmd := exec.CommandContext(ctx, "ssh", sshOneShotCommandArgs(ws, remoteCommand)...)
+	cmd.Stdin = input
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	fields := sshCommandLogFields(ws, operation, details)
+	fields["ssh_verbose"] = daemonDiagnosticLoggingEnabled()
+	startedAt := logDiagnosticSpanStart("ssh.command", fields)
+	err := cmd.Run()
+	doneFields := sshCommandLogFields(ws, operation, details)
+	doneFields["ssh_verbose"] = daemonDiagnosticLoggingEnabled()
+	if stderr.Len() > 0 {
+		doneFields["stderr_bytes"] = stderr.Len()
+	}
+	if err != nil {
+		if stderr.Len() > 0 {
+			doneFields["stderr_tail"] = diagnosticLogTail(stderr.String())
+		}
+		logDiagnosticSpanFailed("ssh.command", startedAt, err, doneFields)
+		return userSSHStderr(stderr.String()), err
+	}
+	logDiagnosticSpanCompleted("ssh.command", startedAt, doneFields)
+	return userSSHStderr(stderr.String()), nil
+}
+
+func runLocalCombinedOutput(cmd *exec.Cmd, operation string, details map[string]any) ([]byte, error) {
+	fields := copyDiagnosticFields(details)
+	fields["operation"] = operation
+	fields["binary"] = filepath.Base(cmd.Path)
+	if cmd.Dir != "" {
+		fields["cwd"] = cmd.Dir
+	}
+	startedAt := logDiagnosticSpanStart("local.command", fields)
+	out, err := cmd.CombinedOutput()
+	doneFields := copyDiagnosticFields(fields)
+	doneFields["output_bytes"] = len(out)
+	if err != nil {
+		if len(out) > 0 {
+			doneFields["output_tail"] = diagnosticLogTail(string(out))
+		}
+		logDiagnosticSpanFailed("local.command", startedAt, err, doneFields)
+		return out, err
+	}
+	logDiagnosticSpanCompleted("local.command", startedAt, doneFields)
+	return out, nil
+}
+
+func sshCommandLogFields(ws Workspace, operation string, details map[string]any) map[string]any {
+	fields := map[string]any{
+		"workspace_id": ws.ID,
+		"operation":    operation,
+		"binary":       "ssh",
+		"port":         sshPort(ws),
+	}
+	if ws.SSH != nil {
+		fields["endpoint"] = ws.SSH.Endpoint
+		fields["remote_cwd"] = ws.SSH.RemoteCWD
+	}
+	for key, value := range details {
+		fields[key] = value
+	}
+	return fields
+}
+
+func sshOneShotCommandArgs(ws Workspace, remoteCommand string) []string {
+	args := append([]string{}, sshArgs(ws)...)
+	if daemonDiagnosticLoggingEnabled() {
+		args = append(args, "-v")
+	}
+	return append(args, ws.SSH.Endpoint, remoteCommand)
+}
+
+func userSSHStderr(text string) string {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	filtered := []string{}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "OpenSSH_") || strings.HasPrefix(trimmed, "debug1:") || strings.HasPrefix(trimmed, "debug2:") || strings.HasPrefix(trimmed, "debug3:") {
+			continue
+		}
+		filtered = append(filtered, trimmed)
+	}
+	return strings.Join(filtered, "\n")
+}
+
+func combinedCommandOutput(stdout string, stderr string) []byte {
+	stdout = strings.TrimSpace(stdout)
+	stderr = strings.TrimSpace(stderr)
+	switch {
+	case stdout == "":
+		return []byte(stderr)
+	case stderr == "":
+		return []byte(stdout)
+	default:
+		return []byte(stdout + "\n" + stderr)
+	}
+}
+
+func sshHelperCandidateLogFields(ws Workspace, candidate remoteHelperCandidate, forceUpload bool, helper helperUpload) map[string]any {
+	fields := map[string]any{
+		"workspace_id":  ws.ID,
+		"endpoint":      "",
+		"port":          sshPort(ws),
+		"candidate":     candidate.Label,
+		"base_dir":      candidate.BaseDir,
+		"remote_dir":    candidate.RemoteDir,
+		"force_upload":  forceUpload,
+		"helper_upload": helper.Uploaded,
+	}
+	if ws.SSH != nil {
+		fields["endpoint"] = ws.SSH.Endpoint
+		fields["remote_cwd"] = ws.SSH.RemoteCWD
+	}
+	if helper.RemotePath != "" {
+		fields["remote_path"] = helper.RemotePath
+	}
+	return fields
+}
+
 func startProxyClient(ws Workspace, helper helperUpload) (*proxyClient, error) {
 	command := "exec " + shellQuote(helper.RemotePath) + " --cwd " + shellQuote(ws.SSH.RemoteCWD)
 	cmd := exec.Command("ssh", append(sshArgs(ws), ws.SSH.Endpoint, command)...)
+	fields := sshCommandLogFields(ws, "proxy.start", map[string]any{
+		"remote_path": helper.RemotePath,
+		"remote_dir":  helper.RemoteDir,
+		"uploaded":    helper.Uploaded,
+	})
+	startedAt := logDiagnosticSpanStart("ssh.command", fields)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		failedFields := sshCommandLogFields(ws, "proxy.start", map[string]any{
+			"remote_path": helper.RemotePath,
+			"remote_dir":  helper.RemoteDir,
+			"uploaded":    helper.Uploaded,
+			"step":        "stdin_pipe",
+		})
+		logDiagnosticSpanFailed("ssh.command", startedAt, err, failedFields)
 		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		failedFields := sshCommandLogFields(ws, "proxy.start", map[string]any{
+			"remote_path": helper.RemotePath,
+			"remote_dir":  helper.RemoteDir,
+			"uploaded":    helper.Uploaded,
+			"step":        "stdout_pipe",
+		})
+		logDiagnosticSpanFailed("ssh.command", startedAt, err, failedFields)
 		return nil, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		failedFields := sshCommandLogFields(ws, "proxy.start", map[string]any{
+			"remote_path": helper.RemotePath,
+			"remote_dir":  helper.RemoteDir,
+			"uploaded":    helper.Uploaded,
+			"step":        "stderr_pipe",
+		})
+		logDiagnosticSpanFailed("ssh.command", startedAt, err, failedFields)
 		return nil, err
 	}
 	client := newProxyClient(ws, cmd, stdin, stdout, stderr)
 	if err := cmd.Start(); err != nil {
+		failedFields := sshCommandLogFields(ws, "proxy.start", map[string]any{
+			"remote_path": helper.RemotePath,
+			"remote_dir":  helper.RemoteDir,
+			"uploaded":    helper.Uploaded,
+			"step":        "start",
+		})
+		logDiagnosticSpanFailed("ssh.command", startedAt, err, failedFields)
 		return nil, err
 	}
+	completedFields := sshCommandLogFields(ws, "proxy.start", map[string]any{
+		"remote_path": helper.RemotePath,
+		"remote_dir":  helper.RemoteDir,
+		"uploaded":    helper.Uploaded,
+		"pid":         cmd.Process.Pid,
+	})
+	logDiagnosticSpanCompleted("ssh.command", startedAt, completedFields)
 	client.start()
 	return client, nil
 }
@@ -1427,6 +1675,7 @@ func (p *proxyClient) subscribe(id string) (<-chan proxyEvent, func()) {
 }
 
 func (p *proxyClient) call(ctx context.Context, method string, params any, out any) error {
+	startedAt := logSSHProxyCallStart(p.workspace, method, params)
 	id := strconv.FormatInt(time.Now().UnixNano(), 36) + "_" + strconv.FormatInt(p.next(), 36)
 	req := map[string]any{"id": id, "method": method, "params": params}
 	body, _ := json.Marshal(req)
@@ -1434,7 +1683,9 @@ func (p *proxyClient) call(ctx context.Context, method string, params any, out a
 	p.mu.Lock()
 	if !p.alive {
 		p.mu.Unlock()
-		return proxyTransportError{err: errors.New("ssh proxy is not running")}
+		err := proxyTransportError{err: errors.New("ssh proxy is not running")}
+		logSSHProxyCallFailed(p.workspace, method, startedAt, err)
+		return err
 	}
 	p.pending[id] = ch
 	_, err := p.stdin.Write(append(body, '\n'))
@@ -1443,25 +1694,39 @@ func (p *proxyClient) call(ctx context.Context, method string, params any, out a
 		p.mu.Lock()
 		delete(p.pending, id)
 		p.mu.Unlock()
-		return proxyTransportError{err: err}
+		callErr := proxyTransportError{err: err}
+		logSSHProxyCallFailed(p.workspace, method, startedAt, callErr)
+		return callErr
 	}
 	select {
 	case res := <-ch:
 		if res.Error != "" {
 			if res.Transport {
-				return proxyTransportError{err: errors.New(res.Error)}
+				err := proxyTransportError{err: errors.New(res.Error)}
+				logSSHProxyCallFailed(p.workspace, method, startedAt, err)
+				return err
 			}
-			return errors.New(res.Error)
+			err := errors.New(res.Error)
+			logSSHProxyCallFailed(p.workspace, method, startedAt, err)
+			return err
 		}
 		if out == nil {
+			logSSHProxyCallCompleted(p.workspace, method, startedAt)
 			return nil
 		}
-		return json.Unmarshal(res.Result, out)
+		if err := json.Unmarshal(res.Result, out); err != nil {
+			logSSHProxyCallFailed(p.workspace, method, startedAt, err)
+			return err
+		}
+		logSSHProxyCallCompleted(p.workspace, method, startedAt)
+		return nil
 	case <-ctx.Done():
 		p.mu.Lock()
 		delete(p.pending, id)
 		p.mu.Unlock()
-		return proxyTransportError{err: ctx.Err()}
+		err := proxyTransportError{err: ctx.Err()}
+		logSSHProxyCallFailed(p.workspace, method, startedAt, err)
+		return err
 	}
 }
 

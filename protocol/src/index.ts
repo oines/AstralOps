@@ -1443,6 +1443,9 @@ export type AppSettings = {
     requires_action: boolean;
     quiet_when_focused: boolean;
   };
+  diagnostics: {
+    logging_enabled: boolean;
+  };
   remote_control: {
     enabled: boolean;
     listen_addr: string;
@@ -1464,6 +1467,7 @@ export type AppSettingsPatch = {
   session?: Partial<AppSettings["session"]>;
   workspace?: Partial<AppSettings["workspace"]>;
   notifications?: Partial<AppSettings["notifications"]>;
+  diagnostics?: Partial<AppSettings["diagnostics"]>;
   remote_control?: Partial<AppSettings["remote_control"]>;
   cloud?: Partial<AppSettings["cloud"]>;
   updates?: Partial<AppSettings["updates"]>;

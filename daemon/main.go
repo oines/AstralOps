@@ -77,6 +77,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := setupDaemonLogging(dataDir, settings.get().Diagnostics.LoggingEnabled); err != nil {
+		log.Fatal(err)
+	}
+	if settings.get().Diagnostics.LoggingEnabled {
+		log.Printf("daemon starting data_dir=%q version=%q", dataDir, version)
+	}
 
 	token := randomToken()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -147,7 +153,7 @@ func main() {
 	mux.HandleFunc("/v1/approvals/", a.auth(a.handleApprovalAction))
 	mux.HandleFunc("/v1/events", a.auth(a.handleEvents))
 
-	handler := withCORS(mux)
+	handler := withCORS(a.diagnosticHTTPLogger(mux))
 	log.Printf("astralopsd listening on 127.0.0.1:%d", port)
 	if err := http.Serve(ln, handler); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)

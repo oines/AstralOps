@@ -21,6 +21,7 @@ type AppSettings struct {
 	Session       SessionSettings       `json:"session"`
 	Workspace     WorkspaceSettings     `json:"workspace"`
 	Notifications NotificationSettings  `json:"notifications"`
+	Diagnostics   DiagnosticSettings    `json:"diagnostics"`
 	RemoteControl RemoteControlSettings `json:"remote_control"`
 	Cloud         CloudSettings         `json:"cloud"`
 	Updates       UpdateSettings        `json:"updates"`
@@ -53,6 +54,10 @@ type NotificationSettings struct {
 	QuietWhenFocused bool `json:"quiet_when_focused"`
 }
 
+type DiagnosticSettings struct {
+	LoggingEnabled bool `json:"logging_enabled"`
+}
+
 type RemoteControlSettings struct {
 	Enabled      bool   `json:"enabled"`
 	ListenAddr   string `json:"listen_addr"`
@@ -75,6 +80,7 @@ type appSettingsPatch struct {
 	Session       *sessionSettingsPatch       `json:"session,omitempty"`
 	Workspace     *workspaceSettingsPatch     `json:"workspace,omitempty"`
 	Notifications *notificationSettingsPatch  `json:"notifications,omitempty"`
+	Diagnostics   *diagnosticSettingsPatch    `json:"diagnostics,omitempty"`
 	RemoteControl *remoteControlSettingsPatch `json:"remote_control,omitempty"`
 	Cloud         *cloudSettingsPatch         `json:"cloud,omitempty"`
 	Updates       *updateSettingsPatch        `json:"updates,omitempty"`
@@ -105,6 +111,10 @@ type notificationSettingsPatch struct {
 	TaskComplete     *bool `json:"task_complete,omitempty"`
 	RequiresAction   *bool `json:"requires_action,omitempty"`
 	QuietWhenFocused *bool `json:"quiet_when_focused,omitempty"`
+}
+
+type diagnosticSettingsPatch struct {
+	LoggingEnabled *bool `json:"logging_enabled,omitempty"`
 }
 
 type remoteControlSettingsPatch struct {
@@ -153,6 +163,9 @@ func defaultAppSettings() AppSettings {
 			TaskComplete:     true,
 			RequiresAction:   true,
 			QuietWhenFocused: false,
+		},
+		Diagnostics: DiagnosticSettings{
+			LoggingEnabled: false,
 		},
 		RemoteControl: RemoteControlSettings{
 			Enabled:      false,
@@ -270,6 +283,9 @@ func applySettingsPatch(settings *AppSettings, patch appSettingsPatch) {
 		if patch.Notifications.QuietWhenFocused != nil {
 			settings.Notifications.QuietWhenFocused = *patch.Notifications.QuietWhenFocused
 		}
+	}
+	if patch.Diagnostics != nil && patch.Diagnostics.LoggingEnabled != nil {
+		settings.Diagnostics.LoggingEnabled = *patch.Diagnostics.LoggingEnabled
 	}
 	if patch.RemoteControl != nil {
 		if patch.RemoteControl.Enabled != nil {
@@ -433,6 +449,11 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		settings, err := a.settings.patchWithHook(patch, func(previous, next AppSettings) error {
+			if previous.Diagnostics.LoggingEnabled != next.Diagnostics.LoggingEnabled {
+				if err := configureDaemonDiagnosticLogging(a.store.dataDir, next.Diagnostics.LoggingEnabled, true); err != nil {
+					return err
+				}
+			}
 			if remoteControlSettingsChanged(previous.RemoteControl, next.RemoteControl) {
 				if err := a.applyRemoteControlSettings(next.RemoteControl); err != nil {
 					return err
@@ -448,6 +469,7 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			return nil
 		}, func(previous AppSettings) {
+			_ = configureDaemonDiagnosticLogging(a.store.dataDir, previous.Diagnostics.LoggingEnabled, false)
 			_ = a.applyRemoteControlSettings(previous.RemoteControl)
 			_ = a.applyCloudSettings(previous.Cloud)
 			_ = a.writeRuntimeFile()

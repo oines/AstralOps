@@ -55,6 +55,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   session: { default_agent: "remember", default_permission_mode: "default", default_reasoning_effort: "high" },
   workspace: { default_opener: "vscode", ssh_auto_reconnect: true },
   notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
+  diagnostics: { logging_enabled: false },
   remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true },
   cloud: { enabled: false },
   updates: { auto_check: true },
@@ -354,6 +355,7 @@ export function App(): React.JSX.Element {
         setHealth(healthResponse);
         setAppSettings(settingsResponse);
         appSettingsRef.current = settingsResponse;
+        void window.astral.setDiagnosticsLoggingEnabled(settingsResponse.diagnostics.logging_enabled).catch(() => undefined);
       } catch (bootError) {
         setError(bootError instanceof Error ? bootError.message : String(bootError));
         setConnection("failed");
@@ -409,6 +411,9 @@ export function App(): React.JSX.Element {
         const next = await localApi.patchSettings(patch);
         appSettingsRef.current = next;
         setAppSettings(next);
+        if (patch.diagnostics?.logging_enabled !== undefined) {
+          void window.astral.setDiagnosticsLoggingEnabled(next.diagnostics.logging_enabled).catch(() => undefined);
+        }
         void window.astral.getDaemonInfo().then(setDaemonInfo).catch(() => undefined);
       } catch (settingsPatchError) {
         setAppSettings(previous);

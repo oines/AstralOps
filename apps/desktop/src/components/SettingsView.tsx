@@ -94,6 +94,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   session: { default_agent: "remember", default_permission_mode: "default", default_reasoning_effort: "high" },
   workspace: { default_opener: "vscode", ssh_auto_reconnect: true },
   notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
+  diagnostics: { logging_enabled: false },
   remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true },
   cloud: { enabled: false },
   updates: { auto_check: true },
@@ -558,6 +559,17 @@ function SettingsContent({
         <div className="grid gap-8">
           <SettingsSection title="本地数据">
             <SettingRow title="媒体缓存" description="图片预览和附件的本地缓存" control={<ButtonControl label={actionStatus.cache || "清理缓存"} onClick={onClearMediaCache} />} />
+            <SettingRow
+              title="诊断日志记录"
+              description="记录客户端、SSH 和远控事务，默认关闭"
+              control={
+                <ToggleControl
+                  disabled={savingKeys.has("diagnostics.logging_enabled")}
+                  enabled={settings.diagnostics.logging_enabled}
+                  onChange={(enabled) => onPatchSettings({ diagnostics: { logging_enabled: enabled } }, "diagnostics.logging_enabled")}
+                />
+              }
+            />
             <SettingRow title="诊断日志" description="用于排查 daemon 和桌面端问题" control={<ButtonControl label={actionStatus.logs || "打开日志目录"} onClick={onOpenLogs} />} />
           </SettingsSection>
         </div>
