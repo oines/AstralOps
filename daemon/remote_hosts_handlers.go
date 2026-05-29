@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 const (
@@ -369,14 +367,14 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 		_ = local.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
-	remote, cipher, activeTarget, err := controlClientDialTarget(target, a.store)
+	remote, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, a.store)
 	if err != nil {
 		_ = local.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
 	defer remote.Close()
 
-	open, err := controlClientRoundTrip(remote, cipher, activeTarget.Timeout, a.store, ControlRequest{
+	open, err := controlClientFrameRoundTrip(remote, activeTarget.Timeout, a.store, ControlRequest{
 		RequestID:  "remote_pty_open_" + randomID(8),
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalOpen,
@@ -396,7 +394,7 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	attach, err := controlClientTerminalResponseRoundTrip(remote, cipher, activeTarget.Timeout, a.store, ControlRequest{
+	attach, err := controlClientTerminalResponseRoundTrip(remote, activeTarget.Timeout, a.store, ControlRequest{
 		RequestID:  "remote_pty_attach_" + randomID(8),
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalAttach,
@@ -404,12 +402,12 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 	})
 	if err != nil {
 		_ = local.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
-		_ = remoteTerminalClose(remote, cipher, a.store, terminalID)
+		_ = remoteTerminalClose(remote, a.store, terminalID)
 		return
 	}
 	if !attach.OK {
 		_ = local.WriteJSON(map[string]any{"type": "error", "message": controlResponseMessage(attach)})
-		_ = remoteTerminalClose(remote, cipher, a.store, terminalID)
+		_ = remoteTerminalClose(remote, a.store, terminalID)
 		return
 	}
 
@@ -424,7 +422,7 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 	go func() {
 		defer close(done)
 		for {
-			frame, err := controlClientRead(remote, cipher)
+			frame, err := remote.ReadPlain(0)
 			if err != nil {
 				localWriter.write(local, map[string]any{"type": "exit"})
 				return
@@ -474,14 +472,14 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 			return
 		case read, ok := <-clientReads:
 			if !ok {
-				_ = remoteTerminalClose(remote, cipher, a.store, terminalID)
+				_ = remoteTerminalClose(remote, a.store, terminalID)
 				return
 			}
 			if read.err != nil {
-				_ = remoteTerminalClose(remote, cipher, a.store, terminalID)
+				_ = remoteTerminalClose(remote, a.store, terminalID)
 				return
 			}
-			if err := remoteTerminalHandleClientMessage(remote, cipher, a.store, terminalID, read.message); err != nil {
+			if err := remoteTerminalHandleClientMessage(remote, a.store, terminalID, read.message); err != nil {
 				localWriter.write(local, map[string]any{"type": "error", "message": err.Error()})
 			}
 		}
@@ -503,10 +501,10 @@ func (w *remotePTYLocalWriter) write(conn interface{ WriteJSON(any) error }, pay
 	return conn.WriteJSON(payload) == nil
 }
 
-func remoteTerminalHandleClientMessage(socket *websocket.Conn, cipher *controlCipher, st *store, terminalID string, message ptyClientMessage) error {
+func remoteTerminalHandleClientMessage(conn controlClientFrameConn, st *store, terminalID string, message ptyClientMessage) error {
 	switch message.Type {
 	case "input":
-		return remoteTerminalRequest(socket, cipher, st, ControlRequest{
+		return remoteTerminalRequest(conn, st, ControlRequest{
 			RequestID:  "remote_pty_input_" + randomID(8),
 			Capability: CapabilityTerminalInput,
 			Action:     ControlActionTerminalInput,
@@ -514,7 +512,7 @@ func remoteTerminalHandleClientMessage(socket *websocket.Conn, cipher *controlCi
 		})
 	case "resize":
 		if message.Cols > 0 && message.Rows > 0 {
-			return remoteTerminalRequest(socket, cipher, st, ControlRequest{
+			return remoteTerminalRequest(conn, st, ControlRequest{
 				RequestID:  "remote_pty_resize_" + randomID(8),
 				Capability: CapabilityTerminalInput,
 				Action:     ControlActionTerminalResize,
@@ -522,21 +520,21 @@ func remoteTerminalHandleClientMessage(socket *websocket.Conn, cipher *controlCi
 			})
 		}
 	case "close":
-		return remoteTerminalClose(socket, cipher, st, terminalID)
+		return remoteTerminalClose(conn, st, terminalID)
 	}
 	return nil
 }
 
-func remoteTerminalRequest(socket *websocket.Conn, cipher *controlCipher, st *store, req ControlRequest) error {
+func remoteTerminalRequest(conn controlClientFrameConn, st *store, req ControlRequest) error {
 	req.ControllerDeviceID = st.deviceIdentity.DeviceID
-	return controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req})
+	return conn.WritePlain(controlPlainFrame{Type: "request", Request: &req})
 }
 
-func remoteTerminalClose(socket *websocket.Conn, cipher *controlCipher, st *store, terminalID string) error {
+func remoteTerminalClose(conn controlClientFrameConn, st *store, terminalID string) error {
 	if strings.TrimSpace(terminalID) == "" {
 		return nil
 	}
-	return remoteTerminalRequest(socket, cipher, st, ControlRequest{
+	return remoteTerminalRequest(conn, st, ControlRequest{
 		RequestID:  "remote_pty_close_" + randomID(8),
 		Capability: CapabilityTerminalInput,
 		Action:     ControlActionTerminalClose,
@@ -682,12 +680,12 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 		writeRemoteHostError(w, err)
 		return
 	}
-	socket, cipher, activeTarget, err := controlClientDialTarget(target, a.store)
+	remote, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, a.store)
 	if err != nil {
 		writeRemoteHostError(w, fmt.Errorf("remote event subscription failed: %w", err))
 		return
 	}
-	defer socket.Close()
+	defer remote.Close()
 
 	requestID := "remote_sse_" + randomID(12)
 	req := ControlRequest{
@@ -701,11 +699,11 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 			"replay_limit": replayLimit,
 		},
 	}
-	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req}); err != nil {
+	if err := remote.WritePlain(controlPlainFrame{Type: "request", Request: &req}); err != nil {
 		writeRemoteHostError(w, fmt.Errorf("remote event subscription failed: %w", err))
 		return
 	}
-	plain, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
+	plain, err := remote.ReadPlain(activeTarget.Timeout)
 	if err != nil {
 		writeRemoteHostError(w, fmt.Errorf("remote event subscription failed: %w", err))
 		return
@@ -739,7 +737,7 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 	errs := make(chan error, 1)
 	go func() {
 		for {
-			frame, readErr := controlClientRead(socket, cipher)
+			frame, readErr := remote.ReadPlain(0)
 			if readErr != nil {
 				errs <- readErr
 				return
@@ -749,7 +747,7 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 	}()
 	go func() {
 		<-r.Context().Done()
-		_ = socket.Close()
+		_ = remote.Close()
 	}()
 
 	ticker := time.NewTicker(10 * time.Second)

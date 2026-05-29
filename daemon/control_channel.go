@@ -76,6 +76,17 @@ type controlFrameRead struct {
 	invalidFrame bool
 }
 
+type controlConnection interface {
+	connectionID() string
+	controllerID() string
+	requestContext() context.Context
+	writePlain(controlPlainFrame)
+	registerControlStream(string, context.CancelFunc)
+	unregisterControlStream(string)
+	cancelControlStream(string) bool
+	cancelAllControlStreams()
+}
+
 type controlWSConn struct {
 	app                *app
 	socket             *websocket.Conn
@@ -299,12 +310,12 @@ func (c *controlWSConn) handleRequest(req ControlRequest) (*ControlResponse, fun
 	req.ControllerDeviceID = c.controllerDeviceID
 	response, err := c.app.executeControlRequestWithConnection(req, c)
 	if err == nil {
-		return &response, c.afterControlResponse(req, response)
+		return &response, c.app.afterControlResponse(c, req, response)
 	}
 	return controlResponseFromError(req.RequestID, err), nil
 }
 
-func (c *controlWSConn) afterControlResponse(req ControlRequest, response ControlResponse) func() {
+func (a *app) afterControlResponse(conn controlConnection, req ControlRequest, response ControlResponse) func() {
 	if !response.OK {
 		return nil
 	}
@@ -314,30 +325,30 @@ func (c *controlWSConn) afterControlResponse(req ControlRequest, response Contro
 		if !ok {
 			return nil
 		}
-		ctx, cancel := context.WithCancel(c.requestContext())
-		c.registerEventSubscription(result.StreamID, cancel)
+		ctx, cancel := context.WithCancel(conn.requestContext())
+		conn.registerControlStream(result.StreamID, cancel)
 		return func() {
-			defer c.unregisterEventSubscription(result.StreamID)
-			c.app.streamControlEvents(ctx, result, c, req.RequestID)
+			defer conn.unregisterControlStream(result.StreamID)
+			a.streamControlEvents(ctx, result, conn, req.RequestID)
 		}
 	case ControlActionMediaStream:
 		result, ok := response.Result.(mediaStreamResult)
 		if !ok {
 			return nil
 		}
-		ctx, cancel := context.WithCancel(c.requestContext())
-		c.registerControlStream(result.StreamID, cancel)
+		ctx, cancel := context.WithCancel(conn.requestContext())
+		conn.registerControlStream(result.StreamID, cancel)
 		return func() {
-			defer c.unregisterControlStream(result.StreamID)
-			c.app.streamControlMedia(ctx, result, c, req.RequestID)
+			defer conn.unregisterControlStream(result.StreamID)
+			a.streamControlMedia(ctx, result, conn, req.RequestID)
 		}
 	case ControlActionHostTrustRevoke:
 		result, ok := response.Result.(hostTrustRevokeResult)
-		if !ok || result.ControllerDeviceID != c.controllerDeviceID {
+		if !ok || result.ControllerDeviceID != conn.controllerID() {
 			return nil
 		}
 		return func() {
-			c.app.closeControlSessionsForDevice(c.controllerDeviceID, "trust_revoked")
+			a.closeControlSessionsForDevice(conn.controllerID(), "trust_revoked")
 		}
 	case ControlActionWorkspaceFilesStream:
 		result, ok := response.Result.(workspaceFileStreamResult)
@@ -348,11 +359,11 @@ func (c *controlWSConn) afterControlResponse(req ControlRequest, response Contro
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil
 		}
-		ctx, cancel := context.WithCancel(c.requestContext())
-		c.registerControlStream(result.StreamID, cancel)
+		ctx, cancel := context.WithCancel(conn.requestContext())
+		conn.registerControlStream(result.StreamID, cancel)
 		return func() {
-			defer c.unregisterControlStream(result.StreamID)
-			c.app.streamControlWorkspaceFile(ctx, params, result, c, req.RequestID)
+			defer conn.unregisterControlStream(result.StreamID)
+			a.streamControlWorkspaceFile(ctx, params, result, conn, req.RequestID)
 		}
 	default:
 		return nil
@@ -418,6 +429,20 @@ func (c *controlWSConn) requestContext() context.Context {
 		return context.Background()
 	}
 	return c.ctx
+}
+
+func (c *controlWSConn) connectionID() string {
+	if c == nil {
+		return ""
+	}
+	return c.id
+}
+
+func (c *controlWSConn) controllerID() string {
+	if c == nil {
+		return ""
+	}
+	return c.controllerDeviceID
 }
 
 func (c *controlWSConn) cancelControlSession() {
@@ -541,7 +566,7 @@ func (a *app) closeControlSessionsForDeviceExcept(controllerDeviceID, reason, ex
 		conn.writeEncryptedClose("trust_revoked", reason)
 		_ = conn.socket.Close()
 	}
-	return len(sessions) + a.closeControlRelaySessionsForDevice(controllerDeviceID)
+	return len(sessions) + a.closeControlRelaySessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID)
 }
 
 func (a *app) activeControlSessionCountForDevice(controllerDeviceID string) int {

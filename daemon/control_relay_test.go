@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
-	"strings"
+	"os"
 	"testing"
 	"time"
 
@@ -132,28 +132,34 @@ func TestControlRelayRejectsUntrustedController(t *testing.T) {
 	}
 }
 
-func TestControlRelayRejectsStreamingActions(t *testing.T) {
+func TestControlRelayTerminalStreamsOutput(t *testing.T) {
+	if !terminalAvailableOnHost() {
+		t.Skip("terminal is not available on this Host")
+	}
+	t.Setenv("SHELL", terminalManagerTestShell(t))
+
 	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityTerminalOpen, CapabilityTerminalInput)
 	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 
-	response, err := controlClientRelayRoundTrip(t.Context(), controlClientTarget{
+	steps, err := controlClientSmokeTerminalFlow(controllerStore, controlClientTarget{
 		HostInfo:           hostApp.store.hostInfo(),
 		Timeout:            3 * time.Second,
 		UseRelay:           true,
 		RelayClient:        client,
 		ControllerDeviceID: controllerStore.deviceIdentity.DeviceID,
-	}, controllerStore, ControlRequest{
-		RequestID:  "relay_terminal_open",
-		Capability: CapabilityTerminalOpen,
-		Action:     ControlActionTerminalOpen,
-		Params:     map[string]any{"workspace_id": workspace.ID},
-	})
+	}, workspace.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.OK || response.Error == nil || response.Error.Code != "relay_streaming_unsupported" {
-		t.Fatalf("response = %#v, want relay streaming rejection", response)
+	for _, name := range []string{"terminal_open", "terminal_attach", "terminal_input", "terminal_output", "terminal_close", "terminal_closed"} {
+		step, ok := smokeStepByName(controlClientSmokeResult{Steps: steps}, name)
+		if !ok {
+			t.Fatalf("missing terminal smoke step %q in %#v", name, steps)
+		}
+		if !step.OK {
+			t.Fatalf("terminal smoke step %q = %#v, want ok", name, step)
+		}
 	}
 }
 
@@ -270,29 +276,75 @@ func TestControlClientSmokeRunsRelayRequestResponseChecks(t *testing.T) {
 	}
 }
 
-func TestControlClientSmokeRejectsRelayStreamingChecks(t *testing.T) {
-	controllerStore, err := loadStore(t.TempDir())
+func TestControlClientSmokeRunsRelayStreamingChecks(t *testing.T) {
+	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead, CapabilityWorkspaceFilesRead)
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	runControlRelayPoller(t, hostApp, client)
+	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("relay workspace stream body\nsecond chunk\n")
+	if err := os.WriteFile(workspace.LocalCWD+"/relay-stream.txt", body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hostApp.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: AgentCodex, Kind: "control.status", Normalized: map[string]any{"status": "running"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := runControlClientSmoke(controllerStore, controlClientSmokeOptions{
+		Target: controlClientTargetOptions{
+			UseRelay:     true,
+			CloudBaseURL: broker.URL,
+			CloudToken:   "account-token",
+			HostDeviceID: hostApp.store.hostInfo().Identity.DeviceID,
+			RelayTimeout: 3 * time.Second,
+		},
+		WorkspaceID:       workspace.ID,
+		Path:              ".",
+		StreamPath:        "relay-stream.txt",
+		StreamChunkSize:   8,
+		EventSubscription: true,
+		EventReplayLimit:  1,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = runControlClientSmoke(controllerStore, controlClientSmokeOptions{
-		Target: controlClientTargetOptions{
-			UseRelay:     true,
-			CloudBaseURL: "http://127.0.0.1:1",
-			CloudToken:   "account-token",
-			HostDeviceID: "dev_host",
-		},
-		WorkspaceID:       "ws_1",
-		SessionID:         "sess_1",
-		StreamPath:        "large.log",
-		EventSubscription: true,
-		AttachmentPath:    "clip.png",
-		MediaEventSeq:     1,
-		MediaID:           "media_1",
-		Terminal:          true,
-	})
-	if err == nil || !strings.Contains(err.Error(), "--relay smoke currently supports request/response checks only") {
-		t.Fatalf("err = %v, want relay streaming smoke rejection", err)
+	eventStep, ok := smokeStepByName(result, "event_subscription")
+	if !ok || !eventStep.OK {
+		t.Fatalf("event subscription step = %#v, ok=%v", eventStep, ok)
+	}
+	streamStep, ok := smokeStepByName(result, "workspace_files_stream")
+	if !ok || !streamStep.OK {
+		t.Fatalf("workspace stream step = %#v, ok=%v", streamStep, ok)
+	}
+	if int64(numberValue(streamStep.Summary["bytes"])) != int64(len(body)) {
+		t.Fatalf("workspace stream summary = %#v, want bytes %d", streamStep.Summary, len(body))
+	}
+}
+
+func TestControlRelayMediaStreamReturnsChunks(t *testing.T) {
+	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityMediaStream)
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	session := hostApp.store.createSession(workspace, AgentCodex)
+	body := []byte("relay media stream body\nsecond chunk\n")
+	media := addControlMediaFixture(t, hostApp, workspace, session, body)
+	runControlRelayPoller(t, hostApp, client)
+
+	step, err := controlClientSmokeMediaStream(controllerStore, controlClientTarget{
+		HostInfo:           hostApp.store.hostInfo(),
+		Timeout:            3 * time.Second,
+		UseRelay:           true,
+		RelayClient:        client,
+		ControllerDeviceID: controllerStore.deviceIdentity.DeviceID,
+	}, session.ID, media.eventSeq, media.mediaID, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !step.OK {
+		t.Fatalf("media stream step = %#v, want ok", step)
+	}
+	if int64(numberValue(step.Summary["bytes"])) != int64(len(body)) {
+		t.Fatalf("media stream summary = %#v, want bytes %d", step.Summary, len(body))
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -658,11 +659,6 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 	if mediaRequested && (opts.MediaEventSeq <= 0 || opts.MediaID == "") {
 		return controlClientSmokeResult{}, fmt.Errorf("--media-event-seq and --media-id are required together")
 	}
-	if opts.Target.UseRelay {
-		if err := controlClientSmokeValidateRelayOptions(opts); err != nil {
-			return controlClientSmokeResult{}, err
-		}
-	}
 	target, err := controlClientResolveTarget(st, opts.Target)
 	if err != nil {
 		return controlClientSmokeResult{}, err
@@ -807,29 +803,6 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 	return result, nil
 }
 
-func controlClientSmokeValidateRelayOptions(opts controlClientSmokeOptions) error {
-	unsupported := []string{}
-	if opts.EventSubscription {
-		unsupported = append(unsupported, "--event-subscription")
-	}
-	if strings.TrimSpace(opts.AttachmentPath) != "" {
-		unsupported = append(unsupported, "--attachment-path")
-	}
-	if strings.TrimSpace(opts.StreamPath) != "" {
-		unsupported = append(unsupported, "--stream-path")
-	}
-	if opts.MediaEventSeq != 0 || strings.TrimSpace(opts.MediaID) != "" {
-		unsupported = append(unsupported, "--media-event-seq/--media-id")
-	}
-	if opts.Terminal {
-		unsupported = append(unsupported, "--terminal")
-	}
-	if len(unsupported) > 0 {
-		return fmt.Errorf("--relay smoke currently supports request/response checks only; remove %s", strings.Join(unsupported, ", "))
-	}
-	return nil
-}
-
 func controlClientTargetLabel(target controlClientTarget) string {
 	if target.UseRelay {
 		deviceID := strings.TrimSpace(target.HostInfo.Identity.DeviceID)
@@ -847,12 +820,12 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 	if chunkSize > 0 {
 		params["chunk_size"] = chunkSize
 	}
-	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
+	conn, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, st)
 	if err != nil {
 		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "connect_failed", Message: err.Error()}}
 		return step, err
 	}
-	defer socket.Close()
+	defer conn.Close()
 
 	req := ControlRequest{
 		RequestID:  "smoke_" + name,
@@ -860,11 +833,11 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 		Action:     ControlActionWorkspaceFilesStream,
 		Params:     params,
 	}
-	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req}); err != nil {
+	if err := conn.WritePlain(controlPlainFrame{Type: "request", Request: &req}); err != nil {
 		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
 		return step, err
 	}
-	plain, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
+	plain, err := conn.ReadPlain(activeTarget.Timeout)
 	if err != nil {
 		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "read_failed", Message: err.Error()}}
 		return step, err
@@ -889,7 +862,7 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 	var bytesRead int64
 	chunks := 0
 	for {
-		frame, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
+		frame, err := conn.ReadPlain(activeTarget.Timeout)
 		if err != nil {
 			step.OK = false
 			step.Error = &ControlError{Code: "stream_read_failed", Message: err.Error()}
@@ -943,12 +916,12 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 	if chunkSize > 0 {
 		params["chunk_size"] = chunkSize
 	}
-	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
+	conn, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, st)
 	if err != nil {
 		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "connect_failed", Message: err.Error()}}
 		return step, err
 	}
-	defer socket.Close()
+	defer conn.Close()
 
 	req := ControlRequest{
 		RequestID:  "smoke_" + name,
@@ -956,11 +929,11 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 		Action:     ControlActionMediaStream,
 		Params:     params,
 	}
-	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req}); err != nil {
+	if err := conn.WritePlain(controlPlainFrame{Type: "request", Request: &req}); err != nil {
 		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
 		return step, err
 	}
-	plain, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
+	plain, err := conn.ReadPlain(activeTarget.Timeout)
 	if err != nil {
 		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "read_failed", Message: err.Error()}}
 		return step, err
@@ -985,7 +958,7 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 	var bytesRead int64
 	chunks := 0
 	for {
-		frame, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
+		frame, err := conn.ReadPlain(activeTarget.Timeout)
 		if err != nil {
 			step.OK = false
 			step.Error = &ControlError{Code: "stream_read_failed", Message: err.Error()}
@@ -1097,11 +1070,11 @@ func controlClientSmokeWorkspaceWriteFlow(st *store, target controlClientTarget,
 }
 
 func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, workspaceID string) ([]controlClientSmokeStep, error) {
-	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
+	conn, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, st)
 	if err != nil {
 		return []controlClientSmokeStep{{Name: "terminal_open", Capability: CapabilityTerminalOpen, Action: ControlActionTerminalOpen, Error: &ControlError{Code: "connect_failed", Message: err.Error()}}}, err
 	}
-	defer socket.Close()
+	defer conn.Close()
 
 	steps := []controlClientSmokeStep{}
 	terminalID := ""
@@ -1112,7 +1085,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 		}
 	}()
 
-	open, err := controlClientRoundTrip(socket, cipher, activeTarget.Timeout, st, ControlRequest{
+	open, err := controlClientFrameRoundTrip(conn, activeTarget.Timeout, st, ControlRequest{
 		RequestID:  "smoke_terminal_open",
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalOpen,
@@ -1133,7 +1106,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 		return steps, err
 	}
 
-	attach, err := controlClientTerminalResponseRoundTrip(socket, cipher, activeTarget.Timeout, st, ControlRequest{
+	attach, err := controlClientTerminalResponseRoundTrip(conn, activeTarget.Timeout, st, ControlRequest{
 		RequestID:  "smoke_terminal_attach",
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalAttach,
@@ -1158,7 +1131,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 		},
 	}
 	inputReq.ControllerDeviceID = st.deviceIdentity.DeviceID
-	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &inputReq}); err != nil {
+	if err := conn.WritePlain(controlPlainFrame{Type: "request", Request: &inputReq}); err != nil {
 		step := controlClientSmokeStep{Name: "terminal_input", Capability: CapabilityTerminalInput, Action: ControlActionTerminalInput, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
 		steps = append(steps, step)
 		return steps, err
@@ -1167,8 +1140,9 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 	outputFrames := 0
 	outputBytes := 0
 	sawMarker := false
-	for i := 0; i < 40 && (inputResponse == nil || !sawMarker); i++ {
-		frame, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
+	deadline := time.Now().Add(30 * time.Second)
+	for i := 0; i < 1000 && time.Now().Before(deadline) && (inputResponse == nil || !sawMarker); i++ {
+		frame, err := conn.ReadPlain(activeTarget.Timeout)
 		if err != nil {
 			step := controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "terminal_read_failed", Message: err.Error()}}
 			steps = appendTerminalInputStep(steps, inputResponse)
@@ -1229,7 +1203,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 	}
 	steps = append(steps, outputStep)
 
-	closeSteps, err := controlClientSmokeTerminalClose(socket, cipher, activeTarget.Timeout, st, terminalID)
+	closeSteps, err := controlClientSmokeTerminalClose(conn, activeTarget.Timeout, st, terminalID)
 	steps = append(steps, closeSteps...)
 	if err != nil {
 		return steps, err
@@ -1245,13 +1219,13 @@ func appendTerminalInputStep(steps []controlClientSmokeStep, response *ControlRe
 	return append(steps, controlClientSmokeStepFromResponse("terminal_input", CapabilityTerminalInput, ControlActionTerminalInput, *response, controlClientTerminalSmokeSummary(*response)))
 }
 
-func controlClientTerminalResponseRoundTrip(socket *websocket.Conn, cipher *controlCipher, timeout time.Duration, st *store, req ControlRequest) (ControlResponse, error) {
+func controlClientTerminalResponseRoundTrip(conn controlClientFrameConn, timeout time.Duration, st *store, req ControlRequest) (ControlResponse, error) {
 	req.ControllerDeviceID = st.deviceIdentity.DeviceID
-	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req}); err != nil {
+	if err := conn.WritePlain(controlPlainFrame{Type: "request", Request: &req}); err != nil {
 		return ControlResponse{}, err
 	}
 	for i := 0; i < 20; i++ {
-		frame, err := controlClientReadWithTimeout(socket, cipher, timeout)
+		frame, err := conn.ReadPlain(timeout)
 		if err != nil {
 			return ControlResponse{}, err
 		}
@@ -1265,7 +1239,7 @@ func controlClientTerminalResponseRoundTrip(socket *websocket.Conn, cipher *cont
 	return ControlResponse{}, fmt.Errorf("remote did not return response frame for %s", req.Action)
 }
 
-func controlClientSmokeTerminalClose(socket *websocket.Conn, cipher *controlCipher, timeout time.Duration, st *store, terminalID string) ([]controlClientSmokeStep, error) {
+func controlClientSmokeTerminalClose(conn controlClientFrameConn, timeout time.Duration, st *store, terminalID string) ([]controlClientSmokeStep, error) {
 	req := ControlRequest{
 		RequestID:  "smoke_terminal_close",
 		Capability: CapabilityTerminalInput,
@@ -1273,14 +1247,14 @@ func controlClientSmokeTerminalClose(socket *websocket.Conn, cipher *controlCiph
 		Params:     map[string]any{"terminal_id": terminalID},
 	}
 	req.ControllerDeviceID = st.deviceIdentity.DeviceID
-	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req}); err != nil {
+	if err := conn.WritePlain(controlPlainFrame{Type: "request", Request: &req}); err != nil {
 		step := controlClientSmokeStep{Name: "terminal_close", Capability: CapabilityTerminalInput, Action: ControlActionTerminalClose, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
 		return []controlClientSmokeStep{step}, err
 	}
 	var closeResponse *ControlResponse
 	sawClosedFrame := false
 	for i := 0; i < 20 && (closeResponse == nil || !sawClosedFrame); i++ {
-		frame, err := controlClientReadWithTimeout(socket, cipher, timeout)
+		frame, err := conn.ReadPlain(timeout)
 		if err != nil {
 			steps := appendTerminalCloseStep(nil, closeResponse, sawClosedFrame)
 			steps = append(steps, controlClientSmokeStep{Name: "terminal_closed", Capability: CapabilityTerminalOpen, Action: terminalFrameClosed, Error: &ControlError{Code: "terminal_read_failed", Message: err.Error()}})
@@ -1346,14 +1320,14 @@ func controlClientSmokeRequest(st *store, target controlClientTarget, requestID,
 func controlClientSmokeEventSubscription(st *store, target controlClientTarget, workspaceID, sessionID string, replayLimit int) (controlClientSmokeStep, error) {
 	name := "event_subscription"
 	step := controlClientSmokeStep{Name: name, Capability: CapabilityCoreRead, Action: ControlActionEventsSubscribe}
-	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
+	conn, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, st)
 	if err != nil {
 		step.Error = &ControlError{Code: "connect_failed", Message: err.Error()}
 		return step, err
 	}
-	defer socket.Close()
+	defer conn.Close()
 
-	response, err := controlClientRoundTrip(socket, cipher, activeTarget.Timeout, st, ControlRequest{
+	response, err := controlClientFrameRoundTrip(conn, activeTarget.Timeout, st, ControlRequest{
 		RequestID:  "smoke_event_subscription",
 		Capability: CapabilityCoreRead,
 		Action:     ControlActionEventsSubscribe,
@@ -1378,7 +1352,7 @@ func controlClientSmokeEventSubscription(st *store, target controlClientTarget, 
 		return step, err
 	}
 
-	plain, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
+	plain, err := conn.ReadPlain(activeTarget.Timeout)
 	if err != nil {
 		step.Error = &ControlError{Code: "event_subscription_read_failed", Message: err.Error()}
 		return step, err
@@ -1417,14 +1391,14 @@ func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, s
 		return step, err
 	}
 
-	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
+	conn, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, st)
 	if err != nil {
 		step.Error = &ControlError{Code: "connect_failed", Message: err.Error()}
 		return step, err
 	}
-	defer socket.Close()
+	defer conn.Close()
 
-	start, err := controlClientRoundTrip(socket, cipher, activeTarget.Timeout, st, ControlRequest{
+	start, err := controlClientFrameRoundTrip(conn, activeTarget.Timeout, st, ControlRequest{
 		RequestID:  "smoke_attachment_start",
 		Capability: CapabilityAttachmentIngest,
 		Action:     ControlActionAttachmentIngestStart,
@@ -1465,7 +1439,7 @@ func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, s
 		if n > 0 {
 			seq++
 			chunk := buffer[:n]
-			response, err := controlClientRoundTrip(socket, cipher, activeTarget.Timeout, st, ControlRequest{
+			response, err := controlClientFrameRoundTrip(conn, activeTarget.Timeout, st, ControlRequest{
 				RequestID:  fmt.Sprintf("smoke_attachment_chunk_%d", seq),
 				Capability: CapabilityAttachmentIngest,
 				Action:     ControlActionAttachmentIngestChunk,
@@ -1497,7 +1471,7 @@ func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, s
 		return step, readErr
 	}
 
-	finish, err := controlClientRoundTrip(socket, cipher, activeTarget.Timeout, st, ControlRequest{
+	finish, err := controlClientFrameRoundTrip(conn, activeTarget.Timeout, st, ControlRequest{
 		RequestID:  "smoke_attachment_finish",
 		Capability: CapabilityAttachmentIngest,
 		Action:     ControlActionAttachmentIngestFinish,
@@ -1894,23 +1868,13 @@ func controlClientRequest(host string, st *store, req ControlRequest) (ControlRe
 }
 
 func controlClientRequestToTarget(target controlClientTarget, st *store, req ControlRequest) (ControlResponse, error) {
-	if target.UseRelay {
-		target.ControllerDeviceID = st.deviceIdentity.DeviceID
-		return controlClientRelayRoundTrip(context.Background(), target, st, req)
-	}
-	socket, cipher, activeTarget, err := controlClientDialTarget(target, st)
+	conn, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, st)
 	if err != nil {
-		if target.RelayClient.BaseURL != "" && target.RelayClient.Token != "" {
-			relayTarget := target
-			relayTarget.UseRelay = true
-			relayTarget.ControllerDeviceID = st.deviceIdentity.DeviceID
-			return controlClientRelayRoundTrip(context.Background(), relayTarget, st, req)
-		}
 		return ControlResponse{}, err
 	}
-	defer socket.Close()
+	defer conn.Close()
 
-	return controlClientRoundTrip(socket, cipher, activeTarget.Timeout, st, req)
+	return controlClientFrameRoundTrip(conn, activeTarget.Timeout, st, req)
 }
 
 func controlClientRoundTrip(socket *websocket.Conn, cipher *controlCipher, timeout time.Duration, st *store, req ControlRequest) (ControlResponse, error) {
@@ -1926,6 +1890,175 @@ func controlClientRoundTrip(socket *websocket.Conn, cipher *controlCipher, timeo
 		return ControlResponse{}, fmt.Errorf("remote did not return a response frame")
 	}
 	return *plain.Response, nil
+}
+
+type controlClientFrameConn interface {
+	Close() error
+	WritePlain(controlPlainFrame) error
+	ReadPlain(time.Duration) (controlPlainFrame, error)
+}
+
+type controlClientWSFrameConn struct {
+	writeMu sync.Mutex
+	socket  *websocket.Conn
+	cipher  *controlCipher
+}
+
+func (c *controlClientWSFrameConn) Close() error {
+	if c == nil || c.socket == nil {
+		return nil
+	}
+	return c.socket.Close()
+}
+
+func (c *controlClientWSFrameConn) WritePlain(frame controlPlainFrame) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return controlClientWrite(c.socket, c.cipher, frame)
+}
+
+func (c *controlClientWSFrameConn) ReadPlain(timeout time.Duration) (controlPlainFrame, error) {
+	if timeout <= 0 {
+		return controlClientRead(c.socket, c.cipher)
+	}
+	return controlClientReadWithTimeout(c.socket, c.cipher, timeout)
+}
+
+type controlClientRelayFrameConn struct {
+	writeMu      sync.Mutex
+	target       controlClientTarget
+	cipher       *controlCipher
+	connectionID string
+	openedAt     time.Time
+	ctx          context.Context
+	cancel       context.CancelFunc
+}
+
+func (c *controlClientRelayFrameConn) Close() error {
+	if c == nil {
+		return nil
+	}
+	if c.cancel != nil {
+		c.cancel()
+	}
+	controlClientRelayUnregisterActive(c.target, c.connectionID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return controlClientRelayWrite(ctx, c.target, c.cipher, c.connectionID, controlPlainFrame{Type: "close"})
+}
+
+func (c *controlClientRelayFrameConn) WritePlain(frame controlPlainFrame) error {
+	timeout := c.target.Timeout
+	if timeout <= 0 {
+		timeout = controlRelayRoundTripTimeout
+	}
+	ctx, cancel := context.WithTimeout(c.ctx, timeout)
+	defer cancel()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return controlClientRelayWrite(ctx, c.target, c.cipher, c.connectionID, frame)
+}
+
+func (c *controlClientRelayFrameConn) ReadPlain(timeout time.Duration) (controlPlainFrame, error) {
+	ctx := c.ctx
+	cancel := func() {}
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(c.ctx, timeout)
+	}
+	defer cancel()
+	return controlClientRelayRead(ctx, c.target, c.cipher, c.connectionID, c.openedAt)
+}
+
+var controlClientRelayActiveConnections sync.Map
+
+func controlClientRelayRegisterActive(target controlClientTarget, connectionID string) {
+	key := controlClientRelayConnectionKey(target, connectionID)
+	if key == "" {
+		return
+	}
+	controlClientRelayActiveConnections.Store(key, struct{}{})
+}
+
+func controlClientRelayUnregisterActive(target controlClientTarget, connectionID string) {
+	key := controlClientRelayConnectionKey(target, connectionID)
+	if key == "" {
+		return
+	}
+	controlClientRelayActiveConnections.Delete(key)
+}
+
+func controlClientRelayConnectionActive(target controlClientTarget, connectionID string) bool {
+	key := controlClientRelayConnectionKey(target, connectionID)
+	if key == "" {
+		return false
+	}
+	_, ok := controlClientRelayActiveConnections.Load(key)
+	return ok
+}
+
+func controlClientRelayConnectionKey(target controlClientTarget, connectionID string) string {
+	controllerID := strings.TrimSpace(target.ControllerDeviceID)
+	hostID := strings.TrimSpace(target.HostInfo.Identity.DeviceID)
+	connectionID = strings.TrimSpace(connectionID)
+	if controllerID == "" || hostID == "" || connectionID == "" {
+		return ""
+	}
+	return controllerID + "|" + hostID + "|" + connectionID
+}
+
+func controlClientOpenTargetWithRelayFallback(target controlClientTarget, st *store) (controlClientFrameConn, controlClientTarget, error) {
+	conn, activeTarget, err := controlClientOpenTarget(target, st)
+	if err == nil {
+		return conn, activeTarget, nil
+	}
+	if target.UseRelay || strings.TrimSpace(target.RelayClient.BaseURL) == "" || strings.TrimSpace(target.RelayClient.Token) == "" {
+		return nil, activeTarget, err
+	}
+	relayTarget := target
+	relayTarget.UseRelay = true
+	relayTarget.ControllerDeviceID = st.deviceIdentity.DeviceID
+	conn, activeTarget, relayErr := controlClientOpenTarget(relayTarget, st)
+	if relayErr != nil {
+		return nil, activeTarget, fmt.Errorf("direct control channel failed: %v; relay control channel failed: %w", err, relayErr)
+	}
+	return conn, activeTarget, nil
+}
+
+func controlClientOpenTarget(target controlClientTarget, st *store) (controlClientFrameConn, controlClientTarget, error) {
+	if target.UseRelay {
+		conn, err := controlClientOpenRelayFrameConn(context.Background(), target, st)
+		if err != nil {
+			return nil, target, err
+		}
+		return conn, conn.target, nil
+	}
+	socket, cipher, activeTarget, err := controlClientDialDirectTarget(target, st)
+	if err != nil {
+		return nil, activeTarget, err
+	}
+	return &controlClientWSFrameConn{socket: socket, cipher: cipher}, activeTarget, nil
+}
+
+func controlClientFrameRoundTrip(conn controlClientFrameConn, timeout time.Duration, st *store, req ControlRequest) (ControlResponse, error) {
+	req.ControllerDeviceID = st.deviceIdentity.DeviceID
+	if err := conn.WritePlain(controlPlainFrame{Type: "request", Request: &req}); err != nil {
+		return ControlResponse{}, err
+	}
+	for {
+		plain, err := conn.ReadPlain(timeout)
+		if err != nil {
+			return ControlResponse{}, err
+		}
+		if plain.Response == nil {
+			continue
+		}
+		if req.RequestID != "" && plain.Response.RequestID != "" && plain.Response.RequestID != req.RequestID {
+			continue
+		}
+		return *plain.Response, nil
+	}
 }
 
 func controlClientHostInfo(host string) (HostInfo, error) {
@@ -1956,9 +2089,9 @@ func controlClientDial(host string, st *store, hostInfo HostInfo) (*websocket.Co
 	return controlClientDialWithTimeout(host, st, hostInfo, 0)
 }
 
-func controlClientDialTarget(target controlClientTarget, st *store) (*websocket.Conn, *controlCipher, controlClientTarget, error) {
+func controlClientDialDirectTarget(target controlClientTarget, st *store) (*websocket.Conn, *controlCipher, controlClientTarget, error) {
 	if target.UseRelay {
-		return nil, nil, target, fmt.Errorf("relay streaming transport is not implemented")
+		return nil, nil, target, fmt.Errorf("direct control dial requires a non-relay target")
 	}
 	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
 	if err == nil {

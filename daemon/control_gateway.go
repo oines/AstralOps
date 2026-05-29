@@ -98,7 +98,7 @@ func (a *app) executeControlRequest(req ControlRequest) (ControlResponse, error)
 	return a.executeControlRequestWithConnection(req, nil)
 }
 
-func (a *app) executeControlRequestWithConnection(req ControlRequest, conn *controlWSConn) (ControlResponse, error) {
+func (a *app) executeControlRequestWithConnection(req ControlRequest, conn controlConnection) (ControlResponse, error) {
 	ctx := context.Background()
 	if conn != nil {
 		ctx = conn.requestContext()
@@ -106,7 +106,7 @@ func (a *app) executeControlRequestWithConnection(req ControlRequest, conn *cont
 	return a.executeControlRequestWithContext(ctx, req, conn)
 }
 
-func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlRequest, conn *controlWSConn) (response ControlResponse, err error) {
+func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlRequest, conn controlConnection) (response ControlResponse, err error) {
 	startedAt := logControlActionStart(req)
 	defer func() {
 		if err != nil {
@@ -174,7 +174,7 @@ func controlActionCapability(action string) string {
 	}
 }
 
-func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, conn *controlWSConn, grant TrustGrant) (any, error) {
+func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, conn controlConnection, grant TrustGrant) (any, error) {
 	switch req.Action {
 	case ControlActionSessionView:
 		var params struct {
@@ -232,7 +232,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if streamID == "" {
 			return nil, newActionError(http.StatusBadRequest, "event_subscription_id_required", "stream_id required")
 		}
-		return eventSubscriptionCancelResult{StreamID: streamID, Cancelled: conn.cancelEventSubscription(streamID)}, nil
+		return eventSubscriptionCancelResult{StreamID: streamID, Cancelled: conn.cancelControlStream(streamID)}, nil
 	case ControlActionSessionInput:
 		var params struct {
 			SessionID       string            `json:"session_id"`
@@ -402,7 +402,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if streamID == "" {
 			return nil, newActionError(http.StatusBadRequest, "media_stream_id_required", "stream_id required")
 		}
-		return mediaStreamCancelResult{StreamID: streamID, Cancelled: conn.cancelMediaStream(streamID)}, nil
+		return mediaStreamCancelResult{StreamID: streamID, Cancelled: conn.cancelControlStream(streamID)}, nil
 	case ControlActionWorkspaceFilesRead:
 		var params workspaceFilesReadParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
@@ -454,7 +454,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if streamID == "" {
 			return nil, newActionError(http.StatusBadRequest, "workspace_file_stream_id_required", "stream_id required")
 		}
-		return workspaceFileStreamCancelResult{StreamID: streamID, Cancelled: conn.cancelWorkspaceFileStream(streamID)}, nil
+		return workspaceFileStreamCancelResult{StreamID: streamID, Cancelled: conn.cancelControlStream(streamID)}, nil
 	case ControlActionWorkspaceExec:
 		var params workspaceExecParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
@@ -512,7 +512,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		}
 		exceptConnectionID := ""
 		if conn != nil {
-			exceptConnectionID = conn.id
+			exceptConnectionID = conn.connectionID()
 		}
 		return a.revokeTrustedControlDevice(params.ControllerDeviceID, exceptConnectionID)
 	case ControlActionHostPairingList:

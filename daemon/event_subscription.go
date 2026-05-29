@@ -78,7 +78,7 @@ func (a *app) prepareControlEventSubscription(params eventSubscriptionParams) (e
 	}, nil
 }
 
-func (a *app) streamControlEvents(ctx context.Context, result eventSubscriptionResult, conn *controlWSConn, requestID string) {
+func (a *app) streamControlEvents(ctx context.Context, result eventSubscriptionResult, conn controlConnection, requestID string) {
 	client := a.hub.addSSE()
 	defer a.hub.removeSSE(client)
 

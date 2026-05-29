@@ -158,7 +158,7 @@ func (a *app) prepareControlMediaStream(params mediaStreamParams) (mediaStreamRe
 	}, nil
 }
 
-func (a *app) streamControlMedia(ctx context.Context, result mediaStreamResult, conn *controlWSConn, requestID string) {
+func (a *app) streamControlMedia(ctx context.Context, result mediaStreamResult, conn controlConnection, requestID string) {
 	media, err := a.resolveSessionMedia(result.SessionID, result.EventSeq, result.MediaID)
 	if err != nil {
 		conn.writePlain(controlPlainFrame{Type: mediaStreamFrameError, Media: mediaStreamErrorFrame(result, requestID, "media_not_found", err.Error())})
