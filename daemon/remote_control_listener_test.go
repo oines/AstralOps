@@ -164,6 +164,36 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 	}
 }
 
+func TestRemoteHostTargetUsesCachedBaseURLBeforeDiscovery(t *testing.T) {
+	hostApp, _ := newRemoteControlHandlerTestApp(t)
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
+	defer hostServer.Close()
+
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+
+	started := time.Now()
+	target, err := controllerApp.remoteHostTarget(hostApp.store.deviceIdentity.DeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("remoteHostTarget took %s, want cached route without discovery timeout", elapsed)
+	}
+	if target.BaseURL != hostServer.URL {
+		t.Fatalf("target BaseURL = %q, want cached %q", target.BaseURL, hostServer.URL)
+	}
+	if target.Timeout != remoteHostLANTimeout {
+		t.Fatalf("target timeout = %s, want LAN timeout", target.Timeout)
+	}
+}
+
 func TestRemoteHostProxyCreatesWorkspaceAndBrowsesHostFilesystem(t *testing.T) {
 	hostApp, _ := newRemoteControlHandlerTestApp(t)
 	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))

@@ -567,11 +567,28 @@ func controlClientExplicitTarget(host string) (controlClientTarget, error) {
 	return controlClientTarget{BaseURL: host, HostInfo: hostInfo}, nil
 }
 
-func controlClientExplicitTargetForKnownHost(st *store, host, hostDeviceID string) (controlClientTarget, error) {
-	target, err := controlClientExplicitTarget(host)
+func controlClientExplicitTargetWithClient(host string, client *http.Client) (controlClientTarget, error) {
+	hostInfo, err := controlClientHostInfoWithClient(host, client)
 	if err != nil {
 		return controlClientTarget{}, err
 	}
+	return controlClientTarget{BaseURL: host, HostInfo: hostInfo}, nil
+}
+
+func controlClientExplicitTargetForKnownHost(st *store, host, hostDeviceID string) (controlClientTarget, error) {
+	return controlClientExplicitTargetForKnownHostWithClient(st, host, hostDeviceID, http.DefaultClient, 0)
+}
+
+func controlClientExplicitTargetForKnownHostWithTimeout(st *store, host, hostDeviceID string, timeout time.Duration) (controlClientTarget, error) {
+	return controlClientExplicitTargetForKnownHostWithClient(st, host, hostDeviceID, &http.Client{Timeout: timeout}, timeout)
+}
+
+func controlClientExplicitTargetForKnownHostWithClient(st *store, host, hostDeviceID string, client *http.Client, timeout time.Duration) (controlClientTarget, error) {
+	target, err := controlClientExplicitTargetWithClient(host, client)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	target.Timeout = timeout
 	if st == nil {
 		return target, nil
 	}

@@ -116,6 +116,19 @@ func discoverRemoteControlHosts(ctx context.Context, port int) ([]LanHostCandida
 	return discoverRemoteControlHostsAt(ctx, remoteControlBroadcastTargets(port))
 }
 
+func discoverRemoteControlHostWithTimeout(timeout time.Duration, port int, accept func(LanHostCandidate) bool) (LanHostCandidate, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return discoverRemoteControlHost(ctx, port, accept)
+}
+
+func discoverRemoteControlHost(ctx context.Context, port int, accept func(LanHostCandidate) bool) (LanHostCandidate, bool, error) {
+	if port <= 0 {
+		port = defaultRemoteControlDiscoveryPort
+	}
+	return discoverRemoteControlHostAt(ctx, remoteControlBroadcastTargets(port), accept)
+}
+
 func discoverRemoteControlHostsAt(ctx context.Context, targets []net.UDPAddr) ([]LanHostCandidate, error) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
@@ -164,6 +177,58 @@ func discoverRemoteControlHostsAt(ctx context.Context, targets []net.UDPAddr) ([
 		}
 		seen[key] = true
 		candidates = append(candidates, candidate)
+	}
+}
+
+func discoverRemoteControlHostAt(ctx context.Context, targets []net.UDPAddr, accept func(LanHostCandidate) bool) (LanHostCandidate, bool, error) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		return LanHostCandidate{}, false, err
+	}
+	defer conn.Close()
+	request, err := json.Marshal(remoteControlDiscoveryPacket{
+		Type:    remoteControlDiscoveryRequestType,
+		Version: controlProtocolVersion,
+	})
+	if err != nil {
+		return LanHostCandidate{}, false, err
+	}
+	for _, target := range targets {
+		_, _ = conn.WriteToUDP(request, &target)
+	}
+
+	seen := map[string]bool{}
+	buf := make([]byte, 4096)
+	for {
+		if deadline, ok := ctx.Deadline(); ok {
+			if err := conn.SetReadDeadline(deadline); err != nil {
+				return LanHostCandidate{}, false, err
+			}
+		}
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				return LanHostCandidate{}, false, nil
+			}
+			select {
+			case <-ctx.Done():
+				return LanHostCandidate{}, false, nil
+			default:
+				return LanHostCandidate{}, false, err
+			}
+		}
+		candidate, ok := remoteControlCandidateFromDiscoveryPacket(buf[:n])
+		if !ok {
+			continue
+		}
+		key := candidate.DeviceID + "|" + candidate.Host + "|" + strconv.Itoa(candidate.Port)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if accept == nil || accept(candidate) {
+			return candidate, true, nil
+		}
 	}
 }
 

@@ -116,6 +116,7 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 		if err := validateKnownLanHost(candidate, known, hostInfo); err != nil {
 			continue
 		}
+		known = a.rememberRemoteHostLANRoute(hostInfo, candidate.BaseURL, known)
 		hosts[candidate.DeviceID] = remoteHostRecordFromHostInfo(hostInfo, known, candidate.BaseURL)
 	}
 }
@@ -574,25 +575,65 @@ func (a *app) remoteHostTarget(hostDeviceID string) (controlClientTarget, error)
 	if !ok {
 		return controlClientTarget{}, newActionError(http.StatusNotFound, "remote_host_unknown", "remote Host is not known; pair the Host first")
 	}
-	target, err := controlClientResolveTarget(a.store, controlClientTargetOptions{
-		Host:             known.LastBaseURL,
-		Discover:         true,
-		HostDeviceID:     hostDeviceID,
-		DiscoveryPort:    defaultRemoteControlDiscoveryPort,
-		DiscoveryTimeout: remoteHostDiscoveryTTL,
-		LANTimeout:       remoteHostLANTimeout,
-	})
+	known = normalizeKnownHost(known)
+	if target, err := a.cachedRemoteHostTarget(known); err == nil {
+		return target, nil
+	}
+	target, err := a.discoverRemoteHostTarget(known)
 	if err == nil {
-		if relay, relayErr := a.remoteHostRelayTarget(known); relayErr == nil {
-			target.RelayClient = relay.RelayClient
-			target.ControllerDeviceID = relay.ControllerDeviceID
-		}
 		return target, nil
 	}
 	if relay, relayErr := a.remoteHostRelayTarget(known); relayErr == nil {
 		return relay, nil
 	}
 	return controlClientTarget{}, err
+}
+
+func (a *app) cachedRemoteHostTarget(known KnownHost) (controlClientTarget, error) {
+	if strings.TrimSpace(known.LastBaseURL) == "" {
+		return controlClientTarget{}, fmt.Errorf("known Host %s has no cached LAN route", known.DeviceID)
+	}
+	target, err := controlClientExplicitTargetForKnownHostWithTimeout(a.store, known.LastBaseURL, known.DeviceID, remoteHostLANTimeout)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	return target, nil
+}
+
+func (a *app) discoverRemoteHostTarget(known KnownHost) (controlClientTarget, error) {
+	candidate, ok, err := discoverRemoteControlHostWithTimeout(remoteHostDiscoveryTTL, defaultRemoteControlDiscoveryPort, func(candidate LanHostCandidate) bool {
+		return candidate.DeviceID == known.DeviceID && candidate.PublicKeyFingerprint == known.PublicKeyFingerprint
+	})
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	if !ok {
+		return controlClientTarget{}, fmt.Errorf("known Host %q was not found on LAN", known.DeviceID)
+	}
+	client := &http.Client{Timeout: remoteHostLANTimeout}
+	hostInfo, err := controlClientHostInfoWithClient(candidate.BaseURL, client)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	if err := validateKnownLanHost(candidate, known, hostInfo); err != nil {
+		return controlClientTarget{}, err
+	}
+	known = a.rememberRemoteHostLANRoute(hostInfo, candidate.BaseURL, known)
+	return controlClientTarget{
+		BaseURL:         candidate.BaseURL,
+		HostInfo:        hostInfo,
+		Timeout:         remoteHostLANTimeout,
+		ExpectedHost:    known,
+		HasExpectedHost: true,
+	}, nil
+}
+
+func (a *app) rememberRemoteHostLANRoute(hostInfo HostInfo, baseURL string, fallback KnownHost) KnownHost {
+	known, err := a.store.rememberKnownHost(hostInfo, baseURL)
+	if err != nil {
+		return fallback
+	}
+	return known
 }
 
 func (a *app) remoteHostRelayTarget(known KnownHost) (controlClientTarget, error) {

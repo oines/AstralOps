@@ -125,12 +125,12 @@ export function App(): React.JSX.Element {
   const sessionViewRefreshPendingRef = useRef<Set<string>>(new Set());
   const sessionViewRefreshGenerationRef = useRef(0);
 
-  const refreshRemoteHosts = useCallback(async (): Promise<void> => {
+  const refreshRemoteHosts = useCallback(async (discover = true): Promise<void> => {
     if (!daemonInfo) {
       setRemoteHosts([]);
       return;
     }
-    const hosts = await listRemoteHosts(daemonInfo, true);
+    const hosts = await listRemoteHosts(daemonInfo, discover);
     setRemoteHosts(hosts);
   }, [daemonInfo]);
 
@@ -403,16 +403,21 @@ export function App(): React.JSX.Element {
     if (!daemonInfo) return;
     const info = daemonInfo;
     let cancelled = false;
+    let refreshing = false;
     async function refresh(): Promise<void> {
+      if (refreshing) return;
+      refreshing = true;
       try {
         const hosts = await listRemoteHosts(info, true);
         if (!cancelled) setRemoteHosts(hosts);
       } catch {
         if (!cancelled) setRemoteHosts([]);
+      } finally {
+        refreshing = false;
       }
     }
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 10_000);
+    const timer = window.setInterval(() => void refresh(), 60_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
