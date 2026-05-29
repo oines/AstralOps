@@ -2,12 +2,16 @@ package cloudbroker
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
+
+const maxJSONBodyBytes int64 = 1 << 20
 
 type Server struct {
 	store        *FileStore
@@ -40,7 +44,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/pairing/requests", s.withAccount(s.handlePairingRequests))
 	mux.HandleFunc("/v1/pairing/requests/", s.withAccount(s.handlePairingRequestAction))
 	mux.HandleFunc("/v1/relay/envelopes", s.withAccount(s.handleRelayEnvelopes))
-	return withCORS(mux)
+	return withSecurityHeaders(withRequestBodyLimit(withCORS(mux)))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -214,6 +218,21 @@ func decodeJSON(r *http.Request, out any) error {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(out); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return apiErr(http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large")
+		}
+		return apiErr(400, "invalid_json", err.Error())
+	}
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return apiErr(400, "invalid_json", "request body must contain a single JSON value")
+		}
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return apiErr(http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large")
+		}
 		return apiErr(400, "invalid_json", err.Error())
 	}
 	return nil
@@ -247,6 +266,26 @@ func withCORS(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func withRequestBodyLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > maxJSONBodyBytes {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large", "code": "payload_too_large"})
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(w, r)
 	})
 }

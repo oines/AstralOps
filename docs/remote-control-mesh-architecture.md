@@ -141,6 +141,14 @@ go run ./cloud --addr 0.0.0.0:43910 --data-dir /var/lib/astralops-cloud
 ASTRALOPS_CLOUD_ACCOUNT_TOKENS=<long-random-token-1>,<long-random-token-2>
 ```
 
+公网部署时 broker 默认拒绝在未配置 `ASTRALOPS_CLOUD_ACCOUNT_TOKENS` 的情况下启动。只有本机开发可以显式设置：
+
+```text
+ASTRALOPS_CLOUD_ALLOW_OPEN_TOKENS=1
+```
+
+这个开关不能用于公网 VPS。账号 token 长度必须至少 32 字符，推荐使用 32 bytes 以上随机值。Cloud broker 还必须启用 HTTP read/write/header timeout，并限制单个 JSON 请求体大小，避免公网开发节点被简单慢请求或超大请求拖垮。
+
 客户端使用：
 
 ```text

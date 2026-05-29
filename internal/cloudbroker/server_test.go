@@ -110,6 +110,38 @@ func TestCloudBrokerRejectsUnknownAccountTokenWhenAllowlistConfigured(t *testing
 	}
 }
 
+func TestCloudBrokerRejectsOversizedRequestBody(t *testing.T) {
+	server := testServer(t)
+	body := strings.NewReader(strings.Repeat("x", int(maxJSONBodyBytes)+1))
+	req := httptest.NewRequest(http.MethodPost, "/v1/devices", body)
+	req.Header.Set("Authorization", "Bearer test-account-token")
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+
+	if res.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d body=%s, want 413", res.Code, res.Body.String())
+	}
+}
+
+func TestCloudBrokerRejectsMultipleJSONValues(t *testing.T) {
+	server := testServer(t)
+	device := testDeviceRegistration(t, "dev_desktop", "desktop", true, true)
+	payload, err := json.Marshal(device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/devices", strings.NewReader(string(payload)+"{}"))
+	req.Header.Set("Authorization", "Bearer test-account-token")
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "single JSON value") {
+		t.Fatalf("status = %d body=%s, want single JSON value rejection", res.Code, res.Body.String())
+	}
+}
+
 func testServer(t *testing.T) *Server {
 	t.Helper()
 	store, err := LoadFileStore(t.TempDir() + "/cloud.json")
