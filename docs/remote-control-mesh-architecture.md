@@ -606,6 +606,34 @@ Mobile UI
 
 所有远程路径里，Host 执行，Controller 渲染。
 
+## Desktop 主界面模型
+
+Desktop 主界面不应该变成单独的 Mesh 首页。Mesh 是资源来源切换，不是新的主产品形态。
+
+Desktop shell 保持当前 workspace/session/transcript 布局，只在左侧栏顶部提供当前 Host 选择器：
+
+```text
+[当前设备: 本机 MacBook Air]
+  workspaces
+  sessions
+
+[当前设备: Mac mini · LAN]
+  remote workspaces
+  remote sessions
+```
+
+选择不同 Host 后，下方 workspace/session 列表显示所选 Host 的资源。主区域继续复用同一套 transcript、pending interaction、terminal、files 和 settings/trust surface。
+
+UI 组件不应该到处分支判断本地/远端。上层应提供 Host-scoped `CoreClient`：
+
+```text
+selectedHost -> CoreClient
+  本机 Host -> LocalCoreClient
+  远端 Host -> RemoteCoreClient over E2EE
+```
+
+移动端也遵循同一产品模型，只是布局更窄：先选 Host，再使用该 Host 上的 workspace/session/PTY/files。
+
 ## 远控能力
 
 Capability 描述可信 Controller 可以请求 Host 做什么。它不应该按 Desktop/Mobile 硬砍功能。可信 Mobile 也可以拥有 full control。

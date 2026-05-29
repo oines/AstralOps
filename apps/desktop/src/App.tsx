@@ -31,6 +31,7 @@ import type {
   CreateWorkspaceRequest,
   DaemonInfo,
   HealthResponse,
+  HostInfo,
   PermissionMode,
   ReasoningEffort,
   RunMode,
@@ -42,6 +43,7 @@ import type {
 } from "./types";
 
 const EVENT_WINDOW_SIZE = 1000;
+const LOCAL_HOST_ID = "local";
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   version: 1,
@@ -67,6 +69,8 @@ export function App(): React.JSX.Element {
   const [connection, setConnection] = useState<ConnectionState>("booting");
   const [api, setApi] = useState<CoreClient | null>(null);
   const [daemonInfo, setDaemonInfo] = useState<DaemonInfo | null>(null);
+  const [localHostInfo, setLocalHostInfo] = useState<HostInfo | null>(null);
+  const [selectedHostId, setSelectedHostId] = useState(LOCAL_HOST_ID);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [settingsSavingKeys, setSettingsSavingKeys] = useState<Set<string>>(() => new Set());
@@ -269,9 +273,10 @@ export function App(): React.JSX.Element {
   });
 
   const loadInitialState = useCallback(async (client: CoreClient) => {
-    const [healthResponse, settingsResponse, workspaceResponse, sessionResponse, recentEvents] = await Promise.all([
+    const [healthResponse, settingsResponse, hostResponse, workspaceResponse, sessionResponse, recentEvents] = await Promise.all([
       client.health(),
       client.settings(),
+      client.hostInfo(),
       client.listWorkspaces(),
       client.listSessions(),
       client.events({ limit: EVENT_WINDOW_SIZE }),
@@ -294,6 +299,7 @@ export function App(): React.JSX.Element {
     }
     const eventResponse = [...recentEvents, ...sessionEvents];
     setHealth(healthResponse);
+    setLocalHostInfo(hostResponse);
     setAppSettings(settingsResponse);
     appSettingsRef.current = settingsResponse;
     setLastSessionAgent(sessionResponse[0]?.agent ?? "claude");
@@ -737,6 +743,19 @@ export function App(): React.JSX.Element {
   const composerVisible = Boolean(activeWorkspace && activeSession);
   const nativeVibrancy = isMacDesktop && appSettings.appearance.mac_sidebar_effect;
   const preferredSessionAgent: AgentKind = appSettings.session.default_agent === "remember" ? lastSessionAgent : appSettings.session.default_agent;
+  const hostOptions = useMemo(
+    () => [
+      {
+        id: localHostInfo?.identity.device_id || LOCAL_HOST_ID,
+        name: localHostInfo?.identity.device_name || "本机",
+        kind: localHostInfo?.identity.device_kind || "desktop",
+        subtitle: daemonInfo?.remote_control?.listen_addr ? `本机 Host · ${daemonInfo.remote_control.listen_addr}` : "本机 Host",
+        connection: "local" as const,
+      },
+    ],
+    [daemonInfo?.remote_control?.listen_addr, localHostInfo],
+  );
+  const activeHostId = hostOptions.some((host) => host.id === selectedHostId) ? selectedHostId : hostOptions[0]?.id || LOCAL_HOST_ID;
   const sessionTitles = useMemo(
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),
     [sessionViews, sessions],
@@ -768,6 +787,8 @@ export function App(): React.JSX.Element {
         collapsed={sidebarCollapsed}
         defaultSessionAgent={preferredSessionAgent}
         nativeVibrancy={nativeVibrancy}
+        activeHostId={activeHostId}
+        hosts={hostOptions}
         sessions={sessions}
         sessionStates={sessionStates}
         sessionTitles={sessionTitles}
@@ -782,6 +803,7 @@ export function App(): React.JSX.Element {
         onDeleteWorkspace={(workspaceId) => void deleteWorkspace(workspaceId)}
         onOpenSettings={() => setSettingsOpen(true)}
         onResize={setSidebarWidth}
+        onSelectHost={setSelectedHostId}
         onSelectSession={handleSelectSession}
         onSelectWorkspace={handleSelectWorkspace}
       />
