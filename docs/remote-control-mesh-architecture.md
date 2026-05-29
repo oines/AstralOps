@@ -1,6 +1,6 @@
 # AstralOps 远程控制 Mesh 架构
 
-最后更新：2026-05-27
+最后更新：2026-05-29
 
 ## 总览
 
@@ -126,6 +126,126 @@ Relay 节点是不可信转发器。Relay payload 必须是不透明加密帧：
 ```
 
 Relay 日志不能打印明文 payload，也不能打印解密后的协议消息。
+
+## VPS Cloud Broker MVP
+
+早期几个人开发和内测时，不需要先上复杂托管账号体系、Kubernetes、Supabase 或 Postgres。当前可运行的 MVP 是一个部署在 VPS 上的 Go cloud broker：
+
+```text
+go run ./cloud --addr 0.0.0.0:43910 --data-dir /var/lib/astralops-cloud
+```
+
+生产/公网 VPS 必须配置账号 token allowlist：
+
+```text
+ASTRALOPS_CLOUD_ACCOUNT_TOKENS=<long-random-token-1>,<long-random-token-2>
+```
+
+客户端使用：
+
+```text
+Authorization: Bearer <account-token>
+```
+
+cloud broker 不存 token 明文，只用 token 派生 `account_id_hash`。同一个 token 对应同一个账号 namespace。这个方案是内测账号基础设施，不是最终消费者账号体验；后续可以把 token auth 替换成正式邮箱登录、OIDC 或 passkey，但外部 API 仍保持账号下设备注册、presence、pairing signal、relay envelope 这几个边界。
+
+当前 cloud broker 使用 VPS 本地 JSON 文件持久化：
+
+```text
+/var/lib/astralops-cloud/cloud.json
+```
+
+这适合少量内测设备，优点是部署成本低、没有数据库运维；缺点是单节点、并发能力有限、没有高可用。迁移到 Postgres 时，只替换 cloud broker store 层，不改变 Desktop daemon、Mobile Controller、Host trust store 或 E2EE control channel。
+
+Cloud broker API 的职责：
+
+```text
+GET  /v1/health
+GET  /v1/account
+GET  /v1/devices
+POST /v1/devices
+POST /v1/devices/:device_id/heartbeat
+POST /v1/devices/:device_id/offline
+GET  /v1/pairing/requests?device_id=<device_id>
+POST /v1/pairing/requests
+GET  /v1/pairing/requests/:request_id
+POST /v1/pairing/requests/:request_id/resolve
+GET  /v1/relay/envelopes?device_id=<device_id>
+POST /v1/relay/envelopes
+```
+
+Desktop daemon 通过本机 authenticated API 接入 cloud broker。这个 API 只读写本机 daemon settings 并调用 cloud broker，不暴露给远程 Host listener：
+
+```text
+PATCH /v1/settings
+  cloud.enabled=true
+  cloud.base_url=https://cloud.example.com
+  cloud.account_token=<account-token>
+
+GET  /v1/cloud/devices
+POST /v1/cloud/devices
+POST /v1/cloud/heartbeat
+GET  /v1/cloud/pairing/requests?device_id=<device_id>
+POST /v1/cloud/pairing/requests
+POST /v1/cloud/pairing/requests/:request_id/resolve
+```
+
+`/v1/cloud/devices` 注册的是当前 daemon 的 public device identity。默认 `can_control=true`，`can_host` 取本机 `remote_control.enabled`，调用方也可以在注册请求里显式覆盖。这个动作不会自动开启 Host listener；是否允许被远控仍然由本机 `remote_control` settings 决定。
+
+这些 API 只能处理云端允许的数据：
+
+```text
+device_id / device_name / device_kind
+public_key / public_key_fingerprint
+can_host / can_control / capabilities
+online/offline presence / last_seen
+pairing request metadata
+opaque relay envelope
+```
+
+这些 API 不能增加字段来保存：
+
+```text
+workspace/session/event payload
+prompt / assistant output
+approval / ask / plan 内容
+PTY 输出
+文件树或文件内容
+SSH 配置
+本地路径
+私钥
+```
+
+`POST /v1/pairing/requests/:request_id/resolve` 只是云端信令状态同步，不是授予 Host 控制权。真正授信仍必须发生在目标 Desktop Host 本地：
+
+```text
+Host UI 或已有可信 host.manage Controller 批准
+  -> Host 本地写入 TrustGrant
+  -> Host 可通知 cloud broker 标记 pairing request approved
+```
+
+任何 Controller 都不能因为 cloud broker 上的 request 状态是 `approved` 就绕过 Host 本地 trust store。连接和每个 action 仍必须由 Host 校验：
+
+```text
+controller_device_id trusted
+grant 未 revoked
+capability 允许
+E2EE session 有效
+```
+
+Relay envelope 只允许：
+
+```json
+{
+  "version": "astralops-relay-envelope-v1",
+  "from_device_id": "dev_controller",
+  "to_device_id": "dev_host",
+  "payload_kind": "control.sealed_frame",
+  "payload_base64": "..."
+}
+```
+
+`payload_base64` 是设备层 E2EE 后的 sealed frame。cloud broker 只能存储和转发，不能解析业务协议。
 
 ## 端到端加密控制通道
 

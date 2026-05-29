@@ -1357,6 +1357,11 @@ export type AppSettings = {
     listen_addr: string;
     lan_discovery: boolean;
   };
+  cloud: {
+    enabled: boolean;
+    base_url?: string;
+    account_token?: string;
+  };
   updates: {
     auto_check: boolean;
   };
@@ -1369,6 +1374,7 @@ export type AppSettingsPatch = {
   workspace?: Partial<AppSettings["workspace"]>;
   notifications?: Partial<AppSettings["notifications"]>;
   remote_control?: Partial<AppSettings["remote_control"]>;
+  cloud?: Partial<AppSettings["cloud"]>;
   updates?: Partial<AppSettings["updates"]>;
 };
 

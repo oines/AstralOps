@@ -26,6 +26,9 @@ func TestSettingsDefaultWhenFileMissing(t *testing.T) {
 	if settings.RemoteControl.Enabled || settings.RemoteControl.ListenAddr != defaultRemoteControlListenAddr || !settings.RemoteControl.LANDiscovery {
 		t.Fatalf("remote control defaults = %#v", settings.RemoteControl)
 	}
+	if settings.Cloud.Enabled || settings.Cloud.BaseURL != "" || settings.Cloud.AccountToken != "" {
+		t.Fatalf("cloud defaults = %#v", settings.Cloud)
+	}
 }
 
 func TestSettingsPatchPersistsAndReloads(t *testing.T) {
@@ -39,23 +42,27 @@ func TestSettingsPatchPersistsAndReloads(t *testing.T) {
 	reconnect := false
 	remoteEnabled := true
 	remoteAddr := "127.0.0.1:43900"
+	cloudEnabled := true
+	cloudBaseURL := "https://cloud.example.test/"
+	cloudToken := "account-token"
 	updated, err := store.patch(appSettingsPatch{
 		Appearance:    &appearanceSettingsPatch{Theme: &theme},
 		Session:       &sessionSettingsPatch{DefaultPermissionMode: &permission},
 		Workspace:     &workspaceSettingsPatch{SSHAutoReconnect: &reconnect},
 		RemoteControl: &remoteControlSettingsPatch{Enabled: &remoteEnabled, ListenAddr: &remoteAddr},
+		Cloud:         &cloudSettingsPatch{Enabled: &cloudEnabled, BaseURL: &cloudBaseURL, AccountToken: &cloudToken},
 	})
 	if err != nil {
 		t.Fatalf("patch settings = %v", err)
 	}
-	if updated.Appearance.Theme != "dark" || updated.Session.DefaultPermissionMode != "auto" || updated.Workspace.SSHAutoReconnect || !updated.RemoteControl.Enabled || updated.RemoteControl.ListenAddr != remoteAddr {
+	if updated.Appearance.Theme != "dark" || updated.Session.DefaultPermissionMode != "auto" || updated.Workspace.SSHAutoReconnect || !updated.RemoteControl.Enabled || updated.RemoteControl.ListenAddr != remoteAddr || !updated.Cloud.Enabled || updated.Cloud.BaseURL != "https://cloud.example.test" || updated.Cloud.AccountToken != cloudToken {
 		t.Fatalf("patched settings = %#v", updated)
 	}
 	reloaded, err := loadSettingsStore(dir)
 	if err != nil {
 		t.Fatalf("reload settings = %v", err)
 	}
-	if reloaded.get().Appearance.Theme != "dark" || reloaded.get().Session.DefaultPermissionMode != "auto" || reloaded.get().Workspace.SSHAutoReconnect || !reloaded.get().RemoteControl.Enabled || reloaded.get().RemoteControl.ListenAddr != remoteAddr {
+	if reloaded.get().Appearance.Theme != "dark" || reloaded.get().Session.DefaultPermissionMode != "auto" || reloaded.get().Workspace.SSHAutoReconnect || !reloaded.get().RemoteControl.Enabled || reloaded.get().RemoteControl.ListenAddr != remoteAddr || !reloaded.get().Cloud.Enabled || reloaded.get().Cloud.BaseURL != "https://cloud.example.test" || reloaded.get().Cloud.AccountToken != cloudToken {
 		t.Fatalf("reloaded settings = %#v", reloaded.get())
 	}
 }
@@ -78,6 +85,14 @@ func TestSettingsInvalidPatchDoesNotPolluteCurrentValue(t *testing.T) {
 	}
 	if got := store.get().RemoteControl.ListenAddr; got != defaultRemoteControlListenAddr {
 		t.Fatalf("remote control listen addr after invalid patch = %q, want default", got)
+	}
+	cloudEnabled := true
+	badCloudURL := "ftp://cloud.example.test"
+	if _, err := store.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &cloudEnabled, BaseURL: &badCloudURL}}); err == nil {
+		t.Fatal("patch invalid cloud settings succeeded")
+	}
+	if store.get().Cloud.Enabled {
+		t.Fatalf("cloud settings after invalid patch = %#v", store.get().Cloud)
 	}
 }
 

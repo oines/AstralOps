@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,7 @@ type AppSettings struct {
 	Workspace     WorkspaceSettings     `json:"workspace"`
 	Notifications NotificationSettings  `json:"notifications"`
 	RemoteControl RemoteControlSettings `json:"remote_control"`
+	Cloud         CloudSettings         `json:"cloud"`
 	Updates       UpdateSettings        `json:"updates"`
 }
 
@@ -57,6 +59,12 @@ type RemoteControlSettings struct {
 	LANDiscovery bool   `json:"lan_discovery"`
 }
 
+type CloudSettings struct {
+	Enabled      bool   `json:"enabled"`
+	BaseURL      string `json:"base_url,omitempty"`
+	AccountToken string `json:"account_token,omitempty"`
+}
+
 type UpdateSettings struct {
 	AutoCheck bool `json:"auto_check"`
 }
@@ -68,6 +76,7 @@ type appSettingsPatch struct {
 	Workspace     *workspaceSettingsPatch     `json:"workspace,omitempty"`
 	Notifications *notificationSettingsPatch  `json:"notifications,omitempty"`
 	RemoteControl *remoteControlSettingsPatch `json:"remote_control,omitempty"`
+	Cloud         *cloudSettingsPatch         `json:"cloud,omitempty"`
 	Updates       *updateSettingsPatch        `json:"updates,omitempty"`
 }
 
@@ -102,6 +111,12 @@ type remoteControlSettingsPatch struct {
 	Enabled      *bool   `json:"enabled,omitempty"`
 	ListenAddr   *string `json:"listen_addr,omitempty"`
 	LANDiscovery *bool   `json:"lan_discovery,omitempty"`
+}
+
+type cloudSettingsPatch struct {
+	Enabled      *bool   `json:"enabled,omitempty"`
+	BaseURL      *string `json:"base_url,omitempty"`
+	AccountToken *string `json:"account_token,omitempty"`
 }
 
 type updateSettingsPatch struct {
@@ -143,6 +158,9 @@ func defaultAppSettings() AppSettings {
 			Enabled:      false,
 			ListenAddr:   defaultRemoteControlListenAddr,
 			LANDiscovery: true,
+		},
+		Cloud: CloudSettings{
+			Enabled: false,
 		},
 		Updates: UpdateSettings{
 			AutoCheck: true,
@@ -264,6 +282,17 @@ func applySettingsPatch(settings *AppSettings, patch appSettingsPatch) {
 			settings.RemoteControl.LANDiscovery = *patch.RemoteControl.LANDiscovery
 		}
 	}
+	if patch.Cloud != nil {
+		if patch.Cloud.Enabled != nil {
+			settings.Cloud.Enabled = *patch.Cloud.Enabled
+		}
+		if patch.Cloud.BaseURL != nil {
+			settings.Cloud.BaseURL = strings.TrimSpace(*patch.Cloud.BaseURL)
+		}
+		if patch.Cloud.AccountToken != nil {
+			settings.Cloud.AccountToken = strings.TrimSpace(*patch.Cloud.AccountToken)
+		}
+	}
 	if patch.Updates != nil && patch.Updates.AutoCheck != nil {
 		settings.Updates.AutoCheck = *patch.Updates.AutoCheck
 	}
@@ -292,6 +321,8 @@ func normalizedAppSettings(settings AppSettings) AppSettings {
 	if strings.TrimSpace(settings.RemoteControl.ListenAddr) == "" {
 		settings.RemoteControl.ListenAddr = defaultRemoteControlListenAddr
 	}
+	settings.Cloud.BaseURL = strings.TrimRight(strings.TrimSpace(settings.Cloud.BaseURL), "/")
+	settings.Cloud.AccountToken = strings.TrimSpace(settings.Cloud.AccountToken)
 	return settings
 }
 
@@ -316,6 +347,29 @@ func validateAppSettings(settings AppSettings) error {
 	}
 	if err := validateRemoteControlListenAddr(settings.RemoteControl.ListenAddr); err != nil {
 		return err
+	}
+	if err := validateCloudSettings(settings.Cloud); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateCloudSettings(settings CloudSettings) error {
+	if !settings.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(settings.BaseURL) == "" {
+		return fmt.Errorf("cloud.base_url required when cloud is enabled")
+	}
+	if strings.TrimSpace(settings.AccountToken) == "" {
+		return fmt.Errorf("cloud.account_token required when cloud is enabled")
+	}
+	parsed, err := url.Parse(settings.BaseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("invalid cloud.base_url %q", settings.BaseURL)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("invalid cloud.base_url %q: scheme must be http or https", settings.BaseURL)
 	}
 	return nil
 }

@@ -24,6 +24,8 @@ type CloudDeviceRecord struct {
 	PublicKey            string   `json:"public_key"`
 	PublicKeyFingerprint string   `json:"public_key_fingerprint"`
 	Capabilities         []string `json:"capabilities,omitempty"`
+	CanHost              bool     `json:"can_host"`
+	CanControl           bool     `json:"can_control"`
 	Status               string   `json:"status"`
 	RelayURL             string   `json:"relay_url,omitempty"`
 	LastSeen             string   `json:"last_seen,omitempty"`
@@ -52,6 +54,8 @@ func cloudDeviceRecordFromIdentity(accountIDHash string, identity DeviceIdentity
 		PublicKey:            strings.TrimSpace(identity.PublicKey),
 		PublicKeyFingerprint: strings.TrimSpace(identity.PublicKeyFingerprint),
 		Capabilities:         normalizeCapabilities(identity.Capabilities),
+		CanHost:              true,
+		CanControl:           true,
 		Status:               normalizeCloudDeviceStatus(status),
 		RelayURL:             strings.TrimSpace(relayURL),
 		LastSeen:             now.Format(time.RFC3339Nano),
