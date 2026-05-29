@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +123,113 @@ func TestRemoteHostActionFallsBackToCloudRelay(t *testing.T) {
 	items, _ := response.Result.([]any)
 	if len(items) != 1 || stringValue(mapValue(items[0])["id"]) != workspace.ID {
 		t.Fatalf("workspaces = %#v, want %s", response.Result, workspace.ID)
+	}
+}
+
+func TestControlClientResolveTargetUsesForcedCloudRelay(t *testing.T) {
+	hostApp, _, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
+	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := controlClientResolveTarget(controllerStore, controlClientTargetOptions{
+		UseRelay:     true,
+		CloudBaseURL: broker.URL,
+		CloudToken:   "account-token",
+		HostDeviceID: hostApp.store.hostInfo().Identity.DeviceID,
+		RelayTimeout: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !target.UseRelay || target.BaseURL != "" || target.RelayClient.BaseURL != broker.URL {
+		t.Fatalf("target = %#v, want forced cloud relay target", target)
+	}
+	if target.HostInfo.Identity.DeviceID != hostApp.store.hostInfo().Identity.DeviceID || target.HostInfo.Identity.PublicKey != hostApp.store.hostInfo().Identity.PublicKey {
+		t.Fatalf("target Host identity = %#v, want known Host identity", target.HostInfo.Identity)
+	}
+	if !target.HasExpectedHost || target.ExpectedHost.DeviceID != hostApp.store.hostInfo().Identity.DeviceID {
+		t.Fatalf("target expected Host = %#v, want known Host", target.ExpectedHost)
+	}
+	if target.ControllerDeviceID != controllerStore.deviceIdentity.DeviceID {
+		t.Fatalf("controller device id = %q, want %q", target.ControllerDeviceID, controllerStore.deviceIdentity.DeviceID)
+	}
+}
+
+func TestControlClientSmokeRunsRelayRequestResponseChecks(t *testing.T) {
+	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceFilesWrite, CapabilityWorkspaceExec, CapabilityHostManage)
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	runControlRelayPoller(t, hostApp, client)
+	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := runControlClientSmoke(controllerStore, controlClientSmokeOptions{
+		Target: controlClientTargetOptions{
+			UseRelay:     true,
+			CloudBaseURL: broker.URL,
+			CloudToken:   "account-token",
+			HostDeviceID: hostApp.store.hostInfo().Identity.DeviceID,
+			RelayTimeout: 3 * time.Second,
+		},
+		WorkspaceID:         workspace.ID,
+		Path:                ".",
+		WorkspaceWriteSmoke: true,
+		Sessions:            true,
+		Events:              true,
+		EventsLimit:         10,
+		ExecCommand:         "pwd",
+		TrustList:           true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Target != "cloud-relay:"+hostApp.store.hostInfo().Identity.DeviceID || result.HostDeviceID != hostApp.store.hostInfo().Identity.DeviceID {
+		t.Fatalf("smoke result target = %#v", result)
+	}
+	wantSteps := []string{"workspaces", "workspace_files_read", "sessions", "events", "workspace_files_write", "workspace_files_apply_patch", "workspace_files_move", "workspace_files_delete", "host_trust_list", "workspace_exec"}
+	for _, name := range wantSteps {
+		step, ok := smokeStepByName(result, name)
+		if !ok {
+			t.Fatalf("missing smoke step %q in %#v", name, result.Steps)
+		}
+		if !step.OK {
+			t.Fatalf("smoke step %q = %#v, want ok", name, step)
+		}
+	}
+	execStep, _ := smokeStepByName(result, "workspace_exec")
+	if int(numberValue(execStep.Summary["exit_code"])) != 0 {
+		t.Fatalf("workspace_exec summary = %#v, want exit_code 0", execStep.Summary)
+	}
+	deleteStep, _ := smokeStepByName(result, "workspace_files_delete")
+	if !boolValue(deleteStep.Summary["removed"]) {
+		t.Fatalf("workspace_files_delete summary = %#v, want removed temp path", deleteStep.Summary)
+	}
+}
+
+func TestControlClientSmokeRejectsRelayStreamingChecks(t *testing.T) {
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runControlClientSmoke(controllerStore, controlClientSmokeOptions{
+		Target: controlClientTargetOptions{
+			UseRelay:     true,
+			CloudBaseURL: "http://127.0.0.1:1",
+			CloudToken:   "account-token",
+			HostDeviceID: "dev_host",
+		},
+		WorkspaceID:       "ws_1",
+		SessionID:         "sess_1",
+		StreamPath:        "large.log",
+		EventSubscription: true,
+		AttachmentPath:    "clip.png",
+		MediaEventSeq:     1,
+		MediaID:           "media_1",
+		Terminal:          true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--relay smoke currently supports request/response checks only") {
+		t.Fatalf("err = %v, want relay streaming smoke rejection", err)
 	}
 }
 

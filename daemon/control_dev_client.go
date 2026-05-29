@@ -322,10 +322,14 @@ func runControlDevClientCommand(args []string) error {
 		fs := flag.NewFlagSet("control-client smoke", flag.ContinueOnError)
 		host := fs.String("host", "", "remote Host base URL")
 		discover := fs.Bool("discover", false, "discover a known Host on LAN before connecting")
+		relay := fs.Bool("relay", false, "use cloud relay instead of LAN/direct control")
+		cloudBaseURL := fs.String("cloud-base-url", "", "cloud broker base URL for --relay")
+		cloudToken := fs.String("cloud-token", "", "cloud account token for --relay")
 		hostDeviceID := fs.String("host-device-id", "", "known Host device id for LAN discovery")
 		discoveryPort := fs.Int("discovery-port", defaultRemoteControlDiscoveryPort, "LAN discovery UDP port")
 		discoveryTimeout := fs.Duration("discovery-timeout", 3*time.Second, "LAN discovery timeout")
 		lanTimeout := fs.Duration("lan-timeout", 2*time.Second, "LAN host validation and handshake timeout")
+		relayTimeout := fs.Duration("relay-timeout", controlRelayRoundTripTimeout, "cloud relay request timeout")
 		workspaceID := fs.String("workspace-id", "", "workspace id for workspace/terminal checks")
 		sessionID := fs.String("session-id", "", "session id for attachment/media checks")
 		path := fs.String("path", ".", "workspace path to read when --workspace-id is set")
@@ -353,10 +357,14 @@ func runControlDevClientCommand(args []string) error {
 			Target: controlClientTargetOptions{
 				Host:             *host,
 				Discover:         *discover,
+				UseRelay:         *relay,
+				CloudBaseURL:     *cloudBaseURL,
+				CloudToken:       *cloudToken,
 				HostDeviceID:     *hostDeviceID,
 				DiscoveryPort:    *discoveryPort,
 				DiscoveryTimeout: *discoveryTimeout,
 				LANTimeout:       *lanTimeout,
+				RelayTimeout:     *relayTimeout,
 			},
 			WorkspaceID:         *workspaceID,
 			SessionID:           *sessionID,
@@ -391,10 +399,14 @@ func runControlDevClientCommand(args []string) error {
 type controlClientTargetOptions struct {
 	Host             string
 	Discover         bool
+	UseRelay         bool
+	CloudBaseURL     string
+	CloudToken       string
 	HostDeviceID     string
 	DiscoveryPort    int
 	DiscoveryTimeout time.Duration
 	LANTimeout       time.Duration
+	RelayTimeout     time.Duration
 }
 
 type controlClientTarget struct {
@@ -449,6 +461,9 @@ type controlClientSmokeStep struct {
 }
 
 func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (controlClientTarget, error) {
+	if opts.UseRelay {
+		return controlClientCloudRelayTarget(st, opts)
+	}
 	if opts.Host != "" && !opts.Discover {
 		return controlClientExplicitTargetForKnownHost(st, opts.Host, opts.HostDeviceID)
 	}
@@ -479,6 +494,68 @@ func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (con
 		return controlClientFallbackTarget(opts.Host, err, knownHost, true)
 	}
 	return controlClientTarget{BaseURL: candidate.BaseURL, HostInfo: hostInfo, Timeout: opts.LANTimeout, FallbackHost: strings.TrimSpace(opts.Host), ExpectedHost: knownHost, HasExpectedHost: true}, nil
+}
+
+func controlClientCloudRelayTarget(st *store, opts controlClientTargetOptions) (controlClientTarget, error) {
+	if st == nil {
+		return controlClientTarget{}, fmt.Errorf("controller store required for --relay")
+	}
+	hostDeviceID := strings.TrimSpace(opts.HostDeviceID)
+	if hostDeviceID == "" {
+		return controlClientTarget{}, fmt.Errorf("--host-device-id is required for --relay")
+	}
+	known, ok := st.knownHost(hostDeviceID)
+	if !ok {
+		return controlClientTarget{}, fmt.Errorf("known Host %q is not paired; pair the Host before using --relay", hostDeviceID)
+	}
+	cloudBaseURL := strings.TrimSpace(opts.CloudBaseURL)
+	cloudToken := strings.TrimSpace(opts.CloudToken)
+	if cloudBaseURL == "" || cloudToken == "" {
+		return controlClientTarget{}, fmt.Errorf("--cloud-base-url and --cloud-token are required for --relay")
+	}
+	if opts.RelayTimeout <= 0 {
+		opts.RelayTimeout = controlRelayRoundTripTimeout
+	}
+	client := CloudClient{BaseURL: cloudBaseURL, Token: cloudToken}
+	ctx, cancel := context.WithTimeout(context.Background(), opts.RelayTimeout)
+	defer cancel()
+	devices, err := client.ListDevices(ctx)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	known = normalizeKnownHost(known)
+	for _, device := range devices {
+		if strings.TrimSpace(device.DeviceID) != known.DeviceID {
+			continue
+		}
+		if !device.CanHost || normalizeCloudDeviceStatus(device.Status) != cloudDeviceStatusOnline {
+			return controlClientTarget{}, fmt.Errorf("cloud Host %s is not online for relay", known.DeviceID)
+		}
+		if strings.TrimSpace(device.PublicKey) != "" && strings.TrimSpace(device.PublicKey) != known.PublicKey {
+			return controlClientTarget{}, fmt.Errorf("cloud Host public key mismatch for %s", known.DeviceID)
+		}
+		if strings.TrimSpace(device.PublicKeyFingerprint) != "" && strings.TrimSpace(device.PublicKeyFingerprint) != known.PublicKeyFingerprint {
+			return controlClientTarget{}, fmt.Errorf("cloud Host public key fingerprint mismatch for %s", known.DeviceID)
+		}
+		capabilities := normalizeCapabilities(device.Capabilities)
+		return controlClientTarget{
+			HostInfo: HostInfo{Identity: DeviceIdentity{
+				DeviceID:             known.DeviceID,
+				DeviceName:           firstString(device.DeviceName, known.DeviceName),
+				DeviceKind:           device.DeviceKind,
+				PublicKey:            known.PublicKey,
+				PublicKeyFingerprint: known.PublicKeyFingerprint,
+				Capabilities:         capabilities,
+			}, Capabilities: capabilities},
+			Timeout:            opts.RelayTimeout,
+			UseRelay:           true,
+			RelayClient:        client,
+			ControllerDeviceID: st.deviceIdentity.DeviceID,
+			ExpectedHost:       known,
+			HasExpectedHost:    true,
+		}, nil
+	}
+	return controlClientTarget{}, fmt.Errorf("cloud Host %s was not found for relay", known.DeviceID)
 }
 
 func controlClientExplicitTarget(host string) (controlClientTarget, error) {
@@ -581,12 +658,17 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 	if mediaRequested && (opts.MediaEventSeq <= 0 || opts.MediaID == "") {
 		return controlClientSmokeResult{}, fmt.Errorf("--media-event-seq and --media-id are required together")
 	}
+	if opts.Target.UseRelay {
+		if err := controlClientSmokeValidateRelayOptions(opts); err != nil {
+			return controlClientSmokeResult{}, err
+		}
+	}
 	target, err := controlClientResolveTarget(st, opts.Target)
 	if err != nil {
 		return controlClientSmokeResult{}, err
 	}
 	result := controlClientSmokeResult{
-		Target:       target.BaseURL,
+		Target:       controlClientTargetLabel(target),
 		HostDeviceID: target.HostInfo.Identity.DeviceID,
 	}
 
@@ -723,6 +805,40 @@ func runControlClientSmoke(st *store, opts controlClientSmokeOptions) (controlCl
 		}
 	}
 	return result, nil
+}
+
+func controlClientSmokeValidateRelayOptions(opts controlClientSmokeOptions) error {
+	unsupported := []string{}
+	if opts.EventSubscription {
+		unsupported = append(unsupported, "--event-subscription")
+	}
+	if strings.TrimSpace(opts.AttachmentPath) != "" {
+		unsupported = append(unsupported, "--attachment-path")
+	}
+	if strings.TrimSpace(opts.StreamPath) != "" {
+		unsupported = append(unsupported, "--stream-path")
+	}
+	if opts.MediaEventSeq != 0 || strings.TrimSpace(opts.MediaID) != "" {
+		unsupported = append(unsupported, "--media-event-seq/--media-id")
+	}
+	if opts.Terminal {
+		unsupported = append(unsupported, "--terminal")
+	}
+	if len(unsupported) > 0 {
+		return fmt.Errorf("--relay smoke currently supports request/response checks only; remove %s", strings.Join(unsupported, ", "))
+	}
+	return nil
+}
+
+func controlClientTargetLabel(target controlClientTarget) string {
+	if target.UseRelay {
+		deviceID := strings.TrimSpace(target.HostInfo.Identity.DeviceID)
+		if deviceID == "" {
+			return "cloud-relay"
+		}
+		return "cloud-relay:" + deviceID
+	}
+	return target.BaseURL
 }
 
 func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget, workspaceID, path string, chunkSize int) (controlClientSmokeStep, error) {
