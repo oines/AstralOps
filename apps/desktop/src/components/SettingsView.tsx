@@ -7,15 +7,19 @@ import {
   Database,
   FolderKanban,
   Info,
+  KeyRound,
   MonitorCog,
   RefreshCw,
   Settings,
+  ShieldCheck,
   SlidersHorizontal,
   TerminalSquare,
+  Wifi,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
-import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, HealthResponse } from "../types";
+import type { CoreClient } from "../api";
+import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, DaemonInfo, HealthResponse, HostInfo, TrustGrant } from "../types";
 
 type SettingsCategoryId =
   | "general"
@@ -23,6 +27,7 @@ type SettingsCategoryId =
   | "session"
   | "workspace"
   | "notifications"
+  | "remote"
   | "data"
   | "advanced"
   | "about";
@@ -42,6 +47,8 @@ type SettingsGroup = {
 type SettingsViewProps = {
   health: HealthResponse | null;
   nativeVibrancy: boolean;
+  core: CoreClient | null;
+  daemonInfo: DaemonInfo | null;
   onBack: () => void;
   onClearMediaCache: () => Promise<ClearMediaCacheResponse>;
   onOpenLogs: () => Promise<void>;
@@ -71,6 +78,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     label: "系统",
     items: [
+      { id: "remote", title: "远控", description: "设备、信任和传输边界", icon: MonitorCog },
       { id: "data", title: "数据", description: "缓存和日志", icon: Database },
       { id: "advanced", title: "高级", description: "运行时路径和诊断入口", icon: SlidersHorizontal },
       { id: "about", title: "关于", description: "版本和更新", icon: Info },
@@ -85,6 +93,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   session: { default_agent: "remember", default_permission_mode: "default", default_reasoning_effort: "high" },
   workspace: { default_opener: "vscode", ssh_auto_reconnect: true },
   notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
+  remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true },
   updates: { auto_check: true },
 };
 
@@ -209,6 +218,8 @@ function updateProgressLabel(status: AppUpdateStatus): string {
 }
 
 export function SettingsView({
+  core,
+  daemonInfo,
   health,
   nativeVibrancy,
   onBack,
@@ -334,6 +345,8 @@ export function SettingsView({
           <SettingsContent
             activeId={activeId}
             actionStatus={actionStatus}
+            core={core}
+            daemonInfo={daemonInfo}
             health={health}
             language={language}
             onClearMediaCache={clearMediaCache}
@@ -355,6 +368,8 @@ export function SettingsView({
 function SettingsContent({
   activeId,
   actionStatus,
+  core,
+  daemonInfo,
   health,
   language,
   onClearMediaCache,
@@ -369,6 +384,8 @@ function SettingsContent({
 }: {
   activeId: SettingsCategoryId;
   actionStatus: ActionStatus;
+  core: CoreClient | null;
+  daemonInfo: DaemonInfo | null;
   health: HealthResponse | null;
   language: string;
   onClearMediaCache: () => Promise<void>;
@@ -382,6 +399,8 @@ function SettingsContent({
   updateStatus: AppUpdateStatus | null;
 }): React.JSX.Element {
   switch (activeId) {
+    case "remote":
+      return <RemoteControlContent core={core} daemonInfo={daemonInfo} onPatchSettings={onPatchSettings} savingKeys={savingKeys} settings={settings} />;
     case "appearance":
       return (
         <div className="grid gap-8">
@@ -575,6 +594,159 @@ function SettingsContent({
   }
 }
 
+function RemoteControlContent({
+  core,
+  daemonInfo,
+  onPatchSettings,
+  savingKeys,
+  settings,
+}: {
+  core: CoreClient | null;
+  daemonInfo: DaemonInfo | null;
+  onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
+  savingKeys: ReadonlySet<string>;
+  settings: AppSettings;
+}): React.JSX.Element {
+  const [host, setHost] = useState<HostInfo | null>(null);
+  const [grants, setGrants] = useState<TrustGrant[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
+  const [confirmRevokeId, setConfirmRevokeId] = useState("");
+  const [revokingId, setRevokingId] = useState("");
+
+  const trustedGrants = useMemo(() => grants.filter((grant) => grant.status === "trusted"), [grants]);
+  const revokedGrants = useMemo(() => grants.filter((grant) => grant.status === "revoked"), [grants]);
+
+  const loadRemoteControl = useCallback(async (): Promise<void> => {
+    if (!core) {
+      setHost(null);
+      setGrants([]);
+      setError("Core 未连接");
+      setStatus("");
+      return;
+    }
+    setLoading(true);
+    try {
+      const [hostInfo, trustList] = await Promise.all([core.hostInfo(), core.listTrustedDevices()]);
+      setHost(hostInfo);
+      setGrants(sortTrustGrants(trustList.grants));
+      setError("");
+      setStatus("已刷新");
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError));
+    } finally {
+      setLoading(false);
+    }
+  }, [core]);
+
+  useEffect(() => {
+    void loadRemoteControl();
+  }, [loadRemoteControl]);
+
+  async function revokeGrant(grant: TrustGrant): Promise<void> {
+    if (!core || grant.status !== "trusted") return;
+    if (confirmRevokeId !== grant.controller_device_id) {
+      setConfirmRevokeId(grant.controller_device_id);
+      setStatus("再次点击确认撤销");
+      return;
+    }
+    setRevokingId(grant.controller_device_id);
+    setError("");
+    try {
+      const result = await core.revokeTrustedDevice(grant.controller_device_id);
+      setStatus(`已撤销，关闭 ${result.closed_control_sessions} 个控制连接`);
+      setConfirmRevokeId("");
+      await loadRemoteControl();
+    } catch (revokeError) {
+      setError(revokeError instanceof Error ? revokeError.message : String(revokeError));
+    } finally {
+      setRevokingId("");
+    }
+  }
+
+  return (
+    <div className="grid gap-8">
+      <SettingsSection title="本机 Host">
+        <InfoRow label="设备名" value={host?.identity.device_name || "未加载"} />
+        <InfoRow label="设备类型" value={deviceKindLabel(host?.identity.device_kind)} />
+        <InfoRow label="设备 ID" value={host?.identity.device_id || "未加载"} />
+        <InfoRow label="公钥指纹" value={host?.identity.public_key_fingerprint || "未加载"} />
+        <InfoRow label="平台" value={host ? `${host.platform.os}/${host.platform.arch}` : "未加载"} />
+        <SettingRow title="Host 能力" description="远端可信设备可通过加密控制通道请求的能力" control={<CapabilityList capabilities={host?.capabilities ?? []} align="right" />} />
+      </SettingsSection>
+
+      <SettingsSection title="连接">
+        <SettingRow
+          title="允许被远控"
+          description="开启后启动 Host LAN listener；本机完整 API 不直接开放给远端"
+          control={
+            <ToggleControl
+              disabled={savingKeys.has("remote_control.enabled")}
+              enabled={settings.remote_control.enabled}
+              onChange={(enabled) => onPatchSettings({ remote_control: { enabled } }, "remote_control.enabled")}
+            />
+          }
+        />
+        <SettingRow
+          title="监听地址"
+          description="远控只暴露 /v1/host 和 /v1/control/ws"
+          control={<StatusPill label={daemonInfo?.remote_control?.listen_addr ? `实际 ${daemonInfo.remote_control.listen_addr}` : `配置 ${settings.remote_control.listen_addr}`} tone={daemonInfo?.remote_control?.listen_addr ? "good" : "muted"} />}
+        />
+        <SettingRow
+          title="局域网发现"
+          description="使用 UDP 广播发现；发现后仍需要 Host 身份校验和信任授权"
+          control={
+            <div className="flex items-center gap-2">
+              <StatusPill label={settings.remote_control.enabled && settings.remote_control.lan_discovery ? "跟随监听端口" : "未开启"} tone={settings.remote_control.enabled && settings.remote_control.lan_discovery ? "good" : "muted"} icon={Wifi} />
+              <ToggleControl
+                disabled={!settings.remote_control.enabled || savingKeys.has("remote_control.lan_discovery")}
+                enabled={settings.remote_control.enabled && settings.remote_control.lan_discovery}
+                onChange={(enabled) => onPatchSettings({ remote_control: { lan_discovery: enabled } }, "remote_control.lan_discovery")}
+              />
+            </div>
+          }
+        />
+        <SettingRow title="远程终端" description="远端渲染工作区 PTY，输入和 resize 走加密控制通道" control={<StatusPill label={terminalFeatureLabel(host)} tone={terminalFeatureAvailable(host) ? "good" : "muted"} icon={TerminalSquare} />} />
+      </SettingsSection>
+
+      <SettingsSection title="可信设备">
+        {trustedGrants.length > 0 ? (
+          trustedGrants.map((grant) => (
+            <TrustGrantRow
+              confirmRevokeId={confirmRevokeId}
+              grant={grant}
+              key={grant.controller_device_id}
+              revokingId={revokingId}
+              onRevoke={revokeGrant}
+            />
+          ))
+        ) : (
+          <EmptySettingsRow title="暂无可信控制设备" description="手机、桌面端或其他控制端完成配对后会显示在这里" />
+        )}
+      </SettingsSection>
+
+      {revokedGrants.length > 0 ? (
+        <SettingsSection title="已撤销">
+          {revokedGrants.map((grant) => (
+            <TrustGrantRow
+              confirmRevokeId={confirmRevokeId}
+              grant={grant}
+              key={grant.controller_device_id}
+              revokingId={revokingId}
+              onRevoke={revokeGrant}
+            />
+          ))}
+        </SettingsSection>
+      ) : null}
+
+      <SettingsSection title="操作">
+        <SettingRow title="刷新远控状态" description={error || status || "重新读取 Host identity 和信任列表"} control={<ButtonControl disabled={loading} icon={RefreshCw} label={loading ? "刷新中" : "刷新"} onClick={loadRemoteControl} />} />
+      </SettingsSection>
+    </div>
+  );
+}
+
 function AboutContent({
   health,
   onCheckForUpdates,
@@ -660,6 +832,88 @@ function InfoRow({ label, value }: { label: string; value: string }): React.JSX.
     <div className="grid min-h-[44px] grid-cols-[minmax(0,1fr)_auto] items-center gap-5 border-b border-[var(--ao-border)] px-4 py-2 last:border-b-0">
       <div className="text-[13px] font-semibold text-[var(--ao-text-soft)]">{label}</div>
       <div className="max-w-[460px] truncate text-[13px] font-semibold text-[var(--ao-muted)]" title={value}>{value}</div>
+    </div>
+  );
+}
+
+function EmptySettingsRow({ description, title }: { description: string; title: string }): React.JSX.Element {
+  return (
+    <div className="grid min-h-[64px] border-b border-[var(--ao-border)] px-4 py-3 last:border-b-0">
+      <div className="text-[13px] font-bold leading-5 text-[var(--ao-text)]">{title}</div>
+      <div className="mt-0.5 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">{description}</div>
+    </div>
+  );
+}
+
+function TrustGrantRow({
+  confirmRevokeId,
+  grant,
+  revokingId,
+  onRevoke,
+}: {
+  confirmRevokeId: string;
+  grant: TrustGrant;
+  revokingId: string;
+  onRevoke: (grant: TrustGrant) => Promise<void>;
+}): React.JSX.Element {
+  const trusted = grant.status === "trusted";
+  const confirming = confirmRevokeId === grant.controller_device_id;
+  const revoking = revokingId === grant.controller_device_id;
+  const name = grant.controller_device_name || "未命名设备";
+  const fingerprint = grant.controller_public_key_fingerprint || "未声明指纹";
+  return (
+    <div className="grid min-h-[84px] grid-cols-[minmax(0,1fr)_auto] items-center gap-5 border-b border-[var(--ao-border)] px-4 py-3 last:border-b-0">
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <ShieldCheck size={15} strokeWidth={1.9} className={trusted ? "text-[var(--ao-green)]" : "text-[var(--ao-muted)]"} />
+          <span className="truncate text-[13px] font-bold leading-5 text-[var(--ao-text)]">{name}</span>
+          <StatusPill label={trustStatusLabel(grant.status)} tone={trusted ? "good" : "muted"} />
+        </div>
+        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
+          <span className="truncate">ID {grant.controller_device_id}</span>
+          <span className="inline-flex min-w-0 items-center gap-1">
+            <KeyRound size={12} strokeWidth={1.9} />
+            <span className="truncate">{fingerprint}</span>
+          </span>
+          <span>{policyLabel(grant.workspace_exec_policy)}</span>
+          <span>{trusted ? `更新于 ${formatTimestamp(grant.updated_at)}` : `撤销于 ${formatTimestamp(grant.revoked_at || grant.updated_at)}`}</span>
+        </div>
+        <CapabilityList capabilities={grant.capabilities} align="left" />
+      </div>
+      <ButtonControl
+        disabled={!trusted || revoking}
+        label={!trusted ? "已撤销" : revoking ? "撤销中" : confirming ? "确认撤销" : "撤销"}
+        onClick={() => onRevoke(grant)}
+      />
+    </div>
+  );
+}
+
+function StatusPill({ icon: Icon, label, tone = "muted" }: { icon?: LucideIcon; label: string; tone?: "good" | "muted" | "warning" }): React.JSX.Element {
+  const toneClass = tone === "good" ? "text-[var(--ao-green)]" : tone === "warning" ? "text-[var(--ao-warning)]" : "text-[var(--ao-muted-strong)]";
+  return (
+    <span className={`inline-flex h-7 max-w-[280px] items-center gap-1.5 rounded-lg bg-black/[0.045] px-2.5 text-[12px] font-semibold ${toneClass}`} title={label}>
+      {Icon ? <Icon size={14} strokeWidth={1.9} /> : null}
+      <span className="truncate">{label}</span>
+    </span>
+  );
+}
+
+function CapabilityList({ align, capabilities }: { align: "left" | "right"; capabilities: readonly string[] }): React.JSX.Element {
+  if (capabilities.length === 0) {
+    return <span className="text-[12px] font-semibold text-[var(--ao-muted)]">未声明</span>;
+  }
+  return (
+    <div className={`flex max-w-[520px] flex-wrap gap-1.5 ${align === "right" ? "justify-end" : "mt-2 justify-start"}`}>
+      {capabilities.map((capability) => (
+        <span
+          className="inline-flex h-6 items-center rounded-md bg-black/[0.045] px-2 text-[11px] font-semibold leading-6 text-[var(--ao-muted-strong)]"
+          key={capability}
+          title={capability}
+        >
+          {capabilityLabel(capability)}
+        </span>
+      ))}
     </div>
   );
 }
@@ -813,6 +1067,82 @@ function PreviewSwatches({
       ))}
     </div>
   );
+}
+
+function sortTrustGrants(grants: TrustGrant[]): TrustGrant[] {
+  return [...grants].sort((left, right) => {
+    if (left.status === "trusted" && right.status !== "trusted") return -1;
+    if (left.status !== "trusted" && right.status === "trusted") return 1;
+    return timestampValue(right.updated_at) - timestampValue(left.updated_at);
+  });
+}
+
+function timestampValue(value?: string): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatTimestamp(value?: string): string {
+  if (!value) return "未知";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function terminalFeatureAvailable(host: HostInfo | null): boolean {
+  return Boolean(host?.features.terminal?.available);
+}
+
+function terminalFeatureLabel(host: HostInfo | null): string {
+  const terminal = host?.features.terminal;
+  if (!terminal) return "未声明";
+  if (terminal.available) return "可用";
+  return terminal.reason ? `不可用：${terminal.reason}` : "不可用";
+}
+
+function deviceKindLabel(kind?: string): string {
+  if (kind === "desktop") return "桌面端";
+  if (kind === "mobile") return "手机端";
+  return kind || "未加载";
+}
+
+function trustStatusLabel(status: string): string {
+  if (status === "trusted") return "可信";
+  if (status === "revoked") return "已撤销";
+  return status || "未知";
+}
+
+function policyLabel(policy?: string): string {
+  if (policy === "trusted") return "命令可执行";
+  if (policy === "require_approval") return "命令需确认";
+  if (policy === "disabled") return "命令禁用";
+  return policy || "默认策略";
+}
+
+function capabilityLabel(capability: string): string {
+  const labels: Record<string, string> = {
+    "core.read": "读状态",
+    "core.control": "控会话",
+    "interaction.respond": "回应确认",
+    "session.edit": "编辑会话",
+    "attachment.ingest": "上传附件",
+    "media.read": "读媒体",
+    "media.download": "下载媒体",
+    "media.stream": "媒体流",
+    "workspace.files.read": "读文件",
+    "workspace.files.write": "写文件",
+    "workspace.exec": "执行命令",
+    "terminal.open": "打开终端",
+    "terminal.input": "终端输入",
+    "host.manage": "管理 Host",
+  };
+  return labels[capability] ?? capability;
 }
 
 function healthValue(health: HealthResponse | null, key: string): string {

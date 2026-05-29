@@ -7,6 +7,9 @@ import type {
   EditLastUserMessageRequest,
   FileListResponse,
   HealthResponse,
+  HostInfo,
+  HostTrustListResult,
+  HostTrustRevokeResult,
   Session,
   SessionCommandListResponse,
   SessionCommandResponse,
@@ -63,6 +66,9 @@ export interface TerminalClient {
 export interface CoreClient {
   readonly terminal: TerminalClient;
   health(): Promise<HealthResponse>;
+  hostInfo(): Promise<HostInfo>;
+  listTrustedDevices(): Promise<HostTrustListResult>;
+  revokeTrustedDevice(controllerDeviceId: string): Promise<HostTrustRevokeResult>;
   settings(): Promise<AppSettings>;
   patchSettings(patch: AppSettingsPatch): Promise<AppSettings>;
   clearMediaCache(): Promise<ClearMediaCacheResponse>;
@@ -193,6 +199,22 @@ export class LocalCoreClient implements CoreClient {
 
   health(): Promise<HealthResponse> {
     return this.channel.request("GET", "/v1/health", undefined, false);
+  }
+
+  hostInfo(): Promise<HostInfo> {
+    return this.channel.request("GET", "/v1/host");
+  }
+
+  async listTrustedDevices(): Promise<HostTrustListResult> {
+    const result = await this.channel.request<HostTrustListResult>("GET", "/v1/trust/devices");
+    if (!Array.isArray(result.grants)) {
+      throw new Error("trust list response missing grants");
+    }
+    return result;
+  }
+
+  revokeTrustedDevice(controllerDeviceId: string): Promise<HostTrustRevokeResult> {
+    return this.channel.request("POST", `/v1/trust/devices/${encodeURIComponent(controllerDeviceId)}/revoke`, {});
   }
 
   settings(): Promise<AppSettings> {

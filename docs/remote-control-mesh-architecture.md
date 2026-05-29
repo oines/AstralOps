@@ -177,16 +177,18 @@ UDP response:
   candidate.port
 ```
 
-当前 daemon MVP 通过显式环境变量开启 LAN listener：
+当前 daemon 通过本机设置开启 LAN listener：
 
 ```text
-ASTRALOPS_CONTROL_LISTEN=0.0.0.0:43900
+remote_control.enabled=true
+remote_control.listen_addr=0.0.0.0:43900
+remote_control.lan_discovery=true
 ```
 
-开启 LAN listener 时，daemon 默认开启 UDP discovery。开发或排障时可以关闭：
+开启 LAN listener 时，daemon 默认开启 UDP discovery。Desktop 设置页必须只写入本机 daemon settings；云端不能替用户默认开启 Host。开发或排障时可以关闭 discovery：
 
 ```text
-ASTRALOPS_CONTROL_DISCOVERY=0
+remote_control.lan_discovery=false
 ```
 
 LAN listener 只暴露远控所需的最小接口：

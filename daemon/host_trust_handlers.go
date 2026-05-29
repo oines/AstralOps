@@ -32,7 +32,7 @@ func (a *app) handleHost(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleTrustDevices(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, a.store.listTrustGrants())
+		writeJSON(w, http.StatusOK, hostTrustListResult{Grants: a.store.listTrustGrants()})
 	case http.MethodPost:
 		var req trustDeviceRequest
 		if err := decodeJSON(r.Body, &req); err != nil {
@@ -68,7 +68,7 @@ func (a *app) handleTrustDeviceAction(w http.ResponseWriter, r *http.Request) {
 			writeActionError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "grant": result.Grant, "closed_control_sessions": result.ClosedControlSessions, "released_terminal_writers": result.ReleasedTerminalWriters})
+		writeJSON(w, http.StatusOK, result)
 		return
 	}
 	w.WriteHeader(http.StatusNotFound)

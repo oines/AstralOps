@@ -1,10 +1,14 @@
-import type { AgentKind, AppSettings, AppSettingsPatch, AstralEvent, ClearMediaCacheResponse, CreateWorkspaceRequest, HealthResponse, ModelInfo, PendingInteractionView, QueuedInputView, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, Workspace, WorkspaceConnection } from "@astralops/protocol";
+import type { AgentKind, AppSettings, AppSettingsPatch, AstralEvent, ClearMediaCacheResponse, CreateWorkspaceRequest, HealthResponse, HostInfo, HostTrustListResult, HostTrustRevokeResult, ModelInfo, PendingInteractionView, QueuedInputView, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, TrustGrant, Workspace, WorkspaceConnection } from "@astralops/protocol";
 
 export type DaemonInfo = {
   host: string;
   port: number;
   token: string;
   pid: number;
+  remote_control?: {
+    listen_addr: string;
+    paths: string[];
+  };
 };
 
 export type ConnectionState = "booting" | "connected" | "reconnecting" | "failed";
@@ -49,4 +53,4 @@ export type WorkspaceCommandResponse = {
   duration_ms: number;
 };
 
-export type { AgentKind, AppSettings, AppSettingsPatch, AstralEvent, ClearMediaCacheResponse, CreateWorkspaceRequest, HealthResponse, ModelInfo, QueuedInputView, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, Workspace, WorkspaceConnection };
+export type { AgentKind, AppSettings, AppSettingsPatch, AstralEvent, ClearMediaCacheResponse, CreateWorkspaceRequest, HealthResponse, HostInfo, HostTrustListResult, HostTrustRevokeResult, ModelInfo, QueuedInputView, Session, SessionCommand, SessionInputAttachment, SessionView, TranscriptMedia, TrustGrant, Workspace, WorkspaceConnection };

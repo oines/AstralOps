@@ -1282,6 +1282,11 @@ export type AppSettings = {
     requires_action: boolean;
     quiet_when_focused: boolean;
   };
+  remote_control: {
+    enabled: boolean;
+    listen_addr: string;
+    lan_discovery: boolean;
+  };
   updates: {
     auto_check: boolean;
   };
@@ -1293,6 +1298,7 @@ export type AppSettingsPatch = {
   session?: Partial<AppSettings["session"]>;
   workspace?: Partial<AppSettings["workspace"]>;
   notifications?: Partial<AppSettings["notifications"]>;
+  remote_control?: Partial<AppSettings["remote_control"]>;
   updates?: Partial<AppSettings["updates"]>;
 };
 

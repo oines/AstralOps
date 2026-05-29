@@ -14,13 +14,14 @@ import (
 const appSettingsVersion = 1
 
 type AppSettings struct {
-	Version       int                  `json:"version"`
-	General       GeneralSettings      `json:"general"`
-	Appearance    AppearanceSettings   `json:"appearance"`
-	Session       SessionSettings      `json:"session"`
-	Workspace     WorkspaceSettings    `json:"workspace"`
-	Notifications NotificationSettings `json:"notifications"`
-	Updates       UpdateSettings       `json:"updates"`
+	Version       int                   `json:"version"`
+	General       GeneralSettings       `json:"general"`
+	Appearance    AppearanceSettings    `json:"appearance"`
+	Session       SessionSettings       `json:"session"`
+	Workspace     WorkspaceSettings     `json:"workspace"`
+	Notifications NotificationSettings  `json:"notifications"`
+	RemoteControl RemoteControlSettings `json:"remote_control"`
+	Updates       UpdateSettings        `json:"updates"`
 }
 
 type GeneralSettings struct {
@@ -50,17 +51,24 @@ type NotificationSettings struct {
 	QuietWhenFocused bool `json:"quiet_when_focused"`
 }
 
+type RemoteControlSettings struct {
+	Enabled      bool   `json:"enabled"`
+	ListenAddr   string `json:"listen_addr"`
+	LANDiscovery bool   `json:"lan_discovery"`
+}
+
 type UpdateSettings struct {
 	AutoCheck bool `json:"auto_check"`
 }
 
 type appSettingsPatch struct {
-	General       *generalSettingsPatch      `json:"general,omitempty"`
-	Appearance    *appearanceSettingsPatch   `json:"appearance,omitempty"`
-	Session       *sessionSettingsPatch      `json:"session,omitempty"`
-	Workspace     *workspaceSettingsPatch    `json:"workspace,omitempty"`
-	Notifications *notificationSettingsPatch `json:"notifications,omitempty"`
-	Updates       *updateSettingsPatch       `json:"updates,omitempty"`
+	General       *generalSettingsPatch       `json:"general,omitempty"`
+	Appearance    *appearanceSettingsPatch    `json:"appearance,omitempty"`
+	Session       *sessionSettingsPatch       `json:"session,omitempty"`
+	Workspace     *workspaceSettingsPatch     `json:"workspace,omitempty"`
+	Notifications *notificationSettingsPatch  `json:"notifications,omitempty"`
+	RemoteControl *remoteControlSettingsPatch `json:"remote_control,omitempty"`
+	Updates       *updateSettingsPatch        `json:"updates,omitempty"`
 }
 
 type generalSettingsPatch struct {
@@ -88,6 +96,12 @@ type notificationSettingsPatch struct {
 	TaskComplete     *bool `json:"task_complete,omitempty"`
 	RequiresAction   *bool `json:"requires_action,omitempty"`
 	QuietWhenFocused *bool `json:"quiet_when_focused,omitempty"`
+}
+
+type remoteControlSettingsPatch struct {
+	Enabled      *bool   `json:"enabled,omitempty"`
+	ListenAddr   *string `json:"listen_addr,omitempty"`
+	LANDiscovery *bool   `json:"lan_discovery,omitempty"`
 }
 
 type updateSettingsPatch struct {
@@ -125,6 +139,11 @@ func defaultAppSettings() AppSettings {
 			RequiresAction:   true,
 			QuietWhenFocused: false,
 		},
+		RemoteControl: RemoteControlSettings{
+			Enabled:      false,
+			ListenAddr:   defaultRemoteControlListenAddr,
+			LANDiscovery: true,
+		},
 		Updates: UpdateSettings{
 			AutoCheck: true,
 		},
@@ -158,6 +177,10 @@ func (s *settingsStore) get() AppSettings {
 }
 
 func (s *settingsStore) patch(patch appSettingsPatch) (AppSettings, error) {
+	return s.patchWithHook(patch, nil, nil)
+}
+
+func (s *settingsStore) patchWithHook(patch appSettingsPatch, beforeCommit func(previous, next AppSettings) error, rollback func(previous AppSettings)) (AppSettings, error) {
 	if s == nil {
 		return AppSettings{}, errors.New("settings store is not initialized")
 	}
@@ -170,7 +193,15 @@ func (s *settingsStore) patch(patch appSettingsPatch) (AppSettings, error) {
 	if err := validateAppSettings(next); err != nil {
 		return s.settings, err
 	}
+	if beforeCommit != nil {
+		if err := beforeCommit(s.settings, next); err != nil {
+			return s.settings, err
+		}
+	}
 	if err := writeSettingsFile(s.path, next); err != nil {
+		if rollback != nil {
+			rollback(s.settings)
+		}
 		return s.settings, err
 	}
 	s.settings = next
@@ -222,6 +253,17 @@ func applySettingsPatch(settings *AppSettings, patch appSettingsPatch) {
 			settings.Notifications.QuietWhenFocused = *patch.Notifications.QuietWhenFocused
 		}
 	}
+	if patch.RemoteControl != nil {
+		if patch.RemoteControl.Enabled != nil {
+			settings.RemoteControl.Enabled = *patch.RemoteControl.Enabled
+		}
+		if patch.RemoteControl.ListenAddr != nil {
+			settings.RemoteControl.ListenAddr = strings.TrimSpace(*patch.RemoteControl.ListenAddr)
+		}
+		if patch.RemoteControl.LANDiscovery != nil {
+			settings.RemoteControl.LANDiscovery = *patch.RemoteControl.LANDiscovery
+		}
+	}
 	if patch.Updates != nil && patch.Updates.AutoCheck != nil {
 		settings.Updates.AutoCheck = *patch.Updates.AutoCheck
 	}
@@ -247,6 +289,9 @@ func normalizedAppSettings(settings AppSettings) AppSettings {
 	if settings.Workspace.DefaultOpener == "" {
 		settings.Workspace.DefaultOpener = "vscode"
 	}
+	if strings.TrimSpace(settings.RemoteControl.ListenAddr) == "" {
+		settings.RemoteControl.ListenAddr = defaultRemoteControlListenAddr
+	}
 	return settings
 }
 
@@ -268,6 +313,9 @@ func validateAppSettings(settings AppSettings) error {
 	}
 	if !oneOf(settings.Workspace.DefaultOpener, "vscode", "finder", "terminal") {
 		return fmt.Errorf("invalid workspace.default_opener %q", settings.Workspace.DefaultOpener)
+	}
+	if err := validateRemoteControlListenAddr(settings.RemoteControl.ListenAddr); err != nil {
+		return err
 	}
 	return nil
 }
@@ -330,7 +378,18 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		settings, err := a.settings.patch(patch)
+		settings, err := a.settings.patchWithHook(patch, func(previous, next AppSettings) error {
+			if !remoteControlSettingsChanged(previous.RemoteControl, next.RemoteControl) {
+				return nil
+			}
+			if err := a.applyRemoteControlSettings(next.RemoteControl); err != nil {
+				return err
+			}
+			return a.writeRuntimeFile()
+		}, func(previous AppSettings) {
+			_ = a.applyRemoteControlSettings(previous.RemoteControl)
+			_ = a.writeRuntimeFile()
+		})
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return

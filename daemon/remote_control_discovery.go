@@ -11,8 +11,6 @@ import (
 )
 
 const (
-	envRemoteControlDiscovery = "ASTRALOPS_CONTROL_DISCOVERY"
-
 	remoteControlDiscoveryRequestType  = "astralops.discovery.request"
 	remoteControlDiscoveryResponseType = "astralops.discovery.response"
 	defaultRemoteControlDiscoveryPort  = 43900

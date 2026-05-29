@@ -671,7 +671,15 @@ autoUpdater.on("error", (error) => {
 });
 
 ipcMain.handle("astral:get-daemon-info", async () => {
-  if (daemonInfo) return daemonInfo;
+  if (daemonInfo) {
+    try {
+      const raw = fs.readFileSync(runtimePath(), "utf8");
+      daemonInfo = JSON.parse(raw);
+      return daemonInfo;
+    } catch {
+      return daemonInfo;
+    }
+  }
   return waitForDaemon();
 });
 

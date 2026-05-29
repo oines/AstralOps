@@ -173,11 +173,32 @@ func TestHostAndTrustHandlers(t *testing.T) {
 		t.Fatalf("trust status = %d body = %s", trustRR.Code, trustRR.Body.String())
 	}
 
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/trust/devices", nil)
+	listRR := httptest.NewRecorder()
+	app.handleTrustDevices(listRR, listReq)
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("trust list status = %d body = %s", listRR.Code, listRR.Body.String())
+	}
+	var listResult hostTrustListResult
+	if err := json.Unmarshal(listRR.Body.Bytes(), &listResult); err != nil {
+		t.Fatalf("trust list response did not match protocol result: %v body = %s", err, listRR.Body.String())
+	}
+	if len(listResult.Grants) != 1 || listResult.Grants[0].ControllerDeviceID != "dev_phone" {
+		t.Fatalf("trust list = %#v, want dev_phone grant", listResult.Grants)
+	}
+
 	revokeReq := httptest.NewRequest(http.MethodPost, "/v1/trust/devices/dev_phone/revoke", nil)
 	revokeRR := httptest.NewRecorder()
 	app.handleTrustDeviceAction(revokeRR, revokeReq)
 	if revokeRR.Code != http.StatusOK {
 		t.Fatalf("revoke status = %d body = %s", revokeRR.Code, revokeRR.Body.String())
+	}
+	var revokeResult hostTrustRevokeResult
+	if err := json.Unmarshal(revokeRR.Body.Bytes(), &revokeResult); err != nil {
+		t.Fatalf("revoke response did not match protocol result: %v body = %s", err, revokeRR.Body.String())
+	}
+	if revokeResult.ControllerDeviceID != "dev_phone" || revokeResult.Grant.Status != TrustStatusRevoked || revokeResult.RevokedAt == "" {
+		t.Fatalf("revoke result = %#v, want protocol revoke result", revokeResult)
 	}
 	events := st.allEvents()
 	if !containsEventKind(events, "control.trust.granted") || !containsEventKind(events, "control.trust.revoked") {

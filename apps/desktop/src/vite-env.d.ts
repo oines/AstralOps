@@ -34,7 +34,7 @@ declare global {
   interface Window {
     astral: {
       platform: string;
-      getDaemonInfo: () => Promise<{ host: string; port: number; token: string; pid: number }>;
+      getDaemonInfo: () => Promise<import("./types").DaemonInfo>;
       chooseDirectory: () => Promise<string | null>;
       chooseFiles: () => Promise<string[]>;
       ingestFiles: (sessionId: string, filePaths: string[]) => Promise<import("@astralops/protocol").SessionInputAttachment[]>;

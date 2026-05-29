@@ -29,6 +29,7 @@ import type {
   ClearMediaCacheResponse,
   ConnectionState,
   CreateWorkspaceRequest,
+  DaemonInfo,
   HealthResponse,
   PermissionMode,
   ReasoningEffort,
@@ -49,6 +50,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   session: { default_agent: "remember", default_permission_mode: "default", default_reasoning_effort: "high" },
   workspace: { default_opener: "vscode", ssh_auto_reconnect: true },
   notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
+  remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true },
   updates: { auto_check: true },
 };
 
@@ -64,6 +66,7 @@ function sessionTimestamp(session: Session): number {
 export function App(): React.JSX.Element {
   const [connection, setConnection] = useState<ConnectionState>("booting");
   const [api, setApi] = useState<CoreClient | null>(null);
+  const [daemonInfo, setDaemonInfo] = useState<DaemonInfo | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [settingsSavingKeys, setSettingsSavingKeys] = useState<Set<string>>(() => new Set());
@@ -318,6 +321,7 @@ export function App(): React.JSX.Element {
       try {
         const info = await window.astral.getDaemonInfo();
         if (cancelled) return;
+        setDaemonInfo(info);
         const client = createLocalCoreClient(info);
         const initialEvents = await loadInitialState(client);
         if (cancelled) return;
@@ -380,6 +384,7 @@ export function App(): React.JSX.Element {
         const next = await api.patchSettings(patch);
         appSettingsRef.current = next;
         setAppSettings(next);
+        void window.astral.getDaemonInfo().then(setDaemonInfo).catch(() => undefined);
       } catch (settingsPatchError) {
         setAppSettings(previous);
         const message = settingsPatchError instanceof Error ? settingsPatchError.message : String(settingsPatchError);
@@ -751,6 +756,8 @@ export function App(): React.JSX.Element {
           nativeVibrancy={nativeVibrancy}
           onBack={() => setSettingsOpen(false)}
           onClearMediaCache={clearMediaCache}
+          core={api}
+          daemonInfo={daemonInfo}
           onOpenLogs={openLogsDirectory}
           onPatchSettings={patchAppSettings}
         />

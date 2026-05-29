@@ -27,6 +27,7 @@ type app struct {
 	settings          *settingsStore
 	token             string
 	addr              string
+	runtimePort       int
 	hub               *eventHub
 	upgrader          websocket.Upgrader
 	agents            map[AgentKind]agentInfo
@@ -45,6 +46,8 @@ type app struct {
 	codexExec         map[string]codexExecCommand
 	codexRemoteHomeMu sync.Mutex
 	codexRemoteHome   map[string]string
+	remoteControlMu   sync.Mutex
+	remoteControl     *remoteControlRuntime
 }
 
 func main() {
@@ -84,6 +87,7 @@ func main() {
 		settings:    settings,
 		token:       token,
 		addr:        localTCPHostPort(ln.Addr().String()),
+		runtimePort: port,
 		hub:         newEventHub(),
 		agents:      discoverAgents(),
 		projections: newSessionProjectionCache(),
@@ -104,12 +108,11 @@ func main() {
 	a.runtimes = newRuntimeRegistry(a)
 	a.ssh.restorePersistedConnections(context.Background())
 
-	remoteControlAddr, err := startRemoteControlListener(a)
-	if err != nil {
+	if err := a.applyRemoteControlSettings(a.currentSettings().RemoteControl); err != nil {
 		log.Fatal(err)
 	}
 
-	if err := writeRuntime(dataDir, port, token, remoteControlAddr); err != nil {
+	if err := a.writeRuntimeFile(); err != nil {
 		log.Fatal(err)
 	}
 
@@ -167,6 +170,9 @@ func randomToken() string {
 
 func writeRuntime(dataDir string, port int, token string, remoteControlAddr string) error {
 	path := filepath.Join(dataDir, "runtime", "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 	value := map[string]any{
 		"host":       "127.0.0.1",
 		"port":       port,
@@ -182,6 +188,13 @@ func writeRuntime(dataDir string, port int, token string, remoteControlAddr stri
 	}
 	body, _ := json.MarshalIndent(value, "", "  ")
 	return os.WriteFile(path, body, 0o600)
+}
+
+func (a *app) writeRuntimeFile() error {
+	if a == nil || a.store == nil {
+		return errors.New("store is not initialized")
+	}
+	return writeRuntime(a.store.dataDir, a.runtimePort, a.token, a.remoteControlListenAddr())
 }
 
 func (a *app) codexExecServerURL(workspaceID string) string {
