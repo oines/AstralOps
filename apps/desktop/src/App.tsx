@@ -120,6 +120,10 @@ export function App(): React.JSX.Element {
   const updateAutoCheckStartedRef = useRef(false);
   const appSettingsRef = useRef<AppSettings>(DEFAULT_APP_SETTINGS);
   const appChromeRef = useRef<HTMLDivElement | null>(null);
+  const sessionViewRefreshTimersRef = useRef<Record<string, number>>({});
+  const sessionViewRefreshInFlightRef = useRef<Set<string>>(new Set());
+  const sessionViewRefreshPendingRef = useRef<Set<string>>(new Set());
+  const sessionViewRefreshGenerationRef = useRef(0);
 
   const refreshRemoteHosts = useCallback(async (): Promise<void> => {
     if (!daemonInfo) {
@@ -273,6 +277,28 @@ export function App(): React.JSX.Element {
     setSessions((current) => sortSessionsByUpdated(current.map((session) => (session.id === view.session.id ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session))));
     setActiveSession((current) => (current?.id === view.session.id ? { ...current, ...view.session, title: view.title || view.session.title, status: view.status } : current));
   }, []);
+
+  const scheduleSessionViewRefresh = useCallback((client: CoreClient, sessionId: string, generation = sessionViewRefreshGenerationRef.current, delayMs = 250) => {
+    if (sessionViewRefreshTimersRef.current[sessionId] !== undefined) return;
+    sessionViewRefreshTimersRef.current[sessionId] = window.setTimeout(() => {
+      delete sessionViewRefreshTimersRef.current[sessionId];
+      if (generation !== sessionViewRefreshGenerationRef.current) return;
+      if (sessionViewRefreshInFlightRef.current.has(sessionId)) {
+        sessionViewRefreshPendingRef.current.add(sessionId);
+        return;
+      }
+      sessionViewRefreshInFlightRef.current.add(sessionId);
+      void client.sessionView(sessionId).then((view) => {
+        if (generation === sessionViewRefreshGenerationRef.current) storeSessionView(view);
+      }).catch(() => undefined).finally(() => {
+        if (generation !== sessionViewRefreshGenerationRef.current) return;
+        sessionViewRefreshInFlightRef.current.delete(sessionId);
+        if (sessionViewRefreshPendingRef.current.delete(sessionId)) {
+          scheduleSessionViewRefresh(client, sessionId, generation, delayMs);
+        }
+      });
+    }, delayMs);
+  }, [storeSessionView]);
 
   const {
     activeCommands,
@@ -668,14 +694,13 @@ export function App(): React.JSX.Element {
           permission_mode: runMode === "plan" ? "plan" : claudeSSHRemote ? "bypassPermissions" : permissionMode,
           attachments,
         });
-        const view = await api.sessionView(activeSession.id).catch(() => null);
-        if (view) storeSessionView(view);
+        scheduleSessionViewRefresh(api, activeSession.id);
       } catch (sendError) {
         setError(sendError instanceof Error ? sendError.message : String(sendError));
         throw sendError;
       }
     },
-    [activeSession, activeWorkspace, api, claudeSSHRemote, permissionMode, runMode, selectedModel, selectedReasoningEffort, storeSessionView, workspaceInteractive],
+    [activeSession, activeWorkspace, api, claudeSSHRemote, permissionMode, runMode, scheduleSessionViewRefresh, selectedModel, selectedReasoningEffort, workspaceInteractive],
   );
 
   const handleEditUserMessage = useCallback(
@@ -834,6 +859,12 @@ export function App(): React.JSX.Element {
     if (!daemonInfo || !localApi || !activeHostId) return;
     let subscription: EventSubscription | null = null;
     let cancelled = false;
+    sessionViewRefreshGenerationRef.current += 1;
+    const refreshGeneration = sessionViewRefreshGenerationRef.current;
+    for (const timer of Object.values(sessionViewRefreshTimersRef.current)) window.clearTimeout(timer);
+    sessionViewRefreshTimersRef.current = {};
+    sessionViewRefreshInFlightRef.current.clear();
+    sessionViewRefreshPendingRef.current.clear();
     const client = activeHostIsLocal ? localApi : createRemoteCoreClient(daemonInfo, activeHostId);
 
     async function loadSelectedHost(): Promise<void> {
@@ -868,9 +899,7 @@ export function App(): React.JSX.Element {
               setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
             }
             if (event.session_id) {
-              void client.sessionView(event.session_id).then((view) => {
-                if (!cancelled) storeSessionView(view);
-              }).catch(() => undefined);
+              scheduleSessionViewRefresh(client, event.session_id, refreshGeneration);
             }
             if (activeHostIsLocal) maybeNotifyLiveEvent(event);
             queueLiveEvent(event);
@@ -903,9 +932,13 @@ export function App(): React.JSX.Element {
         window.cancelAnimationFrame(sseFrameRef.current);
         sseFrameRef.current = null;
       }
+      for (const timer of Object.values(sessionViewRefreshTimersRef.current)) window.clearTimeout(timer);
+      sessionViewRefreshTimersRef.current = {};
+      sessionViewRefreshInFlightRef.current.clear();
+      sessionViewRefreshPendingRef.current.clear();
       sseQueueRef.current = [];
     };
-  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, storeSessionView]);
+  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, scheduleSessionViewRefresh, storeSessionView]);
 
   const sessionTitles = useMemo(
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),
