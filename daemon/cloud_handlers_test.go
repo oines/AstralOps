@@ -278,6 +278,103 @@ func TestCloudPairingApprovalResolvesCloudSignalAfterLocalTrust(t *testing.T) {
 	}
 }
 
+func TestCloudRuntimeRevokedDeviceRevokesLocalTrustAndKnownHost(t *testing.T) {
+	app, broker := testCloudApp(t)
+	defer broker.Close()
+
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	if err := app.cloudRegisterAndHeartbeat(t.Context(), client); err != nil {
+		t.Fatal(err)
+	}
+	other := testCloudDeviceRegistration(t, "dev_other", "desktop", true, true)
+	if _, err := client.RegisterDevice(t.Context(), DeviceIdentity{
+		DeviceID:             other.DeviceID,
+		DeviceName:           other.DeviceName,
+		DeviceKind:           other.DeviceKind,
+		PublicKey:            other.PublicKey,
+		PublicKeyFingerprint: other.PublicKeyFingerprint,
+		Capabilities:         other.Capabilities,
+	}, true, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:             other.DeviceID,
+		ControllerDeviceName:           other.DeviceName,
+		ControllerPublicKey:            other.PublicKey,
+		ControllerPublicKeyFingerprint: other.PublicKeyFingerprint,
+		Capabilities:                   []string{CapabilityCoreRead},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.rememberKnownHost(HostInfo{Identity: DeviceIdentity{
+		DeviceID:             other.DeviceID,
+		DeviceName:           other.DeviceName,
+		DeviceKind:           other.DeviceKind,
+		PublicKey:            other.PublicKey,
+		PublicKeyFingerprint: other.PublicKeyFingerprint,
+		Capabilities:         other.Capabilities,
+	}}, "http://127.0.0.1:43900"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.RemoveDevice(t.Context(), other.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.cloudRegisterAndHeartbeat(t.Context(), client); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := app.store.trustedControlGrant(other.DeviceID); ok {
+		t.Fatal("cloud revoked device still has trusted local grant")
+	}
+	grants := app.store.listTrustGrants()
+	if len(grants) == 0 || grants[0].ControllerDeviceID != other.DeviceID || grants[0].Status != TrustStatusRevoked {
+		t.Fatalf("grants = %#v, want revoked grant for cloud removed device", grants)
+	}
+	known, ok := app.store.knownHost(other.DeviceID)
+	if !ok || !knownHostRevoked(known) {
+		t.Fatalf("known Host = %#v ok=%v, want cloud revoked known Host", known, ok)
+	}
+	if _, err := app.remoteHostTarget(other.DeviceID); err == nil {
+		t.Fatal("remote Host target succeeded for cloud revoked known Host")
+	} else {
+		assertActionError(t, err, http.StatusForbidden, "known_host_revoked")
+	}
+	if !containsEventKind(app.store.queryEvents("", "", 0), "control.trust.revoked") {
+		t.Fatalf("events = %#v, want trust revoked audit event", eventKinds(app.store.queryEvents("", "", 0)))
+	}
+}
+
+func TestCloudRuntimeSelfRevokedBlocksRemoteTargets(t *testing.T) {
+	app, broker := testCloudApp(t)
+	defer broker.Close()
+
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	if err := app.cloudRegisterAndHeartbeat(t.Context(), client); err != nil {
+		t.Fatal(err)
+	}
+	hostStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.rememberKnownHost(hostStore.hostInfo(), "http://127.0.0.1:43900"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.RemoveDevice(t.Context(), app.store.hostInfo().Identity.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.cloudRegisterAndHeartbeat(t.Context(), client); err == nil || !strings.Contains(err.Error(), "removed from cloud mesh") {
+		t.Fatalf("self revoked sync err = %v, want removed from cloud mesh", err)
+	}
+	if !app.currentDeviceCloudRevoked() {
+		t.Fatal("current device cloud revoked flag was not set")
+	}
+	if _, err := app.remoteHostTarget(hostStore.hostInfo().Identity.DeviceID); err == nil {
+		t.Fatal("remote Host target succeeded after current device was removed from cloud mesh")
+	} else {
+		assertActionError(t, err, http.StatusForbidden, "cloud_device_revoked")
+	}
+}
+
 func TestRemoteHostsImportsApprovedCloudPairingAsKnownHost(t *testing.T) {
 	app, broker := testCloudApp(t)
 	defer broker.Close()

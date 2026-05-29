@@ -74,6 +74,21 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 	if a == nil || a.store == nil {
 		return nil
 	}
+	devicesCtx, devicesCancel := context.WithTimeout(ctx, cloudSyncTimeout)
+	devices, err := client.ListDevices(devicesCtx)
+	devicesCancel()
+	if err != nil {
+		return err
+	}
+	selfRevoked, err := a.cloudSyncRevokedDevices(devices)
+	if err != nil {
+		return err
+	}
+	a.setCloudSelfRevoked(selfRevoked)
+	if selfRevoked {
+		return fmt.Errorf("current device has been removed from cloud mesh")
+	}
+
 	registerCtx, cancel := context.WithTimeout(ctx, cloudSyncTimeout)
 	defer cancel()
 	settings := a.currentSettings()
@@ -88,7 +103,7 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 	}
 	approvedCtx, approvedCancel := context.WithTimeout(ctx, cloudSyncTimeout)
 	defer approvedCancel()
-	if err := a.cloudSyncApprovedPairingKnownHosts(approvedCtx, client, nil); err != nil {
+	if err := a.cloudSyncApprovedPairingKnownHosts(approvedCtx, client, devices); err != nil {
 		return err
 	}
 	if settings.RemoteControl.Enabled {
@@ -104,6 +119,57 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 		}
 	}
 	return nil
+}
+
+func (a *app) cloudSyncRevokedDevices(devices []CloudDeviceRecord) (bool, error) {
+	if a == nil || a.store == nil {
+		return false, nil
+	}
+	self := strings.TrimSpace(a.store.hostInfo().Identity.DeviceID)
+	selfRevoked := false
+	for _, device := range devices {
+		deviceID := strings.TrimSpace(device.DeviceID)
+		if deviceID == "" || normalizeCloudDeviceStatus(device.Status) != cloudDeviceStatusRevoked {
+			continue
+		}
+		if deviceID == self {
+			selfRevoked = true
+			continue
+		}
+		if _, ok := a.store.trustedControlGrant(deviceID); ok {
+			if _, err := a.revokeTrustedControlDevice(deviceID, ""); err != nil {
+				return selfRevoked, err
+			}
+		} else {
+			a.closeControlSessionsForDevice(deviceID, "mesh_device_revoked")
+			a.releaseTerminalWritersForDevice(deviceID)
+		}
+		if _, _, err := a.store.markKnownHostRevoked(deviceID); err != nil {
+			return selfRevoked, err
+		}
+		if _, err := a.store.denyPendingPairingRequestsForDevice(deviceID); err != nil {
+			return selfRevoked, err
+		}
+	}
+	return selfRevoked, nil
+}
+
+func (a *app) setCloudSelfRevoked(revoked bool) {
+	if a == nil {
+		return
+	}
+	a.cloudMu.Lock()
+	a.cloudSelfRevoked = revoked
+	a.cloudMu.Unlock()
+}
+
+func (a *app) currentDeviceCloudRevoked() bool {
+	if a == nil {
+		return false
+	}
+	a.cloudMu.Lock()
+	defer a.cloudMu.Unlock()
+	return a.cloudSelfRevoked
 }
 
 func (a *app) cloudSyncApprovedPairingKnownHosts(ctx context.Context, client CloudClient, devices []CloudDeviceRecord) error {
@@ -157,6 +223,9 @@ func (a *app) cloudSyncApprovedPairingKnownHosts(ctx context.Context, client Clo
 			return fmt.Errorf("approved cloud pairing Host public key fingerprint mismatch for %s", hostID)
 		}
 		if known, ok := a.store.knownHost(hostID); ok {
+			if knownHostRevoked(known) {
+				continue
+			}
 			if normalizeKnownHost(known).PublicKeyFingerprint != strings.TrimSpace(host.PublicKeyFingerprint) {
 				return fmt.Errorf("known Host public key fingerprint mismatch for approved cloud pairing %s", hostID)
 			}
@@ -231,6 +300,14 @@ func (a *app) cloudSyncPendingPairingRequests(ctx context.Context, client CloudC
 		controller, ok := devicesByID[strings.TrimSpace(signal.ControllerDeviceID)]
 		if !ok {
 			return fmt.Errorf("cloud pairing %s controller device %s not found", signal.RequestID, signal.ControllerDeviceID)
+		}
+		if normalizeCloudDeviceStatus(controller.Status) == cloudDeviceStatusRevoked {
+			if request, ok := a.store.pairingRequestByCloudRequestID(signal.RequestID); ok && request.Status == PairingStatusPending {
+				if _, err := a.store.denyPairingRequest(request.RequestID); err != nil {
+					return err
+				}
+			}
+			continue
 		}
 		request, created, err := a.store.upsertCloudPairingRequest(signal, controller)
 		if err != nil {

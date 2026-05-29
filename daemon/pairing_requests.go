@@ -325,6 +325,37 @@ func (s *store) pairingRequestByCloudRequestID(cloudRequestID string) (PairingRe
 	return PairingRequest{}, false
 }
 
+func (s *store) denyPendingPairingRequestsForDevice(deviceID string) ([]PairingRequest, error) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return nil, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resolved := []PairingRequest{}
+	for id, request := range s.pairingRequests {
+		if request.Status != PairingStatusPending {
+			continue
+		}
+		if request.HostDeviceID != deviceID && request.ControllerDeviceID != deviceID {
+			continue
+		}
+		request.Status = PairingStatusDenied
+		request.UpdatedAt = now
+		request.ResolvedAt = now
+		s.pairingRequests[id] = request
+		resolved = append(resolved, request)
+	}
+	if len(resolved) == 0 {
+		return nil, nil
+	}
+	if err := s.writePairingRequestsLocked(); err != nil {
+		return nil, err
+	}
+	return resolved, nil
+}
+
 func (s *store) approvePairingRequest(requestID string) (PairingRequest, TrustGrant, error) {
 	request, err := s.pendingPairingRequest(requestID)
 	if err != nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,9 +18,11 @@ type KnownHost struct {
 	DeviceName           string `json:"device_name,omitempty"`
 	PublicKey            string `json:"public_key"`
 	PublicKeyFingerprint string `json:"public_key_fingerprint"`
+	Status               string `json:"status,omitempty"`
 	LastBaseURL          string `json:"last_base_url,omitempty"`
 	CreatedAt            string `json:"created_at"`
 	UpdatedAt            string `json:"updated_at"`
+	RevokedAt            string `json:"revoked_at,omitempty"`
 }
 
 func knownHostsPath(dataDir string) string {
@@ -66,6 +69,9 @@ func (s *store) rememberKnownHost(info HostInfo, baseURL string) (KnownHost, err
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if existing := normalizeKnownHost(s.knownHosts[identity.DeviceID]); knownHostRevoked(existing) {
+		return KnownHost{}, newActionError(http.StatusForbidden, "known_host_revoked", "known Host has been removed from mesh")
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	host := s.knownHosts[identity.DeviceID]
 	if host.CreatedAt == "" {
@@ -76,6 +82,8 @@ func (s *store) rememberKnownHost(info HostInfo, baseURL string) (KnownHost, err
 	host.PublicKey = strings.TrimSpace(identity.PublicKey)
 	host.PublicKeyFingerprint = fingerprint
 	host.LastBaseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	host.Status = ""
+	host.RevokedAt = ""
 	host.UpdatedAt = now
 	if s.knownHosts == nil {
 		s.knownHosts = map[string]KnownHost{}
@@ -93,6 +101,32 @@ func (s *store) knownHost(deviceID string) (KnownHost, bool) {
 	defer s.mu.Unlock()
 	host, ok := s.knownHosts[deviceID]
 	return host, ok
+}
+
+func (s *store) markKnownHostRevoked(deviceID string) (KnownHost, bool, error) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return KnownHost{}, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	host, ok := s.knownHosts[deviceID]
+	if !ok {
+		return KnownHost{}, false, nil
+	}
+	host = normalizeKnownHost(host)
+	if knownHostRevoked(host) {
+		return host, false, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	host.Status = TrustStatusRevoked
+	host.UpdatedAt = now
+	host.RevokedAt = now
+	s.knownHosts[deviceID] = host
+	if err := s.writeKnownHostsLocked(); err != nil {
+		return KnownHost{}, false, err
+	}
+	return host, true, nil
 }
 
 func (s *store) listKnownHosts() []KnownHost {
@@ -120,6 +154,12 @@ func normalizeKnownHost(host KnownHost) KnownHost {
 	host.DeviceName = strings.TrimSpace(host.DeviceName)
 	host.PublicKey = strings.TrimSpace(host.PublicKey)
 	host.PublicKeyFingerprint = strings.TrimSpace(host.PublicKeyFingerprint)
+	host.Status = strings.TrimSpace(host.Status)
 	host.LastBaseURL = strings.TrimRight(strings.TrimSpace(host.LastBaseURL), "/")
+	host.RevokedAt = strings.TrimSpace(host.RevokedAt)
 	return host
+}
+
+func knownHostRevoked(host KnownHost) bool {
+	return strings.TrimSpace(host.Status) == TrustStatusRevoked || strings.TrimSpace(host.RevokedAt) != ""
 }

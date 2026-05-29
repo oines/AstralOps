@@ -620,6 +620,19 @@ POST /v1/devices/:device_id/remove
 
 它不会替代 Host 本地 trust revoke。mesh 注册状态只决定“账号里是否还能发现和中继这个设备”，真正能不能控制某台 Host 仍由那台 Host 本地 trust store 和当前 E2EE control session 决定。如果要让正在控制某台 Host 的设备立即断开，仍必须对目标 Host 执行 `POST /v1/trust/devices/:device_id/revoke` 或等价的 `host.trust.revoke` 控制动作。
 
+为了覆盖“设备被移除时目标 Host 离线”的情况，每台设备上线并执行 cloud sync 时必须把云端 `revoked` 设备投影到本地：
+
+```text
+cloud device.status == revoked
+  -> 如果本机 Host trust store 信任过该 device_id，本机立即 revoke trust grant
+  -> 关闭该 device_id 的 active control session / relay session
+  -> 释放该 device_id 持有的 PTY writer
+  -> 标记本机 known_hosts 中该 device_id 为 revoked，阻止后续 LAN 直连
+  -> 本地 pending pairing request 标记 denied
+```
+
+如果当前设备自身已经在云端被标记为 `revoked`，daemon 必须停止把它当作账号 Mesh 成员继续发起远控目标解析；即使目标 Host 仍在 LAN 内，也不能因为本地 known host 缓存而继续走 LAN 控制。
+
 ### 远控连接体验
 
 用户选择一个 Desktop Host 后，产品可以显示简化状态：

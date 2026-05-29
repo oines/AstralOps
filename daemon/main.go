@@ -52,6 +52,7 @@ type app struct {
 	cloudMu              sync.Mutex
 	cloudCancel          context.CancelFunc
 	cloudSettings        CloudSettings
+	cloudSelfRevoked     bool
 }
 
 func main() {

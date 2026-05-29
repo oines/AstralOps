@@ -46,6 +46,9 @@ func (a *app) handleRemoteHosts(w http.ResponseWriter, r *http.Request) {
 	}
 	hosts := map[string]remoteHostRecord{}
 	for _, known := range a.store.listKnownHosts() {
+		if knownHostRevoked(known) {
+			continue
+		}
 		hosts[known.DeviceID] = remoteHostRecordFromKnownHost(known)
 	}
 	a.mergeCloudRemoteHosts(r.Context(), hosts)
@@ -111,6 +114,9 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 	for _, candidate := range candidates {
 		known, ok := a.store.knownHost(candidate.DeviceID)
 		if !ok || known.PublicKeyFingerprint != candidate.PublicKeyFingerprint {
+			continue
+		}
+		if knownHostRevoked(known) {
 			continue
 		}
 		hostInfo, err := controlClientHostInfoWithClient(candidate.BaseURL, client)
@@ -575,11 +581,17 @@ func controlResponseMessage(response ControlResponse) string {
 }
 
 func (a *app) remoteHostTarget(hostDeviceID string) (controlClientTarget, error) {
+	if a.currentDeviceCloudRevoked() {
+		return controlClientTarget{}, newActionError(http.StatusForbidden, "cloud_device_revoked", "current device has been removed from cloud mesh")
+	}
 	known, ok := a.store.knownHost(hostDeviceID)
 	if !ok {
 		return controlClientTarget{}, newActionError(http.StatusNotFound, "remote_host_unknown", "remote Host is not known; pair the Host first")
 	}
 	known = normalizeKnownHost(known)
+	if knownHostRevoked(known) {
+		return controlClientTarget{}, newActionError(http.StatusForbidden, "known_host_revoked", "remote Host has been removed from mesh")
+	}
 	if target, err := a.cachedRemoteHostTarget(known); err == nil {
 		return target, nil
 	}
