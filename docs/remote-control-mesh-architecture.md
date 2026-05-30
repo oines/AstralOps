@@ -159,7 +159,7 @@ RelayClient:
 {
   "relay": {
     "relay_id": "vps-default",
-    "relay_url": "https://relay.example.com",
+    "relay_url": "https://us-relay-astralops.oines.dev",
     "credential": "<opaque-short-lived-relay-credential>",
     "credential_expires_at": "2026-05-30T10:00:00Z"
   }
@@ -235,7 +235,7 @@ ASTRALOPS_CLOUD_ACCOUNT_TOKENS=<long-random-token-1>,<long-random-token-2>
 
 ```text
 ASTRALOPS_ACCOUNT_RELAY_ID=default
-ASTRALOPS_ACCOUNT_RELAY_URL=https://relay.example.com
+ASTRALOPS_ACCOUNT_RELAY_URL=https://us-relay-astralops.oines.dev
 ```
 
 公网部署时 cloud 必须拒绝未配置账号/OAuth 凭据的 open mode。临时账号 token 长度必须至少 32 字符，推荐使用 32 bytes 以上随机值。Cloud 还必须启用 HTTP read/write/header timeout，并限制单个 JSON 请求体大小，避免公网开发节点被简单慢请求或超大请求拖垮。
@@ -313,7 +313,7 @@ POST /v1/pairing/requests/:request_id/resolve
   "membership_signing_public_key": "<base64-ed25519-public-key>",
   "relay": {
     "relay_id": "default",
-    "relay_url": "https://relay.example.com"
+    "relay_url": "https://us-relay-astralops.oines.dev"
   }
 }
 ```
@@ -340,7 +340,7 @@ Cloud control plane 使用同一组 relay credential secret 签发 credential：
 
 ```text
 ASTRALOPS_ACCOUNT_RELAY_ID=vps-default
-ASTRALOPS_ACCOUNT_RELAY_URL=https://relay.example.com
+ASTRALOPS_ACCOUNT_RELAY_URL=https://us-relay-astralops.oines.dev
 ASTRALOPS_RELAY_CREDENTIAL_KID=vps-1
 ASTRALOPS_RELAY_CREDENTIAL_SECRETS=vps-1:<long-random-secret>
 ASTRALOPS_RELAY_CREDENTIAL_TTL=10m
@@ -358,7 +358,7 @@ Desktop daemon 通过本机 authenticated API 接入 cloud service。这个 API 
 ```text
 PATCH /v1/settings
   cloud.enabled=true
-  cloud.base_url=https://cloud.example.com
+  cloud.base_url=https://cloud-astralops.oines.dev
   cloud.account_token=<account-token>
 
 POST /v1/cloud/auth/start

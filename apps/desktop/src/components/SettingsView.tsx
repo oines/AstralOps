@@ -885,7 +885,7 @@ function RemoteControlContent({
         <SettingRow
           title="Cloud 服务"
           description="账号控制面地址；OAuth 登录完成后 daemon 会保存账号 token"
-          control={<TextInputControl disabled={settings.cloud.enabled || Boolean(authenticatingProvider)} onChange={setCloudBaseURLDraft} placeholder="https://cloud.example.com" value={cloudBaseURLDraft} />}
+          control={<TextInputControl disabled={settings.cloud.enabled || Boolean(authenticatingProvider)} onChange={setCloudBaseURLDraft} placeholder="https://cloud-astralops.oines.dev" value={cloudBaseURLDraft} />}
         />
         <SettingRow
           title="云账号"
