@@ -90,6 +90,19 @@ func (a *app) handleControlRelayHello(ctx context.Context, client RelayClient, e
 	}
 	session, ack, err := a.acceptControlRelayHello(hello)
 	if err != nil {
+		if closeFrame, ok := controlRelayHelloCloseFrame(err); ok {
+			body, marshalErr := json.Marshal(closeFrame)
+			if marshalErr == nil {
+				_, _ = client.EnqueueRelayEnvelope(ctx, RelayEnvelope{
+					Version:       relayEnvelopeVersion,
+					ConnectionID:  "rejected_" + randomID(12),
+					FromDeviceID:  a.store.hostInfo().Identity.DeviceID,
+					ToDeviceID:    hello.ControllerDeviceID,
+					PayloadKind:   relayPayloadKindControlHelloAck,
+					PayloadBase64: base64.StdEncoding.EncodeToString(body),
+				})
+			}
+		}
 		return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
 	}
 	session.relayClient = client
@@ -123,7 +136,7 @@ func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySes
 	}
 	grant, ok := a.store.trustedControlGrant(hello.ControllerDeviceID)
 	if !ok {
-		return nil, controlHelloAckFrame{}, errors.New("controller is not trusted")
+		return nil, controlHelloAckFrame{}, newActionError(http.StatusForbidden, controlAuthorizationRequiredCode, "controller is not trusted")
 	}
 	controllerPublicKey, err := validateControlControllerPublicKey(grant, hello.ControllerPublicKey)
 	if err != nil {
@@ -194,6 +207,14 @@ func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySes
 	}
 	ack.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(a.store.devicePrivateKey), controlHostSignaturePayload(hello, ack)))
 	return session, ack, nil
+}
+
+func controlRelayHelloCloseFrame(err error) (controlPlainFrame, bool) {
+	var actionErr *actionError
+	if errors.As(err, &actionErr) && actionErr.Code == controlAuthorizationRequiredCode {
+		return controlPlainFrame{Type: "close", Code: "capability_denied", Reason: "controller is not trusted"}, true
+	}
+	return controlPlainFrame{}, false
 }
 
 func (a *app) handleControlRelaySealedFrame(ctx context.Context, client RelayClient, envelope RelayEnvelope) error {
@@ -622,6 +643,15 @@ func controlClientRelayWaitHelloAck(ctx context.Context, target controlClientTar
 			}
 			var ack controlHelloAckFrame
 			if err := json.Unmarshal(payload, &ack); err != nil {
+				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
+				continue
+			}
+			if ack.Type == "close" {
+				var closeFrame controlPlainFrame
+				if err := json.Unmarshal(payload, &closeFrame); err == nil {
+					_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
+					return controlHelloAckFrame{}, controlClientHandshakeCloseError(closeFrame)
+				}
 				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
 				continue
 			}

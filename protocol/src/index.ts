@@ -1325,6 +1325,9 @@ export type RemoteHostRecord = {
   known_identity?: boolean;
   status: "online" | "offline" | "lan" | string;
   connection: "lan" | "cloud" | "relay" | "offline" | string;
+  authorization_state?: "needs_pairing" | "pending" | "approved" | "denied" | "known" | string;
+  pairing_request_id?: string;
+  pairing_status?: "pending" | "approved" | "denied" | string;
   last_base_url?: string;
   lan_base_url?: string;
   capabilities?: ControlCapability[];

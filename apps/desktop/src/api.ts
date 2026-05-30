@@ -49,6 +49,22 @@ export type EventSubscription = {
   close: () => void;
 };
 
+export class CoreRequestError extends Error {
+  readonly code?: string;
+  readonly status?: number;
+
+  constructor(message: string, options: { code?: unknown; status?: number } = {}) {
+    super(message);
+    this.name = "CoreRequestError";
+    this.code = typeof options.code === "string" ? options.code : undefined;
+    this.status = options.status;
+  }
+}
+
+export function isCoreRequestError(error: unknown, code: string): boolean {
+  return error instanceof CoreRequestError && error.code === code;
+}
+
 export type EventSubscriptionHandlers = {
   onEvent: (event: AstralEvent) => void;
   onOpen?: () => void;
@@ -284,6 +300,9 @@ function httpErrorMessage(payload: { code?: unknown; error?: unknown }, remote: 
   if (payload.code === "control_action_unknown" && typeof payload.error === "string") {
     return remote ? "远端 Host 不支持这个远控操作，通常是目标设备 AstralOps 版本过旧。请更新并重启目标设备。" : payload.error;
   }
+  if (payload.code === "control_authorization_required") {
+    return "需要目标 Host 批准本机控制";
+  }
   return typeof payload.error === "string" && payload.error ? payload.error : null;
 }
 
@@ -381,7 +400,7 @@ export class LocalHttpControlChannel implements ControlChannel {
         const payload = JSON.parse(text) as { code?: unknown; error?: unknown };
         const message = httpErrorMessage(payload, false);
         if (message) {
-          throw new Error(message);
+          throw new CoreRequestError(message, { code: payload.code, status: res.status });
         }
       } catch (parseOrPayloadError) {
         if (parseOrPayloadError instanceof Error && parseOrPayloadError.name !== "SyntaxError") {
@@ -491,7 +510,7 @@ class RemoteDaemonControlChannel implements ControlChannel {
         const payload = JSON.parse(text) as { code?: unknown; error?: unknown };
         const message = httpErrorMessage(payload, true);
         if (message) {
-          throw new Error(message);
+          throw new CoreRequestError(message, { code: payload.code, status: res.status });
         }
       } catch (parseOrPayloadError) {
         if (parseOrPayloadError instanceof Error && parseOrPayloadError.name !== "SyntaxError") {

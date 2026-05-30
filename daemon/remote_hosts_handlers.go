@@ -20,6 +20,12 @@ const (
 	remoteHostStatusOffline = "offline"
 	remoteHostDiscoveryTTL  = 1500 * time.Millisecond
 	remoteHostLANTimeout    = 2 * time.Second
+
+	remoteHostAuthorizationNeedsPairing = "needs_pairing"
+	remoteHostAuthorizationPending      = "pending"
+	remoteHostAuthorizationApproved     = "approved"
+	remoteHostAuthorizationDenied       = "denied"
+	remoteHostAuthorizationKnown        = "known"
 )
 
 type remoteHostsResponse struct {
@@ -34,6 +40,9 @@ type remoteHostRecord struct {
 	KnownIdentity        bool     `json:"known_identity,omitempty"`
 	Status               string   `json:"status"`
 	Connection           string   `json:"connection"`
+	AuthorizationState   string   `json:"authorization_state,omitempty"`
+	PairingRequestID     string   `json:"pairing_request_id,omitempty"`
+	PairingStatus        string   `json:"pairing_status,omitempty"`
 	LastBaseURL          string   `json:"last_base_url,omitempty"`
 	LANBaseURL           string   `json:"lan_base_url,omitempty"`
 	Capabilities         []string `json:"capabilities,omitempty"`
@@ -84,6 +93,7 @@ func (a *app) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remote
 	}
 	_ = a.cloudSyncApprovedPairingKnownHosts(reqCtx, client, devices)
 	selfID := a.store.hostInfo().Identity.DeviceID
+	pairingSignals := a.remoteHostPairingSignalsByHost(reqCtx, client, selfID)
 	for _, device := range devices {
 		if normalizeCloudDeviceStatus(device.Status) == cloudDeviceStatusRevoked {
 			delete(hosts, device.DeviceID)
@@ -99,8 +109,45 @@ func (a *app) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remote
 		if existing.PublicKeyFingerprint != "" && device.PublicKeyFingerprint != "" && existing.PublicKeyFingerprint != device.PublicKeyFingerprint {
 			continue
 		}
-		hosts[device.DeviceID] = remoteHostRecordFromCloudDevice(device, existing)
+		record := remoteHostRecordFromCloudDevice(device, existing)
+		record = remoteHostRecordWithPairingState(record, pairingSignals[device.DeviceID])
+		hosts[device.DeviceID] = record
 	}
+}
+
+func (a *app) remoteHostPairingSignalsByHost(ctx context.Context, client CloudClient, controllerDeviceID string) map[string]CloudPairingSignal {
+	controllerDeviceID = strings.TrimSpace(controllerDeviceID)
+	if controllerDeviceID == "" {
+		return nil
+	}
+	signals, err := client.ListPairingSignals(ctx, controllerDeviceID)
+	if err != nil {
+		return nil
+	}
+	out := map[string]CloudPairingSignal{}
+	for _, signal := range signals {
+		if strings.TrimSpace(signal.ControllerDeviceID) != controllerDeviceID {
+			continue
+		}
+		hostID := strings.TrimSpace(signal.HostDeviceID)
+		if hostID == "" || hostID == controllerDeviceID {
+			continue
+		}
+		if existing, ok := out[hostID]; ok && !cloudPairingSignalNewer(signal, existing) {
+			continue
+		}
+		out[hostID] = signal
+	}
+	return out
+}
+
+func cloudPairingSignalNewer(left, right CloudPairingSignal) bool {
+	leftTime := firstString(strings.TrimSpace(left.UpdatedAt), strings.TrimSpace(left.CreatedAt))
+	rightTime := firstString(strings.TrimSpace(right.UpdatedAt), strings.TrimSpace(right.CreatedAt))
+	if leftTime == "" || rightTime == "" {
+		return left.RequestID > right.RequestID
+	}
+	return leftTime > rightTime
 }
 
 func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
@@ -133,6 +180,9 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 		if next.Capabilities == nil {
 			next.Capabilities = existing.Capabilities
 		}
+		next.AuthorizationState = existing.AuthorizationState
+		next.PairingRequestID = existing.PairingRequestID
+		next.PairingStatus = existing.PairingStatus
 		hosts[candidate.DeviceID] = next
 	}
 }
@@ -153,6 +203,13 @@ func remoteHostRecordFromCloudDevice(device CloudDeviceRecord, existing remoteHo
 	}
 	if len(record.Capabilities) == 0 {
 		record.Capabilities = normalizeCapabilities(device.Capabilities)
+	}
+	if record.AuthorizationState == "" {
+		if record.KnownIdentity {
+			record.AuthorizationState = remoteHostAuthorizationKnown
+		} else {
+			record.AuthorizationState = remoteHostAuthorizationNeedsPairing
+		}
 	}
 	if record.Connection == remoteHostStatusLAN {
 		return record
@@ -176,6 +233,7 @@ func remoteHostRecordFromKnownHost(host KnownHost) remoteHostRecord {
 		Status:               remoteHostStatusOffline,
 		Connection:           remoteHostStatusOffline,
 		LastBaseURL:          host.LastBaseURL,
+		AuthorizationState:   remoteHostAuthorizationKnown,
 	}
 }
 
@@ -211,7 +269,35 @@ func remoteHostRecordFromHostInfo(info HostInfo, known KnownHost, lanBaseURL str
 		LastBaseURL:          known.LastBaseURL,
 		LANBaseURL:           strings.TrimRight(strings.TrimSpace(lanBaseURL), "/"),
 		Capabilities:         info.Capabilities,
+		AuthorizationState:   remoteHostAuthorizationKnown,
 	}
+}
+
+func remoteHostRecordWithPairingState(record remoteHostRecord, signal CloudPairingSignal) remoteHostRecord {
+	status := strings.TrimSpace(signal.Status)
+	if signal.RequestID != "" {
+		record.PairingRequestID = strings.TrimSpace(signal.RequestID)
+		record.PairingStatus = status
+	}
+	switch status {
+	case PairingStatusPending:
+		record.AuthorizationState = remoteHostAuthorizationPending
+	case PairingStatusDenied:
+		record.AuthorizationState = remoteHostAuthorizationDenied
+	case PairingStatusApproved:
+		if record.KnownIdentity {
+			record.AuthorizationState = remoteHostAuthorizationApproved
+		} else {
+			record.AuthorizationState = remoteHostAuthorizationNeedsPairing
+		}
+	default:
+		if record.KnownIdentity {
+			record.AuthorizationState = firstString(record.AuthorizationState, remoteHostAuthorizationKnown)
+		} else {
+			record.AuthorizationState = remoteHostAuthorizationNeedsPairing
+		}
+	}
+	return record
 }
 
 func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
@@ -649,6 +735,10 @@ func (a *app) remoteControlResponse(hostDeviceID, capability, action string, par
 		Params:     params,
 	})
 	if err != nil {
+		var actionErr *actionError
+		if errors.As(err, &actionErr) && actionErr.Code == controlAuthorizationRequiredCode {
+			return ControlResponse{}, actionErr
+		}
 		return ControlResponse{}, fmt.Errorf("remote control request failed: %w", err)
 	}
 	return response, nil

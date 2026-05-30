@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, KeyRound, LoaderCircle, PanelLeft, PanelRight, RefreshCw, X } from "lucide-react";
-import { createLocalCoreClient, createRemoteCoreClient, listRemoteHosts, requestRemoteHostPairing, type CoreClient, type EventSubscription } from "./api";
+import { createLocalCoreClient, createRemoteCoreClient, isCoreRequestError, listRemoteHosts, requestRemoteHostPairing, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
 import { SettingsView } from "./components/SettingsView";
@@ -48,6 +48,7 @@ import type {
 const EVENT_WINDOW_SIZE = 1000;
 const LOCAL_HOST_ID = "local";
 const DEFAULT_CLOUD_BASE_URL = "https://cloud-astralops.oines.dev";
+type RemoteAuthorizationOverride = "revoked" | "pending";
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   version: 1,
@@ -80,6 +81,7 @@ export function App(): React.JSX.Element {
   const [remoteHosts, setRemoteHosts] = useState<RemoteHostRecord[]>([]);
   const [selectedHostId, setSelectedHostId] = useState(LOCAL_HOST_ID);
   const [hostPairingStatus, setHostPairingStatus] = useState<Record<string, string>>({});
+  const [hostAuthorizationOverrides, setHostAuthorizationOverrides] = useState<Record<string, RemoteAuthorizationOverride>>({});
   const [pendingPairingCount, setPendingPairingCount] = useState(0);
   const [requestingPairingHostId, setRequestingPairingHostId] = useState("");
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -134,6 +136,7 @@ export function App(): React.JSX.Element {
     }
     const hosts = await listRemoteHosts(daemonInfo, discover);
     setRemoteHosts(hosts);
+    setHostAuthorizationOverrides((current) => prunePendingAuthorizationOverrides(current, hosts));
   }, [daemonInfo]);
 
   const refreshLocalPairingState = useCallback(async (): Promise<void> => {
@@ -424,7 +427,10 @@ export function App(): React.JSX.Element {
       refreshing = true;
       try {
         const hosts = await listRemoteHosts(info, true);
-        if (!cancelled) setRemoteHosts(hosts);
+        if (!cancelled) {
+          setRemoteHosts(hosts);
+          setHostAuthorizationOverrides((current) => prunePendingAuthorizationOverrides(current, hosts));
+        }
       } catch {
         if (!cancelled) setRemoteHosts([]);
       } finally {
@@ -877,19 +883,20 @@ export function App(): React.JSX.Element {
         id: host.device_id,
         name: host.device_name || host.device_id,
         kind: host.device_kind || "desktop",
-        subtitle: remoteHostNeedsPairing(host) ? "需要目标 Host 批准" : "远端 Host",
+        subtitle: remoteHostSubtitle(host, hostAuthorizationOverrides[host.device_id]),
         connection: host.connection,
-        statusLabel: remoteHostStatusLabel(host),
-        statusTone: remoteHostStatusTone(host),
+        statusLabel: remoteHostStatusLabel(host, hostAuthorizationOverrides[host.device_id]),
+        statusTone: remoteHostStatusTone(host, hostAuthorizationOverrides[host.device_id]),
       })),
     ],
-    [daemonInfo?.remote_control?.listen_addr, localHostInfo, remoteHosts],
+    [daemonInfo?.remote_control?.listen_addr, hostAuthorizationOverrides, localHostInfo, remoteHosts],
   );
   const activeHostId = hostOptions.some((host) => host.id === selectedHostId) ? selectedHostId : hostOptions[0]?.id || LOCAL_HOST_ID;
   const activeHostOption = hostOptions.find((host) => host.id === activeHostId) ?? hostOptions[0] ?? null;
   const activeHostIsLocal = activeHostId === (localHostInfo?.identity.device_id || LOCAL_HOST_ID);
   const activeRemoteHost = useMemo(() => remoteHosts.find((host) => host.device_id === activeHostId) ?? null, [activeHostId, remoteHosts]);
-  const activeHostNeedsPairing = Boolean(activeRemoteHost && remoteHostNeedsPairing(activeRemoteHost));
+  const activeHostAuthorizationOverride = activeRemoteHost ? hostAuthorizationOverrides[activeRemoteHost.device_id] : undefined;
+  const activeHostNeedsPairing = Boolean(activeRemoteHost && remoteHostNeedsPairing(activeRemoteHost, activeHostAuthorizationOverride));
   const activeHostPairingStatus = activeRemoteHost ? hostPairingStatus[activeRemoteHost.device_id] || "" : "";
 
   const handleBrowseHostFileSystem = useCallback(async (input: HostFileSystemBrowseParams): Promise<HostFileSystemBrowseResult> => {
@@ -907,6 +914,12 @@ export function App(): React.JSX.Element {
         ...current,
         [host.device_id]: result.request.status === "pending" ? "请求已发送，等待目标 Host 批准" : pairingStatusLabel(result.request.status),
       }));
+      setHostAuthorizationOverrides((current) => {
+        if (result.request.status === "pending") return { ...current, [host.device_id]: "pending" };
+        const next = { ...current };
+        delete next[host.device_id];
+        return next;
+      });
       await refreshRemoteHosts().catch(() => undefined);
     } catch (pairingError) {
       const message = pairingError instanceof Error ? pairingError.message : String(pairingError);
@@ -983,7 +996,20 @@ export function App(): React.JSX.Element {
       } catch (hostError) {
         if (!cancelled) {
           setApi(client);
-          setError(hostError instanceof Error ? hostError.message : String(hostError));
+          if (!activeHostIsLocal && isCoreRequestError(hostError, "control_authorization_required")) {
+            setHostAuthorizationOverrides((current) => ({ ...current, [activeHostId]: "revoked" }));
+            setHostPairingStatus((current) => ({ ...current, [activeHostId]: "目标 Host 已撤销本机控制权，需要重新请求授权" }));
+            setWorkspaces([]);
+            setWorkspaceConnections({});
+            setSessions([]);
+            setSessionViews({});
+            setEventIndex(EMPTY_EVENT_INDEX);
+            setActiveWorkspaceId("");
+            setActiveSession(null);
+            setError("");
+          } else {
+            setError(hostError instanceof Error ? hostError.message : String(hostError));
+          }
           setConnection("failed");
         }
       }
@@ -1003,7 +1029,7 @@ export function App(): React.JSX.Element {
       sessionViewRefreshPendingRef.current.clear();
       sseQueueRef.current = [];
     };
-  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, refreshLocalPairingState, scheduleSessionViewRefresh, storeSessionView]);
+  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, activeHostAuthorizationOverride, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, refreshLocalPairingState, scheduleSessionViewRefresh, storeSessionView]);
 
   const sessionTitles = useMemo(
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),
@@ -1078,6 +1104,7 @@ export function App(): React.JSX.Element {
         {activeHostNeedsPairing && activeRemoteHost ? (
           <HostPairingPanel
             host={activeRemoteHost}
+            authorizationState={remoteHostEffectiveAuthorizationState(activeRemoteHost, activeHostAuthorizationOverride)}
             requesting={requestingPairingHostId === activeRemoteHost.device_id}
             status={activeHostPairingStatus}
             onOpenSettings={() => setSettingsOpen(true)}
@@ -1244,6 +1271,7 @@ function latestWorkspaceConnection(events: AstralEvent[]): WorkspaceConnection |
 }
 
 function HostPairingPanel({
+  authorizationState,
   host,
   requesting,
   status,
@@ -1251,6 +1279,7 @@ function HostPairingPanel({
   onRefresh,
   onRequest,
 }: {
+  authorizationState: string;
   host: RemoteHostRecord;
   requesting: boolean;
   status: string;
@@ -1259,6 +1288,12 @@ function HostPairingPanel({
   onRequest: () => void;
 }): React.JSX.Element {
   const fingerprint = host.public_key_fingerprint || "未声明";
+  const pending = authorizationState === "pending";
+  const revoked = authorizationState === "revoked";
+  const denied = authorizationState === "denied";
+  const title = pending ? "等待目标 Host 批准" : revoked ? "控制权已被撤销" : denied ? "上次请求已被拒绝" : "需要目标 Host 批准";
+  const description = status || pairingPanelDescription(authorizationState);
+  const requestLabel = requesting ? "发送中" : pending ? "重新发送请求" : revoked ? "重新请求控制" : "请求控制";
   return (
     <section className="flex min-h-0 flex-1 items-center justify-center bg-white px-8 py-10">
       <div className="w-full max-w-[560px] rounded-lg border border-[var(--ao-border)] bg-[var(--ao-panel-soft)]">
@@ -1269,7 +1304,7 @@ function HostPairingPanel({
             </span>
             <div className="min-w-0">
               <div className="truncate text-[15px] font-bold leading-6 text-[var(--ao-text)]">{host.device_name || host.device_id}</div>
-              <div className="mt-0.5 text-[12px] font-semibold leading-5 text-[var(--ao-muted)]">{hostConnectionLabel(host.connection)}发现，还没有控制权限</div>
+              <div className="mt-0.5 text-[12px] font-semibold leading-5 text-[var(--ao-muted)]">{title}</div>
             </div>
           </div>
         </div>
@@ -1280,7 +1315,7 @@ function HostPairingPanel({
         </div>
         <div className="grid gap-3 px-4 py-4">
           <p className="m-0 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
-            {status || "这台设备已经在当前账号 Mesh 中，但还没有允许本机控制。发送请求后，对方会在远控设置中看到待批准设备；批准前不会显示它的工作区和 session。"}
+            {description}
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <button
@@ -1290,7 +1325,7 @@ function HostPairingPanel({
               onClick={onRequest}
             >
               {requesting ? <LoaderCircle className="animate-spin" size={15} strokeWidth={1.9} /> : <KeyRound size={15} strokeWidth={1.9} />}
-              {requesting ? "发送中" : "请求控制"}
+              {requestLabel}
             </button>
             <button
               className="flex h-8 items-center gap-2 rounded-lg bg-black/[0.055] px-3 text-[13px] font-semibold text-[var(--ao-text)] transition-colors hover:bg-black/[0.08]"
@@ -1314,6 +1349,13 @@ function HostPairingPanel({
   );
 }
 
+function pairingPanelDescription(state: string): string {
+  if (state === "pending") return "请求已经发送到账号 Mesh。目标 Host 同步到待批准请求后，需要在远控设置中允许本机控制。";
+  if (state === "revoked") return "目标 Host 已撤销本机控制权。重新请求后，状态会回到待授权；批准前不会读取它的工作区、session 或终端。";
+  if (state === "denied") return "目标 Host 拒绝了上次控制请求。可以重新发送请求，仍然必须由目标 Host 明确批准。";
+  return "这台设备已经在当前账号 Mesh 中，但还没有允许本机控制。发送请求后，对方会在远控设置中看到待批准设备；批准前不会显示它的工作区和 session。";
+}
+
 function HostPairingInfoRow({ label, mono = false, value }: { label: string; mono?: boolean; value: string }): React.JSX.Element {
   const valueClassName = mono
     ? "min-w-0 overflow-hidden break-all text-right font-mono text-[12px] font-semibold leading-5 text-[var(--ao-muted)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
@@ -1326,12 +1368,45 @@ function HostPairingInfoRow({ label, mono = false, value }: { label: string; mon
   );
 }
 
-function remoteHostNeedsPairing(host: RemoteHostRecord): boolean {
-  return host.connection === "cloud" && !host.known_identity;
+function remoteHostEffectiveAuthorizationState(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): string {
+  if (override) return override;
+  if (host.authorization_state) return host.authorization_state;
+  if (!host.known_identity) return "needs_pairing";
+  return "known";
 }
 
-function remoteHostStatusLabel(host: RemoteHostRecord): string {
-  if (remoteHostNeedsPairing(host)) return "未授权";
+function prunePendingAuthorizationOverrides(current: Record<string, RemoteAuthorizationOverride>, hosts: RemoteHostRecord[]): Record<string, RemoteAuthorizationOverride> {
+  let changed = false;
+  const next = { ...current };
+  for (const host of hosts) {
+    if (next[host.device_id] === "pending" && !remoteHostNeedsPairing(host)) {
+      delete next[host.device_id];
+      changed = true;
+    }
+  }
+  return changed ? next : current;
+}
+
+function remoteHostNeedsPairing(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): boolean {
+  const state = remoteHostEffectiveAuthorizationState(host, override);
+  return state === "needs_pairing" || state === "pending" || state === "denied" || state === "revoked";
+}
+
+function remoteHostSubtitle(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): string {
+  const state = remoteHostEffectiveAuthorizationState(host, override);
+  if (state === "pending") return "等待目标 Host 批准";
+  if (state === "revoked") return "控制权已撤销";
+  if (state === "denied") return "请求被拒绝";
+  if (state === "needs_pairing") return "需要目标 Host 批准";
+  return "远端 Host";
+}
+
+function remoteHostStatusLabel(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): string {
+  const state = remoteHostEffectiveAuthorizationState(host, override);
+  if (state === "pending") return "待授权";
+  if (state === "revoked") return "需重授权";
+  if (state === "denied") return "已拒绝";
+  if (state === "needs_pairing") return "未授权";
   switch (host.connection) {
     case "lan":
       return "LAN";
@@ -1345,8 +1420,8 @@ function remoteHostStatusLabel(host: RemoteHostRecord): string {
   }
 }
 
-function remoteHostStatusTone(host: RemoteHostRecord): "good" | "warning" | "muted" {
-  if (remoteHostNeedsPairing(host)) return "warning";
+function remoteHostStatusTone(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): "good" | "warning" | "muted" {
+  if (remoteHostNeedsPairing(host, override)) return "warning";
   if (host.connection === "lan" || host.connection === "relay" || host.connection === "cloud") return "good";
   return "muted";
 }

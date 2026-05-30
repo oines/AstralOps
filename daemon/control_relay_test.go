@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -39,6 +40,28 @@ func TestControlRelayRoundTripReadsWorkspaces(t *testing.T) {
 	if len(items) != 1 || stringValue(mapValue(items[0])["id"]) != workspace.ID {
 		t.Fatalf("workspaces = %#v, want %s", response.Result, workspace.ID)
 	}
+}
+
+func TestControlRelayReturnsAuthorizationRequiredForRevokedController(t *testing.T) {
+	hostApp, _, controllerStore, _, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
+	client := RelayClient{BaseURL: relayServer.URL, Token: testCloudRelayCredential(t, "acct_test")}
+	runControlRelayPoller(t, hostApp, client)
+	if _, ok, err := hostApp.store.revokeTrustGrant(controllerStore.deviceIdentity.DeviceID); err != nil || !ok {
+		t.Fatalf("revoke ok=%v err=%v", ok, err)
+	}
+
+	_, err := controlClientRelayRoundTrip(t.Context(), controlClientTarget{
+		HostInfo:           hostApp.store.hostInfo(),
+		Timeout:            3 * time.Second,
+		UseRelay:           true,
+		RelayClient:        client,
+		ControllerDeviceID: controllerStore.deviceIdentity.DeviceID,
+	}, controllerStore, ControlRequest{
+		RequestID:  "relay_workspaces",
+		Capability: CapabilityCoreRead,
+		Action:     ControlActionWorkspaces,
+	})
+	assertActionError(t, err, http.StatusForbidden, controlAuthorizationRequiredCode)
 }
 
 func TestControlRelayRejectsReplayedSealedFrame(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -2245,6 +2246,9 @@ func controlClientOpenTargetWithTransports(ctx context.Context, target controlCl
 		if err == nil {
 			return conn, openedTarget, nil
 		}
+		if controlClientTransportErrorIsTerminal(err) {
+			return nil, openedTarget, err
+		}
 		activeTarget = openedTarget
 		failures = append(failures, controlClientTransportFailure{Kind: transport.Kind(), Err: err})
 	}
@@ -2301,6 +2305,11 @@ func controlClientTransportError(failures []controlClientTransportFailure) error
 	if len(failures) == 0 {
 		return fmt.Errorf("control transport is not configured")
 	}
+	for _, failure := range failures {
+		if controlClientTransportErrorIsTerminal(failure.Err) {
+			return failure.Err
+		}
+	}
 	if len(failures) == 1 {
 		return failures[0].Err
 	}
@@ -2312,6 +2321,11 @@ func controlClientTransportError(failures []controlClientTransportFailure) error
 		parts = append(parts, fmt.Sprintf("%s failed: %v", controlClientTransportFailureLabel(failure.Kind), failure.Err))
 	}
 	return fmt.Errorf("%s", strings.Join(parts, "; "))
+}
+
+func controlClientTransportErrorIsTerminal(err error) bool {
+	var actionErr *actionError
+	return errors.As(err, &actionErr) && actionErr.Code == controlAuthorizationRequiredCode
 }
 
 func controlClientTransportFailureLabel(kind controlClientTransportKind) string {
@@ -2413,8 +2427,18 @@ func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, tim
 		socket.Close()
 		return nil, nil, err
 	}
+	_, ackBody, err := socket.ReadMessage()
+	if err != nil {
+		socket.Close()
+		return nil, nil, err
+	}
+	var closeFrame controlPlainFrame
+	if err := json.Unmarshal(ackBody, &closeFrame); err == nil && closeFrame.Type == "close" {
+		socket.Close()
+		return nil, nil, controlClientHandshakeCloseError(closeFrame)
+	}
 	var ack controlHelloAckFrame
-	if err := socket.ReadJSON(&ack); err != nil {
+	if err := json.Unmarshal(ackBody, &ack); err != nil {
 		socket.Close()
 		return nil, nil, err
 	}
@@ -2443,6 +2467,18 @@ func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, tim
 		return nil, nil, err
 	}
 	return socket, cipher, nil
+}
+
+func controlClientHandshakeCloseError(frame controlPlainFrame) error {
+	code := strings.TrimSpace(frame.Code)
+	reason := strings.TrimSpace(frame.Reason)
+	if reason == "" {
+		reason = "remote control handshake rejected"
+	}
+	if code == "capability_denied" {
+		return newActionError(http.StatusForbidden, controlAuthorizationRequiredCode, "需要目标 Host 批准本机控制")
+	}
+	return fmt.Errorf("%s", reason)
 }
 
 func controlClientWrite(socket *websocket.Conn, cipher *controlCipher, frame controlPlainFrame) error {

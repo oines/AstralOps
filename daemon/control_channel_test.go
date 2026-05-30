@@ -2640,6 +2640,29 @@ func TestControlWebSocketRejectsUntrustedController(t *testing.T) {
 	}
 }
 
+func TestControlClientDialReturnsAuthorizationRequiredForUntrustedController(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestCloudMembership(t, st, true, true)
+	app := &app{
+		store:    st,
+		hub:      newEventHub(),
+		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
+	}
+	server := startControlChannelTestServer(t, app)
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestCloudMembership(t, controllerStore, false, true)
+
+	_, _, err = controlClientDialWithTimeout(server.URL, controllerStore, app.store.hostInfo(), time.Second)
+	assertActionError(t, err, http.StatusForbidden, controlAuthorizationRequiredCode)
+}
+
 func TestControlWebSocketRevokeClosesActiveSession(t *testing.T) {
 	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
 	server := startControlChannelTestServer(t, app)

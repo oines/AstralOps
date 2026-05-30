@@ -522,6 +522,9 @@ func TestRemoteHostsImportsApprovedCloudPairingAsKnownHost(t *testing.T) {
 	if len(hosts.Hosts) != 1 || hosts.Hosts[0].DeviceID != hostStore.hostInfo().Identity.DeviceID || !hosts.Hosts[0].KnownIdentity {
 		t.Fatalf("remote hosts = %#v, want approved cloud Host as known identity", hosts.Hosts)
 	}
+	if hosts.Hosts[0].AuthorizationState != remoteHostAuthorizationApproved || hosts.Hosts[0].PairingStatus != PairingStatusApproved {
+		t.Fatalf("remote host authorization = %#v, want approved", hosts.Hosts[0])
+	}
 }
 
 func TestRemoteHostsIncludesCloudHostCandidatesWithoutGrantingControl(t *testing.T) {
@@ -569,6 +572,29 @@ func TestRemoteHostsIncludesCloudHostCandidatesWithoutGrantingControl(t *testing
 	}
 	if hosts.Hosts[0].KnownIdentity {
 		t.Fatalf("cloud-only host = %#v, want unknown identity", hosts.Hosts[0])
+	}
+	if hosts.Hosts[0].AuthorizationState != remoteHostAuthorizationNeedsPairing {
+		t.Fatalf("cloud-only host auth = %#v, want needs_pairing", hosts.Hosts[0])
+	}
+
+	signal, err := client.SubmitPairingSignal(t.Context(), cloudPairingSignalInput{
+		HostDeviceID:       "dev_cloud_host",
+		ControllerDeviceID: app.store.hostInfo().Identity.DeviceID,
+		Scope:              TrustScopeFull,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listResp = httptest.NewRecorder()
+	app.handleRemoteHosts(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("remote hosts with pending status = %d body=%s", listResp.Code, listResp.Body.String())
+	}
+	if err := json.Unmarshal(listResp.Body.Bytes(), &hosts); err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts.Hosts) != 1 || hosts.Hosts[0].AuthorizationState != remoteHostAuthorizationPending || hosts.Hosts[0].PairingRequestID != signal.RequestID {
+		t.Fatalf("pending remote host = %#v, want pending authorization", hosts.Hosts)
 	}
 
 	actionReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/dev_cloud_host/workspaces", nil)

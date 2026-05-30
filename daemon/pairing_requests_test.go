@@ -52,6 +52,41 @@ func TestPairingRequestApprovePersistsTrustGrant(t *testing.T) {
 	}
 }
 
+func TestRevokedControllerCanReturnToPendingPairing(t *testing.T) {
+	st, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := testPairingRequestInput(t, "dev_phone")
+	request, err := st.submitPairingRequest(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.approvePairingRequest(request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.revokeTrustGrant("dev_phone"); err != nil || !ok {
+		t.Fatalf("revoke ok=%v err=%v", ok, err)
+	}
+	if _, ok := st.trustedControlGrant("dev_phone"); ok {
+		t.Fatal("revoked controller is still trusted")
+	}
+
+	next, err := st.submitPairingRequest(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Status != PairingStatusPending || next.RequestID == request.RequestID {
+		t.Fatalf("next request = %#v, want a new pending request after revoke", next)
+	}
+	if _, _, err := st.approvePairingRequest(next.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if grant, ok := st.trustedControlGrant("dev_phone"); !ok || grant.RevokedAt != "" {
+		t.Fatalf("trusted grant after reapprove = %#v ok=%v", grant, ok)
+	}
+}
+
 func TestPairingRequestDenyDoesNotGrantTrust(t *testing.T) {
 	st, err := loadStore(t.TempDir())
 	if err != nil {
