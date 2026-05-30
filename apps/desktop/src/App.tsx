@@ -462,6 +462,16 @@ export function App(): React.JSX.Element {
     [localApi],
   );
 
+  const reloadAppSettings = useCallback(async (): Promise<AppSettings | null> => {
+    if (!localApi) return null;
+    const next = await localApi.settings();
+    appSettingsRef.current = next;
+    setAppSettings(next);
+    void window.astral.setDiagnosticsLoggingEnabled(next.diagnostics.logging_enabled).catch(() => undefined);
+    void window.astral.getDaemonInfo().then(setDaemonInfo).catch(() => undefined);
+    return next;
+  }, [localApi]);
+
   const clearMediaCache = useCallback(async (): Promise<ClearMediaCacheResponse> => {
     if (!localApi) return { ok: false, removed_bytes: 0 };
     return localApi.clearMediaCache();
@@ -968,6 +978,7 @@ export function App(): React.JSX.Element {
           daemonInfo={daemonInfo}
           onOpenLogs={openLogsDirectory}
           onPatchSettings={patchAppSettings}
+          onReloadSettings={reloadAppSettings}
         />
       ) : (
         <>

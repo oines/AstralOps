@@ -252,12 +252,15 @@ Authorization: Bearer <account-token>
 
 ```text
 Desktop daemon
-  -> GET /v1/auth/google/start?redirect_uri=<localhost-callback>&state=<desktop-state>
+  <- local UI POST /v1/cloud/auth/start
+  -> build localhost callback + one-time desktop state
+  -> return cloud /v1/auth/<provider>/start URL to local UI
   -> browser OAuth
   -> Cloud callback
-  -> redirect localhost callback with login_code + desktop state
+  -> redirect localhost /v1/cloud/auth/callback with login_code + desktop state
   -> POST /v1/auth/login-code/exchange
   -> receive AstralOps account session token
+  -> save cloud settings locally and start cloud device sync
 ```
 
 Cloud 可支持：
@@ -351,6 +354,9 @@ PATCH /v1/settings
   cloud.base_url=https://cloud.example.com
   cloud.account_token=<account-token>
 
+POST /v1/cloud/auth/start
+GET  /v1/cloud/auth/callback
+POST /v1/cloud/auth/logout
 GET  /v1/cloud/devices
 POST /v1/cloud/devices
 POST /v1/cloud/heartbeat
@@ -358,6 +364,12 @@ GET  /v1/cloud/pairing/requests?device_id=<device_id>
 POST /v1/cloud/pairing/requests
 POST /v1/cloud/pairing/requests/:request_id/resolve
 ```
+
+`POST /v1/cloud/auth/start` 只能由本机 authenticated Desktop UI 调用。daemon 生成高熵一次性 state 和 `http://127.0.0.1:<daemon-port>/v1/cloud/auth/callback`，返回 Cloud OAuth start URL；Desktop 只负责用系统浏览器打开这个 URL。
+
+`GET /v1/cloud/auth/callback` 是给系统浏览器回跳的本机入口，不要求 daemon auth token，但必须校验 daemon 内存中的一次性 state。state 过期、重复使用或不匹配时只能显示失败页，不能兑换 login code。兑换成功后 daemon 保存 `cloud.base_url` 和 `cloud.account_token` 到本机 settings，并触发 cloud sync。renderer 不能直接接触 OAuth client secret、login code exchange 细节或 relay credential 本体。
+
+`POST /v1/cloud/auth/logout` 只清理本机 cloud enabled 状态和 account token。它不是账号删除，也不会自动移除 Host trust grant；从账号 Mesh 移除设备仍走 cloud device remove 和本机 trust revoke 两个边界明确的动作。
 
 `/v1/cloud/devices` 注册的是当前 daemon 的 public device identity。默认 `can_control=true`，`can_host` 取本机 `remote_control.enabled`，调用方也可以在注册请求里显式覆盖。这个动作不会自动开启 Host listener；是否允许被远控仍然由本机 `remote_control` settings 决定。
 

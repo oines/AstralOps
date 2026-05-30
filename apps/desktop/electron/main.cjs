@@ -924,6 +924,23 @@ ipcMain.handle("astral:open-workspace", async (_event, opener, workspace) => {
   }
 });
 
+ipcMain.handle("astral:open-external", async (_event, value) => {
+  try {
+    if (typeof value !== "string" || !value.trim()) throw new Error("url is required");
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("external url scheme must be http or https");
+    }
+    logDesktopEvent("ipc.external.open.start", { protocol: parsed.protocol, host: parsed.host });
+    await shell.openExternal(parsed.toString());
+    logDesktopEvent("ipc.external.open.completed", { protocol: parsed.protocol, host: parsed.host });
+    return { ok: true };
+  } catch (openError) {
+    logDesktopEvent("ipc.external.open.failed", { error: openError instanceof Error ? openError.message : String(openError) }, "error");
+    return { ok: false, error: openError instanceof Error ? openError.message : String(openError) };
+  }
+});
+
 ipcMain.handle("astral:open-logs-directory", async () => {
   try {
     const dir = logsDir();

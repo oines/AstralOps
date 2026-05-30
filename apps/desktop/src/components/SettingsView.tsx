@@ -8,6 +8,8 @@ import {
   FolderKanban,
   Info,
   KeyRound,
+  LogIn,
+  LogOut,
   MonitorCog,
   RefreshCw,
   Settings,
@@ -20,7 +22,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import type { CoreClient } from "../api";
-import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, CloudAccountStatus, CloudDeviceRecord, DaemonInfo, HealthResponse, HostInfo, PairingRequest, TrustGrant } from "../types";
+import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, CloudAccountStatus, CloudAuthProvider, CloudDeviceRecord, DaemonInfo, HealthResponse, HostInfo, PairingRequest, TrustGrant } from "../types";
 
 type SettingsCategoryId =
   | "general"
@@ -54,6 +56,7 @@ type SettingsViewProps = {
   onClearMediaCache: () => Promise<ClearMediaCacheResponse>;
   onOpenLogs: () => Promise<void>;
   onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
+  onReloadSettings: () => Promise<AppSettings | null>;
   savingKeys: ReadonlySet<string>;
   settings: AppSettings | null;
   settingsError: string;
@@ -229,6 +232,7 @@ export function SettingsView({
   onClearMediaCache,
   onOpenLogs,
   onPatchSettings,
+  onReloadSettings,
   savingKeys,
   settings,
   settingsError,
@@ -356,6 +360,7 @@ export function SettingsView({
             onLanguageChange={setLanguage}
             onOpenLogs={openLogs}
             onPatchSettings={onPatchSettings}
+            onReloadSettings={onReloadSettings}
             savingKeys={savingKeys}
             settings={resolvedSettings}
             updateStatus={updateStatus}
@@ -379,6 +384,7 @@ function SettingsContent({
   onLanguageChange,
   onOpenLogs,
   onPatchSettings,
+  onReloadSettings,
   onCheckForUpdates,
   onInstallUpdate,
   savingKeys,
@@ -397,13 +403,14 @@ function SettingsContent({
   onLanguageChange: (value: string) => void;
   onOpenLogs: () => Promise<void>;
   onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
+  onReloadSettings: () => Promise<AppSettings | null>;
   savingKeys: ReadonlySet<string>;
   settings: AppSettings;
   updateStatus: AppUpdateStatus | null;
 }): React.JSX.Element {
   switch (activeId) {
     case "remote":
-      return <RemoteControlContent core={core} daemonInfo={daemonInfo} onPatchSettings={onPatchSettings} savingKeys={savingKeys} settings={settings} />;
+      return <RemoteControlContent core={core} daemonInfo={daemonInfo} onPatchSettings={onPatchSettings} onReloadSettings={onReloadSettings} savingKeys={savingKeys} settings={settings} />;
     case "appearance":
       return (
         <div className="grid gap-8">
@@ -612,12 +619,14 @@ function RemoteControlContent({
   core,
   daemonInfo,
   onPatchSettings,
+  onReloadSettings,
   savingKeys,
   settings,
 }: {
   core: CoreClient | null;
   daemonInfo: DaemonInfo | null;
   onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
+  onReloadSettings: () => Promise<AppSettings | null>;
   savingKeys: ReadonlySet<string>;
   settings: AppSettings;
 }): React.JSX.Element {
@@ -634,6 +643,9 @@ function RemoteControlContent({
   const [revokingId, setRevokingId] = useState("");
   const [removingCloudDeviceId, setRemovingCloudDeviceId] = useState("");
   const [resolvingPairingId, setResolvingPairingId] = useState("");
+  const [cloudBaseURLDraft, setCloudBaseURLDraft] = useState(settings.cloud.base_url || "");
+  const [authenticatingProvider, setAuthenticatingProvider] = useState<CloudAuthProvider | "">("");
+  const [loggingOutCloud, setLoggingOutCloud] = useState(false);
 
   const trustedGrants = useMemo(() => grants.filter((grant) => grant.status === "trusted"), [grants]);
   const revokedGrants = useMemo(() => grants.filter((grant) => grant.status === "revoked"), [grants]);
@@ -643,6 +655,10 @@ function RemoteControlContent({
     trustedGrants.forEach((grant) => byDeviceId.set(grant.controller_device_id, grant));
     return byDeviceId;
   }, [trustedGrants]);
+
+  useEffect(() => {
+    setCloudBaseURLDraft(settings.cloud.base_url || "");
+  }, [settings.cloud.base_url]);
 
   const loadRemoteControl = useCallback(async (): Promise<void> => {
     if (!core) {
@@ -768,6 +784,48 @@ function RemoteControlContent({
     }
   }
 
+  async function beginCloudAuth(provider: CloudAuthProvider): Promise<void> {
+    if (!core) {
+      setError("Core 未连接");
+      return;
+    }
+    const baseURL = normalizeCloudBaseURLDraft(cloudBaseURLDraft || settings.cloud.base_url || "");
+    if (!baseURL) {
+      setError("先填写 Cloud 服务地址");
+      return;
+    }
+    setAuthenticatingProvider(provider);
+    setError("");
+    try {
+      const result = await core.startCloudAuth({ provider, base_url: baseURL });
+      const opened = await window.astral.openExternal(result.auth_url);
+      if (!opened.ok) throw new Error(opened.error || "无法打开浏览器");
+      setStatus("已打开浏览器登录，完成后会自动连接账号");
+      await waitForCloudAuthCompletion(core, onReloadSettings, baseURL, (message) => setStatus(message));
+    } catch (authError) {
+      setError(authError instanceof Error ? authError.message : String(authError));
+    } finally {
+      setAuthenticatingProvider("");
+    }
+  }
+
+  async function logoutCloud(): Promise<void> {
+    if (!core) return;
+    setLoggingOutCloud(true);
+    setError("");
+    try {
+      await core.logoutCloudAuth();
+      setCloudAccount(null);
+      setCloudDevices([]);
+      setStatus("已退出云账号");
+      await onReloadSettings();
+    } catch (logoutError) {
+      setError(logoutError instanceof Error ? logoutError.message : String(logoutError));
+    } finally {
+      setLoggingOutCloud(false);
+    }
+  }
+
   return (
     <div className="grid gap-8">
       <SettingsSection title="本机 Host">
@@ -814,7 +872,28 @@ function RemoteControlContent({
       </SettingsSection>
 
       <SettingsSection title="账号 Mesh">
-        <SettingRow title="云账号" description={settings.cloud.enabled ? cloudBaseURLLabel(settings) : "账号关闭时不会同步设备状态"} control={<StatusPill label={cloudConnectionLabel(settings, cloudAccount, error)} tone={cloudConnectionTone(settings, cloudAccount, error)} />} />
+        <SettingRow
+          title="Cloud 服务"
+          description="账号控制面地址；OAuth 登录完成后 daemon 会保存账号 token"
+          control={<TextInputControl disabled={settings.cloud.enabled || Boolean(authenticatingProvider)} onChange={setCloudBaseURLDraft} placeholder="https://cloud.example.com" value={cloudBaseURLDraft} />}
+        />
+        <SettingRow
+          title="云账号"
+          description={settings.cloud.enabled ? cloudBaseURLLabel(settings) : "账号关闭时不会同步设备状态"}
+          control={
+            settings.cloud.enabled ? (
+              <div className="flex items-center gap-2">
+                <StatusPill label={cloudConnectionLabel(settings, cloudAccount, error)} tone={cloudConnectionTone(settings, cloudAccount, error)} />
+                <ButtonControl disabled={loggingOutCloud} icon={LogOut} label={loggingOutCloud ? "退出中" : "退出登录"} onClick={logoutCloud} />
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <ButtonControl disabled={Boolean(authenticatingProvider)} icon={LogIn} label={authenticatingProvider === "google" ? "等待登录" : "Google 登录"} onClick={() => beginCloudAuth("google")} />
+                <ButtonControl disabled={Boolean(authenticatingProvider)} icon={LogIn} label={authenticatingProvider === "github" ? "等待登录" : "GitHub 登录"} onClick={() => beginCloudAuth("github")} />
+              </div>
+            )
+          }
+        />
         {settings.cloud.enabled ? (
           <>
             <InfoRow label="账号" value={cloudAccount?.account_id_hash || (error ? "读取失败" : "未加载")} />
@@ -1246,6 +1325,30 @@ function SelectControl<T extends string>({ disabled = false, options, value, onC
   );
 }
 
+function TextInputControl({
+  disabled = false,
+  onChange,
+  placeholder,
+  value,
+}: {
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  value: string;
+}): React.JSX.Element {
+  return (
+    <input
+      className="h-8 w-[280px] rounded-lg bg-black/[0.045] px-3 text-[12px] font-semibold text-[var(--ao-text)] outline-none transition-colors placeholder:text-[var(--ao-subtle)] focus:bg-black/[0.07] disabled:cursor-default disabled:opacity-55"
+      disabled={disabled}
+      onChange={(event) => onChange(event.currentTarget.value)}
+      placeholder={placeholder}
+      spellCheck={false}
+      type="url"
+      value={value}
+    />
+  );
+}
+
 function ButtonControl({ disabled = false, icon: Icon, label, onClick }: { disabled?: boolean; icon?: LucideIcon; label: string; onClick: () => void | Promise<void> }): React.JSX.Element {
   return (
     <button
@@ -1335,6 +1438,33 @@ function cloudDeviceStatusRank(status: string): number {
 
 function cloudBaseURLLabel(settings: AppSettings): string {
   return settings.cloud.base_url ? `服务地址 ${settings.cloud.base_url}` : "服务地址未配置";
+}
+
+function normalizeCloudBaseURLDraft(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
+async function waitForCloudAuthCompletion(
+  core: CoreClient,
+  onReloadSettings: () => Promise<AppSettings | null>,
+  baseURL: string,
+  onStatus: (message: string) => void,
+): Promise<void> {
+  const expectedBaseURL = normalizeCloudBaseURLDraft(baseURL);
+  for (let attempt = 0; attempt < 45; attempt += 1) {
+    await delay(2_000);
+    const next = await core.settings();
+    if (next.cloud.enabled && normalizeCloudBaseURLDraft(next.cloud.base_url || "") === expectedBaseURL && Boolean(next.cloud.account_token)) {
+      await onReloadSettings();
+      onStatus("已登录云账号");
+      return;
+    }
+  }
+  onStatus("浏览器登录仍在等待中，完成后可刷新远控状态");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function cloudConnectionLabel(settings: AppSettings, account: CloudAccountStatus | null, error: string): string {

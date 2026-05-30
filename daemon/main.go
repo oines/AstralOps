@@ -53,6 +53,8 @@ type app struct {
 	cloudCancel          context.CancelFunc
 	cloudSettings        CloudSettings
 	cloudSelfRevoked     bool
+	cloudAuthMu          sync.Mutex
+	cloudAuthStates      map[string]cloudAuthState
 }
 
 func main() {
@@ -136,6 +138,8 @@ func main() {
 	mux.HandleFunc("/v1/host", a.auth(a.handleHost))
 	mux.HandleFunc("/v1/settings", a.auth(a.handleSettings))
 	mux.HandleFunc("/v1/settings/", a.auth(a.handleSettingsAction))
+	mux.HandleFunc("/v1/cloud/auth/callback", a.handleCloudAuthCallback)
+	mux.HandleFunc("/v1/cloud/auth/", a.auth(a.handleCloudAuthAction))
 	mux.HandleFunc("/v1/cloud/account", a.auth(a.handleCloudAccount))
 	mux.HandleFunc("/v1/cloud/devices", a.auth(a.handleCloudDevices))
 	mux.HandleFunc("/v1/cloud/devices/", a.auth(a.handleCloudDeviceAction))

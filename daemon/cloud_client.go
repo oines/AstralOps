@@ -80,6 +80,16 @@ type cloudPairingSignalListResponse struct {
 	Requests []CloudPairingSignal `json:"requests"`
 }
 
+type cloudLoginCodeExchangeRequest struct {
+	LoginCode string `json:"login_code"`
+}
+
+type cloudLoginCodeExchangeResponse struct {
+	Account      CloudAccount `json:"account"`
+	AccountToken string       `json:"account_token"`
+	ExpiresAt    string       `json:"expires_at,omitempty"`
+}
+
 func (c CloudClient) GetAccount(ctx context.Context) (CloudAccount, error) {
 	var out CloudAccount
 	if err := c.do(ctx, http.MethodGet, "/v1/account", nil, &out); err != nil {
@@ -170,6 +180,14 @@ func (c CloudClient) ResolvePairingSignal(ctx context.Context, requestID, status
 	return out.Request, nil
 }
 
+func ExchangeCloudLoginCode(ctx context.Context, baseURL, loginCode string, httpClient *http.Client) (cloudLoginCodeExchangeResponse, error) {
+	var out cloudLoginCodeExchangeResponse
+	if err := jsonRequest(ctx, "cloud", baseURL, httpClient, http.MethodPost, "/v1/auth/login-code/exchange", cloudLoginCodeExchangeRequest{LoginCode: strings.TrimSpace(loginCode)}, &out, nil); err != nil {
+		return cloudLoginCodeExchangeResponse{}, err
+	}
+	return out, nil
+}
+
 func (c CloudClient) do(ctx context.Context, method, path string, body any, out any) error {
 	return authedJSONRequest(ctx, "cloud", c.BaseURL, c.Token, c.HTTPClient, method, path, body, out)
 }
@@ -194,12 +212,16 @@ func relayClientFromCloudAccount(account CloudAccount, httpClient *http.Client) 
 }
 
 func authedJSONRequest(ctx context.Context, serviceName, baseURLValue, token string, httpClient *http.Client, method, path string, body any, out any) error {
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("%s token required", serviceName)
+	}
+	return jsonRequest(ctx, serviceName, baseURLValue, httpClient, method, path, body, out, map[string]string{"Authorization": "Bearer " + strings.TrimSpace(token)})
+}
+
+func jsonRequest(ctx context.Context, serviceName, baseURLValue string, httpClient *http.Client, method, path string, body any, out any, headers map[string]string) error {
 	baseURL := strings.TrimRight(strings.TrimSpace(baseURLValue), "/")
 	if baseURL == "" {
 		return fmt.Errorf("%s base url required", serviceName)
-	}
-	if strings.TrimSpace(token) == "" {
-		return fmt.Errorf("%s token required", serviceName)
 	}
 	var reader io.Reader
 	if body != nil {
@@ -213,7 +235,9 @@ func authedJSONRequest(ctx context.Context, serviceName, baseURLValue, token str
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

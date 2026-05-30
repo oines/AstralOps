@@ -1103,6 +1103,24 @@ export type CloudAccountStatus = {
   relay?: CloudRelayStatus;
 };
 
+export type CloudAuthProvider = "google" | "github";
+
+export type CloudAuthStartRequest = {
+  provider: CloudAuthProvider;
+  base_url?: string;
+};
+
+export type CloudAuthStartResponse = {
+  auth_url: string;
+  callback_url: string;
+  provider: CloudAuthProvider;
+  expires_at: string;
+};
+
+export type CloudAuthLogoutResponse = {
+  ok: boolean;
+};
+
 export type CloudDeviceRecord = {
   account_id_hash: string;
   device_id: string;
