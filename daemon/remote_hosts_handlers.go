@@ -310,6 +310,12 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 	route := parts[1:]
 
 	switch {
+	case len(route) == 1 && route[0] == "snapshot" && r.Method == http.MethodGet:
+		eventLimit, _ := strconv.Atoi(r.URL.Query().Get("event_limit"))
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreRead, ControlActionHostSnapshot, map[string]any{
+			"event_limit":       eventLimit,
+			"restore_on_launch": truthyQuery(r.URL.Query().Get("restore_on_launch")),
+		})
 	case len(route) == 1 && route[0] == "host" && r.Method == http.MethodGet:
 		target, err := a.remoteHostTarget(hostDeviceID)
 		if err != nil {

@@ -48,6 +48,8 @@ import type {
 const EVENT_WINDOW_SIZE = 1000;
 const LOCAL_HOST_ID = "local";
 const DEFAULT_CLOUD_BASE_URL = "https://cloud-astralops.oines.dev";
+const FOREGROUND_STATUS_REFRESH_MS = 5_000;
+const BACKGROUND_STATUS_REFRESH_MS = 60_000;
 type RemoteAuthorizationOverride = "revoked" | "pending";
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -129,15 +131,26 @@ export function App(): React.JSX.Element {
   const sessionViewRefreshPendingRef = useRef<Set<string>>(new Set());
   const sessionViewRefreshGenerationRef = useRef(0);
 
+  const commitRemoteHosts = useCallback((hosts: RemoteHostRecord[]) => {
+    setRemoteHosts(hosts);
+    setHostAuthorizationOverrides((current) => prunePendingAuthorizationOverrides(current, hosts));
+  }, []);
+
   const refreshRemoteHosts = useCallback(async (discover = true): Promise<void> => {
     if (!daemonInfo) {
       setRemoteHosts([]);
       return;
     }
-    const hosts = await listRemoteHosts(daemonInfo, discover);
-    setRemoteHosts(hosts);
-    setHostAuthorizationOverrides((current) => prunePendingAuthorizationOverrides(current, hosts));
-  }, [daemonInfo]);
+    const cloudHosts = await listRemoteHosts(daemonInfo, false);
+    commitRemoteHosts(cloudHosts);
+    if (!discover) return;
+    try {
+      const discoveredHosts = await listRemoteHosts(daemonInfo, true);
+      commitRemoteHosts(discoveredHosts);
+    } catch {
+      // Keep the cloud snapshot visible when LAN discovery is slow or unavailable.
+    }
+  }, [commitRemoteHosts, daemonInfo]);
 
   const refreshLocalPairingState = useCallback(async (): Promise<void> => {
     if (!localApi) {
@@ -338,30 +351,26 @@ export function App(): React.JSX.Element {
     client: CoreClient,
     options: { includeWorkspaceConnections?: boolean; restoreOnLaunch?: boolean; updateLocalHostInfo?: boolean } = {},
   ) => {
-    const [hostResponse, workspaceResponse, sessionResponse, recentEvents] = await Promise.all([
-      client.hostInfo(),
-      client.listWorkspaces(),
-      client.listSessions(),
-      client.events({ limit: EVENT_WINDOW_SIZE }),
-    ]);
-    const connectionResults = options.includeWorkspaceConnections
-      ? await Promise.allSettled(
-          workspaceResponse
-            .filter((workspace) => workspace.target === "ssh")
-            .map(async (workspace) => client.workspaceConnection(workspace.id)),
-        )
-      : [];
+    const snapshot = await client.hostSnapshot({
+      event_limit: EVENT_WINDOW_SIZE,
+      restore_on_launch: Boolean(options.restoreOnLaunch),
+    });
+    const hostResponse = snapshot.host;
+    const workspaceResponse = snapshot.workspaces;
+    const sessionResponse = snapshot.sessions;
+    const recentEvents = snapshot.events;
     const connectionMap: Record<string, WorkspaceConnection> = {};
-    for (const result of connectionResults) {
-      if (result.status === "fulfilled") connectionMap[result.value.workspace_id] = result.value;
+    if (options.includeWorkspaceConnections) {
+      for (const connection of snapshot.workspace_connections ?? []) {
+        connectionMap[connection.workspace_id] = connection;
+      }
     }
     const initialSession = options.restoreOnLaunch ? sessionResponse[0] ?? null : null;
-    const sessionEvents = initialSession ? await client.events({ session_id: initialSession.id, limit: EVENT_WINDOW_SIZE }) : [];
-    const viewResults = await Promise.allSettled(sessionResponse.map((session) => client.sessionView(session.id)));
     const viewMap: Record<string, SessionView> = {};
-    for (const result of viewResults) {
-      if (result.status === "fulfilled") viewMap[result.value.session.id] = result.value;
+    for (const view of snapshot.session_views) {
+      viewMap[view.session.id] = view;
     }
+    const sessionEvents = initialSession ? snapshot.initial_session_events ?? recentEvents.filter((event) => event.session_id === initialSession.id) : [];
     const eventResponse = [...recentEvents, ...sessionEvents];
     if (options.updateLocalHostInfo) setLocalHostInfo(hostResponse);
     setLastSessionAgent(sessionResponse[0]?.agent ?? "claude");
@@ -422,28 +431,54 @@ export function App(): React.JSX.Element {
     const info = daemonInfo;
     let cancelled = false;
     let refreshing = false;
+    let timer: number | undefined;
+
+    function refreshDelay(): number {
+      return document.visibilityState === "visible" ? FOREGROUND_STATUS_REFRESH_MS : BACKGROUND_STATUS_REFRESH_MS;
+    }
+
+    function scheduleNextRefresh(): void {
+      if (cancelled) return;
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(() => void refresh(), refreshDelay());
+    }
+
     async function refresh(): Promise<void> {
       if (refreshing) return;
       refreshing = true;
       try {
-        const hosts = await listRemoteHosts(info, true);
-        if (!cancelled) {
-          setRemoteHosts(hosts);
-          setHostAuthorizationOverrides((current) => prunePendingAuthorizationOverrides(current, hosts));
+        const cloudHosts = await listRemoteHosts(info, false);
+        if (!cancelled) commitRemoteHosts(cloudHosts);
+        try {
+          const discoveredHosts = await listRemoteHosts(info, true);
+          if (!cancelled) commitRemoteHosts(discoveredHosts);
+        } catch {
+          // Keep the cloud snapshot visible when LAN discovery is slow or unavailable.
         }
       } catch {
         if (!cancelled) setRemoteHosts([]);
       } finally {
         refreshing = false;
+        scheduleNextRefresh();
       }
     }
+
+    function handleVisibilityChange(): void {
+      if (document.visibilityState === "visible") {
+        void refresh();
+        return;
+      }
+      scheduleNextRefresh();
+    }
+
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 60_000);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [daemonInfo]);
+  }, [commitRemoteHosts, daemonInfo]);
 
   useEffect(() => {
     if (!localApi) {
@@ -453,6 +488,18 @@ export function App(): React.JSX.Element {
     const client = localApi;
     let cancelled = false;
     let refreshing = false;
+    let timer: number | undefined;
+
+    function refreshDelay(): number {
+      return document.visibilityState === "visible" ? FOREGROUND_STATUS_REFRESH_MS : BACKGROUND_STATUS_REFRESH_MS;
+    }
+
+    function scheduleNextRefresh(): void {
+      if (cancelled) return;
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(() => void refresh(), refreshDelay());
+    }
+
     async function refresh(): Promise<void> {
       if (refreshing) return;
       refreshing = true;
@@ -463,13 +510,24 @@ export function App(): React.JSX.Element {
         if (!cancelled) setPendingPairingCount(0);
       } finally {
         refreshing = false;
+        scheduleNextRefresh();
       }
     }
+
+    function handleVisibilityChange(): void {
+      if (document.visibilityState === "visible") {
+        void refresh();
+        return;
+      }
+      scheduleNextRefresh();
+    }
+
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 60_000);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [localApi]);
 

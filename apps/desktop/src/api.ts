@@ -19,6 +19,8 @@ import type {
   HostFileSystemBrowseParams,
   HostFileSystemBrowseResult,
   HostInfo,
+  HostSnapshotRequest,
+  HostSnapshotResponse,
   HostTrustListResult,
   HostTrustRevokeResult,
   PairingRequestListResult,
@@ -103,6 +105,7 @@ export interface CoreClient {
   listPairingRequests(): Promise<PairingRequestListResult>;
   approvePairingRequest(requestId: string): Promise<PairingRequestResolveResult>;
   denyPairingRequest(requestId: string): Promise<PairingRequestResolveResult>;
+  hostSnapshot(input?: HostSnapshotRequest): Promise<HostSnapshotResponse>;
   settings(): Promise<AppSettings>;
   patchSettings(patch: AppSettingsPatch): Promise<AppSettings>;
   clearMediaCache(): Promise<ClearMediaCacheResponse>;
@@ -200,7 +203,7 @@ function requestLogContext(
 }
 
 function safeQueryDetails(params: URLSearchParams): Record<string, string> | undefined {
-  const allowed = new Set(["after_seq", "before_seq", "limit", "session_id", "workspace_id", "stream", "discover", "path"]);
+  const allowed = new Set(["after_seq", "before_seq", "limit", "session_id", "workspace_id", "stream", "discover", "path", "event_limit", "restore_on_launch"]);
   const out: Record<string, string> = {};
   for (const [key, value] of params.entries()) {
     if (allowed.has(key)) out[key] = value;
@@ -211,6 +214,7 @@ function safeQueryDetails(params: URLSearchParams): Record<string, string> | und
 function requestAction(method: RequestMethod, pathname: string): string {
   const parts = pathname.split("/").filter(Boolean);
   if (method === "POST" && pathname === "/v1/workspaces") return "workspace.create";
+  if (pathname === "/v1/snapshot") return "host.snapshot";
   if (method === "DELETE" && parts[1] === "workspaces" && parts[2]) return "workspace.delete";
   if (method === "POST" && parts[1] === "workspaces" && parts[3]) return `workspace.${parts[3]}`;
   if (method === "GET" && parts[1] === "workspaces" && parts[3]) return `workspace.${parts[3]}.read`;
@@ -596,6 +600,14 @@ export class LocalCoreClient implements CoreClient {
 
   removeCloudDevice(deviceId: string, options: CloudDeviceRemoveRequest = {}): Promise<CloudDeviceRemoveResponse> {
     return this.channel.request("POST", `/v1/cloud/devices/${encodeURIComponent(deviceId)}/remove`, options);
+  }
+
+  hostSnapshot(input: HostSnapshotRequest = {}): Promise<HostSnapshotResponse> {
+    const params = new URLSearchParams();
+    if (input.event_limit !== undefined) params.set("event_limit", String(input.event_limit));
+    if (input.restore_on_launch !== undefined) params.set("restore_on_launch", input.restore_on_launch ? "1" : "0");
+    const search = params.toString();
+    return this.channel.request("GET", `/v1/snapshot${search ? `?${search}` : ""}`);
   }
 
   listWorkspaces(): Promise<Workspace[]> {

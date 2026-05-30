@@ -1629,6 +1629,7 @@ Desktop Controller 不直接在 React/Electron renderer 内实现远控握手，
 
 ```text
 GET /v1/remote/hosts?discover=1
+GET /v1/remote/hosts/:host_device_id/snapshot
 GET /v1/remote/hosts/:host_device_id/host
 POST /v1/remote/hosts/:host_device_id/fs/browse
 GET /v1/remote/hosts/:host_device_id/workspaces
@@ -1658,7 +1659,7 @@ POST /v1/remote/hosts/:host_device_id/approvals/:interaction_id/respond
 
 这些 endpoint 是本机 daemon 的 controller-side facade，不是 Host remote listener。它们必须只对本机 authenticated Desktop 开放，并且要求本机已加入 Cloud Mesh；真正的远端执行仍然通过目标 Host 的 `/v1/control/ws`，目标 Host listener/relay hello 也必须要求 Host 当前 Cloud Mesh active。`discover=1` 只把 Cloud Mesh 列表中已存在、LAN 上匹配 known host fingerprint 且通过 `/v1/host` 校验的 Host 标为 `lan`，未知设备和本地 stale known host 不能自动出现在可控列表里。
 
-当前 Desktop 的 Host selector 使用这个 facade 拉取远端 Host 和 Host-scoped workspaces/sessions/events。创建 workspace 使用同一套 Host-scoped 目录选择器：本机 local、远端 local、本机 ssh、远端 ssh 都先通过当前 CoreClient 调用 `host.fs.browse`，再用 `core.control.workspace.create` 在所选 Host 上创建；SSH workspace 的 connect/disconnect 也通过 Host 侧 `core.control.workspace.connect/disconnect` 执行。远程 PTY 通过本机 daemon WebSocket facade 接入：Desktop 仍打开 `/v1/remote/hosts/:host_device_id/workspaces/:workspace_id/pty`，本机 daemon 再通过目标 Host 的 encrypted control WebSocket 转发 `terminal.open/attach/input/resize/close`，并把 `terminal.output` / `terminal.closed` frame 映射回本地终端 UI 的 ready/output/exit 消息。远端 Host 的 pending pairing request 管理由本机 daemon facade 转成 `host.pairing.*` E2EE action；发起 cloud pairing request 前，本机 daemon 会先注册当前 Controller public identity，避免首次启动还未 heartbeat 时请求失败；approved cloud pairing signal 只会导入 Host public identity 到 Controller `known_hosts`，不会写任何 Host trust grant。Desktop renderer 不直接持有远控密钥。尚未进入 control protocol 的本地 app 设置和 session command 列表不能在 UI 里伪造；下一步应为这些能力补明确协议 action 或保持不可用状态。
+当前 Desktop 的 Host selector 使用这个 facade 拉取远端 Host 和 Host-scoped workspaces/sessions/events。切换 Host 时优先调用 `core.read.host_snapshot` / `/snapshot` 一次性读取 Host info、workspaces、sessions、workspace connection、recent events 和 session views，避免 renderer 对远端 Host 发起多次串行状态请求；snapshot 仍然必须走 Core sanitization，不能把 raw payload、native runtime id、Host helper path、Host 本地路径或 SSH 私有配置泄露给 Controller。创建 workspace 使用同一套 Host-scoped 目录选择器：本机 local、远端 local、本机 ssh、远端 ssh 都先通过当前 CoreClient 调用 `host.fs.browse`，再用 `core.control.workspace.create` 在所选 Host 上创建；SSH workspace 的 connect/disconnect 也通过 Host 侧 `core.control.workspace.connect/disconnect` 执行。远程 PTY 通过本机 daemon WebSocket facade 接入：Desktop 仍打开 `/v1/remote/hosts/:host_device_id/workspaces/:workspace_id/pty`，本机 daemon 再通过目标 Host 的 encrypted control WebSocket 转发 `terminal.open/attach/input/resize/close`，并把 `terminal.output` / `terminal.closed` frame 映射回本地终端 UI 的 ready/output/exit 消息。远端 Host 的 pending pairing request 管理由本机 daemon facade 转成 `host.pairing.*` E2EE action；发起 cloud pairing request 前，本机 daemon 会先注册当前 Controller public identity，避免首次启动还未 heartbeat 时请求失败；approved cloud pairing signal 只会导入 Host public identity 到 Controller `known_hosts`，不会写任何 Host trust grant。Desktop renderer 不直接持有远控密钥。尚未进入 control protocol 的本地 app 设置和 session command 列表不能在 UI 里伪造；下一步应为这些能力补明确协议 action 或保持不可用状态。
 
 握手和帧语义：
 

@@ -136,6 +136,7 @@ func main() {
 	mux.HandleFunc("/v1/health", a.handleHealth)
 	mux.HandleFunc("/v1/control/ws", a.handleControlWS)
 	mux.HandleFunc("/v1/host", a.auth(a.handleHost))
+	mux.HandleFunc("/v1/snapshot", a.auth(a.handleHostSnapshot))
 	mux.HandleFunc("/v1/settings", a.auth(a.handleSettings))
 	mux.HandleFunc("/v1/settings/", a.auth(a.handleSettingsAction))
 	mux.HandleFunc("/v1/cloud/auth/callback", a.handleCloudAuthCallback)

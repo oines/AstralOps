@@ -295,6 +295,21 @@ export type SessionView = {
   editable_user_message?: EditableUserMessageView | null;
 };
 
+export type HostSnapshotRequest = {
+  event_limit?: number;
+  restore_on_launch?: boolean;
+};
+
+export type HostSnapshotResponse = {
+  host: HostInfo;
+  workspaces: Workspace[];
+  sessions: Session[];
+  workspace_connections?: WorkspaceConnection[];
+  events: AstralEvent[];
+  session_views: SessionView[];
+  initial_session_events?: AstralEvent[];
+};
+
 export type EventWindowParams = {
   workspace_id?: string;
   session_id?: string;
@@ -824,6 +839,7 @@ export type ControlCapability =
   | (string & {});
 
 export type ControlAction =
+  | "core.read.host_snapshot"
   | "core.read.session_view"
   | "core.read.sessions"
   | "core.read.workspaces"
@@ -1371,6 +1387,7 @@ export type SessionDeleteResult = {
 };
 
 export type ControlActionParamMap = {
+  "core.read.host_snapshot": HostSnapshotRequest;
   "core.read.session_view": SessionReferenceParams;
   "core.read.sessions": SessionsReadParams;
   "core.read.workspaces": undefined;
@@ -1421,6 +1438,7 @@ export type ControlActionParamMap = {
 };
 
 export type ControlActionResultMap = {
+  "core.read.host_snapshot": HostSnapshotResponse;
   "core.read.session_view": SessionView;
   "core.read.sessions": Session[];
   "core.read.workspaces": Workspace[];

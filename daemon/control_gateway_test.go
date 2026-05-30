@@ -312,6 +312,64 @@ func TestControlGatewayCoreReadHidesHostWorkspaceAndSessionInternals(t *testing.
 	}
 }
 
+func TestControlGatewayReadsHostSnapshot(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	workspace.LocalProjectionRoot = "/host/private/projection"
+	workspace.NativeSessionID = "workspace-native-session"
+	app.store.mu.Lock()
+	app.store.workspaces[workspace.ID] = workspace
+	session.NativeSessionID = "session-native-id"
+	session.NativeThreadID = "session-native-thread"
+	app.store.sessions[session.ID] = session
+	app.store.mu.Unlock()
+	if _, err := app.store.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       session.Agent,
+		Kind:        "message.user",
+		Normalized:  map[string]any{"text": "hello"},
+		Raw:         map[string]any{"native": "secret"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionHostSnapshot,
+		Params: map[string]any{
+			"event_limit":       10,
+			"restore_on_launch": true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, ok := response.Result.(hostSnapshotResult)
+	if !ok {
+		t.Fatalf("snapshot result = %#v, want hostSnapshotResult", response.Result)
+	}
+	if snapshot.Host.Identity.DeviceID == "" {
+		t.Fatalf("snapshot host identity missing: %#v", snapshot.Host)
+	}
+	if len(snapshot.Workspaces) != 1 || snapshot.Workspaces[0].LocalCWD != "" || snapshot.Workspaces[0].LocalProjectionRoot != "" || snapshot.Workspaces[0].NativeSessionID != "" {
+		t.Fatalf("snapshot workspaces = %#v, want sanitized workspace", snapshot.Workspaces)
+	}
+	if len(snapshot.Sessions) != 1 || snapshot.Sessions[0].NativeSessionID != "" || snapshot.Sessions[0].NativeThreadID != "" {
+		t.Fatalf("snapshot sessions = %#v, want sanitized session", snapshot.Sessions)
+	}
+	if len(snapshot.SessionViews) != 1 || snapshot.SessionViews[0].Session.NativeSessionID != "" {
+		t.Fatalf("snapshot session views = %#v, want sanitized session view", snapshot.SessionViews)
+	}
+	if len(snapshot.Events) != 1 || snapshot.Events[0].Raw != nil {
+		t.Fatalf("snapshot events = %#v, want sanitized events", snapshot.Events)
+	}
+	if len(snapshot.InitialSessionEvents) != 1 || snapshot.InitialSessionEvents[0].SessionID != session.ID {
+		t.Fatalf("initial session events = %#v, want selected session events", snapshot.InitialSessionEvents)
+	}
+}
+
 func TestControlGatewayReadsWorkspaceConnectionFromHostState(t *testing.T) {
 	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	workspace, err := app.store.createWorkspace(createWorkspaceRequest{
