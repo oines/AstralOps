@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oines/astralops/internal/cloudbroker"
+	"github.com/oines/astralops/internal/relaybroker"
 )
 
 func TestControlRelayRoundTripReadsWorkspaces(t *testing.T) {
-	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
-	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
+	hostApp, workspace, controllerStore, _, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
+	client := RelayClient{BaseURL: relayServer.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 
 	response, err := controlClientRelayRoundTrip(t.Context(), controlClientTarget{
@@ -42,8 +42,8 @@ func TestControlRelayRoundTripReadsWorkspaces(t *testing.T) {
 }
 
 func TestControlRelayRoundTripAcksStaleHelloAckForSameHost(t *testing.T) {
-	hostApp, _, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
-	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
+	hostApp, _, controllerStore, _, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
+	client := RelayClient{BaseURL: relayServer.URL, Token: "account-token"}
 
 	oldHello, _, err := controlClientRelayHello(controllerStore, hostApp.store.hostInfo())
 	if err != nil {
@@ -103,15 +103,15 @@ func TestControlRelayRoundTripAcksStaleHelloAckForSameHost(t *testing.T) {
 }
 
 func TestControlRelayRejectsUntrustedController(t *testing.T) {
-	hostApp, _, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
-	cloudClient := CloudClient{BaseURL: broker.URL, Token: "account-token"}
-	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
+	hostApp, _, controllerStore, cloudServer, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
+	cloudClient := CloudClient{BaseURL: cloudServer.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: relayServer.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 	untrustedStore, err := loadStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cloudClient.RegisterDevice(t.Context(), untrustedStore.hostInfo().Identity, false, true, broker.URL); err != nil {
+	if _, err := cloudClient.RegisterDevice(t.Context(), untrustedStore.hostInfo().Identity, false, true, relayServer.URL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -140,8 +140,8 @@ func TestControlRelayTerminalStreamsOutput(t *testing.T) {
 	}
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 
-	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityTerminalOpen, CapabilityTerminalInput)
-	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
+	hostApp, workspace, controllerStore, _, relayServer := newControlRelayTestRig(t, CapabilityTerminalOpen, CapabilityTerminalInput)
+	client := RelayClient{BaseURL: relayServer.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 
 	steps, err := controlClientSmokeTerminalFlow(controllerStore, controlClientTarget{
@@ -166,8 +166,8 @@ func TestControlRelayTerminalStreamsOutput(t *testing.T) {
 }
 
 func TestRemoteHostActionFallsBackToCloudRelay(t *testing.T) {
-	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
-	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
+	hostApp, workspace, controllerStore, cloudServer, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
+	client := RelayClient{BaseURL: relayServer.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
 		t.Fatal(err)
@@ -177,7 +177,7 @@ func TestRemoteHostActionFallsBackToCloudRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 	enabled := true
-	baseURL := broker.URL
+	baseURL := cloudServer.URL
 	token := "account-token"
 	if _, err := settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
 		t.Fatal(err)
@@ -198,9 +198,9 @@ func TestRemoteHostActionFallsBackToCloudRelay(t *testing.T) {
 }
 
 func TestRemoteHostActionUsesApprovedCloudPairingKnownHost(t *testing.T) {
-	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
-	cloudClient := CloudClient{BaseURL: broker.URL, Token: "account-token"}
-	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
+	hostApp, workspace, controllerStore, cloudServer, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
+	cloudClient := CloudClient{BaseURL: cloudServer.URL, Token: "account-token"}
+	client := RelayClient{BaseURL: relayServer.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 
 	settings, err := loadSettingsStore(controllerStore.dataDir)
@@ -208,7 +208,7 @@ func TestRemoteHostActionUsesApprovedCloudPairingKnownHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	enabled := true
-	baseURL := broker.URL
+	baseURL := cloudServer.URL
 	token := "account-token"
 	if _, err := settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
 		t.Fatal(err)
@@ -249,8 +249,8 @@ func TestRemoteHostActionUsesApprovedCloudPairingKnownHost(t *testing.T) {
 }
 
 func TestRemoteHostActionCreatesSessionThroughRelay(t *testing.T) {
-	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead, CapabilityCoreControl)
-	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
+	hostApp, workspace, controllerStore, cloudServer, relayServer := newControlRelayTestRig(t, CapabilityCoreRead, CapabilityCoreControl)
+	client := RelayClient{BaseURL: relayServer.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
 		t.Fatal(err)
@@ -260,7 +260,7 @@ func TestRemoteHostActionCreatesSessionThroughRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 	enabled := true
-	baseURL := broker.URL
+	baseURL := cloudServer.URL
 	token := "account-token"
 	if _, err := settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
 		t.Fatal(err)
@@ -290,14 +290,14 @@ func TestRemoteHostActionCreatesSessionThroughRelay(t *testing.T) {
 }
 
 func TestControlClientResolveTargetUsesForcedCloudRelay(t *testing.T) {
-	hostApp, _, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead)
+	hostApp, _, controllerStore, cloudServer, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
 	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
 		t.Fatal(err)
 	}
 
 	target, err := controlClientResolveTarget(controllerStore, controlClientTargetOptions{
 		UseRelay:     true,
-		CloudBaseURL: broker.URL,
+		CloudBaseURL: cloudServer.URL,
 		CloudToken:   "account-token",
 		HostDeviceID: hostApp.store.hostInfo().Identity.DeviceID,
 		RelayTimeout: 3 * time.Second,
@@ -305,7 +305,7 @@ func TestControlClientResolveTargetUsesForcedCloudRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !target.UseRelay || target.BaseURL != "" || target.RelayClient.BaseURL != broker.URL {
+	if !target.UseRelay || target.BaseURL != "" || target.RelayClient.BaseURL != relayServer.URL {
 		t.Fatalf("target = %#v, want forced cloud relay target", target)
 	}
 	if target.HostInfo.Identity.DeviceID != hostApp.store.hostInfo().Identity.DeviceID || target.HostInfo.Identity.PublicKey != hostApp.store.hostInfo().Identity.PublicKey {
@@ -320,8 +320,8 @@ func TestControlClientResolveTargetUsesForcedCloudRelay(t *testing.T) {
 }
 
 func TestControlClientSmokeRunsRelayRequestResponseChecks(t *testing.T) {
-	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceFilesWrite, CapabilityWorkspaceExec, CapabilityHostManage)
-	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
+	hostApp, workspace, controllerStore, cloudServer, relayServer := newControlRelayTestRig(t, CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceFilesWrite, CapabilityWorkspaceExec, CapabilityHostManage)
+	client := RelayClient{BaseURL: relayServer.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
 		t.Fatal(err)
@@ -330,7 +330,7 @@ func TestControlClientSmokeRunsRelayRequestResponseChecks(t *testing.T) {
 	result, err := runControlClientSmoke(controllerStore, controlClientSmokeOptions{
 		Target: controlClientTargetOptions{
 			UseRelay:     true,
-			CloudBaseURL: broker.URL,
+			CloudBaseURL: cloudServer.URL,
 			CloudToken:   "account-token",
 			HostDeviceID: hostApp.store.hostInfo().Identity.DeviceID,
 			RelayTimeout: 3 * time.Second,
@@ -371,8 +371,8 @@ func TestControlClientSmokeRunsRelayRequestResponseChecks(t *testing.T) {
 }
 
 func TestControlClientSmokeRunsRelayStreamingChecks(t *testing.T) {
-	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityCoreRead, CapabilityWorkspaceFilesRead)
-	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
+	hostApp, workspace, controllerStore, cloudServer, relayServer := newControlRelayTestRig(t, CapabilityCoreRead, CapabilityWorkspaceFilesRead)
+	client := RelayClient{BaseURL: relayServer.URL, Token: "account-token"}
 	runControlRelayPoller(t, hostApp, client)
 	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
 		t.Fatal(err)
@@ -388,7 +388,7 @@ func TestControlClientSmokeRunsRelayStreamingChecks(t *testing.T) {
 	result, err := runControlClientSmoke(controllerStore, controlClientSmokeOptions{
 		Target: controlClientTargetOptions{
 			UseRelay:     true,
-			CloudBaseURL: broker.URL,
+			CloudBaseURL: cloudServer.URL,
 			CloudToken:   "account-token",
 			HostDeviceID: hostApp.store.hostInfo().Identity.DeviceID,
 			RelayTimeout: 3 * time.Second,
@@ -417,8 +417,8 @@ func TestControlClientSmokeRunsRelayStreamingChecks(t *testing.T) {
 }
 
 func TestControlRelayMediaStreamReturnsChunks(t *testing.T) {
-	hostApp, workspace, controllerStore, broker := newControlRelayTestRig(t, CapabilityMediaStream)
-	client := RelayClient{BaseURL: broker.URL, Token: "account-token"}
+	hostApp, workspace, controllerStore, _, relayServer := newControlRelayTestRig(t, CapabilityMediaStream)
+	client := RelayClient{BaseURL: relayServer.URL, Token: "account-token"}
 	session := hostApp.store.createSession(workspace, AgentCodex)
 	body := []byte("relay media stream body\nsecond chunk\n")
 	media := addControlMediaFixture(t, hostApp, workspace, session, body)
@@ -442,18 +442,12 @@ func TestControlRelayMediaStreamReturnsChunks(t *testing.T) {
 	}
 }
 
-func newControlRelayTestRig(t *testing.T, capabilities ...string) (*app, Workspace, *store, *httptest.Server) {
+func newControlRelayTestRig(t *testing.T, capabilities ...string) (*app, Workspace, *store, *httptest.Server, *httptest.Server) {
 	t.Helper()
-	cloudStore, err := cloudbroker.LoadFileStore(t.TempDir() + "/cloud.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cloudServer := cloudbroker.NewServer(cloudStore, []string{"account-token"})
-	broker := httptest.NewServer(cloudServer.Handler())
-	if err := cloudServer.SetDefaultRelay(cloudbroker.RelayConfig{RelayID: "test", RelayURL: broker.URL}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(broker.Close)
+	cloudBroker, cloudServer := newTestCloudBrokerServer(t, "account-token")
+	relayServer := httptest.NewServer(relaybroker.NewServer([]string{"account-token"}).Handler())
+	t.Cleanup(relayServer.Close)
+	cloudBroker.SetDefaultRelay(CloudRelayConfig{RelayID: "test", RelayURL: relayServer.URL})
 
 	hostDir := t.TempDir()
 	hostStore, err := loadStore(hostDir)
@@ -491,14 +485,14 @@ func newControlRelayTestRig(t *testing.T, capabilities ...string) (*app, Workspa
 		hub:      newEventHub(),
 		runtimes: map[AgentKind]AgentRuntime{AgentCodex: &recordingRuntime{}},
 	}
-	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
-	if _, err := client.RegisterDevice(t.Context(), hostStore.hostInfo().Identity, true, true, broker.URL); err != nil {
+	client := CloudClient{BaseURL: cloudServer.URL, Token: "account-token"}
+	if _, err := client.RegisterDevice(t.Context(), hostStore.hostInfo().Identity, true, true, relayServer.URL); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.RegisterDevice(t.Context(), controllerStore.hostInfo().Identity, false, true, broker.URL); err != nil {
+	if _, err := client.RegisterDevice(t.Context(), controllerStore.hostInfo().Identity, false, true, relayServer.URL); err != nil {
 		t.Fatal(err)
 	}
-	return hostApp, workspace, controllerStore, broker
+	return hostApp, workspace, controllerStore, cloudServer, relayServer
 }
 
 func runControlRelayPoller(t *testing.T, app *app, client RelayClient) {

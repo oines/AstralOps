@@ -6,8 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/oines/astralops/internal/cloudbroker"
 )
 
 func TestCloudHandlersRegisterAndListCurrentDevice(t *testing.T) {
@@ -497,11 +495,7 @@ func TestRemoteHostsIncludesCloudHostCandidatesWithoutGrantingControl(t *testing
 
 func testCloudApp(t *testing.T) (*app, *httptest.Server) {
 	t.Helper()
-	cloudStore, err := cloudbroker.LoadFileStore(t.TempDir() + "/cloud.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	broker := httptest.NewServer(cloudbroker.NewServer(cloudStore, []string{"account-token"}).Handler())
+	_, broker := newTestCloudBrokerServer(t, "account-token")
 	dir := t.TempDir()
 	st, err := loadStore(dir)
 	if err != nil {
@@ -528,7 +522,7 @@ func enableRemoteControlForCloudTest(t *testing.T, app *app) {
 	}
 }
 
-func testControllerRegistration(t *testing.T, deviceID string) cloudbroker.DeviceRegistration {
+func testControllerRegistration(t *testing.T, deviceID string) cloudDeviceRegistration {
 	t.Helper()
 	st, err := loadStore(t.TempDir())
 	if err != nil {
@@ -538,7 +532,7 @@ func testControllerRegistration(t *testing.T, deviceID string) cloudbroker.Devic
 	identity.DeviceID = deviceID
 	identity.DeviceKind = "mobile"
 	identity.DeviceName = "phone"
-	return cloudbroker.DeviceRegistration{
+	return cloudDeviceRegistration{
 		DeviceID:             identity.DeviceID,
 		DeviceName:           identity.DeviceName,
 		DeviceKind:           identity.DeviceKind,
@@ -550,7 +544,7 @@ func testControllerRegistration(t *testing.T, deviceID string) cloudbroker.Devic
 	}
 }
 
-func testCloudDeviceRegistration(t *testing.T, deviceID, kind string, canHost, canControl bool) cloudbroker.DeviceRegistration {
+func testCloudDeviceRegistration(t *testing.T, deviceID, kind string, canHost, canControl bool) cloudDeviceRegistration {
 	t.Helper()
 	st, err := loadStore(t.TempDir())
 	if err != nil {
@@ -560,7 +554,7 @@ func testCloudDeviceRegistration(t *testing.T, deviceID, kind string, canHost, c
 	identity.DeviceID = deviceID
 	identity.DeviceKind = kind
 	identity.DeviceName = deviceID
-	return cloudbroker.DeviceRegistration{
+	return cloudDeviceRegistration{
 		DeviceID:             identity.DeviceID,
 		DeviceName:           identity.DeviceName,
 		DeviceKind:           identity.DeviceKind,

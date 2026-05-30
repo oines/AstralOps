@@ -6,6 +6,10 @@ This repository is public. Never commit real OAuth client secrets, database URLs
 
 Only commit sanitized examples such as `.env.example` with placeholder values. If a task needs credentials, keep the values local/out-of-band and document only the required variable names, not the values.
 
+Production cloud control-plane code belongs in the private `oines/AstralOps-Cloud` repository, not this public repository. Public code may keep client contracts, protocol docs, relay-facing client code, and test-only fake brokers, but must not add a deployable production cloud account service here.
+
+Relay and cloud must remain separate services. The public `relay/` service may route only opaque encrypted envelopes. The private cloud service may return account relay configuration, but must not mount `/v1/relay/*` handlers or store relay payloads.
+
 ## Event contract memory
 
 Do not rely on chat context for the AstralOps event contract. Treat this file as the project-level source of truth.

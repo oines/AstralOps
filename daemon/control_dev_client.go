@@ -324,7 +324,7 @@ func runControlDevClientCommand(args []string) error {
 		host := fs.String("host", "", "remote Host base URL")
 		discover := fs.Bool("discover", false, "discover a known Host on LAN before connecting")
 		relay := fs.Bool("relay", false, "use cloud relay instead of LAN/direct control")
-		cloudBaseURL := fs.String("cloud-base-url", "", "cloud broker base URL for --relay")
+		cloudBaseURL := fs.String("cloud-base-url", "", "cloud service base URL for --relay")
 		cloudToken := fs.String("cloud-token", "", "cloud account token for --relay")
 		hostDeviceID := fs.String("host-device-id", "", "known Host device id for LAN discovery")
 		discoveryPort := fs.Int("discovery-port", defaultRemoteControlDiscoveryPort, "LAN discovery UDP port")
