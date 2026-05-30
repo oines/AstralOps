@@ -567,7 +567,7 @@ func (r remoteTargetResolver) cloudRelayTarget(opts controlClientTargetOptions) 
 	if err != nil {
 		return controlClientTarget{}, err
 	}
-	relayClient, _, ok := relayClientFromCloudAccount(account, cloudToken, nil)
+	relayClient, _, ok := relayClientFromCloudAccount(account, nil)
 	if !ok {
 		return controlClientTarget{}, fmt.Errorf("cloud account relay is not configured")
 	}
@@ -629,7 +629,7 @@ func (r remoteTargetResolver) cloudRelayKnownHostTarget(known KnownHost) (contro
 	if err != nil {
 		return controlClientTarget{}, err
 	}
-	relayClient, _, ok := relayClientFromCloudAccount(account, client.Token, client.HTTPClient)
+	relayClient, _, ok := relayClientFromCloudAccount(account, client.HTTPClient)
 	if !ok {
 		return controlClientTarget{}, fmt.Errorf("cloud account relay is not configured")
 	}

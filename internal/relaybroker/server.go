@@ -2,7 +2,6 @@ package relaybroker
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oines/astralops/internal/relayauth"
 )
 
 const (
@@ -26,10 +27,18 @@ const (
 )
 
 type Server struct {
-	mu           sync.Mutex
-	allowedToken map[string]bool
-	queues       map[string][]Envelope
-	now          func() time.Time
+	mu                sync.Mutex
+	relayID           string
+	credentialSecrets map[string][]byte
+	maxCredentialTTL  time.Duration
+	queues            map[string][]Envelope
+	now               func() time.Time
+}
+
+type ServerOptions struct {
+	RelayID           string
+	CredentialSecrets map[string][]byte
+	MaxCredentialTTL  time.Duration
 }
 
 type Envelope struct {
@@ -64,19 +73,21 @@ func (e APIError) Error() string {
 	return e.Code
 }
 
-func NewServer(accountTokens []string) *Server {
-	allowed := map[string]bool{}
-	for _, token := range accountTokens {
-		token = strings.TrimSpace(token)
-		if token != "" {
-			allowed[accountIDHashFromToken(token)] = true
-		}
+func NewServer(options ServerOptions) (*Server, error) {
+	relayID := strings.TrimSpace(options.RelayID)
+	if relayID == "" {
+		return nil, errors.New("relay id required")
+	}
+	if len(options.CredentialSecrets) == 0 {
+		return nil, errors.New("relay credential secrets required")
 	}
 	return &Server{
-		allowedToken: allowed,
-		queues:       map[string][]Envelope{},
-		now:          func() time.Time { return time.Now().UTC() },
-	}
+		relayID:           relayID,
+		credentialSecrets: cloneSecrets(options.CredentialSecrets),
+		maxCredentialTTL:  options.MaxCredentialTTL,
+		queues:            map[string][]Envelope{},
+		now:               func() time.Time { return time.Now().UTC() },
+	}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -219,11 +230,16 @@ func (s *Server) accountIDHashFromRequest(r *http.Request) (string, error) {
 	if token == "" {
 		return "", apiErr(http.StatusUnauthorized, "unauthorized", "missing bearer token")
 	}
-	accountIDHash := accountIDHashFromToken(token)
-	if len(s.allowedToken) > 0 && !s.allowedToken[accountIDHash] {
-		return "", apiErr(http.StatusUnauthorized, "unauthorized", "unknown account token")
+	payload, err := relayauth.VerifyCredential(token, relayauth.VerifyOptions{
+		RelayID: s.relayID,
+		Secrets: s.credentialSecrets,
+		Now:     s.now,
+		MaxTTL:  s.maxCredentialTTL,
+	})
+	if err != nil {
+		return "", apiErr(http.StatusUnauthorized, "unauthorized", "invalid relay credential")
 	}
-	return accountIDHash, nil
+	return payload.AccountIDHash, nil
 }
 
 func validateEnvelope(envelope Envelope) error {
@@ -343,11 +359,6 @@ func apiErr(status int, code, message string) APIError {
 	return APIError{Status: status, Code: code, Message: message}
 }
 
-func accountIDHashFromToken(token string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
-	return "acct_" + strings.ToLower(hex.EncodeToString(sum[:16]))
-}
-
 func pathParts(path string) []string {
 	raw := strings.Split(strings.Trim(path, "/"), "/")
 	out := make([]string, 0, len(raw))
@@ -356,6 +367,20 @@ func pathParts(path string) []string {
 		if part != "" {
 			out = append(out, part)
 		}
+	}
+	return out
+}
+
+func cloneSecrets(secrets map[string][]byte) map[string][]byte {
+	out := make(map[string][]byte, len(secrets))
+	for key, secret := range secrets {
+		key = strings.TrimSpace(key)
+		if key == "" || len(secret) == 0 {
+			continue
+		}
+		copied := make([]byte, len(secret))
+		copy(copied, secret)
+		out[key] = copied
 	}
 	return out
 }

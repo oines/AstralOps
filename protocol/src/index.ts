@@ -1082,6 +1082,8 @@ export type CloudDeviceStatus = "online" | "offline" | "revoked" | string;
 export type CloudRelayConfig = {
   relay_id?: string;
   relay_url?: string;
+  credential?: string;
+  credential_expires_at?: string;
 };
 
 export type CloudAccount = {

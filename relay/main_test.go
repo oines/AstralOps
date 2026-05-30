@@ -1,33 +1,35 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
-func TestRelayAccountTokensRequireExplicitConfig(t *testing.T) {
-	t.Setenv("ASTRALOPS_RELAY_ACCOUNT_TOKENS", "")
-	t.Setenv("ASTRALOPS_RELAY_ALLOW_OPEN_TOKENS", "")
-	if _, err := relayAccountTokensFromEnv(); err == nil {
-		t.Fatal("relayAccountTokensFromEnv succeeded without account tokens")
+func TestRelayOptionsRequireRelayID(t *testing.T) {
+	t.Setenv("ASTRALOPS_RELAY_ID", "")
+	t.Setenv("ASTRALOPS_RELAY_CREDENTIAL_SECRETS", "test-1:"+strings.Repeat("a", 32))
+	if _, err := relayOptionsFromEnv(); err == nil {
+		t.Fatal("relayOptionsFromEnv succeeded without relay id")
 	}
 }
 
-func TestRelayAccountTokensAllowLocalOpenMode(t *testing.T) {
-	t.Setenv("ASTRALOPS_RELAY_ACCOUNT_TOKENS", "")
-	t.Setenv("ASTRALOPS_RELAY_ALLOW_OPEN_TOKENS", "1")
-	tokens, err := relayAccountTokensFromEnv()
+func TestRelayOptionsRequireCredentialSecrets(t *testing.T) {
+	t.Setenv("ASTRALOPS_RELAY_ID", "test")
+	t.Setenv("ASTRALOPS_RELAY_CREDENTIAL_SECRETS", "")
+	if _, err := relayOptionsFromEnv(); err == nil {
+		t.Fatal("relayOptionsFromEnv succeeded without credential secrets")
+	}
+}
+
+func TestRelayOptionsFromEnv(t *testing.T) {
+	t.Setenv("ASTRALOPS_RELAY_ID", "test")
+	t.Setenv("ASTRALOPS_RELAY_CREDENTIAL_SECRETS", "test-1:"+strings.Repeat("a", 32))
+	t.Setenv("ASTRALOPS_RELAY_CREDENTIAL_MAX_TTL", "10m")
+	options, err := relayOptionsFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tokens) != 0 {
-		t.Fatalf("tokens = %#v, want empty allowlist", tokens)
-	}
-}
-
-func TestRelayAccountTokensRejectShortToken(t *testing.T) {
-	t.Setenv("ASTRALOPS_RELAY_ACCOUNT_TOKENS", "short-token")
-	t.Setenv("ASTRALOPS_RELAY_ALLOW_OPEN_TOKENS", "")
-	if _, err := relayAccountTokensFromEnv(); err == nil {
-		t.Fatal("short relay account token was accepted")
+	if options.RelayID != "test" || options.MaxCredentialTTL.String() != "10m0s" || len(options.CredentialSecrets) != 1 {
+		t.Fatalf("options = %#v", options)
 	}
 }

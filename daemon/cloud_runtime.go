@@ -148,7 +148,7 @@ func cloudRelayClientFromCloud(ctx context.Context, client CloudClient) (RelayCl
 	if err != nil {
 		return RelayClient{}, "", false, err
 	}
-	relayClient, relay, ok := relayClientFromCloudAccount(account, client.Token, client.HTTPClient)
+	relayClient, relay, ok := relayClientFromCloudAccount(account, client.HTTPClient)
 	if !ok {
 		return RelayClient{}, "", false, nil
 	}

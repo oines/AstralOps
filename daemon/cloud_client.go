@@ -174,21 +174,23 @@ func (c CloudClient) do(ctx context.Context, method, path string, body any, out 
 	return authedJSONRequest(ctx, "cloud", c.BaseURL, c.Token, c.HTTPClient, method, path, body, out)
 }
 
-func relayClientFromCloudAccount(account CloudAccount, token string, httpClient *http.Client) (RelayClient, CloudRelayConfig, bool) {
+func relayClientFromCloudAccount(account CloudAccount, httpClient *http.Client) (RelayClient, CloudRelayConfig, bool) {
 	if account.Relay == nil {
 		return RelayClient{}, CloudRelayConfig{}, false
 	}
 	relay := CloudRelayConfig{
-		RelayID:  strings.TrimSpace(account.Relay.RelayID),
-		RelayURL: strings.TrimSpace(account.Relay.RelayURL),
+		RelayID:             strings.TrimSpace(account.Relay.RelayID),
+		RelayURL:            strings.TrimSpace(account.Relay.RelayURL),
+		Credential:          strings.TrimSpace(account.Relay.Credential),
+		CredentialExpiresAt: strings.TrimSpace(account.Relay.CredentialExpiresAt),
 	}
-	if relay.RelayURL == "" {
+	if relay.RelayURL == "" || relay.Credential == "" {
 		return RelayClient{}, CloudRelayConfig{}, false
 	}
 	if relay.RelayID == "" {
 		relay.RelayID = "default"
 	}
-	return RelayClient{BaseURL: relay.RelayURL, Token: strings.TrimSpace(token), HTTPClient: httpClient}, relay, true
+	return RelayClient{BaseURL: relay.RelayURL, Token: relay.Credential, HTTPClient: httpClient}, relay, true
 }
 
 func authedJSONRequest(ctx context.Context, serviceName, baseURLValue, token string, httpClient *http.Client, method, path string, body any, out any) error {

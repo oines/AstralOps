@@ -72,7 +72,12 @@ func TestCloudClientGetsAccountRelay(t *testing.T) {
 		}
 		writeJSON(w, http.StatusOK, CloudAccount{
 			AccountIDHash: "acct_hash",
-			Relay:         &CloudRelayConfig{RelayID: "us-west", RelayURL: "https://relay-us.example.test"},
+			Relay: &CloudRelayConfig{
+				RelayID:             "us-west",
+				RelayURL:            "https://relay-us.example.test",
+				Credential:          "relay-credential",
+				CredentialExpiresAt: "2026-05-30T01:02:03Z",
+			},
 		})
 	}))
 	defer server.Close()
@@ -85,8 +90,8 @@ func TestCloudClientGetsAccountRelay(t *testing.T) {
 	if account.AccountIDHash != "acct_hash" || account.Relay == nil || account.Relay.RelayURL != "https://relay-us.example.test" {
 		t.Fatalf("account = %#v", account)
 	}
-	relayClient, relay, ok := relayClientFromCloudAccount(account, "account-token", nil)
-	if !ok || relay.RelayID != "us-west" || relayClient.BaseURL != "https://relay-us.example.test" || relayClient.Token != "account-token" {
+	relayClient, relay, ok := relayClientFromCloudAccount(account, nil)
+	if !ok || relay.RelayID != "us-west" || relayClient.BaseURL != "https://relay-us.example.test" || relayClient.Token != "relay-credential" {
 		t.Fatalf("relay client = %#v relay=%#v ok=%v", relayClient, relay, ok)
 	}
 }

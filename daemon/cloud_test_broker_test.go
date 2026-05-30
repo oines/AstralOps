@@ -10,7 +10,29 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/oines/astralops/internal/relayauth"
 )
+
+const testRelayCredentialKid = "test-1"
+
+var testRelayCredentialSecret = []byte("test-relay-credential-secret-000000")
+
+func testCloudRelayCredential(t *testing.T, accountIDHash string) string {
+	t.Helper()
+	now := time.Now().UTC()
+	credential, err := relayauth.SignCredential(relayauth.CredentialPayload{
+		KeyID:         testRelayCredentialKid,
+		RelayID:       "test",
+		AccountIDHash: strings.TrimSpace(accountIDHash),
+		IssuedAt:      now.Unix(),
+		ExpiresAt:     now.Add(10 * time.Minute).Unix(),
+	}, testRelayCredentialSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return credential
+}
 
 type testCloudBroker struct {
 	mu            sync.Mutex
@@ -79,6 +101,21 @@ func (b *testCloudBroker) handleAccount(w http.ResponseWriter, r *http.Request) 
 	account := CloudAccount{AccountIDHash: b.accountIDHash}
 	if b.relay != nil {
 		relay := *b.relay
+		now := time.Now().UTC()
+		credential, err := relayauth.SignCredential(relayauth.CredentialPayload{
+			KeyID:         testRelayCredentialKid,
+			RelayID:       relay.RelayID,
+			AccountIDHash: b.accountIDHash,
+			IssuedAt:      now.Unix(),
+			ExpiresAt:     now.Add(10 * time.Minute).Unix(),
+		}, testRelayCredentialSecret)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "relay_credential_failed", "error": err.Error()})
+			b.mu.Unlock()
+			return
+		}
+		relay.Credential = credential
+		relay.CredentialExpiresAt = now.Add(10 * time.Minute).Format(time.RFC3339)
 		account.Relay = &relay
 	}
 	b.mu.Unlock()

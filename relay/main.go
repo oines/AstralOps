@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/oines/astralops/internal/relayauth"
 	"github.com/oines/astralops/internal/relaybroker"
 )
 
@@ -16,59 +17,62 @@ func main() {
 	addr := flag.String("addr", envDefault("ASTRALOPS_RELAY_ADDR", "127.0.0.1:43911"), "relay listen address")
 	flag.Parse()
 
-	tokens, err := relayAccountTokensFromEnv()
+	options, err := relayOptionsFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+	broker, err := relaybroker.NewServer(options)
 	if err != nil {
 		log.Fatal(err)
 	}
 	server := &http.Server{
 		Addr:              *addr,
-		Handler:           relaybroker.NewServer(tokens).Handler(),
+		Handler:           broker.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	log.Printf("astralops relay credential_auth relay_id=%s max_ttl=%s", options.RelayID, options.MaxCredentialTTL)
 	log.Printf("astralops relay listening on %s", *addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }
 
-func relayAccountTokensFromEnv() ([]string, error) {
-	tokens := splitTokens(os.Getenv("ASTRALOPS_RELAY_ACCOUNT_TOKENS"))
-	if len(tokens) == 0 {
-		if !truthyEnv("ASTRALOPS_RELAY_ALLOW_OPEN_TOKENS") {
-			return nil, errors.New("ASTRALOPS_RELAY_ACCOUNT_TOKENS is required for public relay; set ASTRALOPS_RELAY_ALLOW_OPEN_TOKENS=1 only for local development")
-		}
-		return nil, nil
+func relayOptionsFromEnv() (relaybroker.ServerOptions, error) {
+	relayID := strings.TrimSpace(os.Getenv("ASTRALOPS_RELAY_ID"))
+	if relayID == "" {
+		return relaybroker.ServerOptions{}, errors.New("ASTRALOPS_RELAY_ID is required")
 	}
-	for _, token := range tokens {
-		if len(token) < 32 {
-			return nil, errors.New("ASTRALOPS_RELAY_ACCOUNT_TOKENS entries must be at least 32 characters")
-		}
+	secrets, err := relayauth.ParseSecrets(os.Getenv("ASTRALOPS_RELAY_CREDENTIAL_SECRETS"))
+	if err != nil {
+		return relaybroker.ServerOptions{}, err
 	}
-	return tokens, nil
+	maxTTL, err := durationFromEnv("ASTRALOPS_RELAY_CREDENTIAL_MAX_TTL", 15*time.Minute)
+	if err != nil {
+		return relaybroker.ServerOptions{}, err
+	}
+	return relaybroker.ServerOptions{
+		RelayID:           relayID,
+		CredentialSecrets: secrets,
+		MaxCredentialTTL:  maxTTL,
+	}, nil
 }
 
-func splitTokens(value string) []string {
-	parts := strings.Split(value, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
-		}
+func durationFromEnv(name string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
 	}
-	return out
-}
-
-func truthyEnv(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, err
 	}
+	if duration <= 0 {
+		return 0, errors.New(name + " must be positive")
+	}
+	return duration, nil
 }
 
 func envDefault(name, fallback string) string {

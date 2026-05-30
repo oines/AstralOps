@@ -40,8 +40,10 @@ type CloudAccount struct {
 }
 
 type CloudRelayConfig struct {
-	RelayID  string `json:"relay_id,omitempty"`
-	RelayURL string `json:"relay_url,omitempty"`
+	RelayID             string `json:"relay_id,omitempty"`
+	RelayURL            string `json:"relay_url,omitempty"`
+	Credential          string `json:"credential,omitempty"`
+	CredentialExpiresAt string `json:"credential_expires_at,omitempty"`
 }
 
 type RelayEnvelope struct {
