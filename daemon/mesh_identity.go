@@ -47,8 +47,12 @@ func (s *store) resetMeshIdentity() (meshIdentityResetResult, error) {
 	if err := writePairingRequestsFile(s.dataDir, emptyPairingRequests); err != nil {
 		return meshIdentityResetResult{}, err
 	}
+	if err := writeJSONFile(cloudMembershipPath(s.dataDir), cloudMembershipState{}, defaultHostFileMode); err != nil {
+		return meshIdentityResetResult{}, err
+	}
 	s.deviceIdentity = stored.DeviceIdentity
 	s.devicePrivateKey = ed25519.PrivateKey(privateKey)
+	s.cloudMembership = cloudMembershipState{}
 	s.trustGrants = emptyTrustGrants
 	s.knownHosts = emptyKnownHosts
 	s.pairingRequests = emptyPairingRequests

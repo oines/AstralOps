@@ -96,14 +96,23 @@ func (a *app) handleCloudDevices(w http.ResponseWriter, r *http.Request) {
 		if req.CanControl != nil {
 			canControl = *req.CanControl
 		}
-		_, relayURL, _, err := cloudRelayClientFromCloud(ctx, client)
+		account, err := client.GetAccount(ctx)
 		if err != nil {
 			writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
 			return
 		}
+		_, relay, hasRelay := relayClientFromCloudAccount(account, client.HTTPClient)
+		relayURL := ""
+		if hasRelay {
+			relayURL = relay.RelayURL
+		}
 		record, err := client.RegisterDevice(ctx, a.store.hostInfo().Identity, canHost, canControl, relayURL)
 		if err != nil {
 			writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+			return
+		}
+		if err := a.store.updateCloudMembership(account, record); err != nil {
+			writeActionError(w, newActionError(http.StatusBadGateway, "cloud_membership_failed", err.Error()))
 			return
 		}
 		writeJSON(w, http.StatusOK, record)
@@ -129,14 +138,23 @@ func (a *app) handleCloudHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	_, relayURL, _, err := cloudRelayClientFromCloud(ctx, client)
+	account, err := client.GetAccount(ctx)
 	if err != nil {
 		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
 		return
 	}
+	_, relay, hasRelay := relayClientFromCloudAccount(account, client.HTTPClient)
+	relayURL := ""
+	if hasRelay {
+		relayURL = relay.RelayURL
+	}
 	record, err := client.HeartbeatDevice(ctx, a.store.hostInfo().Identity.DeviceID, relayURL)
 	if err != nil {
 		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+		return
+	}
+	if err := a.store.updateCloudMembership(account, record); err != nil {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_membership_failed", err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, record)

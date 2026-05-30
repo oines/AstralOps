@@ -2376,6 +2376,10 @@ func controlClientDial(host string, st *store, hostInfo HostInfo) (*websocket.Co
 }
 
 func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, timeout time.Duration) (*websocket.Conn, *controlCipher, error) {
+	membership, err := st.currentCloudMembership(cloudMembershipRole{CanControl: true})
+	if err != nil {
+		return nil, nil, err
+	}
 	dialer := *websocket.DefaultDialer
 	if timeout > 0 {
 		dialer.HandshakeTimeout = timeout
@@ -2402,6 +2406,7 @@ func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, tim
 		ControllerPublicKey:    st.deviceIdentity.PublicKey,
 		ControllerEphemeralKey: base64.StdEncoding.EncodeToString(controllerEphemeral.PublicKey().Bytes()),
 		ClientNonce:            clientNonce,
+		MembershipLease:        membership.Lease,
 	}
 	hello.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(st.devicePrivateKey), controlClientSignaturePayload(hostInfo.Identity.DeviceID, hello)))
 	if err := socket.WriteJSON(hello); err != nil {
@@ -2413,27 +2418,9 @@ func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, tim
 		socket.Close()
 		return nil, nil, err
 	}
-	if ack.Type != "hello_ack" || ack.Version != controlProtocolVersion {
-		socket.Close()
-		return nil, nil, fmt.Errorf("invalid control hello_ack")
-	}
-	if ack.HostDeviceID != hostInfo.Identity.DeviceID || ack.HostPublicKey != hostInfo.Identity.PublicKey {
-		socket.Close()
-		return nil, nil, fmt.Errorf("remote Host identity changed during handshake")
-	}
-	if ack.ClientNonce != hello.ClientNonce {
-		socket.Close()
-		return nil, nil, fmt.Errorf("invalid control hello_ack client nonce")
-	}
-	hostPublicKey, err := decodeDevicePublicKey(ack.HostPublicKey)
-	if err != nil {
+	if err := validateControlClientHelloAck(st, hostInfo, hello, ack); err != nil {
 		socket.Close()
 		return nil, nil, err
-	}
-	signature, err := base64.StdEncoding.DecodeString(ack.Signature)
-	if err != nil || !ed25519.Verify(hostPublicKey, controlHostSignaturePayload(hello, ack), signature) {
-		socket.Close()
-		return nil, nil, fmt.Errorf("invalid Host hello_ack signature")
 	}
 	hostEphemeralBytes, err := base64.StdEncoding.DecodeString(ack.HostEphemeralKey)
 	if err != nil {

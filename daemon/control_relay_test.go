@@ -179,6 +179,7 @@ func TestControlRelayRejectsUntrustedController(t *testing.T) {
 	if _, err := cloudClient.RegisterDevice(t.Context(), untrustedStore.hostInfo().Identity, false, true, relayServer.URL); err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, untrustedStore, false, true)
 
 	_, err = controlClientRelayRoundTrip(t.Context(), controlClientTarget{
 		HostInfo:           hostApp.store.hostInfo(),
@@ -562,10 +563,22 @@ func newControlRelayTestRig(t *testing.T, capabilities ...string) (*app, Workspa
 		runtimes: map[AgentKind]AgentRuntime{AgentCodex: &recordingRuntime{}},
 	}
 	client := CloudClient{BaseURL: cloudServer.URL, Token: "account-token"}
-	if _, err := client.RegisterDevice(t.Context(), hostStore.hostInfo().Identity, true, true, relayServer.URL); err != nil {
+	account, err := client.GetAccount(t.Context())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.RegisterDevice(t.Context(), controllerStore.hostInfo().Identity, false, true, relayServer.URL); err != nil {
+	hostRecord, err := client.RegisterDevice(t.Context(), hostStore.hostInfo().Identity, true, true, relayServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hostStore.updateCloudMembership(account, hostRecord); err != nil {
+		t.Fatal(err)
+	}
+	controllerRecord, err := client.RegisterDevice(t.Context(), controllerStore.hostInfo().Identity, false, true, relayServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controllerStore.updateCloudMembership(account, controllerRecord); err != nil {
 		t.Fatal(err)
 	}
 	return hostApp, workspace, controllerStore, cloudServer, relayServer

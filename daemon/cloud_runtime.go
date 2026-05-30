@@ -90,10 +90,15 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 		return nil
 	}
 	accountCtx, accountCancel := context.WithTimeout(ctx, cloudSyncTimeout)
-	relayClient, relayURL, hasRelay, err := cloudRelayClientFromCloud(accountCtx, client)
+	account, err := client.GetAccount(accountCtx)
 	accountCancel()
 	if err != nil {
 		return err
+	}
+	relayClient, relay, hasRelay := relayClientFromCloudAccount(account, client.HTTPClient)
+	relayURL := ""
+	if hasRelay {
+		relayURL = relay.RelayURL
 	}
 	devicesCtx, devicesCancel := context.WithTimeout(ctx, cloudSyncTimeout)
 	devices, err := client.ListDevices(devicesCtx)
@@ -120,7 +125,11 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 
 	heartbeatCtx, heartbeatCancel := context.WithTimeout(ctx, cloudSyncTimeout)
 	defer heartbeatCancel()
-	if _, err := client.HeartbeatDevice(heartbeatCtx, a.store.hostInfo().Identity.DeviceID, relayURL); err != nil {
+	heartbeat, err := client.HeartbeatDevice(heartbeatCtx, a.store.hostInfo().Identity.DeviceID, relayURL)
+	if err != nil {
+		return err
+	}
+	if err := a.store.updateCloudMembership(account, heartbeat); err != nil {
 		return err
 	}
 	approvedCtx, approvedCancel := context.WithTimeout(ctx, cloudSyncTimeout)

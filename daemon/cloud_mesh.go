@@ -19,24 +19,35 @@ const (
 )
 
 type CloudDeviceRecord struct {
-	AccountIDHash        string   `json:"account_id_hash"`
-	DeviceID             string   `json:"device_id"`
-	DeviceName           string   `json:"device_name,omitempty"`
-	DeviceKind           string   `json:"device_kind"`
-	PublicKey            string   `json:"public_key"`
-	PublicKeyFingerprint string   `json:"public_key_fingerprint"`
-	Capabilities         []string `json:"capabilities,omitempty"`
-	CanHost              bool     `json:"can_host"`
-	CanControl           bool     `json:"can_control"`
-	Status               string   `json:"status"`
-	RelayURL             string   `json:"relay_url,omitempty"`
-	LastSeen             string   `json:"last_seen,omitempty"`
-	UpdatedAt            string   `json:"updated_at"`
+	AccountIDHash        string                `json:"account_id_hash"`
+	DeviceID             string                `json:"device_id"`
+	DeviceName           string                `json:"device_name,omitempty"`
+	DeviceKind           string                `json:"device_kind"`
+	PublicKey            string                `json:"public_key"`
+	PublicKeyFingerprint string                `json:"public_key_fingerprint"`
+	Capabilities         []string              `json:"capabilities,omitempty"`
+	CanHost              bool                  `json:"can_host"`
+	CanControl           bool                  `json:"can_control"`
+	Status               string                `json:"status"`
+	RelayURL             string                `json:"relay_url,omitempty"`
+	LastSeen             string                `json:"last_seen,omitempty"`
+	UpdatedAt            string                `json:"updated_at"`
+	MembershipLease      *CloudMembershipLease `json:"membership_lease,omitempty"`
 }
 
 type CloudAccount struct {
-	AccountIDHash string            `json:"account_id_hash"`
-	Relay         *CloudRelayConfig `json:"relay,omitempty"`
+	AccountIDHash              string            `json:"account_id_hash"`
+	Relay                      *CloudRelayConfig `json:"relay,omitempty"`
+	MembershipKeyID            string            `json:"membership_key_id,omitempty"`
+	MembershipSigningPublicKey string            `json:"membership_signing_public_key,omitempty"`
+}
+
+type CloudMembershipLease struct {
+	Version       string `json:"version"`
+	Algorithm     string `json:"alg"`
+	KeyID         string `json:"kid"`
+	PayloadBase64 string `json:"payload_base64"`
+	Signature     string `json:"signature"`
 }
 
 type CloudRelayConfig struct {

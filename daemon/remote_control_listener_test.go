@@ -26,6 +26,7 @@ func newRemoteControlHandlerTestApp(t *testing.T) (*app, Workspace) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	settings := newMeshActiveTestSettings(t, dir)
 	return &app{
 		store:    st,
@@ -93,6 +94,7 @@ func TestRemoteControlDevPairingAndClientWorkspaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	grant, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead})
 	if err != nil {
 		t.Fatal(err)
@@ -123,6 +125,7 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead}); err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +190,7 @@ func TestRemoteHostTargetUsesCachedBaseURLBeforeDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead}); err != nil {
 		t.Fatal(err)
 	}
@@ -217,6 +221,7 @@ func TestRemoteHostProxyCreatesWorkspaceAndBrowsesHostFilesystem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreControl, CapabilityHostFileSystemBrowse}); err != nil {
 		t.Fatal(err)
 	}
@@ -273,6 +278,7 @@ func TestRemoteHostProxyRejectsUnknownHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/dev_missing/workspaces", nil)
@@ -296,6 +302,7 @@ func TestRemoteHostProxyApprovesPairingRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityHostManage}); err != nil {
 		t.Fatal(err)
 	}
@@ -340,6 +347,7 @@ func TestRemoteHostProxyOpensWorkspacePTY(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityTerminalOpen, CapabilityTerminalInput}); err != nil {
 		t.Fatal(err)
 	}

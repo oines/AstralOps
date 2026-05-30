@@ -113,6 +113,7 @@ func TestCloudAuthLogoutClearsCloudTokenAndResetsMeshIdentity(t *testing.T) {
 	if _, err := app.settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, app.store, true, true)
 
 	rr := httptest.NewRecorder()
 	app.handleCloudAuthLogout(rr, httptest.NewRequest(http.MethodPost, "/v1/cloud/auth/logout", nil))
@@ -135,6 +136,9 @@ func TestCloudAuthLogoutClearsCloudTokenAndResetsMeshIdentity(t *testing.T) {
 	}
 	if len(app.store.listTrustGrants()) != 0 || len(app.store.listKnownHosts()) != 0 || len(app.store.listPairingRequests()) != 0 {
 		t.Fatalf("mesh state not cleared: grants=%d known=%d pairings=%d", len(app.store.listTrustGrants()), len(app.store.listKnownHosts()), len(app.store.listPairingRequests()))
+	}
+	if _, err := app.store.currentCloudMembership(cloudMembershipRole{}); err == nil {
+		t.Fatal("mesh logout did not clear cloud membership lease")
 	}
 	if _, ok := app.store.getWorkspace(workspace.ID); !ok {
 		t.Fatal("mesh logout removed local workspace")

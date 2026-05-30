@@ -46,6 +46,9 @@ func (a *app) cloudPollRelayEnvelopes(ctx context.Context, client RelayClient) e
 	if !settings.RemoteControl.Enabled {
 		return nil
 	}
+	if _, err := a.store.currentCloudMembership(cloudMembershipRole{CanHost: true}); err != nil {
+		return nil
+	}
 	deviceID := a.store.hostInfo().Identity.DeviceID
 	envelopes, err := client.ListRelayEnvelopes(ctx, deviceID, controlRelayPollLimit)
 	if err != nil {
@@ -126,6 +129,13 @@ func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySes
 	if err != nil {
 		return nil, controlHelloAckFrame{}, err
 	}
+	membership, err := a.store.currentCloudMembership(cloudMembershipRole{CanHost: true})
+	if err != nil {
+		return nil, controlHelloAckFrame{}, err
+	}
+	if err := validateCloudMembershipLease(firstNonNilMembershipLease(hello.MembershipLease), membership.SigningPublicKey, membership.AccountIDHash, hello.ControllerDeviceID, devicePublicKeyFingerprint(controllerPublicKey), cloudMembershipRole{CanControl: true}, time.Now().UTC()); err != nil {
+		return nil, controlHelloAckFrame{}, err
+	}
 	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(hello.Signature))
 	if err != nil || !ed25519.Verify(controllerPublicKey, controlClientSignaturePayload(a.store.deviceIdentity.DeviceID, hello), signature) {
 		return nil, controlHelloAckFrame{}, errors.New("invalid control hello signature")
@@ -180,6 +190,7 @@ func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySes
 		ServerNonce:        serverNonce,
 		Encryption:         "x25519-aes-256-gcm",
 		SignatureAlgorithm: "ed25519",
+		MembershipLease:    membership.Lease,
 	}
 	ack.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(a.store.devicePrivateKey), controlHostSignaturePayload(hello, ack)))
 	return session, ack, nil
@@ -561,6 +572,10 @@ func controlClientRelayHello(st *store, hostInfo HostInfo) (controlHelloFrame, *
 	if hostInfo.Identity.DeviceID == "" || hostInfo.Identity.PublicKey == "" {
 		return controlHelloFrame{}, nil, fmt.Errorf("remote Host identity is missing")
 	}
+	membership, err := st.currentCloudMembership(cloudMembershipRole{CanControl: true})
+	if err != nil {
+		return controlHelloFrame{}, nil, err
+	}
 	curve := ecdh.X25519()
 	controllerEphemeral, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
@@ -577,6 +592,7 @@ func controlClientRelayHello(st *store, hostInfo HostInfo) (controlHelloFrame, *
 		ControllerPublicKey:    st.deviceIdentity.PublicKey,
 		ControllerEphemeralKey: base64.StdEncoding.EncodeToString(controllerEphemeral.PublicKey().Bytes()),
 		ClientNonce:            clientNonce,
+		MembershipLease:        membership.Lease,
 	}
 	hello.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(st.devicePrivateKey), controlClientSignaturePayload(hostInfo.Identity.DeviceID, hello)))
 	return hello, controllerEphemeral, nil
@@ -613,7 +629,7 @@ func controlClientRelayWaitHelloAck(ctx context.Context, target controlClientTar
 				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
 				continue
 			}
-			if err := validateControlRelayHelloAck(target.HostInfo, hello, ack); err != nil {
+			if err := validateControlRelayHelloAck(st, target.HostInfo, hello, ack); err != nil {
 				continue
 			}
 			if err := target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID); err != nil {
@@ -627,25 +643,8 @@ func controlClientRelayWaitHelloAck(ctx context.Context, target controlClientTar
 	}
 }
 
-func validateControlRelayHelloAck(hostInfo HostInfo, hello controlHelloFrame, ack controlHelloAckFrame) error {
-	if ack.Type != "hello_ack" || ack.Version != controlProtocolVersion {
-		return fmt.Errorf("invalid control hello_ack")
-	}
-	if ack.HostDeviceID != hostInfo.Identity.DeviceID || ack.HostPublicKey != hostInfo.Identity.PublicKey {
-		return fmt.Errorf("remote Host identity changed during relay handshake")
-	}
-	if ack.ClientNonce != hello.ClientNonce {
-		return fmt.Errorf("invalid control hello_ack client nonce")
-	}
-	hostPublicKey, err := decodeDevicePublicKey(ack.HostPublicKey)
-	if err != nil {
-		return err
-	}
-	signature, err := base64.StdEncoding.DecodeString(ack.Signature)
-	if err != nil || !ed25519.Verify(hostPublicKey, controlHostSignaturePayload(hello, ack), signature) {
-		return fmt.Errorf("invalid Host hello_ack signature")
-	}
-	return nil
+func validateControlRelayHelloAck(st *store, hostInfo HostInfo, hello controlHelloFrame, ack controlHelloAckFrame) error {
+	return validateControlClientHelloAck(st, hostInfo, hello, ack)
 }
 
 func controlClientCipherFromHelloAck(hello controlHelloFrame, ack controlHelloAckFrame, controllerEphemeral *ecdh.PrivateKey) (*controlCipher, error) {

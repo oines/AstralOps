@@ -45,7 +45,7 @@ func (a *app) handleRemoteHosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hosts := map[string]remoteHostRecord{}
-	if !a.cloudMeshActive() {
+	if !a.cloudMeshActiveFor(cloudMembershipRole{CanControl: true}) {
 		writeJSON(w, http.StatusOK, remoteHostsResponse{Hosts: []remoteHostRecord{}})
 		return
 	}
@@ -587,7 +587,7 @@ func controlResponseMessage(response ControlResponse) string {
 }
 
 func (a *app) remoteHostTarget(hostDeviceID string) (controlClientTarget, error) {
-	if !a.cloudMeshActive() {
+	if !a.cloudMeshActiveFor(cloudMembershipRole{CanControl: true}) {
 		return controlClientTarget{}, cloudMeshInactiveError()
 	}
 	return a.remoteTargetResolver().ResolveKnownHost(hostDeviceID)

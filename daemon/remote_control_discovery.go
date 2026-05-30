@@ -43,7 +43,7 @@ func startRemoteControlDiscovery(identity DeviceIdentity, controlPort int) (*net
 
 func startRemoteControlDiscoveryForApp(a *app, controlPort int) (*net.UDPConn, error) {
 	return startRemoteControlDiscoveryWithProvider(func() (DeviceIdentity, bool) {
-		if a == nil || !a.cloudMeshActive() {
+		if a == nil || !a.cloudMeshActiveFor(cloudMembershipRole{CanHost: true}) {
 			return DeviceIdentity{}, false
 		}
 		return a.store.hostInfo().Identity, true

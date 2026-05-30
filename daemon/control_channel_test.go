@@ -45,6 +45,7 @@ func newControlChannelTestApp(t *testing.T, capabilities ...string) (*app, Works
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	app := &app{
 		store:    st,
 		hub:      newEventHub(),
@@ -90,6 +91,7 @@ func dialControlChannelAs(t *testing.T, serverURL string, app *app, controllerDe
 		ControllerPublicKey:    base64.StdEncoding.EncodeToString(controllerPublicKey),
 		ControllerEphemeralKey: base64.StdEncoding.EncodeToString(controllerEphemeral.PublicKey().Bytes()),
 		ClientNonce:            clientNonce,
+		MembershipLease:        testCloudMembershipLeaseForDevice(t, "acct_test", controllerDeviceID, devicePublicKeyFingerprint(controllerPublicKey), false, true),
 	}
 	hello.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(controllerPrivateKey, controlClientSignaturePayload(app.store.deviceIdentity.DeviceID, hello)))
 	if err := client.WriteJSON(hello); err != nil {
@@ -2090,6 +2092,7 @@ func TestControlWebSocketRemoteWorkspaceFileStreamUsesProxyReadRange(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	workspace, err := st.createWorkspace(createWorkspaceRequest{
 		Name:   "Remote",
 		Target: "ssh",
@@ -2179,6 +2182,7 @@ func TestControlWebSocketRemoteWorkspaceFileStreamReportsTruncatedReadRange(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	workspace, err := st.createWorkspace(createWorkspaceRequest{
 		Name:   "Remote",
 		Target: "ssh",
@@ -2307,6 +2311,7 @@ func TestControlWebSocketRemoteWorkspaceFileWriteUsesProxyOverEncryptedChannel(t
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	workspace, err := st.createWorkspace(createWorkspaceRequest{
 		Name:   "Remote",
 		Target: "ssh",
@@ -2397,6 +2402,7 @@ func TestControlWebSocketRemoteWorkspacePatchUsesProxyOverEncryptedChannel(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	workspace, err := st.createWorkspace(createWorkspaceRequest{
 		Name:   "Remote",
 		Target: "ssh",
@@ -2486,6 +2492,7 @@ func TestControlWebSocketRemoteWorkspaceExecUsesProxyOverEncryptedChannel(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	workspace, err := st.createWorkspace(createWorkspaceRequest{
 		Name:   "Remote",
 		Target: "ssh",

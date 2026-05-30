@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +20,15 @@ import (
 const testRelayCredentialKid = "test-1"
 
 var testRelayCredentialSecret = []byte("test-relay-credential-secret-000000")
+
+const testMembershipKeyID = "test-membership-1"
+
+var (
+	testMembershipKeyOnce    sync.Once
+	testMembershipPublicKey  ed25519.PublicKey
+	testMembershipPrivateKey ed25519.PrivateKey
+	testMembershipKeyErr     error
+)
 
 func testCloudRelayCredential(t *testing.T, accountIDHash string) string {
 	t.Helper()
@@ -35,25 +47,108 @@ func testCloudRelayCredential(t *testing.T, accountIDHash string) string {
 }
 
 type testCloudBroker struct {
-	mu            sync.Mutex
-	token         string
-	accountIDHash string
-	relay         *CloudRelayConfig
-	devices       map[string]CloudDeviceRecord
-	pairing       []CloudPairingSignal
-	nextPairID    int
+	mu              sync.Mutex
+	token           string
+	accountIDHash   string
+	membershipKeyID string
+	membershipPub   ed25519.PublicKey
+	membershipPriv  ed25519.PrivateKey
+	relay           *CloudRelayConfig
+	devices         map[string]CloudDeviceRecord
+	pairing         []CloudPairingSignal
+	nextPairID      int
 }
 
 func newTestCloudBrokerServer(t *testing.T, token string) (*testCloudBroker, *httptest.Server) {
 	t.Helper()
+	membershipPub, membershipPriv := testCloudMembershipSigningKey(t)
 	broker := &testCloudBroker{
-		token:         strings.TrimSpace(token),
-		accountIDHash: "acct_test",
-		devices:       map[string]CloudDeviceRecord{},
+		token:           strings.TrimSpace(token),
+		accountIDHash:   "acct_test",
+		membershipKeyID: testMembershipKeyID,
+		membershipPub:   membershipPub,
+		membershipPriv:  membershipPriv,
+		devices:         map[string]CloudDeviceRecord{},
 	}
 	server := httptest.NewServer(broker.Handler())
 	t.Cleanup(server.Close)
 	return broker, server
+}
+
+func testCloudMembershipSigningKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+	t.Helper()
+	testMembershipKeyOnce.Do(func() {
+		testMembershipPublicKey, testMembershipPrivateKey, testMembershipKeyErr = ed25519.GenerateKey(rand.Reader)
+	})
+	if testMembershipKeyErr != nil {
+		t.Fatal(testMembershipKeyErr)
+	}
+	return testMembershipPublicKey, testMembershipPrivateKey
+}
+
+func testCloudMembershipSigningPublicKey(t *testing.T) string {
+	t.Helper()
+	publicKey, _ := testCloudMembershipSigningKey(t)
+	return base64.StdEncoding.EncodeToString(publicKey)
+}
+
+func testCloudMembershipLeaseForDevice(t *testing.T, accountIDHash, deviceID, publicKeyFingerprint string, canHost, canControl bool) *CloudMembershipLease {
+	t.Helper()
+	_, privateKey := testCloudMembershipSigningKey(t)
+	lease, err := signTestCloudMembershipLease(accountIDHash, deviceID, publicKeyFingerprint, canHost, canControl, testMembershipKeyID, privateKey, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return lease
+}
+
+func testCloudMembershipLeaseForIdentity(t *testing.T, accountIDHash string, identity DeviceIdentity, canHost, canControl bool) *CloudMembershipLease {
+	t.Helper()
+	return testCloudMembershipLeaseForDevice(t, accountIDHash, identity.DeviceID, identity.PublicKeyFingerprint, canHost, canControl)
+}
+
+func setTestCloudMembership(t *testing.T, st *store, canHost, canControl bool) cloudMembershipState {
+	t.Helper()
+	state := cloudMembershipState{
+		AccountIDHash:    "acct_test",
+		SigningKeyID:     testMembershipKeyID,
+		SigningPublicKey: testCloudMembershipSigningPublicKey(t),
+		Lease:            testCloudMembershipLeaseForIdentity(t, "acct_test", st.deviceIdentity, canHost, canControl),
+		UpdatedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := writeJSONFile(cloudMembershipPath(st.dataDir), state, defaultHostFileMode); err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	st.cloudMembership = state
+	st.mu.Unlock()
+	return state
+}
+
+func signTestCloudMembershipLease(accountIDHash, deviceID, publicKeyFingerprint string, canHost, canControl bool, keyID string, privateKey ed25519.PrivateKey, now time.Time) (*CloudMembershipLease, error) {
+	payload := cloudMembershipLeasePayload{
+		AccountIDHash:        strings.TrimSpace(accountIDHash),
+		DeviceID:             strings.TrimSpace(deviceID),
+		PublicKeyFingerprint: strings.TrimSpace(publicKeyFingerprint),
+		CanHost:              canHost,
+		CanControl:           canControl,
+		MeshEpoch:            1,
+		IssuedAt:             now.Unix(),
+		ExpiresAt:            now.Add(24 * time.Hour).Unix(),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	payloadPart := base64.RawURLEncoding.EncodeToString(raw)
+	signature := ed25519.Sign(privateKey, []byte(payloadPart))
+	return &CloudMembershipLease{
+		Version:       cloudMembershipLeaseVersion,
+		Algorithm:     cloudMembershipLeaseAlgorithm,
+		KeyID:         keyID,
+		PayloadBase64: payloadPart,
+		Signature:     base64.RawURLEncoding.EncodeToString(signature),
+	}, nil
 }
 
 func (b *testCloudBroker) SetDefaultRelay(config CloudRelayConfig) {
@@ -98,7 +193,11 @@ func (b *testCloudBroker) handleAccount(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	b.mu.Lock()
-	account := CloudAccount{AccountIDHash: b.accountIDHash}
+	account := CloudAccount{
+		AccountIDHash:              b.accountIDHash,
+		MembershipKeyID:            b.membershipKeyID,
+		MembershipSigningPublicKey: base64.StdEncoding.EncodeToString(b.membershipPub),
+	}
 	if b.relay != nil {
 		relay := *b.relay
 		now := time.Now().UTC()
@@ -271,7 +370,7 @@ func (b *testCloudBroker) registerDevice(input cloudDeviceRegistration) (CloudDe
 		return CloudDeviceRecord{}, errTestCloudBroker("device has been removed from mesh")
 	}
 	b.devices[record.DeviceID] = record
-	return record, nil
+	return b.attachMembershipLease(record)
 }
 
 func (b *testCloudBroker) updateDeviceStatus(deviceID, status, relayURL string) (CloudDeviceRecord, int, error) {
@@ -293,7 +392,23 @@ func (b *testCloudBroker) updateDeviceStatus(deviceID, status, relayURL string) 
 		}
 	}
 	b.devices[record.DeviceID] = record
+	if status == cloudDeviceStatusOnline {
+		withLease, err := b.attachMembershipLease(record)
+		if err != nil {
+			return CloudDeviceRecord{}, http.StatusInternalServerError, err
+		}
+		return withLease, http.StatusOK, nil
+	}
 	return record, http.StatusOK, nil
+}
+
+func (b *testCloudBroker) attachMembershipLease(record CloudDeviceRecord) (CloudDeviceRecord, error) {
+	lease, err := signTestCloudMembershipLease(record.AccountIDHash, record.DeviceID, record.PublicKeyFingerprint, record.CanHost, record.CanControl, b.membershipKeyID, b.membershipPriv, time.Now().UTC())
+	if err != nil {
+		return CloudDeviceRecord{}, err
+	}
+	record.MembershipLease = lease
+	return record, nil
 }
 
 func (b *testCloudBroker) removeDevice(deviceID string) (CloudDeviceRecord, int, error) {

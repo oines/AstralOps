@@ -257,6 +257,9 @@ func TestCloudRuntimeRegistersCurrentDeviceFromSettings(t *testing.T) {
 	if device.CanHost || !device.CanControl || device.Status != cloudDeviceStatusOnline {
 		t.Fatalf("device role/status = %#v", device)
 	}
+	if _, err := app.store.currentCloudMembership(cloudMembershipRole{CanControl: true}); err != nil {
+		t.Fatalf("cloud membership lease was not stored after heartbeat: %v", err)
+	}
 }
 
 func TestCloudRuntimeImportsPendingPairingSignalWithoutGrantingTrust(t *testing.T) {
@@ -525,6 +528,10 @@ func TestRemoteHostsIncludesCloudHostCandidatesWithoutGrantingControl(t *testing
 	app, broker := testCloudApp(t)
 	defer broker.Close()
 
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	if err := app.cloudRegisterAndHeartbeat(t.Context(), client); err != nil {
+		t.Fatal(err)
+	}
 	host := testCloudDeviceRegistration(t, "dev_cloud_host", "desktop", true, true)
 	res, err := httpClientPostJSON(broker.URL+"/v1/devices", "account-token", host)
 	if err != nil {
@@ -571,7 +578,6 @@ func TestRemoteHostsIncludesCloudHostCandidatesWithoutGrantingControl(t *testing
 		t.Fatalf("cloud-only Host action status = %d body=%s, want unknown until paired/known", actionResp.Code, actionResp.Body.String())
 	}
 
-	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
 	if _, err := client.RemoveDevice(t.Context(), "dev_cloud_host"); err != nil {
 		t.Fatal(err)
 	}

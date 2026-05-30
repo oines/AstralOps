@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,27 +32,29 @@ const (
 )
 
 type controlHelloFrame struct {
-	Type                   string `json:"type"`
-	Version                string `json:"version"`
-	ControllerDeviceID     string `json:"controller_device_id"`
-	ControllerPublicKey    string `json:"controller_public_key"`
-	ControllerEphemeralKey string `json:"controller_ephemeral_key"`
-	ClientNonce            string `json:"client_nonce"`
-	Signature              string `json:"signature"`
+	Type                   string                `json:"type"`
+	Version                string                `json:"version"`
+	ControllerDeviceID     string                `json:"controller_device_id"`
+	ControllerPublicKey    string                `json:"controller_public_key"`
+	ControllerEphemeralKey string                `json:"controller_ephemeral_key"`
+	ClientNonce            string                `json:"client_nonce"`
+	Signature              string                `json:"signature"`
+	MembershipLease        *CloudMembershipLease `json:"membership_lease,omitempty"`
 }
 
 type controlHelloAckFrame struct {
-	Type               string `json:"type"`
-	Version            string `json:"version"`
-	ConnectionID       string `json:"connection_id"`
-	HostDeviceID       string `json:"host_device_id"`
-	HostPublicKey      string `json:"host_public_key"`
-	HostEphemeralKey   string `json:"host_ephemeral_key"`
-	ClientNonce        string `json:"client_nonce"`
-	ServerNonce        string `json:"server_nonce"`
-	Signature          string `json:"signature"`
-	Encryption         string `json:"encryption"`
-	SignatureAlgorithm string `json:"signature_algorithm"`
+	Type               string                `json:"type"`
+	Version            string                `json:"version"`
+	ConnectionID       string                `json:"connection_id"`
+	HostDeviceID       string                `json:"host_device_id"`
+	HostPublicKey      string                `json:"host_public_key"`
+	HostEphemeralKey   string                `json:"host_ephemeral_key"`
+	ClientNonce        string                `json:"client_nonce"`
+	ServerNonce        string                `json:"server_nonce"`
+	Signature          string                `json:"signature"`
+	Encryption         string                `json:"encryption"`
+	SignatureAlgorithm string                `json:"signature_algorithm"`
+	MembershipLease    *CloudMembershipLease `json:"membership_lease,omitempty"`
 }
 
 type controlPlainFrame struct {
@@ -174,6 +177,15 @@ func (c *controlWSConn) acceptHello() error {
 		c.writeUnsealedClose("invalid_identity", err.Error())
 		return err
 	}
+	membership, err := c.app.store.currentCloudMembership(cloudMembershipRole{CanHost: true})
+	if err != nil {
+		c.writeUnsealedClose("membership_required", err.Error())
+		return err
+	}
+	if err := validateCloudMembershipLease(firstNonNilMembershipLease(hello.MembershipLease), membership.SigningPublicKey, membership.AccountIDHash, hello.ControllerDeviceID, devicePublicKeyFingerprint(controllerPublicKey), cloudMembershipRole{CanControl: true}, time.Now().UTC()); err != nil {
+		c.writeUnsealedClose("membership_invalid", err.Error())
+		return err
+	}
 	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(hello.Signature))
 	if err != nil || !ed25519.Verify(controllerPublicKey, controlClientSignaturePayload(c.app.store.deviceIdentity.DeviceID, hello), signature) {
 		c.writeUnsealedClose("invalid_signature", "invalid control hello signature")
@@ -228,6 +240,7 @@ func (c *controlWSConn) acceptHello() error {
 		ServerNonce:        serverNonce,
 		Encryption:         "x25519-aes-256-gcm",
 		SignatureAlgorithm: "ed25519",
+		MembershipLease:    membership.Lease,
 	}
 	ack.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(c.app.store.devicePrivateKey), controlHostSignaturePayload(hello, ack)))
 	if err := c.socket.WriteJSON(ack); err != nil {
@@ -757,6 +770,7 @@ func controlClientSignaturePayload(hostDeviceID string, hello controlHelloFrame)
 		hello.ControllerPublicKey,
 		hello.ControllerEphemeralKey,
 		hello.ClientNonce,
+		controlMembershipLeaseSignaturePart(hello.MembershipLease),
 	}, "\n"))
 }
 
@@ -773,7 +787,44 @@ func controlHostSignaturePayload(hello controlHelloFrame, ack controlHelloAckFra
 		ack.HostEphemeralKey,
 		hello.ClientNonce,
 		ack.ServerNonce,
+		controlMembershipLeaseSignaturePart(hello.MembershipLease),
+		controlMembershipLeaseSignaturePart(ack.MembershipLease),
 	}, "\n"))
+}
+
+func validateControlClientHelloAck(st *store, hostInfo HostInfo, hello controlHelloFrame, ack controlHelloAckFrame) error {
+	if ack.Type != "hello_ack" || ack.Version != controlProtocolVersion {
+		return fmt.Errorf("invalid control hello_ack")
+	}
+	if ack.HostDeviceID != hostInfo.Identity.DeviceID || ack.HostPublicKey != hostInfo.Identity.PublicKey {
+		return fmt.Errorf("remote Host identity changed during handshake")
+	}
+	if ack.ClientNonce != hello.ClientNonce {
+		return fmt.Errorf("invalid control hello_ack client nonce")
+	}
+	membership, err := st.currentCloudMembership(cloudMembershipRole{CanControl: true})
+	if err != nil {
+		return err
+	}
+	if err := validateCloudMembershipLease(firstNonNilMembershipLease(ack.MembershipLease), membership.SigningPublicKey, membership.AccountIDHash, ack.HostDeviceID, hostInfo.Identity.PublicKeyFingerprint, cloudMembershipRole{CanHost: true}, time.Now().UTC()); err != nil {
+		return err
+	}
+	hostPublicKey, err := decodeDevicePublicKey(ack.HostPublicKey)
+	if err != nil {
+		return err
+	}
+	signature, err := base64.StdEncoding.DecodeString(ack.Signature)
+	if err != nil || !ed25519.Verify(hostPublicKey, controlHostSignaturePayload(hello, ack), signature) {
+		return fmt.Errorf("invalid Host hello_ack signature")
+	}
+	return nil
+}
+
+func firstNonNilMembershipLease(lease *CloudMembershipLease) CloudMembershipLease {
+	if lease == nil {
+		return CloudMembershipLease{}
+	}
+	return *lease
 }
 
 func randomBase64(n int) (string, error) {

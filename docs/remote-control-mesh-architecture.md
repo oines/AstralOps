@@ -309,6 +309,8 @@ POST /v1/pairing/requests/:request_id/resolve
 ```json
 {
   "account_id_hash": "acct_...",
+  "membership_key_id": "default",
+  "membership_signing_public_key": "<base64-ed25519-public-key>",
   "relay": {
     "relay_id": "default",
     "relay_url": "https://relay.example.com"
@@ -342,7 +344,12 @@ ASTRALOPS_ACCOUNT_RELAY_URL=https://relay.example.com
 ASTRALOPS_RELAY_CREDENTIAL_KID=vps-1
 ASTRALOPS_RELAY_CREDENTIAL_SECRETS=vps-1:<long-random-secret>
 ASTRALOPS_RELAY_CREDENTIAL_TTL=10m
+ASTRALOPS_MEMBERSHIP_SIGNING_KID=default
+ASTRALOPS_MEMBERSHIP_SIGNING_KEY=<base64-ed25519-private-key>
+ASTRALOPS_MEMBERSHIP_LEASE_TTL=24h
 ```
+
+Cloud 对 register/heartbeat 返回短期 `membership_lease`，由 Cloud membership signing key 签名。lease payload 只包含账号 hash、device_id、public_key_fingerprint、can_host/can_control、mesh_epoch、iat/exp。客户端把当前设备 lease 持久化在本机私有 daemon 数据里；lease 只证明“这个 device identity 当前仍属于账号 Mesh 且具备 host/control 角色”，不授予 Host trust。
 
 公网 relay 不能依赖 cloud 进程内状态，不能读取 cloud 数据库，也不能接受 cloud account token。它只能基于短期 relay credential 得到账号 namespace 并投递 opaque envelope。
 
@@ -373,15 +380,16 @@ POST /v1/cloud/pairing/requests/:request_id/resolve
 
 `/v1/cloud/devices` 注册的是当前 daemon 的 public device identity。默认 `can_control=true`，`can_host` 取本机 `remote_control.enabled`，调用方也可以在注册请求里显式覆盖。这个动作不会自动开启 Host listener；是否允许被远控仍然由本机 `remote_control` settings 决定。
 
-daemon 启动后如果 `cloud.enabled=true`，会先读取 `GET /v1/account` 的账号 relay 配置，再向 cloud 注册当前设备并定时 heartbeat。注册和 heartbeat 中的 `relay_url` 只是 presence/routing metadata，来自账号默认 relay，不是每台设备任意选择的 relay。关闭 cloud settings 时，daemon 会尝试把当前设备标记为 offline；正式退出登录则走上面的 Mesh logout/reset 语义。自动同步只发送 public device identity、capabilities、can_host/can_control、presence 和账号 relay routing metadata，不发送工作区、session、事件、SSH 或路径数据。
+daemon 启动后如果 `cloud.enabled=true`，会先读取 `GET /v1/account` 的账号 relay 配置和 membership signing public key，再向 cloud 注册当前设备并定时 heartbeat。注册和 heartbeat 中的 `relay_url` 只是 presence/routing metadata，来自账号默认 relay，不是每台设备任意选择的 relay。register/heartbeat 必须返回当前设备 `membership_lease`；daemon 验签通过后才认为本机是 active Cloud Mesh 成员。关闭 cloud settings 时，daemon 会尝试把当前设备标记为 offline；正式退出登录则走上面的 Mesh logout/reset 语义。自动同步只发送 public device identity、capabilities、can_host/can_control、presence 和账号 relay routing metadata，不发送工作区、session、事件、SSH 或路径数据。
 
 如果本机 `remote_control.enabled=true`，daemon 的 cloud sync 还会拉取 `host_device_id == 本机 device_id` 的 pending pairing request。这个同步只能把云端信令转换成 Host 本地 `PairingRequest(source=cloud, cloud_request_id=...)`，并通过 cloud device registry 取得 Controller 的 public key；它不能直接写入 `TrustGrant`。Host UI 或已有可信 `host.manage` Controller 批准/拒绝本地 request 后，Host 再把同一个 `cloud_request_id` 回写为 approved/denied。云端状态只是信令状态，真正可控条件仍然是 Host 本地 trust store、E2EE 握手和 capability 校验。
 
-`GET /v1/remote/hosts` 只在本机已登录 Cloud 且当前 device 未被 revoked 时返回远端 Host。列表来源是同账号 cloud devices 中 `can_host=true` 的设备；`known_hosts.json` 只是 Controller 侧 Host identity cache，不能单独把 stale 设备放回 selector。LAN discovery 只能把已经属于 cloud Mesh 列表且 known host fingerprint 匹配的设备升级成 `lan` 路由。Cloud 候选只代表“账号下可发现的 Host 设备”，不代表已经获得控制权。真正发起远控 action 前仍必须满足：
+`GET /v1/remote/hosts` 只在本机已登录 Cloud、当前 device 未被 revoked 且本机 membership lease 仍有效时返回远端 Host。列表来源是同账号 cloud devices 中 `can_host=true` 的设备；`known_hosts.json` 只是 Controller 侧 Host identity cache，不能单独把 stale 设备放回 selector。LAN discovery 只能把已经属于 cloud Mesh 列表且 known host fingerprint 匹配的设备升级成 `lan` 路由。Cloud 候选只代表“账号下可发现的 Host 设备”，不代表已经获得控制权。真正发起远控 action 前仍必须满足：
 
 ```text
 本机 Controller 已登录 Cloud Mesh
 目标 Host 已登录 Cloud Mesh
+双方 Cloud membership lease 都有效且角色匹配
 本地已知 Host identity / known host 匹配
 Host 本地 trust grant 存在且未 revoked
 E2EE control channel 握手成功
@@ -464,6 +472,8 @@ Controller 与 Host 通过云端信令建立临时加密会话。
 Core API 消息、event subscription payload、附件/媒体数据帧、PTY stream frame 都走这个加密会话。
 云端和 relay 不能解密业务 payload。
 ```
+
+控制握手还必须绑定 Cloud membership lease。Controller 在 `control.hello` 中带自己的 lease；Host 校验该 lease 由当前账号 Cloud membership public key 签发，payload 中的 `device_id` 和 `public_key_fingerprint` 必须匹配 hello 中的 controller identity，且 `can_control=true`。Host 在 `control.hello_ack` 中带自己的 lease；Controller 用本地保存的账号 signing public key 校验 Host identity 和 `can_host=true`。两侧 lease 字段都进入 Ed25519 握手签名 payload，防止 relay/LAN 中间人替换、剥离或跨连接复用 lease。
 
 控制会话必须把防重放作为协议层约束，而不是依赖 relay 投递语义。握手后派生两把方向密钥：`controller-to-host` 和 `host-to-controller`。每个 `sealed` frame 的 AES-GCM AAD 必须绑定 `protocol_version`、`connection_id`、方向和严格连续的 `seq`。接收端只接受 `seq == previous_seq + 1`；重复、乱序、跳号或跨方向复用的 frame 都必须视为非法 frame 并关闭 control session。LAN direct 和 relay transport 复用同一套 sealed frame 校验。
 
@@ -862,6 +872,8 @@ cloud device.status == revoked
 ```
 
 如果当前设备自身已经在云端被标记为 `revoked`，daemon 必须停止把它当作账号 Mesh 成员继续发起或接受远控，关闭现有 control session，并执行本地 mesh logout/reset；即使目标 Host 仍在 LAN 内，也不能因为本地 known host 缓存而继续走 LAN 控制。
+
+如果 Cloud 暂时不可达，设备不做每次握手实时 Cloud 查询；MVP 采用短期 membership lease 控制离线窗口。Host 接受 LAN/relay `control.hello` 前必须校验 Controller lease 签名、账号、device_id、public key fingerprint、`can_control` 和过期时间；Controller 接受 `control.hello_ack` 前必须校验 Host lease 的 `can_host`。lease 过期后，即使本地 trust grant 还在，也不能继续新建远控连接。默认 TTL 为 24h，可通过 Cloud 部署配置收紧；这比每次握手查 Cloud 简单、可维护，并且避免被移除设备在永久离线状态下无限期继续 LAN 控制。
 
 ### 远控连接体验
 
@@ -1621,6 +1633,7 @@ hello
   controller_public_key
   controller_ephemeral_key
   client_nonce
+  membership_lease
   Ed25519 signature
 
 hello_ack
@@ -1630,6 +1643,7 @@ hello_ack
   client_nonce
   server_nonce
   connection_id
+  membership_lease
   Ed25519 signature
 
 sealed

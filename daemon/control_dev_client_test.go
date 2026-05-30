@@ -228,6 +228,7 @@ func TestControlClientRequestFallsBackWhenLanControlDialFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	_, err = hostApp.store.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:             controllerStore.deviceIdentity.DeviceID,
 		ControllerPublicKey:            controllerStore.deviceIdentity.PublicKey,
@@ -279,6 +280,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	capabilities := []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceFilesWrite, CapabilityWorkspaceExec, CapabilityAttachmentIngest, CapabilityMediaStream, CapabilityHostManage}
 	runTerminal := terminalAvailableOnHost()
 	if runTerminal {

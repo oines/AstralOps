@@ -1089,6 +1089,16 @@ export type CloudRelayConfig = {
 export type CloudAccount = {
   account_id_hash: string;
   relay?: CloudRelayConfig;
+  membership_key_id?: string;
+  membership_signing_public_key?: string;
+};
+
+export type CloudMembershipLease = {
+  version: string;
+  alg: string;
+  kid: string;
+  payload_base64: string;
+  signature: string;
 };
 
 export type CloudRelayStatus = {
@@ -1149,6 +1159,7 @@ export type CloudDeviceRecord = {
   relay_url?: string;
   last_seen?: string;
   updated_at: string;
+  membership_lease?: CloudMembershipLease;
 };
 
 export type CloudDeviceListResponse = {

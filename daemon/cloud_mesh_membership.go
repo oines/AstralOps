@@ -22,6 +22,10 @@ type cloudMeshLogoutResult struct {
 }
 
 func (a *app) cloudMeshActive() bool {
+	return a.cloudMeshActiveFor(cloudMembershipRole{})
+}
+
+func (a *app) cloudMeshActiveFor(role cloudMembershipRole) bool {
 	if a == nil || a.store == nil {
 		return false
 	}
@@ -32,7 +36,11 @@ func (a *app) cloudMeshActive() bool {
 	if a.currentDeviceCloudRevoked() {
 		return false
 	}
-	return validateCloudSettings(settings) == nil
+	if validateCloudSettings(settings) != nil {
+		return false
+	}
+	_, err := a.store.currentCloudMembership(role)
+	return err == nil
 }
 
 func cloudMeshInactiveError() *actionError {
@@ -40,7 +48,7 @@ func cloudMeshInactiveError() *actionError {
 }
 
 func (a *app) requireCloudMeshRemoteControl(w http.ResponseWriter) bool {
-	if a.cloudMeshActive() {
+	if a.cloudMeshActiveFor(cloudMembershipRole{CanHost: true}) {
 		return true
 	}
 	writeJSON(w, http.StatusConflict, map[string]string{

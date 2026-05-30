@@ -19,6 +19,7 @@ type store struct {
 	dataDir          string
 	deviceIdentity   DeviceIdentity
 	devicePrivateKey []byte
+	cloudMembership  cloudMembershipState
 	trustGrants      map[string]TrustGrant
 	pairingRequests  map[string]PairingRequest
 	knownHosts       map[string]KnownHost
@@ -45,10 +46,15 @@ func loadStore(dataDir string) (*store, error) {
 	if err != nil {
 		return nil, err
 	}
+	cloudMembership, err := loadCloudMembership(dataDir)
+	if err != nil {
+		return nil, err
+	}
 	st := &store{
 		dataDir:          dataDir,
 		deviceIdentity:   identity,
 		devicePrivateKey: privateKey,
+		cloudMembership:  cloudMembership,
 		trustGrants:      trustGrants,
 		pairingRequests:  pairingRequests,
 		knownHosts:       knownHosts,
