@@ -461,12 +461,23 @@ type controlClientSmokeStep struct {
 	Summary    map[string]any `json:"summary,omitempty"`
 }
 
+type remoteTargetResolver struct {
+	store                     *store
+	cloudClient               func() (CloudClient, error)
+	currentDeviceCloudRevoked func() bool
+	rememberLANRoute          func(HostInfo, string, KnownHost) KnownHost
+}
+
 func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (controlClientTarget, error) {
+	return remoteTargetResolver{store: st}.ResolveControlClient(opts)
+}
+
+func (r remoteTargetResolver) ResolveControlClient(opts controlClientTargetOptions) (controlClientTarget, error) {
 	if opts.UseRelay {
-		return controlClientCloudRelayTarget(st, opts)
+		return r.cloudRelayTarget(opts)
 	}
 	if opts.Host != "" && !opts.Discover {
-		return controlClientExplicitTargetForKnownHost(st, opts.Host, opts.HostDeviceID)
+		return controlClientExplicitTargetForKnownHost(r.store, opts.Host, opts.HostDeviceID)
 	}
 	if !opts.Discover {
 		return controlClientTarget{}, fmt.Errorf("--host is required unless --discover is set")
@@ -477,12 +488,12 @@ func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (con
 	if opts.LANTimeout <= 0 {
 		opts.LANTimeout = 2 * time.Second
 	}
-	fallbackKnownHost, hasFallbackKnownHost := controlClientFallbackKnownHost(st, opts.HostDeviceID)
+	fallbackKnownHost, hasFallbackKnownHost := controlClientFallbackKnownHost(r.store, opts.HostDeviceID)
 	candidates, err := discoverRemoteControlHostsWithTimeout(opts.DiscoveryTimeout, opts.DiscoveryPort)
 	if err != nil {
 		return controlClientFallbackTarget(opts.Host, err, fallbackKnownHost, hasFallbackKnownHost)
 	}
-	candidate, knownHost, err := selectKnownLanCandidate(st, candidates, opts.HostDeviceID)
+	candidate, knownHost, err := selectKnownLanCandidate(r.store, candidates, opts.HostDeviceID)
 	if err != nil {
 		return controlClientFallbackTarget(opts.Host, err, fallbackKnownHost, hasFallbackKnownHost)
 	}
@@ -497,15 +508,43 @@ func controlClientResolveTarget(st *store, opts controlClientTargetOptions) (con
 	return controlClientTarget{BaseURL: candidate.BaseURL, HostInfo: hostInfo, Timeout: opts.LANTimeout, FallbackHost: strings.TrimSpace(opts.Host), ExpectedHost: knownHost, HasExpectedHost: true}, nil
 }
 
-func controlClientCloudRelayTarget(st *store, opts controlClientTargetOptions) (controlClientTarget, error) {
-	if st == nil {
+func (r remoteTargetResolver) ResolveKnownHost(hostDeviceID string) (controlClientTarget, error) {
+	if r.currentDeviceCloudRevoked != nil && r.currentDeviceCloudRevoked() {
+		return controlClientTarget{}, newActionError(http.StatusForbidden, "cloud_device_revoked", "current device has been removed from cloud mesh")
+	}
+	if r.store == nil {
+		return controlClientTarget{}, fmt.Errorf("controller store required")
+	}
+	known, ok := r.store.knownHost(hostDeviceID)
+	if !ok {
+		return controlClientTarget{}, newActionError(http.StatusNotFound, "remote_host_unknown", "remote Host is not known; pair the Host first")
+	}
+	known = normalizeKnownHost(known)
+	if knownHostRevoked(known) {
+		return controlClientTarget{}, newActionError(http.StatusForbidden, "known_host_revoked", "remote Host has been removed from mesh")
+	}
+	if target, err := r.cachedKnownHostTarget(known); err == nil {
+		return target, nil
+	}
+	target, err := r.discoverKnownHostTarget(known)
+	if err == nil {
+		return target, nil
+	}
+	if relay, relayErr := r.cloudRelayKnownHostTarget(known); relayErr == nil {
+		return relay, nil
+	}
+	return controlClientTarget{}, err
+}
+
+func (r remoteTargetResolver) cloudRelayTarget(opts controlClientTargetOptions) (controlClientTarget, error) {
+	if r.store == nil {
 		return controlClientTarget{}, fmt.Errorf("controller store required for --relay")
 	}
 	hostDeviceID := strings.TrimSpace(opts.HostDeviceID)
 	if hostDeviceID == "" {
 		return controlClientTarget{}, fmt.Errorf("--host-device-id is required for --relay")
 	}
-	known, ok := st.knownHost(hostDeviceID)
+	known, ok := r.store.knownHost(hostDeviceID)
 	if !ok {
 		return controlClientTarget{}, fmt.Errorf("known Host %q is not paired; pair the Host before using --relay", hostDeviceID)
 	}
@@ -532,6 +571,72 @@ func controlClientCloudRelayTarget(st *store, opts controlClientTargetOptions) (
 	if !ok {
 		return controlClientTarget{}, fmt.Errorf("cloud account relay is not configured")
 	}
+	return r.cloudDeviceTarget(known, devices, relayClient, opts.RelayTimeout, true)
+}
+
+func (r remoteTargetResolver) cachedKnownHostTarget(known KnownHost) (controlClientTarget, error) {
+	if strings.TrimSpace(known.LastBaseURL) == "" {
+		return controlClientTarget{}, fmt.Errorf("known Host %s has no cached LAN route", known.DeviceID)
+	}
+	return controlClientExplicitTargetForKnownHostWithTimeout(r.store, known.LastBaseURL, known.DeviceID, remoteHostLANTimeout)
+}
+
+func (r remoteTargetResolver) discoverKnownHostTarget(known KnownHost) (controlClientTarget, error) {
+	candidate, ok, err := discoverRemoteControlHostWithTimeout(remoteHostDiscoveryTTL, defaultRemoteControlDiscoveryPort, func(candidate LanHostCandidate) bool {
+		return candidate.DeviceID == known.DeviceID && candidate.PublicKeyFingerprint == known.PublicKeyFingerprint
+	})
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	if !ok {
+		return controlClientTarget{}, fmt.Errorf("known Host %q was not found on LAN", known.DeviceID)
+	}
+	client := &http.Client{Timeout: remoteHostLANTimeout}
+	hostInfo, err := controlClientHostInfoWithClient(candidate.BaseURL, client)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	if err := validateKnownLanHost(candidate, known, hostInfo); err != nil {
+		return controlClientTarget{}, err
+	}
+	if r.rememberLANRoute != nil {
+		known = r.rememberLANRoute(hostInfo, candidate.BaseURL, known)
+	}
+	return controlClientTarget{
+		BaseURL:         candidate.BaseURL,
+		HostInfo:        hostInfo,
+		Timeout:         remoteHostLANTimeout,
+		ExpectedHost:    known,
+		HasExpectedHost: true,
+	}, nil
+}
+
+func (r remoteTargetResolver) cloudRelayKnownHostTarget(known KnownHost) (controlClientTarget, error) {
+	if r.cloudClient == nil {
+		return controlClientTarget{}, fmt.Errorf("cloud is not configured")
+	}
+	client, err := r.cloudClient()
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cloudSyncTimeout)
+	defer cancel()
+	devices, err := client.ListDevices(ctx)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	account, err := client.GetAccount(ctx)
+	if err != nil {
+		return controlClientTarget{}, err
+	}
+	relayClient, _, ok := relayClientFromCloudAccount(account, client.Token, client.HTTPClient)
+	if !ok {
+		return controlClientTarget{}, fmt.Errorf("cloud account relay is not configured")
+	}
+	return r.cloudDeviceTarget(known, devices, relayClient, controlRelayRoundTripTimeout, false)
+}
+
+func (r remoteTargetResolver) cloudDeviceTarget(known KnownHost, devices []CloudDeviceRecord, relayClient RelayClient, timeout time.Duration, requireFound bool) (controlClientTarget, error) {
 	known = normalizeKnownHost(known)
 	for _, device := range devices {
 		if strings.TrimSpace(device.DeviceID) != known.DeviceID {
@@ -556,15 +661,18 @@ func controlClientCloudRelayTarget(st *store, opts controlClientTargetOptions) (
 				PublicKeyFingerprint: known.PublicKeyFingerprint,
 				Capabilities:         capabilities,
 			}, Capabilities: capabilities},
-			Timeout:            opts.RelayTimeout,
+			Timeout:            timeout,
 			UseRelay:           true,
 			RelayClient:        relayClient,
-			ControllerDeviceID: st.deviceIdentity.DeviceID,
+			ControllerDeviceID: r.store.hostInfo().Identity.DeviceID,
 			ExpectedHost:       known,
 			HasExpectedHost:    true,
 		}, nil
 	}
-	return controlClientTarget{}, fmt.Errorf("cloud Host %s was not found for relay", known.DeviceID)
+	if requireFound {
+		return controlClientTarget{}, fmt.Errorf("cloud Host %s was not found for relay", known.DeviceID)
+	}
+	return controlClientTarget{}, fmt.Errorf("cloud Host %s is not online for relay", known.DeviceID)
 }
 
 func controlClientExplicitTarget(host string) (controlClientTarget, error) {

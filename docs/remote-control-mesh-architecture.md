@@ -404,6 +404,8 @@ relay fallback
 
 P2P 失败不能改变 Host identity 校验、Host trust grant、E2EE 握手或 capability 校验。
 
+Desktop app 的远端 Host 操作入口和开发 CLI 都必须复用同一个 `RemoteTargetResolver` 边界。UI handler 不能复制 LAN discovery、cloud registry、known host、account relay 的解析分支；它只能请求 resolver 返回目标 Host identity 和可用 transport plan。
+
 Desktop Host 在本机网络上提供一个远控 LAN listener，并在同一个端口监听 UDP discovery。Controller 需要 LAN 发现时，向局域网广播一个 discovery request，Host 只单播回复候选地址：
 
 ```text

@@ -581,67 +581,7 @@ func controlResponseMessage(response ControlResponse) string {
 }
 
 func (a *app) remoteHostTarget(hostDeviceID string) (controlClientTarget, error) {
-	if a.currentDeviceCloudRevoked() {
-		return controlClientTarget{}, newActionError(http.StatusForbidden, "cloud_device_revoked", "current device has been removed from cloud mesh")
-	}
-	known, ok := a.store.knownHost(hostDeviceID)
-	if !ok {
-		return controlClientTarget{}, newActionError(http.StatusNotFound, "remote_host_unknown", "remote Host is not known; pair the Host first")
-	}
-	known = normalizeKnownHost(known)
-	if knownHostRevoked(known) {
-		return controlClientTarget{}, newActionError(http.StatusForbidden, "known_host_revoked", "remote Host has been removed from mesh")
-	}
-	if target, err := a.cachedRemoteHostTarget(known); err == nil {
-		return target, nil
-	}
-	target, err := a.discoverRemoteHostTarget(known)
-	if err == nil {
-		return target, nil
-	}
-	if relay, relayErr := a.remoteHostRelayTarget(known); relayErr == nil {
-		return relay, nil
-	}
-	return controlClientTarget{}, err
-}
-
-func (a *app) cachedRemoteHostTarget(known KnownHost) (controlClientTarget, error) {
-	if strings.TrimSpace(known.LastBaseURL) == "" {
-		return controlClientTarget{}, fmt.Errorf("known Host %s has no cached LAN route", known.DeviceID)
-	}
-	target, err := controlClientExplicitTargetForKnownHostWithTimeout(a.store, known.LastBaseURL, known.DeviceID, remoteHostLANTimeout)
-	if err != nil {
-		return controlClientTarget{}, err
-	}
-	return target, nil
-}
-
-func (a *app) discoverRemoteHostTarget(known KnownHost) (controlClientTarget, error) {
-	candidate, ok, err := discoverRemoteControlHostWithTimeout(remoteHostDiscoveryTTL, defaultRemoteControlDiscoveryPort, func(candidate LanHostCandidate) bool {
-		return candidate.DeviceID == known.DeviceID && candidate.PublicKeyFingerprint == known.PublicKeyFingerprint
-	})
-	if err != nil {
-		return controlClientTarget{}, err
-	}
-	if !ok {
-		return controlClientTarget{}, fmt.Errorf("known Host %q was not found on LAN", known.DeviceID)
-	}
-	client := &http.Client{Timeout: remoteHostLANTimeout}
-	hostInfo, err := controlClientHostInfoWithClient(candidate.BaseURL, client)
-	if err != nil {
-		return controlClientTarget{}, err
-	}
-	if err := validateKnownLanHost(candidate, known, hostInfo); err != nil {
-		return controlClientTarget{}, err
-	}
-	known = a.rememberRemoteHostLANRoute(hostInfo, candidate.BaseURL, known)
-	return controlClientTarget{
-		BaseURL:         candidate.BaseURL,
-		HostInfo:        hostInfo,
-		Timeout:         remoteHostLANTimeout,
-		ExpectedHost:    known,
-		HasExpectedHost: true,
-	}, nil
+	return a.remoteTargetResolver().ResolveKnownHost(hostDeviceID)
 }
 
 func (a *app) rememberRemoteHostLANRoute(hostInfo HostInfo, baseURL string, fallback KnownHost) KnownHost {
@@ -652,54 +592,13 @@ func (a *app) rememberRemoteHostLANRoute(hostInfo HostInfo, baseURL string, fall
 	return known
 }
 
-func (a *app) remoteHostRelayTarget(known KnownHost) (controlClientTarget, error) {
-	client, err := a.cloudClientFromSettings()
-	if err != nil {
-		return controlClientTarget{}, err
+func (a *app) remoteTargetResolver() remoteTargetResolver {
+	return remoteTargetResolver{
+		store:                     a.store,
+		cloudClient:               a.cloudClientFromSettings,
+		currentDeviceCloudRevoked: a.currentDeviceCloudRevoked,
+		rememberLANRoute:          a.rememberRemoteHostLANRoute,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), cloudSyncTimeout)
-	defer cancel()
-	devices, err := client.ListDevices(ctx)
-	if err != nil {
-		return controlClientTarget{}, err
-	}
-	account, err := client.GetAccount(ctx)
-	if err != nil {
-		return controlClientTarget{}, err
-	}
-	relayClient, _, ok := relayClientFromCloudAccount(account, client.Token, client.HTTPClient)
-	if !ok {
-		return controlClientTarget{}, fmt.Errorf("cloud account relay is not configured")
-	}
-	known = normalizeKnownHost(known)
-	for _, device := range devices {
-		if device.DeviceID != known.DeviceID || !device.CanHost || device.Status != cloudDeviceStatusOnline {
-			continue
-		}
-		if device.PublicKey != "" && device.PublicKey != known.PublicKey {
-			return controlClientTarget{}, fmt.Errorf("cloud Host public key mismatch for %s", known.DeviceID)
-		}
-		if device.PublicKeyFingerprint != "" && device.PublicKeyFingerprint != known.PublicKeyFingerprint {
-			return controlClientTarget{}, fmt.Errorf("cloud Host public key fingerprint mismatch for %s", known.DeviceID)
-		}
-		return controlClientTarget{
-			HostInfo: HostInfo{Identity: DeviceIdentity{
-				DeviceID:             known.DeviceID,
-				DeviceName:           firstString(device.DeviceName, known.DeviceName),
-				DeviceKind:           device.DeviceKind,
-				PublicKey:            known.PublicKey,
-				PublicKeyFingerprint: known.PublicKeyFingerprint,
-				Capabilities:         normalizeCapabilities(device.Capabilities),
-			}, Capabilities: normalizeCapabilities(device.Capabilities)},
-			Timeout:            controlRelayRoundTripTimeout,
-			UseRelay:           true,
-			RelayClient:        relayClient,
-			ControllerDeviceID: a.store.hostInfo().Identity.DeviceID,
-			ExpectedHost:       known,
-			HasExpectedHost:    true,
-		}, nil
-	}
-	return controlClientTarget{}, fmt.Errorf("cloud Host %s is not online for relay", known.DeviceID)
 }
 
 func (a *app) writeRemoteControlResult(w http.ResponseWriter, hostDeviceID, capability, action string, params map[string]any) {
