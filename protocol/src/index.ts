@@ -827,6 +827,7 @@ export type ControlAction =
   | "core.read.session_view"
   | "core.read.sessions"
   | "core.read.workspaces"
+  | "core.read.workspace.connection"
   | "core.read.events"
   | "core.subscribe.events"
   | "core.unsubscribe.events"
@@ -1373,6 +1374,7 @@ export type ControlActionParamMap = {
   "core.read.session_view": SessionReferenceParams;
   "core.read.sessions": SessionsReadParams;
   "core.read.workspaces": undefined;
+  "core.read.workspace.connection": WorkspaceReferenceParams;
   "core.read.events": EventWindowParams;
   "core.subscribe.events": EventSubscriptionParams;
   "core.unsubscribe.events": EventSubscriptionCancelParams;
@@ -1422,6 +1424,7 @@ export type ControlActionResultMap = {
   "core.read.session_view": SessionView;
   "core.read.sessions": Session[];
   "core.read.workspaces": Workspace[];
+  "core.read.workspace.connection": WorkspaceConnection;
   "core.read.events": AstralEvent[];
   "core.subscribe.events": EventSubscriptionResult;
   "core.unsubscribe.events": EventSubscriptionCancelResult;

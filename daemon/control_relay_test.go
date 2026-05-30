@@ -286,6 +286,46 @@ func TestRemoteHostActionFallsBackToCloudRelay(t *testing.T) {
 	}
 }
 
+func TestRemoteHostActionFallsBackToCloudRelayAfterCachedLANHandshakeFailure(t *testing.T) {
+	hostApp, workspace, controllerStore, cloudServer, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
+	client := RelayClient{BaseURL: relayServer.URL, Token: testCloudRelayCredential(t, "acct_test")}
+	runControlRelayPoller(t, hostApp, client)
+	brokenLANServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/host" {
+			writeJSON(w, http.StatusOK, hostApp.store.hostInfo())
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer brokenLANServer.Close()
+	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), brokenLANServer.URL); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := loadSettingsStore(controllerStore.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	baseURL := cloudServer.URL
+	token := "account-token"
+	if _, err := settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, settings: settings, hub: newEventHub()}
+
+	response, err := controllerApp.remoteControlResponse(hostApp.store.hostInfo().Identity.DeviceID, CapabilityCoreRead, ControlActionWorkspaces, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("response = %#v", response)
+	}
+	items, _ := response.Result.([]any)
+	if len(items) != 1 || stringValue(mapValue(items[0])["id"]) != workspace.ID {
+		t.Fatalf("workspaces = %#v, want %s", response.Result, workspace.ID)
+	}
+}
+
 func TestRemoteHostActionUsesApprovedCloudPairingKnownHost(t *testing.T) {
 	hostApp, workspace, controllerStore, cloudServer, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
 	cloudClient := CloudClient{BaseURL: cloudServer.URL, Token: "account-token"}

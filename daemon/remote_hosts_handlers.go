@@ -349,6 +349,8 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 			"path":         r.URL.Query().Get("path"),
 			"mode":         "list",
 		})
+	case len(route) == 3 && route[0] == "workspaces" && route[2] == "connection" && r.Method == http.MethodGet:
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreRead, ControlActionWorkspaceConnection, map[string]any{"workspace_id": route[1]})
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "connect" && r.Method == http.MethodPost:
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreControl, ControlActionWorkspaceConnect, map[string]any{"workspace_id": route[1]})
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "disconnect" && r.Method == http.MethodPost:

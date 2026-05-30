@@ -552,13 +552,12 @@ export function App(): React.JSX.Element {
       setActiveWorkspaceId(workspace.id);
       setActiveSession(null);
       setWorkspaceOpen(false);
-      const createdOnLocalHost = selectedHostId === LOCAL_HOST_ID || selectedHostId === localHostInfo?.identity.device_id;
-      if (workspace.target === "ssh" && createdOnLocalHost) {
+      if (workspace.target === "ssh") {
         const state = await api.connectWorkspace(workspace.id);
         setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
       }
     },
-    [api, localHostInfo?.identity.device_id, selectedHostId],
+    [api],
   );
 
   const handleConnectWorkspace = useCallback(
@@ -960,7 +959,7 @@ export function App(): React.JSX.Element {
       setError("");
       try {
         const initialEvents = await loadHostState(client, {
-          includeWorkspaceConnections: activeHostIsLocal,
+          includeWorkspaceConnections: true,
           restoreOnLaunch: appSettingsRef.current.general.restore_on_launch,
           updateLocalHostInfo: activeHostIsLocal,
         });
@@ -969,7 +968,7 @@ export function App(): React.JSX.Element {
         subscription = client.subscribeEvents(afterSeq, {
           onEvent: (event) => {
             if (cancelled) return;
-            if (activeHostIsLocal && event.kind === "workspace.connection") {
+            if (event.kind === "workspace.connection") {
               const state = event.normalized as WorkspaceConnection;
               setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
             }

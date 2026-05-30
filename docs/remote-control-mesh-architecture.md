@@ -645,6 +645,8 @@ else:
   use relay
 ```
 
+LAN identity validation 成功只说明候选地址属于目标 Host，不能把目标降级成 direct-only。只要账号 relay 可用，`RemoteTargetResolver` 返回的 LAN target 也必须携带 relay fallback；后续 control websocket dial、hello/ack 或 request/response 超时都可以切到 relay，但不能绕过同一个 Host identity、trust grant、capability 和 E2EE 校验。
+
 这个判断是 per Controller-Host pair 的。一个账号的 mesh 里可以同时存在：
 
 ```text
@@ -1315,7 +1317,7 @@ relay 解密或缓存明文媒体
 
 远控 `core.read.events` 和 `core.subscribe.events` 返回的是 Host Gateway 投影后的事件，不是 JSONL 原始事件直出。投影必须去掉 `AstralEvent.raw`，移除 `native_session_id` / `native_thread_id` / `forked_from_native_anchor` 等 Host/runtime 内部标识，并从 `workspace.*` 事件中移除 `local_cwd`、`local_projection_root`、`ssh` 等 Host workspace 内部字段。`message.user.attachments`、`message.*.media`、`message.media` 等 transcript media surface 还必须移除 Host 私有 `path` / `saved_path` / `file_path` 字段。Controller 只能拿 `event_seq + media_id` 再通过 `media.read`、`media.download` 或 `media.stream` 读取内容。
 
-同理，远控 `core.read.workspaces`、`core.read.sessions`、`core.read.session_view` 返回 Host Gateway 投影后的 workspace/session 元数据。投影保留 `id`、`name`、`target`、`agent`、状态和时间等远控 UI 所需字段，但不暴露 `local_cwd`、`local_projection_root`、SSH endpoint/remote cwd、native session/thread id 等 Host/runtime 内部细节。`session_view.pending_interaction.detail_rows` 可以展示审批决策目标，但每行必须带机器可读 `key`（如 `cwd` / `path` / `command`）；Host Gateway 按 `key` 投影 cwd/path 为 workspace-relative display path，不能依赖 UI label，也不能把 Desktop 本机绝对路径或 SSH remote cwd 发给 Controller。
+同理，远控 `core.read.workspaces`、`core.read.workspace.connection`、`core.read.sessions`、`core.read.session_view` 返回 Host Gateway 投影后的 workspace/session 元数据和 Host-owned workspace 连接状态。Controller UI 只是遥控器：选中远端 Host 时，工作区列表、SSH 连接状态、session 状态和后续交互都必须以被控端 Host 返回的数据为准，不能混用 Controller 本机的 workspace/SSH 状态。workspace/session 投影保留 `id`、`name`、`target`、`agent`、状态和时间等远控 UI 所需字段，但不暴露 `local_cwd`、`local_projection_root`、SSH 配置对象、native session/thread id 等 Host/runtime 内部细节。`core.read.workspace.connection` 可以返回 UI 所需的连接状态和显示路径。`session_view.pending_interaction.detail_rows` 可以展示审批决策目标，但每行必须带机器可读 `key`（如 `cwd` / `path` / `command`）；Host Gateway 按 `key` 投影 cwd/path 为 workspace-relative display path，不能依赖 UI label，也不能把 Desktop 本机绝对路径或 SSH remote cwd 发给 Controller。
 
 ## PTY 架构
 

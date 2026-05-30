@@ -525,11 +525,11 @@ func (r remoteTargetResolver) ResolveKnownHost(hostDeviceID string) (controlClie
 		return controlClientTarget{}, newActionError(http.StatusForbidden, "known_host_revoked", "remote Host has been removed from mesh")
 	}
 	if target, err := r.cachedKnownHostTarget(known); err == nil {
-		return target, nil
+		return r.attachCloudRelayFallback(known, target), nil
 	}
 	target, err := r.discoverKnownHostTarget(known)
 	if err == nil {
-		return target, nil
+		return r.attachCloudRelayFallback(known, target), nil
 	}
 	if relay, relayErr := r.cloudRelayKnownHostTarget(known); relayErr == nil {
 		return relay, nil
@@ -635,6 +635,26 @@ func (r remoteTargetResolver) cloudRelayKnownHostTarget(known KnownHost) (contro
 		return controlClientTarget{}, fmt.Errorf("cloud account relay is not configured")
 	}
 	return r.cloudDeviceTarget(known, devices, relayClient, controlRelayRoundTripTimeout, false)
+}
+
+func (r remoteTargetResolver) attachCloudRelayFallback(known KnownHost, target controlClientTarget) controlClientTarget {
+	if target.UseRelay || strings.TrimSpace(target.RelayClient.BaseURL) != "" {
+		return target
+	}
+	relay, err := r.cloudRelayKnownHostTarget(known)
+	if err != nil {
+		return target
+	}
+	target.RelayClient = relay.RelayClient
+	target.ControllerDeviceID = relay.ControllerDeviceID
+	if target.HostInfo.Identity.DeviceID == "" {
+		target.HostInfo = relay.HostInfo
+	}
+	if !target.HasExpectedHost {
+		target.ExpectedHost = relay.ExpectedHost
+		target.HasExpectedHost = relay.HasExpectedHost
+	}
+	return target
 }
 
 func (r remoteTargetResolver) cloudDeviceTarget(known KnownHost, devices []CloudDeviceRecord, relayClient RelayClient, timeout time.Duration, requireFound bool) (controlClientTarget, error) {

@@ -29,6 +29,7 @@ const (
 	ControlActionSessionView                = "core.read.session_view"
 	ControlActionSessions                   = "core.read.sessions"
 	ControlActionWorkspaces                 = "core.read.workspaces"
+	ControlActionWorkspaceConnection        = "core.read.workspace.connection"
 	ControlActionEvents                     = "core.read.events"
 	ControlActionEventsSubscribe            = "core.subscribe.events"
 	ControlActionEventsUnsubscribe          = "core.unsubscribe.events"
@@ -140,7 +141,7 @@ func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlR
 
 func controlActionCapability(action string) string {
 	switch action {
-	case ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
+	case ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionWorkspaceConnection, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
 		return CapabilityCoreRead
 	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionWorkspaceCreate, ControlActionWorkspaceConnect, ControlActionWorkspaceDisconnect, ControlActionSessionCreate, ControlActionSessionFork, ControlActionSessionDelete:
 		return CapabilityCoreControl
@@ -200,6 +201,16 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		return sanitizeControlSessions(a.store.listSessions(params.WorkspaceID)), nil
 	case ControlActionWorkspaces:
 		return sanitizeControlWorkspaces(a.store.listWorkspaces()), nil
+	case ControlActionWorkspaceConnection:
+		var params workspaceReferenceParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		workspace, err := a.controlWorkspace(params.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		return a.ssh.getConnection(workspace), nil
 	case ControlActionEvents:
 		var params struct {
 			WorkspaceID string `json:"workspace_id"`
