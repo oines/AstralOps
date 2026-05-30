@@ -15,12 +15,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/oines/astralops/internal/relayauth"
 )
 
 const (
-	maxJSONBodyBytes int64 = 1 << 20
-	maxEnvelopeWait        = 25 * time.Second
+	maxJSONBodyBytes    int64 = 1 << 20
+	maxEnvelopeWait           = 25 * time.Second
+	webSocketWriteWait        = 15 * time.Second
+	webSocketSendBuffer       = 128
 
 	EnvelopeVersion               = "astralops-relay-envelope-v1"
 	PayloadKindControlHello       = "control.hello"
@@ -35,6 +38,7 @@ type Server struct {
 	maxCredentialTTL  time.Duration
 	queues            map[string][]Envelope
 	waiters           map[string][]chan struct{}
+	webSocketClients  map[string]map[*webSocketClient]struct{}
 	now               func() time.Time
 }
 
@@ -61,6 +65,22 @@ type EnvelopeListResponse struct {
 
 type EnvelopeAckInput struct {
 	DeviceID string `json:"device_id"`
+}
+
+type WebSocketFrame struct {
+	Type     string    `json:"type"`
+	Envelope *Envelope `json:"envelope,omitempty"`
+	Code     string    `json:"code,omitempty"`
+	Error    string    `json:"error,omitempty"`
+}
+
+type webSocketClient struct {
+	accountIDHash string
+	deviceID      string
+	conn          *websocket.Conn
+	send          chan WebSocketFrame
+	done          chan struct{}
+	closeOnce     sync.Once
 }
 
 type APIError struct {
@@ -90,6 +110,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 		maxCredentialTTL:  options.MaxCredentialTTL,
 		queues:            map[string][]Envelope{},
 		waiters:           map[string][]chan struct{}{},
+		webSocketClients:  map[string]map[*webSocketClient]struct{}{},
 		now:               func() time.Time { return time.Now().UTC() },
 	}, nil
 }
@@ -97,6 +118,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", s.handleHealth)
+	mux.HandleFunc("/v1/relay/connect", s.withAccount(s.handleRelayConnect))
 	mux.HandleFunc("/v1/relay/envelopes", s.withAccount(s.handleEnvelopes))
 	mux.HandleFunc("/v1/relay/envelopes/", s.withAccount(s.handleEnvelopeAction))
 	return withSecurityHeaders(withRequestBodyLimit(withCORS(mux)))
@@ -159,6 +181,53 @@ func (s *Server) handleEnvelopeAction(accountIDHash string, w http.ResponseWrite
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+func (s *Server) handleRelayConnect(accountIDHash string, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	deviceID := strings.TrimSpace(r.URL.Query().Get("device_id"))
+	if deviceID == "" {
+		writeError(w, apiErr(http.StatusBadRequest, "device_id_required", "device_id required"))
+		return
+	}
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(*http.Request) bool { return true },
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	conn.SetReadLimit(maxJSONBodyBytes)
+	client := &webSocketClient{
+		accountIDHash: accountIDHash,
+		deviceID:      deviceID,
+		conn:          conn,
+		send:          make(chan WebSocketFrame, webSocketSendBuffer),
+		done:          make(chan struct{}),
+	}
+	s.registerWebSocketClient(client)
+	go client.writeLoop()
+	defer func() {
+		s.unregisterWebSocketClient(client)
+		client.close()
+	}()
+
+	for {
+		var frame WebSocketFrame
+		if err := conn.ReadJSON(&frame); err != nil {
+			return
+		}
+		if strings.TrimSpace(frame.Type) != "send" || frame.Envelope == nil {
+			client.sendError("relay_ws_frame_invalid", "relay websocket frame invalid")
+			continue
+		}
+		if _, err := s.forwardWebSocketEnvelope(accountIDHash, deviceID, *frame.Envelope); err != nil {
+			client.sendError(apiErrorCode(err), err.Error())
+		}
+	}
+}
+
 func (s *Server) enqueue(accountIDHash string, envelope Envelope) (Envelope, error) {
 	envelope.EnvelopeID = strings.TrimSpace(envelope.EnvelopeID)
 	if envelope.EnvelopeID == "" {
@@ -172,6 +241,27 @@ func (s *Server) enqueue(accountIDHash string, envelope Envelope) (Envelope, err
 	defer s.mu.Unlock()
 	s.queues[accountIDHash] = append(s.queues[accountIDHash], envelope)
 	s.notifyWaitersLocked(accountIDHash, envelope.ToDeviceID)
+	return envelope, nil
+}
+
+func (s *Server) forwardWebSocketEnvelope(accountIDHash, fromDeviceID string, envelope Envelope) (Envelope, error) {
+	envelope.EnvelopeID = strings.TrimSpace(envelope.EnvelopeID)
+	if envelope.EnvelopeID == "" {
+		envelope.EnvelopeID = "env_" + randomHex(16)
+	}
+	envelope.CreatedAt = s.now().Format(time.RFC3339Nano)
+	envelope.FromDeviceID = strings.TrimSpace(envelope.FromDeviceID)
+	fromDeviceID = strings.TrimSpace(fromDeviceID)
+	if envelope.FromDeviceID == "" {
+		envelope.FromDeviceID = fromDeviceID
+	}
+	if envelope.FromDeviceID != fromDeviceID {
+		return Envelope{}, apiErr(http.StatusForbidden, "from_device_mismatch", "from_device_id does not match relay websocket device")
+	}
+	if err := validateEnvelope(envelope); err != nil {
+		return Envelope{}, err
+	}
+	s.deliverWebSocketEnvelope(accountIDHash, envelope)
 	return envelope, nil
 }
 
@@ -255,6 +345,101 @@ func (s *Server) removeWaiter(key string, waiter chan struct{}) {
 		return
 	}
 	s.waiters[key] = waiters
+}
+
+func (s *Server) registerWebSocketClient(client *webSocketClient) {
+	if client == nil {
+		return
+	}
+	key := envelopeWaiterKey(client.accountIDHash, client.deviceID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.webSocketClients[key] == nil {
+		s.webSocketClients[key] = map[*webSocketClient]struct{}{}
+	}
+	s.webSocketClients[key][client] = struct{}{}
+}
+
+func (s *Server) unregisterWebSocketClient(client *webSocketClient) {
+	if client == nil {
+		return
+	}
+	key := envelopeWaiterKey(client.accountIDHash, client.deviceID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clients := s.webSocketClients[key]
+	if len(clients) == 0 {
+		return
+	}
+	delete(clients, client)
+	if len(clients) == 0 {
+		delete(s.webSocketClients, key)
+	}
+}
+
+func (s *Server) deliverWebSocketEnvelope(accountIDHash string, envelope Envelope) {
+	key := envelopeWaiterKey(accountIDHash, envelope.ToDeviceID)
+	s.mu.Lock()
+	clients := make([]*webSocketClient, 0, len(s.webSocketClients[key]))
+	for client := range s.webSocketClients[key] {
+		clients = append(clients, client)
+	}
+	s.mu.Unlock()
+
+	frame := WebSocketFrame{Type: "envelope", Envelope: &envelope}
+	for _, client := range clients {
+		if client.sendFrame(frame) {
+			continue
+		}
+		s.unregisterWebSocketClient(client)
+		client.close()
+	}
+}
+
+func (c *webSocketClient) sendFrame(frame WebSocketFrame) bool {
+	if c == nil {
+		return false
+	}
+	select {
+	case <-c.done:
+		return false
+	case c.send <- frame:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *webSocketClient) sendError(code, message string) {
+	if code == "" {
+		code = "relay_ws_error"
+	}
+	_ = c.sendFrame(WebSocketFrame{Type: "error", Code: code, Error: message})
+}
+
+func (c *webSocketClient) writeLoop() {
+	for {
+		select {
+		case <-c.done:
+			return
+		case frame := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(webSocketWriteWait))
+			if err := c.conn.WriteJSON(frame); err != nil {
+				c.close()
+				return
+			}
+		}
+	}
+}
+
+func (c *webSocketClient) close() {
+	if c == nil {
+		return
+	}
+	c.closeOnce.Do(func() {
+		close(c.done)
+		_ = c.conn.Close()
+	})
 }
 
 func envelopeWaiterKey(accountIDHash, deviceID string) string {
@@ -411,6 +596,14 @@ func writeError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error(), "code": "internal_error"})
+}
+
+func apiErrorCode(err error) string {
+	var api APIError
+	if errors.As(err, &api) {
+		return api.Code
+	}
+	return "relay_ws_error"
 }
 
 func withCORS(next http.Handler) http.Handler {

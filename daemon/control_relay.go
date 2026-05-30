@@ -25,12 +25,22 @@ const (
 	controlRelayHelloPayloadBytes = controlHelloFrameMaxBytesDefault
 )
 
+type relayEnvelopeTransport interface {
+	EnqueueRelayEnvelope(context.Context, RelayEnvelope) (RelayEnvelope, error)
+	AckRelayEnvelope(context.Context, string, string) error
+}
+
+type relayEnvelopeReadTransport interface {
+	relayEnvelopeTransport
+	ReadRelayEnvelope(context.Context) (RelayEnvelope, error)
+}
+
 type controlRelaySession struct {
 	app                *app
 	id                 string
 	controllerDeviceID string
 	cipher             *controlCipher
-	relayClient        RelayClient
+	relay              relayEnvelopeTransport
 	ctx                context.Context
 	cancel             context.CancelFunc
 	writeMu            sync.Mutex
@@ -67,34 +77,81 @@ func (a *app) cloudPollRelayEnvelopes(ctx context.Context, client RelayClient) e
 	return nil
 }
 
-func (a *app) handleControlRelayEnvelope(ctx context.Context, client RelayClient, envelope RelayEnvelope) error {
-	switch strings.TrimSpace(envelope.PayloadKind) {
-	case relayPayloadKindControlHello:
-		return a.handleControlRelayHello(ctx, client, envelope)
-	case relayPayloadKindControlSealedFrame:
-		return a.handleControlRelaySealedFrame(ctx, client, envelope)
-	case relayPayloadKindControlHelloAck:
-		return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
-	default:
-		return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+func (a *app) cloudRunRelayWebSocket(ctx context.Context, client RelayClient) error {
+	if a == nil || a.store == nil {
+		return nil
+	}
+	settings := a.currentSettings()
+	if !settings.RemoteControl.Enabled {
+		return nil
+	}
+	if _, err := a.store.currentCloudMembership(cloudMembershipRole{CanHost: true}); err != nil {
+		return nil
+	}
+	deviceID := a.store.hostInfo().Identity.DeviceID
+	relay, err := client.ConnectRelayWebSocket(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	defer relay.Close()
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = relay.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		envelope, err := relay.ReadRelayEnvelope(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+		if strings.TrimSpace(envelope.ToDeviceID) != deviceID {
+			continue
+		}
+		a.expireIdleControlRelaySessions(time.Now().UTC())
+		if err := a.handleControlRelayEnvelope(ctx, relay, envelope); err != nil {
+			return err
+		}
 	}
 }
 
-func (a *app) handleControlRelayHello(ctx context.Context, client RelayClient, envelope RelayEnvelope) error {
+func (a *app) handleControlRelayEnvelope(ctx context.Context, relay relayEnvelopeTransport, envelope RelayEnvelope) error {
+	switch strings.TrimSpace(envelope.PayloadKind) {
+	case relayPayloadKindControlHello:
+		return a.handleControlRelayHello(ctx, relay, envelope)
+	case relayPayloadKindControlSealedFrame:
+		return a.handleControlRelaySealedFrame(ctx, relay, envelope)
+	case relayPayloadKindControlHelloAck:
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+	default:
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+	}
+}
+
+func (a *app) handleControlRelayHello(ctx context.Context, relay relayEnvelopeTransport, envelope RelayEnvelope) error {
 	payload, err := relayEnvelopePayload(envelope, controlRelayHelloPayloadBytes)
 	if err != nil {
-		return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
 	}
 	var hello controlHelloFrame
 	if err := json.Unmarshal(payload, &hello); err != nil {
-		return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
 	}
 	session, ack, err := a.acceptControlRelayHello(hello)
 	if err != nil {
 		if closeFrame, ok := controlRelayHelloCloseFrame(err); ok {
 			body, marshalErr := json.Marshal(closeFrame)
 			if marshalErr == nil {
-				_, _ = client.EnqueueRelayEnvelope(ctx, RelayEnvelope{
+				_, _ = relay.EnqueueRelayEnvelope(ctx, RelayEnvelope{
 					Version:       relayEnvelopeVersion,
 					ConnectionID:  "rejected_" + randomID(12),
 					FromDeviceID:  a.store.hostInfo().Identity.DeviceID,
@@ -104,16 +161,16 @@ func (a *app) handleControlRelayHello(ctx context.Context, client RelayClient, e
 				})
 			}
 		}
-		return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
 	}
-	session.relayClient = client
+	session.relay = relay
 	body, err := json.Marshal(ack)
 	if err != nil {
 		session.cancelControlSession()
 		a.unregisterControlRelaySession(session.id)
 		return err
 	}
-	if _, err := client.EnqueueRelayEnvelope(ctx, RelayEnvelope{
+	if _, err := relay.EnqueueRelayEnvelope(ctx, RelayEnvelope{
 		Version:       relayEnvelopeVersion,
 		ConnectionID:  ack.ConnectionID,
 		FromDeviceID:  ack.HostDeviceID,
@@ -125,7 +182,7 @@ func (a *app) handleControlRelayHello(ctx context.Context, client RelayClient, e
 		a.unregisterControlRelaySession(session.id)
 		return err
 	}
-	return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+	return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
 }
 
 func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySession, controlHelloAckFrame, error) {
@@ -218,40 +275,41 @@ func controlRelayHelloCloseFrame(err error) (controlPlainFrame, bool) {
 	return controlPlainFrame{}, false
 }
 
-func (a *app) handleControlRelaySealedFrame(ctx context.Context, client RelayClient, envelope RelayEnvelope) error {
+func (a *app) handleControlRelaySealedFrame(ctx context.Context, relay relayEnvelopeTransport, envelope RelayEnvelope) error {
 	session := a.controlRelaySession(envelope.ConnectionID)
 	if session == nil || session.controllerDeviceID != strings.TrimSpace(envelope.FromDeviceID) {
-		return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
 	}
 	payload, err := relayEnvelopePayload(envelope, controlRelayPayloadMaxBytes)
 	if err != nil {
 		session.close("invalid_frame")
 		a.unregisterControlRelaySession(session.id)
-		return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
 	}
 	var sealed controlSealedFrame
 	if err := json.Unmarshal(payload, &sealed); err != nil {
 		session.close("invalid_frame")
 		a.unregisterControlRelaySession(session.id)
-		return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
 	}
 	plain, err := session.cipher.open(sealed)
 	if err != nil {
 		session.close("invalid_frame")
 		a.unregisterControlRelaySession(session.id)
-		return client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
 	}
 	session.touch()
-	if err := client.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID); err != nil {
+	session.relay = relay
+	if err := relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID); err != nil {
 		return err
 	}
 	switch plain.Type {
 	case "request":
 		if plain.Request == nil {
-			return session.writeRelayPlain(ctx, client, controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_request", "missing request")})
+			return session.writeRelayPlain(ctx, relay, controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_request", "missing request")})
 		}
 		response, after := session.handleRequest(*plain.Request)
-		if err := session.writeRelayPlain(ctx, client, controlPlainFrame{Type: "response", Response: response}); err != nil {
+		if err := session.writeRelayPlain(ctx, relay, controlPlainFrame{Type: "response", Response: response}); err != nil {
 			return err
 		}
 		if after != nil {
@@ -263,7 +321,7 @@ func (a *app) handleControlRelaySealedFrame(ctx context.Context, client RelayCli
 		a.unregisterControlRelaySession(session.id)
 		return nil
 	default:
-		return session.writeRelayPlain(ctx, client, controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_frame", "unsupported control frame type")})
+		return session.writeRelayPlain(ctx, relay, controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_frame", "unsupported control frame type")})
 	}
 }
 
@@ -279,10 +337,10 @@ func (s *controlRelaySession) handleRequest(req ControlRequest) (*ControlRespons
 	return controlResponseFromError(req.RequestID, err), nil
 }
 
-func (s *controlRelaySession) writeRelayPlain(ctx context.Context, client RelayClient, frame controlPlainFrame) error {
+func (s *controlRelaySession) writeRelayPlain(ctx context.Context, relay relayEnvelopeTransport, frame controlPlainFrame) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if s.cipher == nil {
+	if s.cipher == nil || relay == nil {
 		return nil
 	}
 	sealed, err := s.cipher.seal(frame)
@@ -293,7 +351,7 @@ func (s *controlRelaySession) writeRelayPlain(ctx context.Context, client RelayC
 	if err != nil {
 		return err
 	}
-	_, err = client.EnqueueRelayEnvelope(ctx, RelayEnvelope{
+	_, err = relay.EnqueueRelayEnvelope(ctx, RelayEnvelope{
 		Version:       relayEnvelopeVersion,
 		ConnectionID:  s.id,
 		FromDeviceID:  s.app.store.hostInfo().Identity.DeviceID,
@@ -326,12 +384,12 @@ func (s *controlRelaySession) controllerID() string {
 }
 
 func (s *controlRelaySession) writePlain(frame controlPlainFrame) {
-	if s == nil || strings.TrimSpace(s.relayClient.BaseURL) == "" || strings.TrimSpace(s.relayClient.Token) == "" {
+	if s == nil || s.relay == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(s.requestContext(), controlRelayRoundTripTimeout)
 	defer cancel()
-	_ = s.writeRelayPlain(ctx, s.relayClient, frame)
+	_ = s.writeRelayPlain(ctx, s.relay, frame)
 }
 
 func (s *controlRelaySession) registerControlStream(streamID string, cancel context.CancelFunc) {
@@ -551,6 +609,16 @@ func controlClientOpenRelayFrameConn(parent context.Context, target controlClien
 	openedAt := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	relay, err := target.RelayClient.ConnectRelayWebSocket(ctx, st.deviceIdentity.DeviceID)
+	if err != nil {
+		return nil, err
+	}
+	closeRelay := true
+	defer func() {
+		if closeRelay {
+			_ = relay.Close()
+		}
+	}()
 
 	hello, controllerEphemeral, err := controlClientRelayHello(st, target.HostInfo)
 	if err != nil {
@@ -560,7 +628,7 @@ func controlClientOpenRelayFrameConn(parent context.Context, target controlClien
 	if err != nil {
 		return nil, err
 	}
-	if _, err := target.RelayClient.EnqueueRelayEnvelope(ctx, RelayEnvelope{
+	if _, err := relay.EnqueueRelayEnvelope(ctx, RelayEnvelope{
 		Version:       relayEnvelopeVersion,
 		FromDeviceID:  st.deviceIdentity.DeviceID,
 		ToDeviceID:    target.HostInfo.Identity.DeviceID,
@@ -569,7 +637,7 @@ func controlClientOpenRelayFrameConn(parent context.Context, target controlClien
 	}); err != nil {
 		return nil, err
 	}
-	ack, err := controlClientRelayWaitHelloAck(ctx, target, st, hello, openedAt)
+	ack, err := controlClientRelayWaitHelloAck(ctx, relay, target, st, hello, openedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -580,12 +648,14 @@ func controlClientOpenRelayFrameConn(parent context.Context, target controlClien
 	connCtx, connCancel := context.WithCancel(context.Background())
 	conn := &controlClientRelayFrameConn{
 		target:       target,
+		relay:        relay,
 		cipher:       cipher,
 		connectionID: ack.ConnectionID,
 		openedAt:     openedAt,
 		ctx:          connCtx,
 		cancel:       connCancel,
 	}
+	closeRelay = false
 	controlClientRelayRegisterActive(target, ack.ConnectionID)
 	return conn, nil
 }
@@ -620,57 +690,52 @@ func controlClientRelayHello(st *store, hostInfo HostInfo) (controlHelloFrame, *
 	return hello, controllerEphemeral, nil
 }
 
-func controlClientRelayWaitHelloAck(ctx context.Context, target controlClientTarget, st *store, hello controlHelloFrame, openedAt time.Time) (controlHelloAckFrame, error) {
+func controlClientRelayWaitHelloAck(ctx context.Context, relay relayEnvelopeReadTransport, target controlClientTarget, st *store, hello controlHelloFrame, openedAt time.Time) (controlHelloAckFrame, error) {
 	for {
 		if err := ctx.Err(); err != nil {
 			return controlHelloAckFrame{}, err
 		}
-		envelopes, err := target.RelayClient.ListRelayEnvelopesWait(ctx, st.deviceIdentity.DeviceID, controlRelayPollLimit, controlRelayLongPollWait)
+		envelope, err := relay.ReadRelayEnvelope(ctx)
 		if err != nil {
 			return controlHelloAckFrame{}, err
 		}
-		for _, envelope := range envelopes {
-			if envelope.PayloadKind == relayPayloadKindControlSealedFrame && envelope.FromDeviceID == target.HostInfo.Identity.DeviceID && controlClientRelayEnvelopeIsStale(target, envelope, openedAt) {
-				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
-				continue
-			}
-			if envelope.PayloadKind != relayPayloadKindControlHelloAck || envelope.FromDeviceID != target.HostInfo.Identity.DeviceID {
-				continue
-			}
-			payload, err := relayEnvelopePayload(envelope, controlRelayHelloPayloadBytes)
-			if err != nil {
-				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
-				continue
-			}
-			var ack controlHelloAckFrame
-			if err := json.Unmarshal(payload, &ack); err != nil {
-				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
-				continue
-			}
-			if ack.Type == "close" {
-				var closeFrame controlPlainFrame
-				if err := json.Unmarshal(payload, &closeFrame); err == nil {
-					_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
-					return controlHelloAckFrame{}, controlClientHandshakeCloseError(closeFrame)
-				}
-				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
-				continue
-			}
-			if ack.ClientNonce != "" && ack.ClientNonce != hello.ClientNonce {
-				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
-				continue
-			}
-			if err := validateControlRelayHelloAck(st, target.HostInfo, hello, ack); err != nil {
-				continue
-			}
-			if err := target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID); err != nil {
-				return controlHelloAckFrame{}, err
-			}
-			return ack, nil
+		if envelope.PayloadKind == relayPayloadKindControlSealedFrame && envelope.FromDeviceID == target.HostInfo.Identity.DeviceID && controlClientRelayEnvelopeIsStale(target, envelope, openedAt) {
+			_ = relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
+			continue
 		}
-		if err := relaySleep(ctx); err != nil {
+		if envelope.PayloadKind != relayPayloadKindControlHelloAck || envelope.FromDeviceID != target.HostInfo.Identity.DeviceID {
+			continue
+		}
+		payload, err := relayEnvelopePayload(envelope, controlRelayHelloPayloadBytes)
+		if err != nil {
+			_ = relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
+			continue
+		}
+		var ack controlHelloAckFrame
+		if err := json.Unmarshal(payload, &ack); err != nil {
+			_ = relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
+			continue
+		}
+		if ack.Type == "close" {
+			var closeFrame controlPlainFrame
+			if err := json.Unmarshal(payload, &closeFrame); err == nil {
+				_ = relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
+				return controlHelloAckFrame{}, controlClientHandshakeCloseError(closeFrame)
+			}
+			_ = relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
+			continue
+		}
+		if ack.ClientNonce != "" && ack.ClientNonce != hello.ClientNonce {
+			_ = relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID)
+			continue
+		}
+		if err := validateControlRelayHelloAck(st, target.HostInfo, hello, ack); err != nil {
+			continue
+		}
+		if err := relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, st.deviceIdentity.DeviceID); err != nil {
 			return controlHelloAckFrame{}, err
 		}
+		return ack, nil
 	}
 }
 
@@ -694,7 +759,10 @@ func controlClientCipherFromHelloAck(hello controlHelloFrame, ack controlHelloAc
 	return newControlControllerCipher(sharedSecret, hello, ack.HostDeviceID, ack.HostPublicKey, ack.HostEphemeralKey, ack.ServerNonce, ack.ConnectionID)
 }
 
-func controlClientRelayWrite(ctx context.Context, target controlClientTarget, cipher *controlCipher, connectionID string, frame controlPlainFrame) error {
+func controlClientRelayWrite(ctx context.Context, relay relayEnvelopeTransport, target controlClientTarget, cipher *controlCipher, connectionID string, frame controlPlainFrame) error {
+	if relay == nil {
+		return fmt.Errorf("cloud relay is not connected")
+	}
 	sealed, err := cipher.seal(frame)
 	if err != nil {
 		return err
@@ -703,7 +771,7 @@ func controlClientRelayWrite(ctx context.Context, target controlClientTarget, ci
 	if err != nil {
 		return err
 	}
-	_, err = target.RelayClient.EnqueueRelayEnvelope(ctx, RelayEnvelope{
+	_, err = relay.EnqueueRelayEnvelope(ctx, RelayEnvelope{
 		Version:       relayEnvelopeVersion,
 		ConnectionID:  connectionID,
 		FromDeviceID:  target.ControllerDeviceID,
@@ -714,51 +782,49 @@ func controlClientRelayWrite(ctx context.Context, target controlClientTarget, ci
 	return err
 }
 
-func controlClientRelayRead(ctx context.Context, target controlClientTarget, cipher *controlCipher, connectionID string, openedAt time.Time) (controlPlainFrame, error) {
+func controlClientRelayRead(ctx context.Context, relay relayEnvelopeReadTransport, target controlClientTarget, cipher *controlCipher, connectionID string, openedAt time.Time) (controlPlainFrame, error) {
+	if relay == nil {
+		return controlPlainFrame{}, fmt.Errorf("cloud relay is not connected")
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return controlPlainFrame{}, err
 		}
-		envelopes, err := target.RelayClient.ListRelayEnvelopesWait(ctx, target.ControllerDeviceID, controlRelayPollLimit, controlRelayLongPollWait)
+		envelope, err := relay.ReadRelayEnvelope(ctx)
 		if err != nil {
 			return controlPlainFrame{}, err
 		}
-		for _, envelope := range envelopes {
-			if envelope.PayloadKind != relayPayloadKindControlSealedFrame || envelope.FromDeviceID != target.HostInfo.Identity.DeviceID {
-				continue
-			}
-			if envelope.ConnectionID != connectionID {
-				if controlClientRelayEnvelopeIsStale(target, envelope, openedAt) {
-					_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, target.ControllerDeviceID)
-				}
-				continue
-			}
-			payload, err := relayEnvelopePayload(envelope, controlRelayPayloadMaxBytes)
-			if err != nil {
-				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, target.ControllerDeviceID)
-				continue
-			}
-			var sealed controlSealedFrame
-			if err := json.Unmarshal(payload, &sealed); err != nil {
-				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, target.ControllerDeviceID)
-				continue
-			}
-			plain, err := cipher.open(sealed)
-			if err != nil {
-				_ = target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, target.ControllerDeviceID)
-				return controlPlainFrame{}, err
-			}
-			if err := target.RelayClient.AckRelayEnvelope(ctx, envelope.EnvelopeID, target.ControllerDeviceID); err != nil {
-				return controlPlainFrame{}, err
-			}
-			if plain.Type == "close" {
-				return controlPlainFrame{}, errors.New(firstString(plain.Reason, plain.Code, "relay control session closed"))
-			}
-			return plain, nil
+		if envelope.PayloadKind != relayPayloadKindControlSealedFrame || envelope.FromDeviceID != target.HostInfo.Identity.DeviceID {
+			continue
 		}
-		if err := relaySleep(ctx); err != nil {
+		if envelope.ConnectionID != connectionID {
+			if controlClientRelayEnvelopeIsStale(target, envelope, openedAt) {
+				_ = relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, target.ControllerDeviceID)
+			}
+			continue
+		}
+		payload, err := relayEnvelopePayload(envelope, controlRelayPayloadMaxBytes)
+		if err != nil {
+			_ = relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, target.ControllerDeviceID)
+			continue
+		}
+		var sealed controlSealedFrame
+		if err := json.Unmarshal(payload, &sealed); err != nil {
+			_ = relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, target.ControllerDeviceID)
+			continue
+		}
+		plain, err := cipher.open(sealed)
+		if err != nil {
+			_ = relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, target.ControllerDeviceID)
 			return controlPlainFrame{}, err
 		}
+		if err := relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, target.ControllerDeviceID); err != nil {
+			return controlPlainFrame{}, err
+		}
+		if plain.Type == "close" {
+			return controlPlainFrame{}, errors.New(firstString(plain.Reason, plain.Code, "relay control session closed"))
+		}
+		return plain, nil
 	}
 }
 

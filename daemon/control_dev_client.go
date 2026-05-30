@@ -2154,6 +2154,7 @@ func (c *controlClientWSFrameConn) ReadPlain(timeout time.Duration) (controlPlai
 type controlClientRelayFrameConn struct {
 	writeMu      sync.Mutex
 	target       controlClientTarget
+	relay        *RelayWebSocketConn
 	cipher       *controlCipher
 	connectionID string
 	openedAt     time.Time
@@ -2173,7 +2174,10 @@ func (c *controlClientRelayFrameConn) Close() error {
 	defer cancel()
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	return controlClientRelayWrite(ctx, c.target, c.cipher, c.connectionID, controlPlainFrame{Type: "close"})
+	if c.relay != nil {
+		defer c.relay.Close()
+	}
+	return controlClientRelayWrite(ctx, c.relay, c.target, c.cipher, c.connectionID, controlPlainFrame{Type: "close"})
 }
 
 func (c *controlClientRelayFrameConn) WritePlain(frame controlPlainFrame) error {
@@ -2185,7 +2189,7 @@ func (c *controlClientRelayFrameConn) WritePlain(frame controlPlainFrame) error 
 	defer cancel()
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	return controlClientRelayWrite(ctx, c.target, c.cipher, c.connectionID, frame)
+	return controlClientRelayWrite(ctx, c.relay, c.target, c.cipher, c.connectionID, frame)
 }
 
 func (c *controlClientRelayFrameConn) ReadPlain(timeout time.Duration) (controlPlainFrame, error) {
@@ -2195,7 +2199,7 @@ func (c *controlClientRelayFrameConn) ReadPlain(timeout time.Duration) (controlP
 		ctx, cancel = context.WithTimeout(c.ctx, timeout)
 	}
 	defer cancel()
-	return controlClientRelayRead(ctx, c.target, c.cipher, c.connectionID, c.openedAt)
+	return controlClientRelayRead(ctx, c.relay, c.target, c.cipher, c.connectionID, c.openedAt)
 }
 
 var controlClientRelayActiveConnections sync.Map

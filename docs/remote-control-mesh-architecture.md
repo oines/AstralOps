@@ -149,8 +149,9 @@ CloudClient:
   pairing requests
 
 RelayClient:
-  GET/POST /v1/relay/envelopes
-  POST /v1/relay/envelopes/:id/ack
+  GET /v1/relay/connect (WebSocket)
+  GET/POST /v1/relay/envelopes (legacy/test HTTP queue)
+  POST /v1/relay/envelopes/:id/ack (legacy/test HTTP queue)
 ```
 
 客户端不能把 `cloud.base_url` 直接当 relay URL 使用，也不能把 cloud account token 发给 relay。它必须从账号响应的 `relay.relay_url` 和 `relay.credential` 构造 `RelayClient`。Cloud control plane 和 relay 是部署边界不同的服务：cloud 负责账号、设备 registry、presence、pairing signal、吊销、账号 relay catalog、账号当前 relay 配置和短期 relay credential 签发；relay 只负责校验 credential 并投递 opaque envelope。开发测试可以临时把二者部署在同一台机器，但 daemon 代码必须继续通过 `CloudClient` / `RelayClient` 分离调用。
@@ -204,12 +205,14 @@ exp - iat 不能超过 relay 配置的最大 TTL
 A 登录 cloud
 A 读取账号 relay
 A 从 cloud device registry 找 B 的 public metadata / presence
-A 通过账号 relay 投递 opaque envelope 给 B
+A 通过账号 relay 的 WebSocket 转发 opaque envelope 给 B
 ```
 
 如果某台设备还拿着旧 relay 配置，v1 不做跨 relay 查找或转发；它需要等下一次 cloud sync 读取新的账号 relay 后再参与 relay fallback。LAN 直连不受这个限制，仍然优先使用。
 
 MVP 不做 previous relay grace、双 relay 投递、relay-to-relay 转发或跨 relay 查找。用户在设置里切换账号 relay 时，daemon 只调用本机 daemon 的 `PATCH /v1/cloud/account/relay`，daemon 再调用 Cloud 的 `PATCH /v1/account/relay`。Cloud 持久化账号当前 `relay_id` 后立即对后续 `GET /v1/account` 签发新 relay credential。其他设备在下一次 Cloud sync 后切到新 relay；切换窗口内 relay fallback 可能短暂不可用，但不会破坏 LAN 直连和设备 E2EE 信任边界。
+
+默认 relay 传输是 WebSocket：Host daemon 登录 Mesh 后连接账号 relay，并用自己的 `device_id` 挂在线转发通道；Controller 需要控制 Host 时也连接同一个账号 relay，发送 `control.hello`，随后同一条 WebSocket 承载 `control.hello_ack` 与 `control.sealed_frame`。Relay 不持久化 WebSocket 消息，也不解析 payload。HTTP envelope queue 仍保留为旧接口和测试夹具，不作为 daemon 的默认交互路径。
 
 开发默认账号 relay 是 `cn-nanjing`：
 
@@ -352,13 +355,14 @@ POST /v1/pairing/requests/:request_id/resolve
 Relay API 的职责：
 
 ```text
-GET  /v1/relay/envelopes?device_id=<device_id>&wait=10s
-POST /v1/relay/envelopes
-POST /v1/relay/envelopes/:envelope_id/ack
+GET  /v1/relay/connect?device_id=<device_id>  (WebSocket)
+GET  /v1/relay/envelopes?device_id=<device_id>&wait=10s  (legacy/test)
+POST /v1/relay/envelopes  (legacy/test)
+POST /v1/relay/envelopes/:envelope_id/ack  (legacy/test)
 ```
 
 Relay API 必须由独立 relay service 提供，不能由 cloud control plane 顺手挂载 `/v1/relay/*`。daemon 代码必须通过独立的 `RelayClient` 调用这些 endpoint。
-`wait` 是 relay 层长轮询参数：如果目标设备队列暂时为空，relay 可以最多等待一小段时间再返回空列表；一旦有 envelope 入队必须立即返回。当前公开 relay 将单次等待上限限制为 25s，daemon 默认使用 10s。这个优化只减少空轮询和弱网下的可感知等待，不改变 envelope/ack/E2EE sealed frame 语义。
+`/v1/relay/connect` 使用同一个短期 relay credential 鉴权。连接建立后客户端发送 `{"type":"send","envelope":{...}}`，relay 向目标设备当前在线 WebSocket 推送 `{"type":"envelope","envelope":{...}}`。这条通道只转发 opaque envelope，不做业务确认、不保存明文、不跨 relay 转发。旧 HTTP queue 的 `wait` 是长轮询参数，保留给测试和兼容，不是默认 daemon 传输路径。
 
 公开仓库提供独立 relay 进程：
 
@@ -383,7 +387,7 @@ ASTRALOPS_MEMBERSHIP_LEASE_TTL=24h
 
 Cloud 对 register/heartbeat 返回短期 `membership_lease`，由 Cloud membership signing key 签名。lease payload 只包含账号 hash、device_id、public_key_fingerprint、can_host/can_control、mesh_epoch、iat/exp。客户端把当前设备 lease 持久化在本机私有 daemon 数据里；lease 只证明“这个 device identity 当前仍属于账号 Mesh 且具备 host/control 角色”，不授予 Host trust。
 
-公网 relay 不能依赖 cloud 进程内状态，不能读取 cloud 数据库，也不能接受 cloud account token。它只能基于短期 relay credential 得到账号 namespace 并投递 opaque envelope。
+公网 relay 不能依赖 cloud 进程内状态，不能读取 cloud 数据库，也不能接受 cloud account token。它只能基于短期 relay credential 得到账号 namespace，并把 opaque envelope 转发给同账号 namespace 下的目标 `device_id` WebSocket。
 
 Desktop daemon 通过本机 authenticated API 接入 cloud service。这个 API 只读写本机 daemon settings 并调用 cloud，不暴露给远程 Host listener：
 
@@ -482,7 +486,7 @@ Relay envelope 只允许：
 }
 ```
 
-`control.hello` 和 `control.hello_ack` 是现有设备级 E2EE 握手帧的 relay 投递形态，用于在没有直连 WebSocket 时完成同一套签名校验和会话密钥派生。握手完成后，业务 `request/response/stream` 只能放进 `control.sealed_frame`。cloud/relay service 只能存储、投递、ack 并按账号/设备做路由和限流，不能解析业务协议。
+`control.hello` 和 `control.hello_ack` 是现有设备级 E2EE 握手帧的 relay 投递形态，用于在没有 LAN 直连时完成同一套签名校验和会话密钥派生。握手完成后，业务 `request/response/stream` 只能放进 `control.sealed_frame`。cloud/relay service 只能转发 opaque envelope 并按账号/设备做路由和限流，不能解析业务协议。
 
 ## 端到端加密控制通道
 

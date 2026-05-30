@@ -7,10 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/oines/astralops/internal/relayauth"
 )
 
@@ -121,6 +123,40 @@ func TestRelayBrokerLongPollReturnsWhenEnvelopeArrives(t *testing.T) {
 	}
 }
 
+func TestRelayBrokerWebSocketDeliversEnvelope(t *testing.T) {
+	server := newTestRelayServer(t)
+	defer server.Close()
+	credential := testRelayCredential(t, "acct_test")
+	receiver := relayWebSocketDial(t, server.URL, credential, "dev_b")
+	defer receiver.Close()
+	sender := relayWebSocketDial(t, server.URL, credential, "dev_a")
+	defer sender.Close()
+
+	if err := sender.WriteJSON(WebSocketFrame{
+		Type: "send",
+		Envelope: &Envelope{
+			Version:       EnvelopeVersion,
+			FromDeviceID:  "dev_a",
+			ToDeviceID:    "dev_b",
+			PayloadKind:   PayloadKindControlHello,
+			PayloadBase64: "aGVsbG8=",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = receiver.SetReadDeadline(time.Now().Add(time.Second))
+	var frame WebSocketFrame
+	if err := receiver.ReadJSON(&frame); err != nil {
+		t.Fatal(err)
+	}
+	if frame.Type != "envelope" || frame.Envelope == nil {
+		t.Fatalf("frame = %#v, want envelope", frame)
+	}
+	if frame.Envelope.FromDeviceID != "dev_a" || frame.Envelope.ToDeviceID != "dev_b" || frame.Envelope.EnvelopeID == "" {
+		t.Fatalf("envelope = %#v", frame.Envelope)
+	}
+}
+
 func TestRelayBrokerRejectsInvalidWait(t *testing.T) {
 	server := newTestRelayServer(t)
 	defer server.Close()
@@ -168,6 +204,23 @@ func testRelayCredential(t *testing.T, accountIDHash string) string {
 		t.Fatal(err)
 	}
 	return token
+}
+
+func relayWebSocketDial(t *testing.T, serverURL, token, deviceID string) *websocket.Conn {
+	t.Helper()
+	u := strings.Replace(serverURL, "http://", "ws://", 1)
+	u = strings.Replace(u, "https://", "wss://", 1)
+	u += "/v1/relay/connect?device_id=" + url.QueryEscape(deviceID)
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+token)
+	conn, resp, err := websocket.DefaultDialer.Dial(u, header)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("websocket dial status=%s err=%v", resp.Status, err)
+		}
+		t.Fatal(err)
+	}
+	return conn
 }
 
 func relayRequest[T any](t *testing.T, method, url, token string, body any) T {
