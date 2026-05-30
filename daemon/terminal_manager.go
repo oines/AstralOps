@@ -389,7 +389,10 @@ func (m *terminalManager) listTabs() []terminalTab {
 	m.mu.Unlock()
 	tabs := make([]terminalTab, 0, len(sessions))
 	for _, session := range sessions {
-		tabs = append(tabs, session.tab())
+		tab := session.tab()
+		if tab.Status == terminalStatusOpen {
+			tabs = append(tabs, tab)
+		}
 	}
 	return tabs
 }
@@ -470,6 +473,11 @@ func (m *terminalManager) writerSession(controllerDeviceID, terminalID string) (
 		return session, nil
 	}
 	if session.writerDeviceID != controllerDeviceID {
+		if m.app != nil && m.app.store != nil && controllerDeviceID == m.app.store.hostInfo().Identity.DeviceID {
+			session.writerDeviceID = controllerDeviceID
+			session.updatedAt = time.Now().UTC()
+			return session, nil
+		}
 		return nil, newActionError(http.StatusForbidden, "terminal_writer_denied", "controller is not the terminal active writer")
 	}
 	return session, nil

@@ -333,6 +333,23 @@ func TestTerminalManagerKeepsSingleActiveWriter(t *testing.T) {
 	assertActionError(t, err, http.StatusForbidden, "terminal_writer_denied")
 }
 
+func TestHostDeviceCanCloseRemoteOwnedTerminal(t *testing.T) {
+	t.Setenv("SHELL", terminalManagerTestShell(t))
+
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_remote", CapabilityTerminalOpen, CapabilityTerminalInput)
+
+	open := openTerminalForTest(t, app, "device_remote", workspace.ID)
+	hostDeviceID := app.store.hostInfo().Identity.DeviceID
+	closed, err := app.terminalManager().close(context.Background(), hostDeviceID, terminalCloseParams{TerminalID: open.TerminalID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != terminalStatusClosed || closed.WriterDeviceID != hostDeviceID {
+		t.Fatalf("closed terminal = %#v, want host-owned close", closed)
+	}
+}
+
 func TestTrustRevocationReleasesTerminalWriterForNextTrustedController(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 

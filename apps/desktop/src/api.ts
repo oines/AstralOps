@@ -35,6 +35,8 @@ import type {
   SessionInputAttachment,
   SessionForkResponse,
   SessionView,
+  TerminalAckResult,
+  TerminalOpenResult,
   Workspace,
   WorkspaceCommandResponse,
   WorkspaceConnection,
@@ -114,7 +116,9 @@ export type TerminalOpenOptions = {
 };
 
 export interface TerminalClient {
+  createWorkspaceTerminal(workspaceId: string): Promise<TerminalOpenResult>;
   openWorkspaceTerminal(workspaceId: string, handlers: TerminalHandlers, options?: TerminalOpenOptions): TerminalConnection;
+  closeWorkspaceTerminal(workspaceId: string, terminalId: string): Promise<TerminalAckResult>;
 }
 
 export interface CoreClient {
@@ -261,6 +265,8 @@ function requestAction(method: RequestMethod, pathname: string): string {
   if (method === "POST" && pathname === "/v1/workspaces") return "workspace.create";
   if (pathname === "/v1/snapshot") return "host.snapshot";
   if (method === "DELETE" && parts[1] === "workspaces" && parts[2]) return "workspace.delete";
+  if (method === "POST" && parts[1] === "workspaces" && parts[3] === "terminal") return "terminal.open";
+  if (method === "DELETE" && parts[1] === "workspaces" && parts[3] === "terminals" && parts[4]) return "terminal.close";
   if (method === "POST" && parts[1] === "workspaces" && parts[3]) return `workspace.${parts[3]}`;
   if (method === "GET" && parts[1] === "workspaces" && parts[3]) return `workspace.${parts[3]}.read`;
   if (method === "POST" && pathname === "/v1/sessions") return "session.create";
@@ -920,10 +926,20 @@ class RemoteCoreClient extends LocalCoreClient {
 class LocalTerminalClient implements TerminalClient {
   constructor(private readonly channel: ControlChannel) {}
 
+  createWorkspaceTerminal(workspaceId: string): Promise<TerminalOpenResult> {
+    logClientEvent("terminal.create.start", { workspace_id: workspaceId });
+    return this.channel.request("POST", `/v1/workspaces/${workspaceId}/terminal`, {});
+  }
+
   openWorkspaceTerminal(workspaceId: string, handlers: TerminalHandlers, options: TerminalOpenOptions = {}): TerminalConnection {
     logClientEvent("terminal.open.start", { workspace_id: workspaceId, terminal_id: options.terminalId });
     const query = options.terminalId ? `?terminal_id=${encodeURIComponent(options.terminalId)}` : "";
     return new WebSocketTerminalConnection(this.channel.openSocket(`/v1/workspaces/${workspaceId}/pty${query}`), handlers);
+  }
+
+  closeWorkspaceTerminal(workspaceId: string, terminalId: string): Promise<TerminalAckResult> {
+    logClientEvent("terminal.close.start", { workspace_id: workspaceId, terminal_id: terminalId });
+    return this.channel.request("DELETE", `/v1/workspaces/${workspaceId}/terminals/${encodeURIComponent(terminalId)}`);
   }
 }
 

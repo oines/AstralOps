@@ -17,7 +17,10 @@ type PanelTab = {
   id: string;
   kind: PanelTabKind;
   terminalId?: string;
+  workspaceId?: string;
   title?: string;
+  creating?: boolean;
+  error?: string;
 };
 
 type RightPanelProps = {
@@ -72,10 +75,38 @@ export function RightPanel({ api, health, open, terminalTabs = [], width, worksp
 
   useEffect(() => {
     const hostTerminalIds = new Set(openTerminalTabs.map((tab) => tab.terminal_id));
+    const workspaceId = workspace?.id ?? "";
     setTabs((current) => {
-      const next = current.filter((tab) => tab.kind !== "terminal" || !tab.terminalId || hostTerminalIds.has(tab.terminalId));
+      const next = current.filter((tab) => {
+        if (tab.kind !== "terminal") return true;
+        if (workspaceId && tab.workspaceId && tab.workspaceId !== workspaceId) return false;
+        if (!tab.terminalId) return true;
+        return hostTerminalIds.has(tab.terminalId);
+      });
       for (const hostTab of openTerminalTabs) {
-        if (next.some((tab) => tab.terminalId === hostTab.terminal_id)) continue;
+        const existingIndex = next.findIndex((tab) => tab.terminalId === hostTab.terminal_id);
+        if (existingIndex >= 0) {
+          next[existingIndex] = {
+            ...next[existingIndex],
+            workspaceId: hostTab.workspace_id,
+            title: tabTitleFromHostTerminal(hostTab),
+            creating: false,
+            error: undefined,
+          };
+          continue;
+        }
+        const pendingIndex = next.findIndex((tab) => tab.kind === "terminal" && !tab.terminalId && tab.workspaceId === hostTab.workspace_id);
+        if (pendingIndex >= 0) {
+          next[pendingIndex] = {
+            ...next[pendingIndex],
+            terminalId: hostTab.terminal_id,
+            workspaceId: hostTab.workspace_id,
+            title: tabTitleFromHostTerminal(hostTab),
+            creating: false,
+            error: undefined,
+          };
+          continue;
+        }
         next.push(createTerminalTab(hostTab));
       }
       contentOrderRef.current = contentOrderRef.current.filter((id) => next.some((tab) => tab.id === id));
@@ -87,7 +118,7 @@ export function RightPanel({ api, health, open, terminalTabs = [], width, worksp
     if (openTerminalTabs.length > 0 && !activeTabId) {
       setActiveTabId(`terminal-${openTerminalTabs[0].terminal_id}`);
     }
-  }, [activeTabId, openTerminalTabs]);
+  }, [activeTabId, openTerminalTabs, workspace?.id]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -161,17 +192,60 @@ export function RightPanel({ api, health, open, terminalTabs = [], width, worksp
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   const contentTabs = panelContentTabs(tabs, contentOrderRef);
+  const activeContentTab = contentTabs.find((tab) => tab.id === activeTab?.id) ?? activeTab;
   const panelWidth = open ? liveWidth : 0;
 
   function addTab(kind: PanelTabKind): void {
-    const tab = createTab(kind);
+    if (kind === "terminal") {
+      void createHostTerminalTab();
+      return;
+    }
+    const tab = createTab(kind, workspace?.id);
     contentOrderRef.current = [...contentOrderRef.current, tab.id];
     setTabs((current) => [...current, tab]);
     setActiveTabId(tab.id);
     setMenuOpen(false);
   }
 
+  async function createHostTerminalTab(): Promise<void> {
+    if (!api || !workspace?.id) {
+      setMenuOpen(false);
+      return;
+    }
+    const pendingID = `terminal-pending-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const pendingTab: PanelTab = {
+      id: pendingID,
+      kind: "terminal",
+      workspaceId: workspace.id,
+      title: "正在打开终端",
+      creating: true,
+    };
+    contentOrderRef.current = [...contentOrderRef.current, pendingID];
+    setTabs((current) => [...current, pendingTab]);
+    setActiveTabId(pendingID);
+    setMenuOpen(false);
+    try {
+      const opened = await api.terminal.createWorkspaceTerminal(workspace.id);
+      const title = `${opened.shell || "shell"} · ${basename(opened.cwd || workspace.local_cwd || "")}`;
+      setTabs((current) => current.map((tab) => (
+        tab.id === pendingID
+          ? { ...tab, terminalId: opened.terminal_id, workspaceId: opened.workspace_id, title, creating: false, error: undefined }
+          : tab
+      )));
+    } catch (error) {
+      setTabs((current) => current.map((tab) => (
+        tab.id === pendingID
+          ? { ...tab, title: "终端打开失败", creating: false, error: error instanceof Error ? error.message : String(error) }
+          : tab
+      )));
+    }
+  }
+
   function closeTab(id: string): void {
+    const tab = tabs.find((item) => item.id === id);
+    if (api && tab?.kind === "terminal" && tab.terminalId && tab.workspaceId) {
+      void api.terminal.closeWorkspaceTerminal(tab.workspaceId, tab.terminalId).catch(() => undefined);
+    }
     contentOrderRef.current = contentOrderRef.current.filter((tabId) => tabId !== id);
     setTabs((current) => {
       const next = current.filter((tab) => tab.id !== id);
@@ -261,17 +335,25 @@ export function RightPanel({ api, health, open, terminalTabs = [], width, worksp
         {tabs.length === 0 ? (
           <PanelMessage title="没有标签页" body="点右上角 + 新建终端或文件浏览。" />
         ) : null}
-        {contentTabs.map((tab) => (
-          <div className={tab.id === activeTab?.id ? "h-full" : "hidden h-full"} key={tab.id}>
-            {tab.kind === "terminal" && !terminalAvailable ? (
+        {activeContentTab ? (
+          <div className="h-full" key={activeContentTab.id}>
+            {activeContentTab.kind === "terminal" && !terminalAvailable ? (
               <PanelMessage title="终端不可用" body="Windows 当前禁用内置终端。文件浏览和 agent 任务仍可使用。" />
-            ) : tab.kind === "terminal" ? (
-              <TerminalTab api={api} terminalId={tab.terminalId} workspace={workspace} onReady={(terminalId, title) => updateTerminalTabReady(tab.id, terminalId, title)} onTitleChange={(title) => updateTabTitle(tab.id, title)} />
+            ) : activeContentTab.kind === "terminal" ? (
+              <TerminalTab
+                api={api}
+                creating={activeContentTab.creating}
+                error={activeContentTab.error}
+                terminalId={activeContentTab.terminalId}
+                workspace={workspace}
+                onReady={(terminalId, title) => updateTerminalTabReady(activeContentTab.id, terminalId, title)}
+                onTitleChange={(title) => updateTabTitle(activeContentTab.id, title)}
+              />
             ) : (
               <FilesTab api={api} workspace={workspace} />
             )}
           </div>
-        ))}
+        ) : null}
       </div>
       </motion.div>
     </motion.aside>
@@ -429,12 +511,16 @@ function FilesTab({ api, workspace }: { api: CoreClient | null; workspace: Works
 
 function TerminalTab({
   api,
+  creating,
+  error,
   onReady,
   onTitleChange,
   terminalId,
   workspace,
 }: {
   api: CoreClient | null;
+  creating?: boolean;
+  error?: string;
   onReady: (terminalId: string | undefined, title: string) => void;
   onTitleChange: (title: string) => void;
   terminalId?: string;
@@ -444,12 +530,17 @@ function TerminalTab({
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const connectionIdRef = useRef(0);
+  const onReadyRef = useRef(onReady);
   const onTitleChangeRef = useRef(onTitleChange);
   const workspaceId = workspace?.id ?? "";
   const workspaceRoot = workspace?.local_cwd ?? "";
   const theme = useSystemTerminalTheme();
   const [fontId] = useState(() => storedTerminalPreference("astralops-terminal-font", "sf-mono"));
   const font = terminalFonts.find((item) => item.id === fontId) ?? terminalFonts[0];
+
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  }, [onReady]);
 
   useEffect(() => {
     onTitleChangeRef.current = onTitleChange;
@@ -472,7 +563,7 @@ function TerminalTab({
   }, [font.family, font.lineHeight, font.size, fontId]);
 
   useEffect(() => {
-    if (!api || !workspaceId || !hostRef.current) return;
+    if (!api || !workspaceId || !terminalId || !hostRef.current) return;
     const connectionId = connectionIdRef.current + 1;
     connectionIdRef.current = connectionId;
     let disposed = false;
@@ -517,7 +608,7 @@ function TerminalTab({
         if (!isCurrent()) return;
         const nextShell = message.shell || "shell";
         const title = `${nextShell} · ${basename(message.cwd || workspaceRoot)}`;
-        onReady(message.terminal_id, title);
+        onReadyRef.current(message.terminal_id, title);
         onTitleChangeRef.current(title);
       },
       onOutput: (data) => {
@@ -542,10 +633,13 @@ function TerminalTab({
       if (termRef.current === term) termRef.current = null;
       if (fitRef.current === fit) fitRef.current = null;
     };
-  }, [api, onReady, terminalId, workspaceId, workspaceRoot]);
+  }, [api, terminalId, workspaceId, workspaceRoot]);
 
   if (!workspace) {
     return <PanelMessage title="没有工作区" body="创建或选择一个本地工作区后可以运行命令。" />;
+  }
+  if (!terminalId) {
+    return <PanelMessage title={error ? "终端打开失败" : "正在打开终端"} body={error || (creating ? "Host 正在创建终端标签页。" : "等待 Host 返回终端标签页。")} />;
   }
 
   return (
@@ -566,10 +660,11 @@ function PanelMessage({ body, title }: { body: string; title: string }): React.J
   );
 }
 
-function createTab(kind: PanelTabKind): PanelTab {
+function createTab(kind: PanelTabKind, workspaceId?: string): PanelTab {
   return {
     id: `${kind}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     kind,
+    workspaceId,
     title: kind === "terminal" ? undefined : "文件",
   };
 }
@@ -579,6 +674,7 @@ function createTerminalTab(tab: HostTerminalTab): PanelTab {
     id: `terminal-${tab.terminal_id}`,
     kind: "terminal",
     terminalId: tab.terminal_id,
+    workspaceId: tab.workspace_id,
     title: tabTitleFromHostTerminal(tab),
   };
 }

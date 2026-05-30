@@ -109,6 +109,39 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 		a.handleWorkspaceFiles(w, ws, r.URL.Query().Get("path"))
 		return
 	}
+	if len(parts) == 2 && parts[1] == "terminal" && r.Method == http.MethodPost {
+		ws, ok := a.store.getWorkspace(parts[0])
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+			return
+		}
+		open, err := a.terminalManager().open(r.Context(), a.store.hostInfo().Identity.DeviceID, terminalOpenParams{WorkspaceID: ws.ID, Cols: defaultTerminalCols, Rows: defaultTerminalRows})
+		if err != nil {
+			writeActionError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, open)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "terminals" && r.Method == http.MethodDelete {
+		ws, ok := a.store.getWorkspace(parts[0])
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+			return
+		}
+		open, ok := a.terminalManager().openTerminalResult(parts[2])
+		if !ok || open.WorkspaceID != ws.ID {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "terminal not found"})
+			return
+		}
+		closed, err := a.terminalManager().close(r.Context(), a.store.hostInfo().Identity.DeviceID, terminalCloseParams{TerminalID: parts[2]})
+		if err != nil {
+			writeActionError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, closed)
+		return
+	}
 	if len(parts) == 2 && parts[1] == "exec" && r.Method == http.MethodPost {
 		ws, ok := a.store.getWorkspace(parts[0])
 		if !ok {

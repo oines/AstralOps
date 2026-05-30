@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -67,5 +68,31 @@ func TestWorkbenchPatchUsesGenericCollectionOps(t *testing.T) {
 	remove := diffWorkbenchState(next, workbenchState{Version: 2})
 	if len(remove.Ops) != 1 || remove.Ops[0].Op != "remove" || remove.Ops[0].Collection != "workspaces" || remove.Ops[0].ID != workspace.ID {
 		t.Fatalf("remove patch = %#v, want generic workspace remove", remove)
+	}
+}
+
+func TestWorkbenchStateOmitsClosedTerminalTabs(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Local", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, hub: newEventHub()}
+	deviceID := st.hostInfo().Identity.DeviceID
+	terminal := newTerminalSession(workspace.ID, AgentCodex, "local", ".", "zsh", deviceID)
+	app.terminalManager().register(terminal)
+
+	if got := len(app.buildWorkbenchState().TerminalTabs); got != 1 {
+		t.Fatalf("open terminal tabs = %d, want 1", got)
+	}
+	if _, err := app.terminalManager().close(context.Background(), deviceID, terminalCloseParams{TerminalID: terminal.id}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(app.buildWorkbenchState().TerminalTabs); got != 0 {
+		t.Fatalf("closed terminal tabs = %d, want 0", got)
 	}
 }

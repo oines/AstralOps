@@ -386,6 +386,14 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreControl, ControlActionWorkspaceConnect, map[string]any{"workspace_id": route[1]})
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "disconnect" && r.Method == http.MethodPost:
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreControl, ControlActionWorkspaceDisconnect, map[string]any{"workspace_id": route[1]})
+	case len(route) == 3 && route[0] == "workspaces" && route[2] == "terminal" && r.Method == http.MethodPost:
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityTerminalOpen, ControlActionTerminalOpen, map[string]any{
+			"workspace_id": route[1],
+			"cols":         defaultTerminalCols,
+			"rows":         defaultTerminalRows,
+		})
+	case len(route) == 4 && route[0] == "workspaces" && route[2] == "terminals" && r.Method == http.MethodDelete:
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityTerminalInput, ControlActionTerminalClose, map[string]any{"terminal_id": route[3]})
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "pty" && strings.EqualFold(r.Header.Get("Upgrade"), "websocket"):
 		a.handleRemoteHostWorkspacePTY(w, r, hostDeviceID, route[1])
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "exec" && r.Method == http.MethodPost:
