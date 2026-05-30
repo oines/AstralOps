@@ -41,6 +41,52 @@ func TestCloudHandlersRegisterAndListCurrentDevice(t *testing.T) {
 	}
 }
 
+func TestCloudAccountStatusDoesNotExposeRelayCredential(t *testing.T) {
+	brokerImpl, broker := newTestCloudBrokerServer(t, "account-token")
+	defer broker.Close()
+	brokerImpl.SetDefaultRelay(CloudRelayConfig{RelayID: "test", RelayURL: broker.URL + "/relay"})
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := loadSettingsStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	baseURL := broker.URL
+	token := "account-token"
+	if _, err := settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, settings: settings, hub: newEventHub(), projections: newSessionProjectionCache()}
+
+	rr := httptest.NewRecorder()
+	app.handleCloudAccount(rr, httptest.NewRequest(http.MethodGet, "/v1/cloud/account", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("account status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var status cloudAccountStatusResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.AccountIDHash == "" || status.Relay == nil || status.Relay.RelayURL == "" || !status.Relay.CredentialAvailable || status.Relay.CredentialExpiresAt == "" {
+		t.Fatalf("status = %#v", status)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	relay, _ := raw["relay"].(map[string]any)
+	if _, ok := relay["credential"]; ok {
+		t.Fatalf("account status exposed relay credential: %s", rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), token) {
+		t.Fatalf("account status exposed cloud token: %s", rr.Body.String())
+	}
+}
+
 func TestCloudHandlersRemoveDevice(t *testing.T) {
 	app, broker := testCloudApp(t)
 	defer broker.Close()

@@ -20,7 +20,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import type { CoreClient } from "../api";
-import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, CloudDeviceRecord, DaemonInfo, HealthResponse, HostInfo, PairingRequest, TrustGrant } from "../types";
+import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, CloudAccountStatus, CloudDeviceRecord, DaemonInfo, HealthResponse, HostInfo, PairingRequest, TrustGrant } from "../types";
 
 type SettingsCategoryId =
   | "general"
@@ -624,6 +624,7 @@ function RemoteControlContent({
   const [host, setHost] = useState<HostInfo | null>(null);
   const [grants, setGrants] = useState<TrustGrant[]>([]);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
+  const [cloudAccount, setCloudAccount] = useState<CloudAccountStatus | null>(null);
   const [cloudDevices, setCloudDevices] = useState<CloudDeviceRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -643,6 +644,7 @@ function RemoteControlContent({
       setHost(null);
       setGrants([]);
       setPairingRequests([]);
+      setCloudAccount(null);
       setCloudDevices([]);
       setError("Core 未连接");
       setStatus("");
@@ -651,18 +653,25 @@ function RemoteControlContent({
     setLoading(true);
     try {
       const [hostInfo, trustList, pairingList] = await Promise.all([core.hostInfo(), core.listTrustedDevices(), core.listPairingRequests()]);
+      let nextCloudAccount: CloudAccountStatus | null = null;
       let nextCloudDevices: CloudDeviceRecord[] = [];
       let cloudError = "";
       if (settings.cloud.enabled) {
         try {
-          nextCloudDevices = await core.listCloudDevices();
+          nextCloudAccount = await core.cloudAccountStatus();
         } catch (loadCloudError) {
           cloudError = loadCloudError instanceof Error ? loadCloudError.message : String(loadCloudError);
+        }
+        try {
+          nextCloudDevices = await core.listCloudDevices();
+        } catch (loadCloudDevicesError) {
+          cloudError = cloudError || (loadCloudDevicesError instanceof Error ? loadCloudDevicesError.message : String(loadCloudDevicesError));
         }
       }
       setHost(hostInfo);
       setGrants(sortTrustGrants(trustList.grants));
       setPairingRequests(sortPairingRequests(pairingList.requests));
+      setCloudAccount(nextCloudAccount);
       setCloudDevices(sortCloudDevices(nextCloudDevices, hostInfo.identity.device_id));
       setError(cloudError);
       setStatus(cloudError ? "账号设备读取失败" : "已刷新");
@@ -795,21 +804,30 @@ function RemoteControlContent({
       </SettingsSection>
 
       <SettingsSection title="账号 Mesh">
-        {!settings.cloud.enabled ? (
-          <EmptySettingsRow title="云账号未开启" description="开启账号后，本机和其他设备会出现在这里" />
-        ) : cloudDevices.length > 0 ? (
-          cloudDevices.map((device) => (
-            <CloudDeviceRow
-              confirmRemoveId={confirmCloudRemoveId}
-              currentDeviceId={host?.identity.device_id || ""}
-              device={device}
-              key={device.device_id}
-              removingId={removingCloudDeviceId}
-              onRemove={removeCloudDevice}
-            />
-          ))
+        <SettingRow title="云账号" description={settings.cloud.enabled ? cloudBaseURLLabel(settings) : "账号关闭时不会同步设备状态"} control={<StatusPill label={cloudConnectionLabel(settings, cloudAccount, error)} tone={cloudConnectionTone(settings, cloudAccount, error)} />} />
+        {settings.cloud.enabled ? (
+          <>
+            <InfoRow label="账号" value={cloudAccount?.account_id_hash || (error ? "读取失败" : "未加载")} />
+            <InfoRow label="账号中继" value={cloudRelayLabel(cloudAccount)} />
+            <SettingRow title="中继授权" description="由云端签发给本机使用，短期有效" control={<StatusPill label={cloudRelayCredentialLabel(cloudAccount)} tone={cloudRelayCredentialTone(cloudAccount)} />} />
+            <SettingRow title="账号设备" description="云端只保存设备公开身份、在线状态和路由元数据" control={<StatusPill label={`${cloudDevices.length} 台`} tone={cloudDevices.length > 0 ? "good" : "muted"} />} />
+            {cloudDevices.length > 0 ? (
+              cloudDevices.map((device) => (
+                <CloudDeviceRow
+                  confirmRemoveId={confirmCloudRemoveId}
+                  currentDeviceId={host?.identity.device_id || ""}
+                  device={device}
+                  key={device.device_id}
+                  removingId={removingCloudDeviceId}
+                  onRemove={removeCloudDevice}
+                />
+              ))
+            ) : (
+              <EmptySettingsRow title="暂无账号设备" description="本机注册到云账号后会显示账号 Mesh 设备" />
+            )}
+          </>
         ) : (
-          <EmptySettingsRow title="暂无账号设备" description="本机注册到云账号后会显示账号 Mesh 设备" />
+          <EmptySettingsRow title="云账号未开启" description="开启账号后，本机和其他设备会出现在这里" />
         )}
       </SettingsSection>
 
@@ -1298,6 +1316,49 @@ function cloudDeviceStatusRank(status: string): number {
   if (status === "offline") return 1;
   if (status === "revoked") return 2;
   return 3;
+}
+
+function cloudBaseURLLabel(settings: AppSettings): string {
+  return settings.cloud.base_url ? `服务地址 ${settings.cloud.base_url}` : "服务地址未配置";
+}
+
+function cloudConnectionLabel(settings: AppSettings, account: CloudAccountStatus | null, error: string): string {
+  if (!settings.cloud.enabled) return "未开启";
+  if (error) return "读取失败";
+  if (account?.account_id_hash) return "已连接";
+  return "未加载";
+}
+
+function cloudConnectionTone(settings: AppSettings, account: CloudAccountStatus | null, error: string): "good" | "muted" | "warning" {
+  if (!settings.cloud.enabled) return "muted";
+  if (error) return "warning";
+  if (account?.account_id_hash) return "good";
+  return "muted";
+}
+
+function cloudRelayLabel(account: CloudAccountStatus | null): string {
+  const relay = account?.relay;
+  if (!relay) return "未配置";
+  const relayID = relay.relay_id || "default";
+  return relay.relay_url ? `${relayID} · ${relay.relay_url}` : relayID;
+}
+
+function cloudRelayCredentialLabel(account: CloudAccountStatus | null): string {
+  const relay = account?.relay;
+  if (!relay) return "未配置";
+  if (!relay.credential_available) return "未下发";
+  if (!relay.credential_expires_at) return "已下发";
+  const parsed = Date.parse(relay.credential_expires_at);
+  if (Number.isFinite(parsed) && parsed <= Date.now()) return "已过期";
+  return `有效到 ${formatTimestamp(relay.credential_expires_at)}`;
+}
+
+function cloudRelayCredentialTone(account: CloudAccountStatus | null): "good" | "muted" | "warning" {
+  const relay = account?.relay;
+  if (!relay?.credential_available) return "muted";
+  const parsed = Date.parse(relay.credential_expires_at || "");
+  if (Number.isFinite(parsed) && parsed <= Date.now()) return "warning";
+  return "good";
 }
 
 function timestampValue(value?: string): number {

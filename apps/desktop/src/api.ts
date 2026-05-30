@@ -3,6 +3,7 @@ import type {
   AppSettings,
   AppSettingsPatch,
   ClearMediaCacheResponse,
+  CloudAccountStatus,
   CloudDeviceListResponse,
   CloudDeviceRecord,
   CloudPairingSignalResponse,
@@ -84,6 +85,7 @@ export interface CoreClient {
   settings(): Promise<AppSettings>;
   patchSettings(patch: AppSettingsPatch): Promise<AppSettings>;
   clearMediaCache(): Promise<ClearMediaCacheResponse>;
+  cloudAccountStatus(): Promise<CloudAccountStatus>;
   listCloudDevices(): Promise<CloudDeviceRecord[]>;
   removeCloudDevice(deviceId: string): Promise<CloudDeviceRecord>;
   listWorkspaces(): Promise<Workspace[]>;
@@ -195,6 +197,7 @@ function requestAction(method: RequestMethod, pathname: string): string {
   if (parts[1] === "approvals" && parts[3] === "respond") return "interaction.respond";
   if (pathname === "/v1/events") return method === "GET" ? "events.read" : "events";
   if (pathname === "/v1/remote/hosts") return "remote.hosts.list";
+  if (pathname === "/v1/cloud/account") return "cloud.account.read";
   if (pathname === "/v1/cloud/devices") return "cloud.devices.list";
   if (method === "POST" && parts[1] === "cloud" && parts[2] === "devices" && parts[4] === "remove") return "cloud.device.remove";
   if (pathname === "/v1/cloud/pairing/requests") return "cloud.pairing.request";
@@ -543,6 +546,10 @@ export class LocalCoreClient implements CoreClient {
     return this.channel.request("POST", "/v1/settings/actions/clear-media-cache", {});
   }
 
+  cloudAccountStatus(): Promise<CloudAccountStatus> {
+    return this.channel.request("GET", "/v1/cloud/account");
+  }
+
   async listCloudDevices(): Promise<CloudDeviceRecord[]> {
     const result = await this.channel.request<CloudDeviceListResponse>("GET", "/v1/cloud/devices");
     if (!Array.isArray(result.devices)) {
@@ -696,6 +703,10 @@ class RemoteCoreClient extends LocalCoreClient {
 
   listCloudDevices(): Promise<CloudDeviceRecord[]> {
     return Promise.reject(new Error("远端 Host cloud 设备列表不能由 Controller 读取"));
+  }
+
+  cloudAccountStatus(): Promise<CloudAccountStatus> {
+    return Promise.reject(new Error("远端 Host cloud 账号状态不能由 Controller 读取"));
   }
 
   removeCloudDevice(): Promise<CloudDeviceRecord> {

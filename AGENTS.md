@@ -86,6 +86,7 @@ message.user attachments and message.media are first-class transcript media surf
 Remote control event projection must strip Host/runtime internals such as raw payloads, native session/thread IDs, local workspace paths, SSH config, and private transcript media paths before sending events to Controllers.
 Cloud device registry and relay code may store or route only account/device public metadata, presence, routing metadata, trust/revocation state, and opaque sealed envelopes. Do not add cloud fields for workspace/session/event payloads, prompts, approvals, file trees, PTY output, SSH config, attachments, or media content.
 Daemon must not send cloud account tokens to relay. Cloud may issue short-lived relay credentials containing account_id_hash, relay_id, kid, iat, and exp; relay validates those credentials locally and routes only opaque envelopes under the derived account namespace.
+Desktop UI account/mesh status must be read through the local daemon. UI-facing cloud account status may show account_id_hash, relay_id, relay_url, credential availability, and credential expiration, but must not expose the relay credential body or cloud account token.
 Session input while a turn is running must be modeled as an explicit Core decision: start, queue, or steer. Controller UI must not independently decide continuation semantics for remote control. Desktop app settings, shell theme/window behavior, notifications, logs, and auto updates are local shell concerns unless a future Host management capability explicitly says otherwise.
 ```
 

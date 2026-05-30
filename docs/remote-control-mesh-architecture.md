@@ -756,6 +756,20 @@ Office Desktop
   离线
 ```
 
+Desktop 远控设置页必须从本机 daemon 读取账号状态，而不是让 renderer 直接拼 cloud/relay 请求。UI 可展示：
+
+```text
+Cloud 连接状态
+account_id_hash
+账号默认 relay_id / relay_url
+relay credential 过期时间
+账号设备列表
+本机 Host trust grants
+pending pairing requests
+```
+
+本机 daemon 暴露给 Desktop UI 的账号状态不能返回 relay credential 本体；只返回是否已下发和过期时间。renderer 也不能把 cloud account token 发给 relay。
+
 用户可以：
 
 ```text

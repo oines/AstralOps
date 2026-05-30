@@ -17,9 +17,41 @@ type cloudHeartbeatRequest struct {
 	RelayURL string `json:"relay_url,omitempty"`
 }
 
+type cloudAccountStatusResponse struct {
+	AccountIDHash string                  `json:"account_id_hash"`
+	Relay         *cloudRelayStatusResult `json:"relay,omitempty"`
+}
+
+type cloudRelayStatusResult struct {
+	RelayID             string `json:"relay_id,omitempty"`
+	RelayURL            string `json:"relay_url,omitempty"`
+	CredentialAvailable bool   `json:"credential_available"`
+	CredentialExpiresAt string `json:"credential_expires_at,omitempty"`
+}
+
 type cloudPairingResolveInput struct {
 	Status           string `json:"status"`
 	ResolverDeviceID string `json:"resolver_device_id,omitempty"`
+}
+
+func (a *app) handleCloudAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	client, err := a.cloudClientFromSettings()
+	if err != nil {
+		writeActionError(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	account, err := client.GetAccount(ctx)
+	if err != nil {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, cloudAccountStatusFromAccount(account))
 }
 
 func (a *app) handleCloudDevices(w http.ResponseWriter, r *http.Request) {
@@ -191,6 +223,24 @@ func (a *app) handleCloudPairingRequestAction(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSON(w, http.StatusOK, cloudPairingSignalResponse{Request: request})
+}
+
+func cloudAccountStatusFromAccount(account CloudAccount) cloudAccountStatusResponse {
+	out := cloudAccountStatusResponse{AccountIDHash: strings.TrimSpace(account.AccountIDHash)}
+	if account.Relay == nil {
+		return out
+	}
+	relay := cloudRelayStatusResult{
+		RelayID:             strings.TrimSpace(account.Relay.RelayID),
+		RelayURL:            strings.TrimSpace(account.Relay.RelayURL),
+		CredentialAvailable: strings.TrimSpace(account.Relay.Credential) != "",
+		CredentialExpiresAt: strings.TrimSpace(account.Relay.CredentialExpiresAt),
+	}
+	if relay.RelayID == "" {
+		relay.RelayID = "default"
+	}
+	out.Relay = &relay
+	return out
 }
 
 func (a *app) cloudClientFromSettings() (CloudClient, error) {

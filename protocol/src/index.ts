@@ -1091,6 +1091,18 @@ export type CloudAccount = {
   relay?: CloudRelayConfig;
 };
 
+export type CloudRelayStatus = {
+  relay_id?: string;
+  relay_url?: string;
+  credential_available: boolean;
+  credential_expires_at?: string;
+};
+
+export type CloudAccountStatus = {
+  account_id_hash: string;
+  relay?: CloudRelayStatus;
+};
+
 export type CloudDeviceRecord = {
   account_id_hash: string;
   device_id: string;
