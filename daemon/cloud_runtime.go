@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	cloudSyncInterval = 60 * time.Second
+	cloudSyncInterval = 10 * time.Second
 	cloudSyncTimeout  = 15 * time.Second
 )
 
@@ -127,6 +127,20 @@ func relayWebSocketLoopKey(relayURL string, hasRelay bool) string {
 		return ""
 	}
 	return strings.TrimSpace(relayURL)
+}
+
+func (a *app) syncCloudRegistrationSoon(settings AppSettings) {
+	if a == nil || !settings.Cloud.Enabled || validateCloudSettings(settings.Cloud) != nil {
+		return
+	}
+	client := CloudClient{BaseURL: settings.Cloud.BaseURL, Token: settings.Cloud.AccountToken}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), cloudSyncTimeout)
+		defer cancel()
+		if err := a.cloudRegisterAndHeartbeat(ctx, client); err != nil {
+			log.Printf("astralops cloud sync: %v", err)
+		}
+	}()
 }
 
 func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient) error {

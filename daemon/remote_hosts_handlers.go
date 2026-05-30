@@ -19,6 +19,7 @@ const (
 	remoteHostStatusOnline  = "online"
 	remoteHostStatusOffline = "offline"
 	remoteHostDiscoveryTTL  = 1500 * time.Millisecond
+	remoteHostCloudTimeout  = 4 * time.Second
 	remoteHostLANTimeout    = 2 * time.Second
 
 	remoteHostAuthorizationNeedsPairing = "needs_pairing"
@@ -85,7 +86,7 @@ func (a *app) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remote
 	if err != nil {
 		return
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, cloudSyncTimeout)
+	reqCtx, cancel := context.WithTimeout(ctx, remoteHostCloudTimeout)
 	defer cancel()
 	devices, err := client.ListDevices(reqCtx)
 	if err != nil {

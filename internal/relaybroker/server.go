@@ -20,10 +20,11 @@ import (
 )
 
 const (
-	maxJSONBodyBytes    int64 = 1 << 20
-	maxEnvelopeWait           = 25 * time.Second
-	webSocketWriteWait        = 15 * time.Second
-	webSocketSendBuffer       = 128
+	maxJSONBodyBytes      int64 = 1 << 20
+	maxEnvelopeWait             = 25 * time.Second
+	webSocketWriteWait          = 15 * time.Second
+	webSocketPingInterval       = 20 * time.Second
+	webSocketSendBuffer         = 128
 
 	EnvelopeVersion               = "astralops-relay-envelope-v1"
 	PayloadKindControlHello       = "control.hello"
@@ -418,6 +419,8 @@ func (c *webSocketClient) sendError(code, message string) {
 }
 
 func (c *webSocketClient) writeLoop() {
+	pingTicker := time.NewTicker(webSocketPingInterval)
+	defer pingTicker.Stop()
 	for {
 		select {
 		case <-c.done:
@@ -425,6 +428,12 @@ func (c *webSocketClient) writeLoop() {
 		case frame := <-c.send:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(webSocketWriteWait))
 			if err := c.conn.WriteJSON(frame); err != nil {
+				c.close()
+				return
+			}
+		case <-pingTicker.C:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(webSocketWriteWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				c.close()
 				return
 			}

@@ -29,8 +29,6 @@ func main() {
 		Addr:              *addr,
 		Handler:           broker.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	log.Printf("astralops relay credential_auth relay_id=%s max_ttl=%s", options.RelayID, options.MaxCredentialTTL)

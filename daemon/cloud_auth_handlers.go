@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"html"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -172,7 +173,37 @@ func (a *app) enableCloudAccount(baseURL, accountToken string) error {
 	}, func(previous AppSettings) {
 		_ = a.applyCloudSettings(previous.Cloud)
 	})
+	if err == nil {
+		a.enableRemoteControlForCloudLogin()
+	}
 	return err
+}
+
+func (a *app) enableRemoteControlForCloudLogin() {
+	settings := a.currentSettings()
+	if settings.RemoteControl.Enabled {
+		return
+	}
+	enabled := true
+	lanDiscovery := true
+	_, err := a.settings.patchWithHook(appSettingsPatch{RemoteControl: &remoteControlSettingsPatch{Enabled: &enabled, LANDiscovery: &lanDiscovery}}, func(previous, next AppSettings) error {
+		if remoteControlSettingsChanged(previous.RemoteControl, next.RemoteControl) {
+			if err := a.applyRemoteControlSettings(next.RemoteControl); err != nil {
+				return err
+			}
+			if err := a.writeRuntimeFile(); err != nil {
+				return err
+			}
+			a.syncCloudRegistrationSoon(next)
+		}
+		return nil
+	}, func(previous AppSettings) {
+		_ = a.applyRemoteControlSettings(previous.RemoteControl)
+		_ = a.writeRuntimeFile()
+	})
+	if err != nil {
+		log.Printf("astralops remote control auto-enable after cloud login: %v", err)
+	}
 }
 
 func normalizeCloudAuthProvider(value string) (cloudAuthProvider, error) {

@@ -227,6 +227,12 @@ function updateProgressLabel(status: AppUpdateStatus): string {
   return ` ${Math.max(0, Math.min(100, percent ?? 0)).toFixed(0)}%`;
 }
 
+function firstErrorMessage(...results: PromiseSettledResult<unknown>[]): string {
+  const rejected = results.find((result) => result.status === "rejected");
+  if (!rejected || rejected.status !== "rejected") return "";
+  return rejected.reason instanceof Error ? rejected.reason.message : String(rejected.reason);
+}
+
 export function SettingsView({
   core,
   daemonInfo,
@@ -694,30 +700,27 @@ function RemoteControlContent({
     setLoading(true);
     try {
       const [hostInfo, trustList, pairingList] = await Promise.all([core.hostInfo(), core.listTrustedDevices(), core.listPairingRequests()]);
-      let nextCloudAccount: CloudAccountStatus | null = null;
-      let nextCloudRelays: CloudRelayListResponse = { relays: [] };
-      let nextCloudDevices: CloudDeviceRecord[] = [];
-      let cloudError = "";
-      if (settings.cloud.enabled) {
-        try {
-          nextCloudAccount = await core.cloudAccountStatus();
-        } catch (loadCloudError) {
-          cloudError = loadCloudError instanceof Error ? loadCloudError.message : String(loadCloudError);
-        }
-        try {
-          nextCloudRelays = await core.listCloudRelays();
-        } catch (loadRelaysError) {
-          cloudError = cloudError || (loadRelaysError instanceof Error ? loadRelaysError.message : String(loadRelaysError));
-        }
-        try {
-          nextCloudDevices = await core.listCloudDevices();
-        } catch (loadCloudDevicesError) {
-          cloudError = cloudError || (loadCloudDevicesError instanceof Error ? loadCloudDevicesError.message : String(loadCloudDevicesError));
-        }
-      }
       setHost(hostInfo);
       setGrants(sortTrustGrants(trustList.grants));
       setPairingRequests(sortPairingRequests(pairingList.requests));
+      if (!settings.cloud.enabled) {
+        setCloudAccount(null);
+        setCloudRelays({ relays: [] });
+        setCloudDevices([]);
+        setError("");
+        setStatus("已刷新");
+        return;
+      }
+
+      const [accountResult, relaysResult, devicesResult] = await Promise.allSettled([
+        core.cloudAccountStatus(),
+        core.listCloudRelays(),
+        core.listCloudDevices(),
+      ]);
+      const nextCloudAccount = accountResult.status === "fulfilled" ? accountResult.value : null;
+      const nextCloudRelays = relaysResult.status === "fulfilled" ? relaysResult.value : { relays: [] };
+      const nextCloudDevices = devicesResult.status === "fulfilled" ? devicesResult.value : [];
+      const cloudError = firstErrorMessage(accountResult, relaysResult, devicesResult);
       setCloudAccount(nextCloudAccount);
       setCloudRelays(nextCloudRelays);
       setCloudDevices(sortCloudDevices(nextCloudDevices, hostInfo.identity.device_id));
