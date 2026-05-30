@@ -10,7 +10,8 @@ import { motion } from "framer-motion";
 import "@xterm/xterm/css/xterm.css";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CoreClient, TerminalConnection } from "../api";
+import type { CoreClient } from "../api";
+import { TerminalViewerController } from "../terminalViewer";
 import type { FileListResponse, HealthResponse, PanelTabKind, TerminalTab as HostTerminalTab, Workspace } from "../types";
 
 type PanelTab = {
@@ -584,9 +585,9 @@ function TerminalTab({
     term.open(hostRef.current);
     fit.fit();
 
-    let terminalConnection: TerminalConnection | null = null;
+    let terminalController: TerminalViewerController | null = null;
     const sendResize = (): void => {
-      terminalConnection?.resize(term.cols, term.rows);
+      terminalController?.resize(term.cols, term.rows);
     };
     const resizeObserver = new ResizeObserver(() => {
       fit.fit();
@@ -595,10 +596,13 @@ function TerminalTab({
     resizeObserver.observe(hostRef.current);
 
     const input = term.onData((data) => {
-      terminalConnection?.input(data);
+      terminalController?.input(data);
     });
     const isCurrent = (): boolean => !disposed && connectionIdRef.current === connectionId;
-    terminalConnection = api.terminal.openWorkspaceTerminal(workspaceId, {
+    terminalController = new TerminalViewerController({
+      api,
+      workspaceId,
+      terminalId,
       onOpen: () => {
         if (!isCurrent()) return;
         opened = true;
@@ -614,6 +618,10 @@ function TerminalTab({
       onOutput: (data) => {
         if (isCurrent()) term.write(data);
       },
+      onExit: () => {
+        if (!isCurrent()) return;
+        term.writeln("\r\n\x1b[2m终端已关闭\x1b[0m");
+      },
       onError: (text) => {
         if (!isCurrent()) return;
         if (opened || text !== "PTY 连接失败") {
@@ -622,13 +630,14 @@ function TerminalTab({
           term.writeln("\r\n\x1b[31mPTY 连接失败\x1b[0m");
         }
       },
-    }, { terminalId });
+    });
+    terminalController.start();
 
     return () => {
       disposed = true;
       input.dispose();
       resizeObserver.disconnect();
-      terminalConnection?.close();
+      terminalController?.dispose();
       term.dispose();
       if (termRef.current === term) termRef.current = null;
       if (fitRef.current === fit) fitRef.current = null;

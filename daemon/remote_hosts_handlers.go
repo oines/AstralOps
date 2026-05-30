@@ -634,11 +634,12 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	terminalID := strings.TrimSpace(r.URL.Query().Get("terminal_id"))
+	afterSeq, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
 	var terminal *remoteManagedTerminalStream
 	if terminalID != "" {
-		terminal, err = manager.AttachTerminal(r.Context(), hostDeviceID, terminalID)
+		terminal, err = manager.AttachTerminal(r.Context(), hostDeviceID, terminalID, afterSeq)
 	} else {
-		terminal, err = manager.OpenTerminal(r.Context(), hostDeviceID, workspaceID)
+		terminal, err = manager.OpenTerminal(r.Context(), hostDeviceID, workspaceID, afterSeq)
 	}
 	if err != nil {
 		_ = local.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
@@ -647,12 +648,7 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 	defer terminal.Detach()
 
 	localWriter := &remotePTYLocalWriter{}
-	localWriter.write(local, map[string]any{
-		"type":        "ready",
-		"terminal_id": terminal.terminalID,
-		"shell":       terminal.shell,
-		"cwd":         terminal.cwd,
-	})
+	localWriter.write(local, terminalReadySocketPayload(terminal.terminalID, terminal.shell, terminal.cwd, terminal.outputSeq))
 
 	done := make(chan struct{})
 	go func() {
@@ -667,11 +663,11 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 			}
 			switch frame.Type {
 			case terminalFrameOutput:
-				if frame.Terminal.Data != "" {
-					localWriter.write(local, map[string]any{"type": "output", "data": frame.Terminal.Data})
+				if payload := terminalOutputSocketPayload(frame.Terminal); payload != nil {
+					localWriter.write(local, payload)
 				}
 			case terminalFrameClosed:
-				localWriter.write(local, map[string]any{"type": "exit", "reason": frame.Terminal.Reason})
+				localWriter.write(local, terminalExitSocketPayload(frame.Terminal))
 				return
 			}
 		}

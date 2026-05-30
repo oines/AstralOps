@@ -452,6 +452,7 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 	controllerID := a.store.hostInfo().Identity.DeviceID
 	terminals := a.terminalManager()
 	terminalID := strings.TrimSpace(r.URL.Query().Get("terminal_id"))
+	afterSeq, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
 	open, ok := terminalOpenResult{}, false
 	if terminalID != "" {
 		open, ok = terminals.openTerminalResult(terminalID)
@@ -468,17 +469,12 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 			return
 		}
 	}
-	_ = conn.WriteJSON(map[string]any{
-		"type":        "ready",
-		"terminal_id": open.TerminalID,
-		"shell":       open.Shell,
-		"cwd":         open.CWD,
-	})
+	_ = conn.WriteJSON(terminalReadySocketPayload(open.TerminalID, open.Shell, open.CWD, open.OutputSeq))
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	localControl := newLocalPTYControlConnection(ctx, cancel, controllerID, conn)
-	if _, err := terminals.attach(controllerID, localControl, terminalAttachParams{TerminalID: open.TerminalID}); err != nil {
+	if _, err := terminals.attach(controllerID, localControl, terminalAttachParams{TerminalID: open.TerminalID, AfterSeq: afterSeq}); err != nil {
 		_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
@@ -560,15 +556,11 @@ func (c *localPTYControlConnection) writePlain(frame controlPlainFrame) {
 	defer c.writeMu.Unlock()
 	switch frame.Type {
 	case terminalFrameOutput:
-		if frame.Terminal != nil && frame.Terminal.Data != "" {
-			_ = c.socket.WriteJSON(map[string]any{"type": "output", "data": frame.Terminal.Data})
+		if payload := terminalOutputSocketPayload(frame.Terminal); payload != nil {
+			_ = c.socket.WriteJSON(payload)
 		}
 	case terminalFrameClosed:
-		reason := ""
-		if frame.Terminal != nil {
-			reason = frame.Terminal.Reason
-		}
-		_ = c.socket.WriteJSON(map[string]any{"type": "exit", "reason": reason})
+		_ = c.socket.WriteJSON(terminalExitSocketPayload(frame.Terminal))
 		if c.cancel != nil {
 			c.cancel()
 		}

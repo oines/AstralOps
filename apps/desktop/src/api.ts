@@ -95,14 +95,17 @@ export type TerminalReadyPayload = {
   terminal_id?: string;
   shell?: string;
   cwd?: string;
+  output_seq?: number;
 };
 
 export type TerminalHandlers = {
   onOpen?: () => void;
   onReady?: (payload: TerminalReadyPayload) => void;
-  onOutput?: (data: string) => void;
+  onOutput?: (data: string, outputSeq?: number) => void;
   onExit?: (payload: Record<string, unknown>) => void;
   onError?: (message: string) => void;
+  onConnectionError?: (message: string) => void;
+  onClose?: (payload: { code?: number; reason?: string; wasClean?: boolean }) => void;
 };
 
 export type TerminalConnection = {
@@ -113,6 +116,7 @@ export type TerminalConnection = {
 
 export type TerminalOpenOptions = {
   terminalId?: string;
+  afterSeq?: number;
 };
 
 export interface TerminalClient {
@@ -932,8 +936,12 @@ class LocalTerminalClient implements TerminalClient {
   }
 
   openWorkspaceTerminal(workspaceId: string, handlers: TerminalHandlers, options: TerminalOpenOptions = {}): TerminalConnection {
-    logClientEvent("terminal.open.start", { workspace_id: workspaceId, terminal_id: options.terminalId });
-    const query = options.terminalId ? `?terminal_id=${encodeURIComponent(options.terminalId)}` : "";
+    logClientEvent("terminal.open.start", { workspace_id: workspaceId, terminal_id: options.terminalId, after_seq: options.afterSeq });
+    const params = new URLSearchParams();
+    if (options.terminalId) params.set("terminal_id", options.terminalId);
+    if (options.afterSeq !== undefined && Number.isFinite(options.afterSeq) && options.afterSeq >= 0) params.set("after_seq", String(Math.floor(options.afterSeq)));
+    const queryString = params.toString();
+    const query = queryString ? `?${queryString}` : "";
     return new WebSocketTerminalConnection(this.channel.openSocket(`/v1/workspaces/${workspaceId}/pty${query}`), handlers);
   }
 
@@ -951,12 +959,12 @@ class WebSocketTerminalConnection implements TerminalConnection {
     };
     socket.onmessage = (event) => {
       try {
-        const message = JSON.parse(event.data as string) as { type: string; terminal_id?: string; data?: string; message?: string; shell?: string; cwd?: string };
+        const message = JSON.parse(event.data as string) as { type: string; terminal_id?: string; data?: string; message?: string; shell?: string; cwd?: string; output_seq?: number };
         if (message.type === "ready") {
-          logClientEvent("terminal.ready", { terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd });
-          handlers.onReady?.({ terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd });
+          logClientEvent("terminal.ready", { terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
+          handlers.onReady?.({ terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
         }
-        if (message.type === "output" && message.data) handlers.onOutput?.(message.data);
+        if (message.type === "output" && message.data) handlers.onOutput?.(message.data, message.output_seq);
         if (message.type === "exit") {
           const exitPayload = message as unknown as Record<string, unknown>;
           logClientEvent("terminal.exit", { code: exitPayload.code, exit_code: exitPayload.exit_code });
@@ -972,10 +980,11 @@ class WebSocketTerminalConnection implements TerminalConnection {
     };
     socket.onerror = () => {
       logClientEvent("terminal.connection_failed", {}, "error");
-      handlers.onError?.("PTY 连接失败");
+      handlers.onConnectionError?.("PTY 连接失败");
     };
-    socket.onclose = () => {
-      logClientEvent("terminal.closed");
+    socket.onclose = (event) => {
+      logClientEvent("terminal.closed", { code: event.code, reason: event.reason, was_clean: event.wasClean });
+      handlers.onClose?.({ code: event.code, reason: event.reason, wasClean: event.wasClean });
     };
   }
 

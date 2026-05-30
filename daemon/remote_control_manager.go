@@ -59,6 +59,7 @@ type remoteManagedTerminalStream struct {
 	terminalID  string
 	shell       string
 	cwd         string
+	outputSeq   int64
 	frames      <-chan controlPlainFrame
 	closeStream func()
 }
@@ -324,37 +325,37 @@ func (m *remoteControlManager) SubscribeEvents(ctx context.Context, hostDeviceID
 	return remoteControlEventStream{Events: events, Close: closeFn}, nil
 }
 
-func (m *remoteControlManager) OpenTerminal(ctx context.Context, hostDeviceID, workspaceID string) (*remoteManagedTerminalStream, error) {
+func (m *remoteControlManager) OpenTerminal(ctx context.Context, hostDeviceID, workspaceID string, afterSeq int64) (*remoteManagedTerminalStream, error) {
 	session, err := m.getSession(ctx, hostDeviceID)
 	if err != nil {
 		return nil, err
 	}
-	terminalID, shell, cwd, created, err := session.remoteTerminalForWorkspace(ctx, workspaceID)
+	terminalID, shell, cwd, _, created, err := session.remoteTerminalForWorkspace(ctx, workspaceID)
 	if err != nil {
 		return nil, err
 	}
-	return m.attachTerminal(ctx, session, terminalID, shell, cwd, created)
+	return m.attachTerminal(ctx, session, terminalID, shell, cwd, afterSeq, created)
 }
 
-func (m *remoteControlManager) AttachTerminal(ctx context.Context, hostDeviceID, terminalID string) (*remoteManagedTerminalStream, error) {
+func (m *remoteControlManager) AttachTerminal(ctx context.Context, hostDeviceID, terminalID string, afterSeq int64) (*remoteManagedTerminalStream, error) {
 	session, err := m.getSession(ctx, hostDeviceID)
 	if err != nil {
 		return nil, err
 	}
-	terminalID, shell, cwd, err := session.remoteTerminalByID(ctx, terminalID)
+	terminalID, shell, cwd, _, err := session.remoteTerminalByID(ctx, terminalID)
 	if err != nil {
 		return nil, err
 	}
-	return m.attachTerminal(ctx, session, terminalID, shell, cwd, false)
+	return m.attachTerminal(ctx, session, terminalID, shell, cwd, afterSeq, false)
 }
 
-func (m *remoteControlManager) attachTerminal(ctx context.Context, session *remoteControlManagedSession, terminalID, shell, cwd string, closeOnAttachFailure bool) (*remoteManagedTerminalStream, error) {
+func (m *remoteControlManager) attachTerminal(ctx context.Context, session *remoteControlManagedSession, terminalID, shell, cwd string, afterSeq int64, closeOnAttachFailure bool) (*remoteManagedTerminalStream, error) {
 	frames, unregister := session.registerStream(terminalID)
 	attach, err := session.request(ctx, ControlRequest{
 		RequestID:  remoteControlManagedRequestPrefix + "pty_attach_" + randomID(12),
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalAttach,
-		Params:     map[string]any{"terminal_id": terminalID, "after_seq": 0},
+		Params:     map[string]any{"terminal_id": terminalID, "after_seq": afterSeq},
 	})
 	if err != nil {
 		unregister()
@@ -373,17 +374,22 @@ func (m *remoteControlManager) attachTerminal(ctx context.Context, session *remo
 		}
 		return nil, controlResponseActionError(attach, ControlActionTerminalAttach)
 	}
+	attachResult := mapValue(attach.Result)
+	if seq := int64(numberValue(attachResult["output_seq"])); seq > 0 {
+		afterSeq = seq
+	}
 	return &remoteManagedTerminalStream{
 		session:     session,
 		terminalID:  terminalID,
 		shell:       shell,
 		cwd:         cwd,
+		outputSeq:   afterSeq,
 		frames:      frames,
 		closeStream: unregister,
 	}, nil
 }
 
-func (s *remoteControlManagedSession) remoteTerminalForWorkspace(ctx context.Context, workspaceID string) (string, string, string, bool, error) {
+func (s *remoteControlManagedSession) remoteTerminalForWorkspace(ctx context.Context, workspaceID string) (string, string, string, int64, bool, error) {
 	open, err := s.request(ctx, ControlRequest{
 		RequestID:  remoteControlManagedRequestPrefix + "pty_open_" + randomID(12),
 		Capability: CapabilityTerminalOpen,
@@ -391,26 +397,26 @@ func (s *remoteControlManagedSession) remoteTerminalForWorkspace(ctx context.Con
 		Params:     map[string]any{"workspace_id": workspaceID, "cols": defaultTerminalCols, "rows": defaultTerminalRows},
 	})
 	if err != nil {
-		return "", "", "", false, fmt.Errorf("remote terminal open failed: %w", err)
+		return "", "", "", 0, false, fmt.Errorf("remote terminal open failed: %w", err)
 	}
 	if !open.OK {
 		if open.Error != nil && open.Error.Code == controlAuthorizationRequiredCode && s.manager != nil {
 			s.manager.Invalidate(s.hostDeviceID, controlAuthorizationRequiredCode)
 		}
-		return "", "", "", false, controlResponseActionError(open, ControlActionTerminalOpen)
+		return "", "", "", 0, false, controlResponseActionError(open, ControlActionTerminalOpen)
 	}
 	openResult := mapValue(open.Result)
 	terminalID := stringValue(openResult["terminal_id"])
 	if terminalID == "" {
-		return "", "", "", false, errors.New("remote terminal response missing terminal_id")
+		return "", "", "", 0, false, errors.New("remote terminal response missing terminal_id")
 	}
-	return terminalID, stringValue(openResult["shell"]), stringValue(openResult["cwd"]), true, nil
+	return terminalID, stringValue(openResult["shell"]), stringValue(openResult["cwd"]), int64(numberValue(openResult["output_seq"])), true, nil
 }
 
-func (s *remoteControlManagedSession) remoteTerminalByID(ctx context.Context, terminalID string) (string, string, string, error) {
+func (s *remoteControlManagedSession) remoteTerminalByID(ctx context.Context, terminalID string) (string, string, string, int64, error) {
 	terminalID = strings.TrimSpace(terminalID)
 	if terminalID == "" {
-		return "", "", "", errors.New("terminal_id is required")
+		return "", "", "", 0, errors.New("terminal_id is required")
 	}
 	list, err := s.request(ctx, ControlRequest{
 		RequestID:  remoteControlManagedRequestPrefix + "pty_list_" + randomID(12),
@@ -418,17 +424,17 @@ func (s *remoteControlManagedSession) remoteTerminalByID(ctx context.Context, te
 		Action:     ControlActionTerminalList,
 	})
 	if err != nil {
-		return "", "", "", fmt.Errorf("remote terminal list failed: %w", err)
+		return "", "", "", 0, fmt.Errorf("remote terminal list failed: %w", err)
 	}
 	if !list.OK {
-		return "", "", "", controlResponseActionError(list, ControlActionTerminalList)
+		return "", "", "", 0, controlResponseActionError(list, ControlActionTerminalList)
 	}
 	for _, tab := range terminalTabsFromControlResult(list.Result) {
 		if tab.TerminalID == terminalID && tab.Status == terminalStatusOpen {
-			return tab.TerminalID, tab.Shell, tab.CWD, nil
+			return tab.TerminalID, tab.Shell, tab.CWD, tab.OutputSeq, nil
 		}
 	}
-	return "", "", "", newActionError(http.StatusNotFound, "terminal_not_found", "terminal not found")
+	return "", "", "", 0, newActionError(http.StatusNotFound, "terminal_not_found", "terminal not found")
 }
 
 func terminalTabsFromControlResult(result any) []terminalTab {
