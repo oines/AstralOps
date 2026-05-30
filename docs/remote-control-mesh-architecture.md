@@ -246,7 +246,31 @@ ASTRALOPS_ACCOUNT_RELAY_URL=https://relay.example.com
 Authorization: Bearer <account-token>
 ```
 
-内测 token 模式下 cloud 不存 token 明文，只用 token 派生 `account_id_hash`。同一个 token 对应同一个账号 namespace。这个方案是内测账号基础设施，不是最终消费者账号体验；后续可以把 token auth 替换成 Google/GitHub OAuth、OIDC 或 passkey，但外部 API 仍保持账号下设备注册、presence、pairing signal、账号 relay 配置、relay envelope 这几个边界。
+内测 token 模式下 cloud 不存 token 明文，只用 token 派生 `account_id_hash`。同一个 token 对应同一个账号 namespace。这个方案只用于开发和小规模内测，不是最终消费者账号体验。
+
+正式账号 MVP 由私有 cloud control plane 承担 OAuth broker 职责，Desktop daemon 不持有 Google/GitHub OAuth client secret：
+
+```text
+Desktop daemon
+  -> GET /v1/auth/google/start?redirect_uri=<localhost-callback>&state=<desktop-state>
+  -> browser OAuth
+  -> Cloud callback
+  -> redirect localhost callback with login_code + desktop state
+  -> POST /v1/auth/login-code/exchange
+  -> receive AstralOps account session token
+```
+
+Cloud 可支持：
+
+```text
+GET  /v1/auth/google/start
+GET  /v1/auth/google/callback
+GET  /v1/auth/github/start
+GET  /v1/auth/github/callback
+POST /v1/auth/login-code/exchange
+```
+
+不管用户用 Google、GitHub 或后续邮箱/passkey 登录，Cloud 内部都必须映射到 AstralOps 自己的 `account_id`，对客户端只暴露 `account_id_hash`。OAuth state、login code、account session token 都必须按一次性/过期语义处理；login code 和 account session token 不得明文落盘，只能保存 hash。换到正式账号后，外部设备 API 仍保持账号下设备注册、presence、pairing signal、账号 relay 配置、relay envelope 这几个边界。
 
 私有 cloud MVP 可以先使用 VPS 本地 JSON 文件持久化：
 
@@ -260,6 +284,11 @@ Cloud service API 的职责：
 
 ```text
 GET  /v1/health
+GET  /v1/auth/google/start
+GET  /v1/auth/google/callback
+GET  /v1/auth/github/start
+GET  /v1/auth/github/callback
+POST /v1/auth/login-code/exchange
 GET  /v1/account
 GET  /v1/devices
 POST /v1/devices
