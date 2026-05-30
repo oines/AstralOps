@@ -666,6 +666,7 @@ function RemoteControlContent({
   const trustedGrants = useMemo(() => grants.filter((grant) => grant.status === "trusted"), [grants]);
   const revokedGrants = useMemo(() => grants.filter((grant) => grant.status === "revoked"), [grants]);
   const pendingPairingRequests = useMemo(() => pairingRequests.filter((request) => request.status === "pending"), [pairingRequests]);
+  const activeCloudDevices = useMemo(() => cloudDevices.filter((device) => device.status !== "revoked"), [cloudDevices]);
   const trustedGrantByDeviceId = useMemo(() => {
     const byDeviceId = new Map<string, TrustGrant>();
     trustedGrants.forEach((grant) => byDeviceId.set(grant.controller_device_id, grant));
@@ -929,9 +930,9 @@ function RemoteControlContent({
             <InfoRow label="账号" value={cloudAccount?.account_id_hash || (error ? "读取失败" : "未加载")} />
             <InfoRow label="中继节点" value={cloudRelayLabel(cloudAccount)} />
             <SettingRow title="中继凭证" description="由账号服务签发给本机使用，短期有效" control={<StatusPill label={cloudRelayCredentialLabel(cloudAccount)} tone={cloudRelayCredentialTone(cloudAccount)} />} />
-            <SettingRow title="我的设备" description="账号服务只保存设备公开身份、在线状态、撤销状态和路由元数据" control={<StatusPill label={`${cloudDevices.length} 台`} tone={cloudDevices.length > 0 ? "good" : "muted"} />} />
-            {cloudDevices.length > 0 ? (
-              cloudDevices.map((device) => (
+            <SettingRow title="我的设备" description="账号服务只保存设备公开身份、在线状态、撤销状态和路由元数据" control={<StatusPill label={`${activeCloudDevices.length} 台`} tone={activeCloudDevices.length > 0 ? "good" : "muted"} />} />
+            {activeCloudDevices.length > 0 ? (
+              activeCloudDevices.map((device) => (
                 <CloudDeviceRow
                   confirmRemoveId={confirmCloudRemoveId}
                   currentDeviceId={host?.identity.device_id || ""}
