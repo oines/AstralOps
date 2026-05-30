@@ -86,6 +86,11 @@ func notificationIntentText(source AstralEvent, value map[string]any, events []A
 			return "approval_required", title + "：" + body, true
 		}
 		return "approval_required", title, true
+	case "control.pairing.requested":
+		if body := pairingNotificationBody(value); body != "" {
+			return "pairing_requested", body, true
+		}
+		return "pairing_requested", "有设备请求控制本机", true
 	case "workspace.connection":
 		status := stringValue(value["status"])
 		if status != connectionDegraded && status != connectionFailed {
@@ -167,6 +172,14 @@ func askNotificationBody(value map[string]any) string {
 		}
 	}
 	return firstString(params["message"], params["prompt"], params["question"], value["message"])
+}
+
+func pairingNotificationBody(value map[string]any) string {
+	name := firstString(value["controller_device_name"], value["controller_device_id"])
+	if name == "" {
+		return "有设备请求控制本机"
+	}
+	return name + " 请求控制本机"
 }
 
 func truncateNotificationBody(value string, max int) string {

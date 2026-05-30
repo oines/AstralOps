@@ -10,6 +10,7 @@ type SidebarProps = {
   defaultSessionAgent: AgentKind;
   hosts: SidebarHost[];
   nativeVibrancy: boolean;
+  pendingPairingCount?: number;
   sessions: Session[];
   sessionStates: Record<string, string>;
   sessionTitles: Record<string, string>;
@@ -35,6 +36,8 @@ export type SidebarHost = {
   id: string;
   kind: "desktop" | "mobile" | string;
   name: string;
+  statusLabel?: string;
+  statusTone?: "good" | "warning" | "muted";
   subtitle: string;
 };
 
@@ -45,6 +48,7 @@ export function Sidebar({
   defaultSessionAgent,
   hosts,
   nativeVibrancy,
+  pendingPairingCount = 0,
   sessions,
   sessionStates,
   sessionTitles,
@@ -161,7 +165,7 @@ export function Sidebar({
             <div className="truncate text-[13px] font-bold leading-5">{activeHost?.name || "本机"}</div>
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] font-semibold leading-4 text-[var(--ao-muted)]">
               <span className="truncate">{activeHost?.subtitle || "本机 Host"}</span>
-              <span className="shrink-0 text-[var(--ao-subtle)]">{hostConnectionLabel(activeHost?.connection)}</span>
+              <HostStatusPill label={activeHost?.statusLabel || hostConnectionLabel(activeHost?.connection)} tone={activeHost?.statusTone} />
             </div>
           </div>
           <ChevronDown className={`shrink-0 text-[var(--ao-muted-strong)] transition-transform ${hostMenuOpen ? "rotate-180" : ""}`} size={15} strokeWidth={1.9} />
@@ -183,7 +187,10 @@ export function Sidebar({
                 <HostIcon kind={host.kind} />
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[12px] font-bold leading-4">{host.name}</div>
-                  <div className="truncate text-[11px] font-semibold leading-4 text-[var(--ao-muted)]">{host.subtitle}</div>
+                  <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] font-semibold leading-4 text-[var(--ao-muted)]">
+                    <span className="truncate">{host.subtitle}</span>
+                    <HostStatusPill label={host.statusLabel || hostConnectionLabel(host.connection)} tone={host.statusTone} />
+                  </div>
                 </div>
                 {host.id === activeHost?.id ? <Check size={14} strokeWidth={2.1} /> : <span className="size-[14px]" />}
               </button>
@@ -273,6 +280,11 @@ export function Sidebar({
         >
           <Settings size={16} strokeWidth={1.9} />
           <span>设置</span>
+          {pendingPairingCount > 0 ? (
+            <span className="ml-auto grid min-w-5 place-items-center rounded-md bg-black/[0.055] px-1.5 text-[11px] font-bold text-[var(--ao-warning)]">
+              {pendingPairingCount}
+            </span>
+          ) : null}
         </button>
       </nav>
       </div>
@@ -619,6 +631,12 @@ function HostIcon({ kind }: { kind?: string }): React.JSX.Element {
       <Icon size={16} strokeWidth={1.9} />
     </span>
   );
+}
+
+function HostStatusPill({ label, tone = "muted" }: { label?: string; tone?: "good" | "warning" | "muted" }): React.JSX.Element | null {
+  if (!label) return null;
+  const toneClass = tone === "good" ? "text-[var(--ao-green)] bg-black/[0.045]" : tone === "warning" ? "text-[var(--ao-warning)] bg-black/[0.045]" : "text-[var(--ao-subtle)] bg-black/[0.045]";
+  return <span className={`shrink-0 rounded-md px-1.5 text-[10px] font-bold leading-4 ${toneClass}`}>{label}</span>;
 }
 
 function hostConnectionLabel(connection?: string): string {

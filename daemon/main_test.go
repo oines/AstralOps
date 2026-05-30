@@ -1433,6 +1433,30 @@ func TestNotificationIntentSkipsNonActionableEvent(t *testing.T) {
 	}
 }
 
+func TestNotificationIntentGeneratedForPairingRequest(t *testing.T) {
+	source := AstralEvent{
+		Seq:  8,
+		Kind: "control.pairing.requested",
+		Normalized: map[string]any{
+			"controller_device_id":   "dev_phone",
+			"controller_device_name": "iPhone",
+		},
+	}
+
+	notification, ok := notificationEventForSource(source, "", "", nil)
+	if !ok {
+		t.Fatal("pairing request notification intent was not generated")
+	}
+	value := mapValue(notification.Normalized)
+	if stringValue(value["reason"]) != "pairing_requested" || stringValue(value["title"]) != "AstralOps" || stringValue(value["body"]) != "iPhone 请求控制本机" {
+		t.Fatalf("notification normalized = %#v", value)
+	}
+	target := mapValue(value["target"])
+	if stringValue(target["kind"]) != "workspace" || stringValue(target["session_id"]) != "" {
+		t.Fatalf("target = %#v, want workspace-level notification", target)
+	}
+}
+
 func TestNotificationIntentUsesFinalAssistantMessageForCompletedTurn(t *testing.T) {
 	events := []AstralEvent{
 		{

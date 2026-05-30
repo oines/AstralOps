@@ -79,6 +79,7 @@ export function App(): React.JSX.Element {
   const [remoteHosts, setRemoteHosts] = useState<RemoteHostRecord[]>([]);
   const [selectedHostId, setSelectedHostId] = useState(LOCAL_HOST_ID);
   const [hostPairingStatus, setHostPairingStatus] = useState<Record<string, string>>({});
+  const [pendingPairingCount, setPendingPairingCount] = useState(0);
   const [requestingPairingHostId, setRequestingPairingHostId] = useState("");
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
@@ -134,6 +135,19 @@ export function App(): React.JSX.Element {
     setRemoteHosts(hosts);
   }, [daemonInfo]);
 
+  const refreshLocalPairingState = useCallback(async (): Promise<void> => {
+    if (!localApi) {
+      setPendingPairingCount(0);
+      return;
+    }
+    try {
+      const result = await localApi.listPairingRequests();
+      setPendingPairingCount(result.requests.filter((request) => request.status === "pending").length);
+    } catch {
+      setPendingPairingCount(0);
+    }
+  }, [localApi]);
+
   const mergeEvents = useCallback((incoming: AstralEvent[]) => {
     setEventIndex((current) => mergeEventIndex(current, incoming));
   }, []);
@@ -144,7 +158,7 @@ export function App(): React.JSX.Element {
     const settings = appSettingsRef.current.notifications;
     const reason = typeof payload.reason === "string" ? payload.reason : "";
     if ((reason === "turn_completed" || reason === "turn_failed") && !settings.task_complete) return;
-    if ((reason === "ask_required" || reason === "approval_required") && !settings.requires_action) return;
+    if ((reason === "ask_required" || reason === "approval_required" || reason === "pairing_requested") && !settings.requires_action) return;
     const notificationID = typeof payload.notification_id === "string" ? payload.notification_id : "";
     if (!notificationID || notifiedIntentIDsRef.current.has(notificationID)) return;
     notifiedIntentIDsRef.current.add(notificationID);
@@ -423,6 +437,34 @@ export function App(): React.JSX.Element {
       window.clearInterval(timer);
     };
   }, [daemonInfo]);
+
+  useEffect(() => {
+    if (!localApi) {
+      setPendingPairingCount(0);
+      return;
+    }
+    const client = localApi;
+    let cancelled = false;
+    let refreshing = false;
+    async function refresh(): Promise<void> {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        const result = await client.listPairingRequests();
+        if (!cancelled) setPendingPairingCount(result.requests.filter((request) => request.status === "pending").length);
+      } catch {
+        if (!cancelled) setPendingPairingCount(0);
+      } finally {
+        refreshing = false;
+      }
+    }
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [localApi]);
 
   useEffect(() => {
     if (!modelOverride) return;
@@ -825,15 +867,19 @@ export function App(): React.JSX.Element {
         id: localHostInfo?.identity.device_id || LOCAL_HOST_ID,
         name: localHostInfo?.identity.device_name || "本机",
         kind: localHostInfo?.identity.device_kind || "desktop",
-        subtitle: daemonInfo?.remote_control?.listen_addr ? `本机 Host · ${daemonInfo.remote_control.listen_addr}` : "本机 Host",
+        subtitle: daemonInfo?.remote_control?.listen_addr ? "本机 Host" : "本机可用",
         connection: "local" as const,
+        statusLabel: "本机",
+        statusTone: "good" as const,
       },
       ...remoteHosts.map((host) => ({
         id: host.device_id,
         name: host.device_name || host.device_id,
         kind: host.device_kind || "desktop",
-        subtitle: remoteHostNeedsPairing(host) ? "Mesh Host · 未授权" : host.connection === "lan" ? "Mesh Host · LAN" : host.connection === "cloud" ? "Mesh Host · Relay" : "Mesh Host",
+        subtitle: remoteHostNeedsPairing(host) ? "需要目标 Host 批准" : "远端 Host",
         connection: host.connection,
+        statusLabel: remoteHostStatusLabel(host),
+        statusTone: remoteHostStatusTone(host),
       })),
     ],
     [daemonInfo?.remote_control?.listen_addr, localHostInfo, remoteHosts],
@@ -913,6 +959,9 @@ export function App(): React.JSX.Element {
               const state = event.normalized as WorkspaceConnection;
               setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
             }
+            if (activeHostIsLocal && event.kind.startsWith("control.pairing.")) {
+              void refreshLocalPairingState();
+            }
             if (event.session_id) {
               scheduleSessionViewRefresh(client, event.session_id, refreshGeneration);
             }
@@ -953,7 +1002,7 @@ export function App(): React.JSX.Element {
       sessionViewRefreshPendingRef.current.clear();
       sseQueueRef.current = [];
     };
-  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, scheduleSessionViewRefresh, storeSessionView]);
+  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, refreshLocalPairingState, scheduleSessionViewRefresh, storeSessionView]);
 
   const sessionTitles = useMemo(
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),
@@ -978,7 +1027,9 @@ export function App(): React.JSX.Element {
           daemonInfo={daemonInfo}
           onOpenLogs={openLogsDirectory}
           onPatchSettings={patchAppSettings}
+          onPairingRequestsChanged={refreshLocalPairingState}
           onReloadSettings={reloadAppSettings}
+          pendingPairingCount={pendingPairingCount}
         />
       ) : (
         <>
@@ -989,6 +1040,7 @@ export function App(): React.JSX.Element {
         nativeVibrancy={nativeVibrancy}
         activeHostId={activeHostId}
         hosts={hostOptions}
+        pendingPairingCount={pendingPairingCount}
         sessions={sessions}
         sessionStates={sessionStates}
         sessionTitles={sessionTitles}
@@ -1216,7 +1268,7 @@ function HostPairingPanel({
             </span>
             <div className="min-w-0">
               <div className="truncate text-[15px] font-bold leading-6 text-[var(--ao-text)]">{host.device_name || host.device_id}</div>
-              <div className="mt-0.5 text-[12px] font-semibold leading-5 text-[var(--ao-muted)]">{hostConnectionLabel(host.connection)}发现，等待 Host 批准</div>
+              <div className="mt-0.5 text-[12px] font-semibold leading-5 text-[var(--ao-muted)]">{hostConnectionLabel(host.connection)}发现，还没有控制权限</div>
             </div>
           </div>
         </div>
@@ -1227,7 +1279,7 @@ function HostPairingPanel({
         </div>
         <div className="grid gap-3 px-4 py-4">
           <p className="m-0 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
-            {status || "这台设备属于当前账号 Mesh，但还没有授予本机控制权。发起请求后，目标 Host 必须批准；Cloud 登录不会直接授予控制权。"}
+            {status || "这台设备已经在当前账号 Mesh 中，但还没有允许本机控制。发送请求后，对方会在远控设置中看到待批准设备；批准前不会显示它的工作区和 session。"}
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <button
@@ -1272,6 +1324,27 @@ function HostPairingInfoRow({ label, mono = false, value }: { label: string; mon
 
 function remoteHostNeedsPairing(host: RemoteHostRecord): boolean {
   return host.connection === "cloud" && !host.known_identity;
+}
+
+function remoteHostStatusLabel(host: RemoteHostRecord): string {
+  if (remoteHostNeedsPairing(host)) return "未授权";
+  switch (host.connection) {
+    case "lan":
+      return "LAN";
+    case "relay":
+    case "cloud":
+      return "Relay";
+    case "offline":
+      return "离线";
+    default:
+      return host.status === "offline" ? "离线" : "可用";
+  }
+}
+
+function remoteHostStatusTone(host: RemoteHostRecord): "good" | "warning" | "muted" {
+  if (remoteHostNeedsPairing(host)) return "warning";
+  if (host.connection === "lan" || host.connection === "relay" || host.connection === "cloud") return "good";
+  return "muted";
 }
 
 function pairingStatusLabel(status: string): string {

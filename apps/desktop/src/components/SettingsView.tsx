@@ -56,7 +56,9 @@ type SettingsViewProps = {
   onClearMediaCache: () => Promise<ClearMediaCacheResponse>;
   onOpenLogs: () => Promise<void>;
   onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
+  onPairingRequestsChanged?: () => void;
   onReloadSettings: () => Promise<AppSettings | null>;
+  pendingPairingCount?: number;
   savingKeys: ReadonlySet<string>;
   settings: AppSettings | null;
   settingsError: string;
@@ -232,7 +234,9 @@ export function SettingsView({
   onClearMediaCache,
   onOpenLogs,
   onPatchSettings,
+  onPairingRequestsChanged,
   onReloadSettings,
+  pendingPairingCount = 0,
   savingKeys,
   settings,
   settingsError,
@@ -334,6 +338,11 @@ export function SettingsView({
                     >
                       <Icon size={16} strokeWidth={1.9} />
                       <span className="truncate">{item.title}</span>
+                      {item.id === "remote" && pendingPairingCount > 0 ? (
+                        <span className="ml-auto grid min-w-5 place-items-center rounded-md bg-black/[0.055] px-1.5 text-[11px] font-bold text-[var(--ao-warning)]">
+                          {pendingPairingCount}
+                        </span>
+                      ) : null}
                     </button>
                   );
                 })}
@@ -360,6 +369,7 @@ export function SettingsView({
             onLanguageChange={setLanguage}
             onOpenLogs={openLogs}
             onPatchSettings={onPatchSettings}
+            onPairingRequestsChanged={onPairingRequestsChanged}
             onReloadSettings={onReloadSettings}
             savingKeys={savingKeys}
             settings={resolvedSettings}
@@ -384,6 +394,7 @@ function SettingsContent({
   onLanguageChange,
   onOpenLogs,
   onPatchSettings,
+  onPairingRequestsChanged,
   onReloadSettings,
   onCheckForUpdates,
   onInstallUpdate,
@@ -403,6 +414,7 @@ function SettingsContent({
   onLanguageChange: (value: string) => void;
   onOpenLogs: () => Promise<void>;
   onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
+  onPairingRequestsChanged?: () => void;
   onReloadSettings: () => Promise<AppSettings | null>;
   savingKeys: ReadonlySet<string>;
   settings: AppSettings;
@@ -410,7 +422,7 @@ function SettingsContent({
 }): React.JSX.Element {
   switch (activeId) {
     case "remote":
-      return <RemoteControlContent core={core} daemonInfo={daemonInfo} onPatchSettings={onPatchSettings} onReloadSettings={onReloadSettings} savingKeys={savingKeys} settings={settings} />;
+      return <RemoteControlContent core={core} daemonInfo={daemonInfo} onPairingRequestsChanged={onPairingRequestsChanged} onPatchSettings={onPatchSettings} onReloadSettings={onReloadSettings} savingKeys={savingKeys} settings={settings} />;
     case "appearance":
       return (
         <div className="grid gap-8">
@@ -538,7 +550,7 @@ function SettingsContent({
             />
             <SettingRow
               title="需要确认"
-              description="权限、Ask 或计划需要处理时提醒"
+              description="权限、Ask、计划或配对请求需要处理时提醒"
               control={
                 <ToggleControl
                   disabled={savingKeys.has("notifications.requires_action")}
@@ -618,6 +630,7 @@ function SettingsContent({
 function RemoteControlContent({
   core,
   daemonInfo,
+  onPairingRequestsChanged,
   onPatchSettings,
   onReloadSettings,
   savingKeys,
@@ -625,6 +638,7 @@ function RemoteControlContent({
 }: {
   core: CoreClient | null;
   daemonInfo: DaemonInfo | null;
+  onPairingRequestsChanged?: () => void;
   onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
   onReloadSettings: () => Promise<AppSettings | null>;
   savingKeys: ReadonlySet<string>;
@@ -736,6 +750,7 @@ function RemoteControlContent({
       await core.approvePairingRequest(request.request_id);
       setStatus("已允许设备控制本机");
       await loadRemoteControl();
+      onPairingRequestsChanged?.();
     } catch (approveError) {
       setError(approveError instanceof Error ? approveError.message : String(approveError));
     } finally {
@@ -751,6 +766,7 @@ function RemoteControlContent({
       await core.denyPairingRequest(request.request_id);
       setStatus("已拒绝设备加入");
       await loadRemoteControl();
+      onPairingRequestsChanged?.();
     } catch (denyError) {
       setError(denyError instanceof Error ? denyError.message : String(denyError));
     } finally {
@@ -777,6 +793,7 @@ function RemoteControlContent({
         setStatus(result.local_mesh_logout.cloud_removed ? "本机已退出 Mesh，远控身份和信任已重置" : "本机已退出 Mesh，Cloud 删除稍后可重试");
         await onReloadSettings();
         await loadRemoteControl();
+        onPairingRequestsChanged?.();
       } else if (result.local_trust_revoked && result.trust_revoke) {
         setStatus(`已移除并撤销本机信任，关闭 ${result.trust_revoke.closed_control_sessions} 个控制连接`);
       } else {
@@ -829,6 +846,7 @@ function RemoteControlContent({
       setStatus("已退出 Mesh，远控身份和信任已重置");
       await onReloadSettings();
       await loadRemoteControl();
+      onPairingRequestsChanged?.();
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : String(logoutError));
     } finally {
@@ -844,13 +862,13 @@ function RemoteControlContent({
         <InfoRow label="设备 ID" value={host?.identity.device_id || "未加载"} />
         <InfoRow label="公钥指纹" value={host?.identity.public_key_fingerprint || "未加载"} />
         <InfoRow label="平台" value={host ? `${host.platform.os}/${host.platform.arch}` : "未加载"} />
-        <SettingRow title="Host 能力" description="远端可信设备可通过加密控制通道请求的能力" control={<CapabilityList capabilities={host?.capabilities ?? []} align="right" />} />
+        <SettingRow title="可开放能力" description="批准后的控制设备可以请求这些能力" control={<CapabilityList capabilities={host?.capabilities ?? []} align="right" />} />
       </SettingsSection>
 
       <SettingsSection title="连接">
         <SettingRow
           title="允许被远控"
-          description="开启后启动 Host LAN listener；本机完整 API 不直接开放给远端"
+          description={settings.cloud.enabled ? "开启后本机可以接受已批准设备控制" : "登录 Cloud 后才能加入 Mesh 并接受远控"}
           control={
             <ToggleControl
               disabled={savingKeys.has("remote_control.enabled")}
@@ -861,15 +879,15 @@ function RemoteControlContent({
         />
         <SettingRow
           title="监听地址"
-          description="远控只暴露 /v1/host 和 /v1/control/ws"
+          description="只开放 Host 身份和加密控制通道"
           control={<StatusPill label={daemonInfo?.remote_control?.listen_addr ? `实际 ${daemonInfo.remote_control.listen_addr}` : `配置 ${settings.remote_control.listen_addr}`} tone={daemonInfo?.remote_control?.listen_addr ? "good" : "muted"} />}
         />
         <SettingRow
           title="局域网发现"
-          description="使用 UDP 广播发现；发现后仍需要 Host 身份校验和信任授权"
+          description="同一局域网内优先直连；仍需要 Host 身份校验和授权"
           control={
             <div className="flex items-center gap-2">
-              <StatusPill label={settings.remote_control.enabled && settings.remote_control.lan_discovery ? "跟随监听端口" : "未开启"} tone={settings.remote_control.enabled && settings.remote_control.lan_discovery ? "good" : "muted"} icon={Wifi} />
+              <StatusPill label={!settings.cloud.enabled ? "登录后生效" : settings.remote_control.enabled && settings.remote_control.lan_discovery ? "跟随监听端口" : "未开启"} tone={settings.cloud.enabled && settings.remote_control.enabled && settings.remote_control.lan_discovery ? "good" : "muted"} icon={Wifi} />
               <ToggleControl
                 disabled={!settings.remote_control.enabled || savingKeys.has("remote_control.lan_discovery")}
                 enabled={settings.remote_control.enabled && settings.remote_control.lan_discovery}
@@ -878,17 +896,17 @@ function RemoteControlContent({
             </div>
           }
         />
-        <SettingRow title="远程终端" description="远端渲染工作区 PTY，输入和 resize 走加密控制通道" control={<StatusPill label={terminalFeatureLabel(host)} tone={terminalFeatureAvailable(host) ? "good" : "muted"} icon={TerminalSquare} />} />
+        <SettingRow title="远程终端" description="工作区终端可以在控制端渲染，输入和 resize 走加密控制通道" control={<StatusPill label={terminalFeatureLabel(host)} tone={terminalFeatureAvailable(host) ? "good" : "muted"} icon={TerminalSquare} />} />
       </SettingsSection>
 
       <SettingsSection title="账号 Mesh">
         <SettingRow
-          title="Cloud 服务"
-          description="账号控制面地址；OAuth 登录完成后 daemon 会保存账号 token"
+          title="账号服务"
+          description="登录后这台设备会加入当前账号 Mesh"
           control={<TextInputControl disabled={settings.cloud.enabled || Boolean(authenticatingProvider)} onChange={setCloudBaseURLDraft} placeholder="https://cloud-astralops.oines.dev" value={cloudBaseURLDraft} />}
         />
         <SettingRow
-          title="云账号"
+          title="账号"
           description={settings.cloud.enabled ? `${cloudBaseURLLabel(settings)}；退出会断开 Mesh 并重置远控身份，本地数据保留` : "未登录时本机仍可使用，但不能远控别人或被别人远控"}
           control={
             settings.cloud.enabled ? (
@@ -907,9 +925,9 @@ function RemoteControlContent({
         {settings.cloud.enabled ? (
           <>
             <InfoRow label="账号" value={cloudAccount?.account_id_hash || (error ? "读取失败" : "未加载")} />
-            <InfoRow label="账号中继" value={cloudRelayLabel(cloudAccount)} />
-            <SettingRow title="中继授权" description="由云端签发给本机使用，短期有效" control={<StatusPill label={cloudRelayCredentialLabel(cloudAccount)} tone={cloudRelayCredentialTone(cloudAccount)} />} />
-            <SettingRow title="Mesh 设备" description="云端只保存设备公开身份、在线状态、撤销状态和路由元数据" control={<StatusPill label={`${cloudDevices.length} 台`} tone={cloudDevices.length > 0 ? "good" : "muted"} />} />
+            <InfoRow label="中继节点" value={cloudRelayLabel(cloudAccount)} />
+            <SettingRow title="中继凭证" description="由账号服务签发给本机使用，短期有效" control={<StatusPill label={cloudRelayCredentialLabel(cloudAccount)} tone={cloudRelayCredentialTone(cloudAccount)} />} />
+            <SettingRow title="我的设备" description="账号服务只保存设备公开身份、在线状态、撤销状态和路由元数据" control={<StatusPill label={`${cloudDevices.length} 台`} tone={cloudDevices.length > 0 ? "good" : "muted"} />} />
             {cloudDevices.length > 0 ? (
               cloudDevices.map((device) => (
                 <CloudDeviceRow
@@ -923,7 +941,7 @@ function RemoteControlContent({
                 />
               ))
             ) : (
-              <EmptySettingsRow title="暂无 Mesh 设备" description="本机注册到云账号后会显示 Mesh 设备" />
+              <EmptySettingsRow title="暂无设备" description="本机注册到账号后会显示在这里" />
             )}
           </>
         ) : (
@@ -931,7 +949,10 @@ function RemoteControlContent({
         )}
       </SettingsSection>
 
-      <SettingsSection title="可信设备">
+      <SettingsSection title="可控制本机的设备">
+        {pendingPairingRequests.length > 0 ? (
+          <SettingRow title="待批准请求" description="批准前，对方不能读取本机工作区、session 或终端" control={<StatusPill label={`${pendingPairingRequests.length} 个`} tone="warning" icon={KeyRound} />} />
+        ) : null}
         {pendingPairingRequests.map((request) => (
           <PairingRequestRow
             key={request.request_id}
@@ -952,7 +973,7 @@ function RemoteControlContent({
             />
           ))
         ) : pendingPairingRequests.length === 0 ? (
-          <EmptySettingsRow title="暂无可信控制设备" description="手机、桌面端或其他控制端完成配对后会显示在这里" />
+          <EmptySettingsRow title="暂无已批准设备" description="其他设备请求控制本机后，需要在这里允许" />
         ) : null}
       </SettingsSection>
 
@@ -1112,7 +1133,7 @@ function TrustGrantRow({
       </div>
       <ButtonControl
         disabled={!trusted || revoking}
-        label={!trusted ? "已撤销" : revoking ? "撤销中" : confirming ? "确认撤销" : "撤销"}
+        label={!trusted ? "已撤销" : revoking ? "撤销中" : confirming ? "确认撤销" : "撤销控制权"}
         onClick={() => onRevoke(grant)}
       />
     </div>
