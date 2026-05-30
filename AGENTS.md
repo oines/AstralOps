@@ -1,5 +1,11 @@
 # AstralOps Agent Notes
 
+## Public repository secret rule
+
+This repository is public. Never commit real OAuth client secrets, database URLs, service credentials, access tokens, refresh tokens, account tokens, relay/cloud tokens, private keys, VPS credentials, `.env` files, local database files, database dumps, or production config with secret values.
+
+Only commit sanitized examples such as `.env.example` with placeholder values. If a task needs credentials, keep the values local/out-of-band and document only the required variable names, not the values.
+
 ## Event contract memory
 
 Do not rely on chat context for the AstralOps event contract. Treat this file as the project-level source of truth.

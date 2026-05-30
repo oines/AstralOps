@@ -8,3 +8,46 @@ tmp/
 release/
 daemon/astralopsd
 proxy-agent/astral-proxy-agent
+
+# Local secrets and environment files. This repository is public.
+.env
+.env.*
+!.env.example
+!.env.*.example
+.npmrc.local
+.vercel/
+secrets/
+credentials/
+private/
+
+# Private keys, OAuth/service-account credentials, and local cert material.
+*.pem
+*.key
+*.p8
+*.p12
+*.crt
+*.cer
+*.csr
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+*service-account*.json
+*serviceAccount*.json
+
+# Local databases, journals, dumps, and backups.
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite-shm
+*.sqlite-wal
+*.dump
+*.dump.sql
+*.backup.sql
+*.bak
+*.backup
+dumps/
+backups/
