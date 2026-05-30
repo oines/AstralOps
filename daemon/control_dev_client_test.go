@@ -181,6 +181,45 @@ func TestControlClientResolveTargetRequiresKnownIdentityForFallback(t *testing.T
 	}
 }
 
+func TestControlClientTransportPlanOrdersDirectFallbackRelay(t *testing.T) {
+	transports := controlClientTransportPlan(controlClientTarget{
+		BaseURL:      "http://lan-host",
+		FallbackHost: "http://explicit-host",
+		RelayClient:  RelayClient{BaseURL: "https://relay.example.test", Token: "account-token"},
+	})
+	kinds := controlClientTransportKinds(transports)
+	want := []controlClientTransportKind{controlClientTransportDirect, controlClientTransportExplicitHost, controlClientTransportRelay}
+	if len(kinds) != len(want) {
+		t.Fatalf("transport plan = %#v, want %#v", kinds, want)
+	}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Fatalf("transport plan = %#v, want %#v", kinds, want)
+		}
+	}
+}
+
+func TestControlClientTransportPlanUsesOnlyRelayForForcedRelay(t *testing.T) {
+	transports := controlClientTransportPlan(controlClientTarget{
+		UseRelay:     true,
+		BaseURL:      "http://lan-host",
+		FallbackHost: "http://explicit-host",
+		RelayClient:  RelayClient{BaseURL: "https://relay.example.test", Token: "account-token"},
+	})
+	kinds := controlClientTransportKinds(transports)
+	if len(kinds) != 1 || kinds[0] != controlClientTransportRelay {
+		t.Fatalf("transport plan = %#v, want forced relay only", kinds)
+	}
+}
+
+func controlClientTransportKinds(transports []controlClientTransport) []controlClientTransportKind {
+	kinds := make([]controlClientTransportKind, 0, len(transports))
+	for _, transport := range transports {
+		kinds = append(kinds, transport.Kind())
+	}
+	return kinds
+}
+
 func TestControlClientRequestFallsBackWhenLanControlDialFails(t *testing.T) {
 	hostApp, _ := newRemoteControlHandlerTestApp(t)
 	hostServer := httptest.NewServer(remoteControlHandler(hostApp, false))

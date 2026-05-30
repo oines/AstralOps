@@ -376,6 +376,34 @@ LAN direct 和 relay 只是 packet path。
 所有路径都必须跑同一套设备认证 E2EE 握手。
 ```
 
+客户端建连必须分成三层：
+
+```text
+RemoteTargetResolver
+  -> 解析目标 Host identity、known host、LAN candidate、账号 relay
+
+ControlTransport
+  -> direct LAN
+  -> explicit direct host fallback
+  -> relay
+  -> future p2p
+
+ControlChannel
+  -> E2EE frame
+  -> request/response
+  -> stream / PTY / attachment / media
+```
+
+`ControlTransport` 只负责打开一条可以读写 encrypted control frame 的连接。workspace、session、PTY、file、media、approval、trust 等业务能力不能分叉成 LAN 专用逻辑或 relay 专用逻辑。未来加入应用层 P2P 时，只能新增一个 `p2p` transport，并把它插入 transport plan：
+
+```text
+LAN direct
+P2P direct
+relay fallback
+```
+
+P2P 失败不能改变 Host identity 校验、Host trust grant、E2EE 握手或 capability 校验。
+
 Desktop Host 在本机网络上提供一个远控 LAN listener，并在同一个端口监听 UDP discovery。Controller 需要 LAN 发现时，向局域网广播一个 discovery request，Host 只单播回复候选地址：
 
 ```text

@@ -488,12 +488,13 @@ func validateControlControllerPublicKey(grant TrustGrant, value string) (ed25519
 }
 
 func controlClientRelayRoundTrip(parent context.Context, target controlClientTarget, st *store, req ControlRequest) (ControlResponse, error) {
-	conn, err := controlClientOpenRelayFrameConn(parent, target, st)
+	target.UseRelay = true
+	conn, activeTarget, err := controlClientOpenTargetWithTransports(parent, target, st, []controlClientTransport{controlClientRelayTransport{}})
 	if err != nil {
 		return ControlResponse{}, err
 	}
 	defer conn.Close()
-	return controlClientFrameRoundTrip(conn, conn.target.Timeout, st, req)
+	return controlClientFrameRoundTrip(conn, activeTarget.Timeout, st, req)
 }
 
 func controlClientOpenRelayFrameConn(parent context.Context, target controlClientTarget, st *store) (*controlClientRelayFrameConn, error) {

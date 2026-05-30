@@ -1923,6 +1923,79 @@ type controlClientFrameConn interface {
 	ReadPlain(time.Duration) (controlPlainFrame, error)
 }
 
+type controlClientTransportKind string
+
+const (
+	controlClientTransportDirect       controlClientTransportKind = "direct"
+	controlClientTransportExplicitHost controlClientTransportKind = "explicit-host"
+	controlClientTransportRelay        controlClientTransportKind = "relay"
+)
+
+type controlClientTransport interface {
+	Kind() controlClientTransportKind
+	Open(context.Context, controlClientTarget, *store) (controlClientFrameConn, controlClientTarget, error)
+}
+
+type controlClientDirectTransport struct{}
+
+func (controlClientDirectTransport) Kind() controlClientTransportKind {
+	return controlClientTransportDirect
+}
+
+func (controlClientDirectTransport) Open(_ context.Context, target controlClientTarget, st *store) (controlClientFrameConn, controlClientTarget, error) {
+	if target.UseRelay {
+		return nil, target, fmt.Errorf("direct control dial requires a non-relay target")
+	}
+	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
+	if err != nil {
+		return nil, target, err
+	}
+	return &controlClientWSFrameConn{socket: socket, cipher: cipher}, target, nil
+}
+
+type controlClientExplicitHostTransport struct{}
+
+func (controlClientExplicitHostTransport) Kind() controlClientTransportKind {
+	return controlClientTransportExplicitHost
+}
+
+func (controlClientExplicitHostTransport) Open(_ context.Context, target controlClientTarget, st *store) (controlClientFrameConn, controlClientTarget, error) {
+	fallbackHost := strings.TrimSpace(target.FallbackHost)
+	if fallbackHost == "" {
+		return nil, target, fmt.Errorf("explicit fallback host is not configured")
+	}
+	fallback, err := controlClientExplicitTarget(fallbackHost)
+	if err != nil {
+		return nil, target, err
+	}
+	if target.HasExpectedHost {
+		if validateErr := validateHostInfoAgainstKnownHost(target.ExpectedHost, fallback.HostInfo); validateErr != nil {
+			return nil, target, fmt.Errorf("fallback host identity mismatch: %w", validateErr)
+		}
+	} else if fallback.HostInfo.Identity.DeviceID != target.HostInfo.Identity.DeviceID || fallback.HostInfo.Identity.PublicKey != target.HostInfo.Identity.PublicKey {
+		return nil, target, fmt.Errorf("fallback host identity mismatch for %s", target.HostInfo.Identity.DeviceID)
+	}
+	socket, cipher, err := controlClientDialWithTimeout(fallback.BaseURL, st, fallback.HostInfo, fallback.Timeout)
+	if err != nil {
+		return nil, target, err
+	}
+	return &controlClientWSFrameConn{socket: socket, cipher: cipher}, fallback, nil
+}
+
+type controlClientRelayTransport struct{}
+
+func (controlClientRelayTransport) Kind() controlClientTransportKind {
+	return controlClientTransportRelay
+}
+
+func (controlClientRelayTransport) Open(ctx context.Context, target controlClientTarget, st *store) (controlClientFrameConn, controlClientTarget, error) {
+	conn, err := controlClientOpenRelayFrameConn(ctx, target, st)
+	if err != nil {
+		return nil, target, err
+	}
+	return conn, conn.target, nil
+}
+
 type controlClientWSFrameConn struct {
 	writeMu sync.Mutex
 	socket  *websocket.Conn
@@ -2033,37 +2106,117 @@ func controlClientRelayConnectionKey(target controlClientTarget, connectionID st
 	return controllerID + "|" + hostID + "|" + connectionID
 }
 
+type controlClientTransportFailure struct {
+	Kind controlClientTransportKind
+	Err  error
+}
+
 func controlClientOpenTargetWithRelayFallback(target controlClientTarget, st *store) (controlClientFrameConn, controlClientTarget, error) {
-	conn, activeTarget, err := controlClientOpenTarget(target, st)
-	if err == nil {
-		return conn, activeTarget, nil
-	}
-	if target.UseRelay || strings.TrimSpace(target.RelayClient.BaseURL) == "" || strings.TrimSpace(target.RelayClient.Token) == "" {
-		return nil, activeTarget, err
-	}
-	relayTarget := target
-	relayTarget.UseRelay = true
-	relayTarget.ControllerDeviceID = st.deviceIdentity.DeviceID
-	conn, activeTarget, relayErr := controlClientOpenTarget(relayTarget, st)
-	if relayErr != nil {
-		return nil, activeTarget, fmt.Errorf("direct control channel failed: %v; relay control channel failed: %w", err, relayErr)
-	}
-	return conn, activeTarget, nil
+	return controlClientOpenTargetWithTransports(context.Background(), target, st, controlClientTransportPlan(target))
 }
 
 func controlClientOpenTarget(target controlClientTarget, st *store) (controlClientFrameConn, controlClientTarget, error) {
-	if target.UseRelay {
-		conn, err := controlClientOpenRelayFrameConn(context.Background(), target, st)
-		if err != nil {
-			return nil, target, err
+	transports := controlClientPrimaryTransportPlan(target)
+	return controlClientOpenTargetWithTransports(context.Background(), target, st, transports)
+}
+
+func controlClientOpenTargetWithTransports(ctx context.Context, target controlClientTarget, st *store, transports []controlClientTransport) (controlClientFrameConn, controlClientTarget, error) {
+	if st == nil {
+		return nil, target, fmt.Errorf("controller store required")
+	}
+	if len(transports) == 0 {
+		return nil, target, fmt.Errorf("control transport is not configured")
+	}
+	failures := make([]controlClientTransportFailure, 0, len(transports))
+	activeTarget := target
+	for _, transport := range transports {
+		if transport == nil {
+			continue
 		}
-		return conn, conn.target, nil
+		conn, openedTarget, err := transport.Open(ctx, target, st)
+		if err == nil {
+			return conn, openedTarget, nil
+		}
+		activeTarget = openedTarget
+		failures = append(failures, controlClientTransportFailure{Kind: transport.Kind(), Err: err})
 	}
-	socket, cipher, activeTarget, err := controlClientDialDirectTarget(target, st)
-	if err != nil {
-		return nil, activeTarget, err
+	return nil, activeTarget, controlClientTransportError(failures)
+}
+
+func controlClientTransportPlan(target controlClientTarget) []controlClientTransport {
+	if target.UseRelay {
+		return []controlClientTransport{controlClientRelayTransport{}}
 	}
-	return &controlClientWSFrameConn{socket: socket, cipher: cipher}, activeTarget, nil
+	transports := []controlClientTransport{controlClientDirectTransport{}}
+	if strings.TrimSpace(target.FallbackHost) != "" {
+		transports = append(transports, controlClientExplicitHostTransport{})
+	}
+	if strings.TrimSpace(target.RelayClient.BaseURL) != "" && strings.TrimSpace(target.RelayClient.Token) != "" {
+		relayTarget := target
+		relayTarget.UseRelay = true
+		transports = append(transports, controlClientTargetTransport{target: relayTarget, transport: controlClientRelayTransport{}})
+	}
+	return transports
+}
+
+func controlClientPrimaryTransportPlan(target controlClientTarget) []controlClientTransport {
+	if target.UseRelay {
+		return []controlClientTransport{controlClientRelayTransport{}}
+	}
+	return []controlClientTransport{controlClientDirectTransport{}}
+}
+
+type controlClientTargetTransport struct {
+	target    controlClientTarget
+	transport controlClientTransport
+}
+
+func (t controlClientTargetTransport) Kind() controlClientTransportKind {
+	if t.transport == nil {
+		return ""
+	}
+	return t.transport.Kind()
+}
+
+func (t controlClientTargetTransport) Open(ctx context.Context, _ controlClientTarget, st *store) (controlClientFrameConn, controlClientTarget, error) {
+	target := t.target
+	if t.transport == nil {
+		return nil, target, fmt.Errorf("control transport is not configured")
+	}
+	if strings.TrimSpace(target.ControllerDeviceID) == "" && st != nil {
+		target.ControllerDeviceID = st.deviceIdentity.DeviceID
+	}
+	return t.transport.Open(ctx, target, st)
+}
+
+func controlClientTransportError(failures []controlClientTransportFailure) error {
+	if len(failures) == 0 {
+		return fmt.Errorf("control transport is not configured")
+	}
+	if len(failures) == 1 {
+		return failures[0].Err
+	}
+	parts := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		if failure.Err == nil {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s failed: %v", controlClientTransportFailureLabel(failure.Kind), failure.Err))
+	}
+	return fmt.Errorf("%s", strings.Join(parts, "; "))
+}
+
+func controlClientTransportFailureLabel(kind controlClientTransportKind) string {
+	switch kind {
+	case controlClientTransportDirect:
+		return "direct control channel"
+	case controlClientTransportExplicitHost:
+		return "fallback host control channel"
+	case controlClientTransportRelay:
+		return "relay control channel"
+	default:
+		return "control transport"
+	}
 }
 
 func controlClientFrameRoundTrip(conn controlClientFrameConn, timeout time.Duration, st *store, req ControlRequest) (ControlResponse, error) {
@@ -2112,35 +2265,6 @@ func controlClientHostInfoWithClient(host string, client *http.Client) (HostInfo
 
 func controlClientDial(host string, st *store, hostInfo HostInfo) (*websocket.Conn, *controlCipher, error) {
 	return controlClientDialWithTimeout(host, st, hostInfo, 0)
-}
-
-func controlClientDialDirectTarget(target controlClientTarget, st *store) (*websocket.Conn, *controlCipher, controlClientTarget, error) {
-	if target.UseRelay {
-		return nil, nil, target, fmt.Errorf("direct control dial requires a non-relay target")
-	}
-	socket, cipher, err := controlClientDialWithTimeout(target.BaseURL, st, target.HostInfo, target.Timeout)
-	if err == nil {
-		return socket, cipher, target, nil
-	}
-	if strings.TrimSpace(target.FallbackHost) == "" {
-		return nil, nil, target, err
-	}
-	fallback, fallbackErr := controlClientExplicitTarget(target.FallbackHost)
-	if fallbackErr != nil {
-		return nil, nil, target, fmt.Errorf("LAN control channel failed: %v; fallback host failed: %w", err, fallbackErr)
-	}
-	if target.HasExpectedHost {
-		if validateErr := validateHostInfoAgainstKnownHost(target.ExpectedHost, fallback.HostInfo); validateErr != nil {
-			return nil, nil, target, fmt.Errorf("LAN control channel failed: %v; fallback host identity mismatch: %w", err, validateErr)
-		}
-	} else if fallback.HostInfo.Identity.DeviceID != target.HostInfo.Identity.DeviceID || fallback.HostInfo.Identity.PublicKey != target.HostInfo.Identity.PublicKey {
-		return nil, nil, target, fmt.Errorf("LAN control channel failed: %v; fallback host identity mismatch for %s", err, target.HostInfo.Identity.DeviceID)
-	}
-	socket, cipher, fallbackDialErr := controlClientDialWithTimeout(fallback.BaseURL, st, fallback.HostInfo, fallback.Timeout)
-	if fallbackDialErr != nil {
-		return nil, nil, target, fmt.Errorf("LAN control channel failed: %v; fallback control channel failed: %w", err, fallbackDialErr)
-	}
-	return socket, cipher, fallback, nil
 }
 
 func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, timeout time.Duration) (*websocket.Conn, *controlCipher, error) {
