@@ -482,8 +482,11 @@ func newControlRelayTestRig(t *testing.T, capabilities ...string) (*app, Workspa
 		t.Fatal(err)
 	}
 	enabled := true
+	baseURL := cloudServer.URL
+	token := "account-token"
 	if _, err := settings.patch(appSettingsPatch{
 		RemoteControl: &remoteControlSettingsPatch{Enabled: &enabled},
+		Cloud:         &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token},
 	}); err != nil {
 		t.Fatal(err)
 	}

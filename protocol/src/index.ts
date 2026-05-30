@@ -1119,6 +1119,20 @@ export type CloudAuthStartResponse = {
 
 export type CloudAuthLogoutResponse = {
   ok: boolean;
+  cloud_removed?: boolean;
+  cloud_remove_error?: string;
+  mesh_reset?: boolean;
+  old_device_id?: string;
+  new_device_id?: string;
+  closed_control_sessions?: number;
+  released_terminal_writers?: number;
+  reset?: {
+    old_device_id?: string;
+    new_device_id?: string;
+    trust_grants_cleared?: number;
+    known_hosts_cleared?: number;
+    pairing_requests_cleared?: number;
+  };
 };
 
 export type CloudDeviceRecord = {
@@ -1149,6 +1163,7 @@ export type CloudDeviceRemoveResponse = {
   device: CloudDeviceRecord;
   local_trust_revoked: boolean;
   trust_revoke?: HostTrustRevokeResult;
+  local_mesh_logout?: CloudAuthLogoutResponse;
 };
 
 export type CloudPairingSignalInput = {

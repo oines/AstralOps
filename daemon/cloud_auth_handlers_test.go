@@ -75,10 +75,40 @@ func TestCloudAuthStartAndCallbackStoresAccountToken(t *testing.T) {
 	}
 }
 
-func TestCloudAuthLogoutClearsLocalAccountToken(t *testing.T) {
+func TestCloudAuthLogoutClearsCloudTokenAndResetsMeshIdentity(t *testing.T) {
+	var exchanges int32
+	cloud := newTestCloudAuthServer(t, "unused", "local-account-token", &exchanges)
 	app := testCloudAuthApp(t)
+	workspace, err := app.store.createWorkspace(createWorkspaceRequest{Name: "Local", Target: "local", Agent: AgentCodex, LocalCWD: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedController, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingController, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.rememberKnownHost(trustedController.hostInfo(), "http://127.0.0.1:43900"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:  trustedController.deviceIdentity.DeviceID,
+		ControllerPublicKey: trustedController.deviceIdentity.PublicKey,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.submitPairingRequest(pairingRequestInput{
+		ControllerDeviceID:  pendingController.deviceIdentity.DeviceID,
+		ControllerPublicKey: pendingController.deviceIdentity.PublicKey,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldDeviceID := app.store.hostInfo().Identity.DeviceID
 	enabled := true
-	baseURL := "https://cloud.example.test"
+	baseURL := cloud.URL
 	token := "local-account-token"
 	if _, err := app.settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
 		t.Fatal(err)
@@ -89,9 +119,25 @@ func TestCloudAuthLogoutClearsLocalAccountToken(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("logout status = %d body=%s", rr.Code, rr.Body.String())
 	}
+	var result cloudAuthLogoutResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.CloudRemoved || !result.MeshReset || result.ClosedControlSessions != 0 {
+		t.Fatalf("logout result = %#v", result)
+	}
 	settings := app.currentSettings()
 	if settings.Cloud.Enabled || settings.Cloud.AccountToken != "" || settings.Cloud.BaseURL != baseURL {
 		t.Fatalf("cloud settings = %#v", settings.Cloud)
+	}
+	if app.store.hostInfo().Identity.DeviceID == oldDeviceID {
+		t.Fatal("mesh logout did not rotate device identity")
+	}
+	if len(app.store.listTrustGrants()) != 0 || len(app.store.listKnownHosts()) != 0 || len(app.store.listPairingRequests()) != 0 {
+		t.Fatalf("mesh state not cleared: grants=%d known=%d pairings=%d", len(app.store.listTrustGrants()), len(app.store.listKnownHosts()), len(app.store.listPairingRequests()))
+	}
+	if _, ok := app.store.getWorkspace(workspace.ID); !ok {
+		t.Fatal("mesh logout removed local workspace")
 	}
 }
 

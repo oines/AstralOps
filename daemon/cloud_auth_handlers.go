@@ -40,9 +40,7 @@ type cloudAuthStartResponse struct {
 	ExpiresAt   string `json:"expires_at"`
 }
 
-type cloudAuthLogoutResponse struct {
-	OK bool `json:"ok"`
-}
+type cloudAuthLogoutResponse = cloudMeshLogoutResult
 
 func (a *app) handleCloudAuthAction(w http.ResponseWriter, r *http.Request) {
 	route := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/cloud/auth/"), "/")
@@ -151,22 +149,12 @@ func (a *app) handleCloudAuthLogout(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	disabled := false
-	empty := ""
-	if _, err := a.settings.patchWithHook(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &disabled, AccountToken: &empty}}, func(previous, next AppSettings) error {
-		if cloudSettingsChanged(previous.Cloud, next.Cloud) {
-			if err := a.applyCloudSettings(next.Cloud); err != nil {
-				return err
-			}
-		}
-		return nil
-	}, func(previous AppSettings) {
-		_ = a.applyCloudSettings(previous.Cloud)
-	}); err != nil {
+	result, err := a.logoutCloudMesh(r.Context(), true)
+	if err != nil {
 		writeActionError(w, newActionError(http.StatusBadRequest, "cloud_logout_failed", err.Error()))
 		return
 	}
-	writeJSON(w, http.StatusOK, cloudAuthLogoutResponse{OK: true})
+	writeJSON(w, http.StatusOK, cloudAuthLogoutResponse(result))
 }
 
 func (a *app) enableCloudAccount(baseURL, accountToken string) error {

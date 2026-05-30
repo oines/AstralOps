@@ -141,12 +141,16 @@ func (s *store) listKnownHosts() []KnownHost {
 }
 
 func (s *store) writeKnownHostsLocked() error {
-	hosts := make([]KnownHost, 0, len(s.knownHosts))
-	for _, host := range s.knownHosts {
+	return writeKnownHostsFile(s.dataDir, s.knownHosts)
+}
+
+func writeKnownHostsFile(dataDir string, hostsByDevice map[string]KnownHost) error {
+	hosts := make([]KnownHost, 0, len(hostsByDevice))
+	for _, host := range hostsByDevice {
 		hosts = append(hosts, normalizeKnownHost(host))
 	}
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].DeviceID < hosts[j].DeviceID })
-	return writeJSONFile(knownHostsPath(s.dataDir), hosts, defaultHostFileMode)
+	return writeJSONFile(knownHostsPath(dataDir), hosts, defaultHostFileMode)
 }
 
 func normalizeKnownHost(host KnownHost) KnownHost {

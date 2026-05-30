@@ -760,23 +760,32 @@ function RemoteControlContent({
 
   async function removeCloudDevice(device: CloudDeviceRecord): Promise<void> {
     if (!core || device.status === "revoked") return;
+    const currentDevice = device.device_id === host?.identity.device_id;
     const revokeLocalTrust = trustedGrantByDeviceId.has(device.device_id);
     if (confirmCloudRemoveId !== device.device_id) {
       setConfirmCloudRemoveId(device.device_id);
-      setStatus(revokeLocalTrust ? "再次点击确认移除并撤销本机信任" : "再次点击确认从账号 Mesh 移除");
+      setStatus(currentDevice ? "再次点击确认本机退出 Mesh" : revokeLocalTrust ? "再次点击确认从 Mesh 删除并撤销本机信任" : "再次点击确认从 Mesh 删除设备");
       return;
     }
     setRemovingCloudDeviceId(device.device_id);
     setError("");
     try {
       const result = await core.removeCloudDevice(device.device_id, { revoke_local_trust: revokeLocalTrust });
-      if (result.local_trust_revoked && result.trust_revoke) {
+      if (result.local_mesh_logout) {
+        setCloudAccount(null);
+        setCloudDevices([]);
+        setStatus(result.local_mesh_logout.cloud_removed ? "本机已退出 Mesh，远控身份和信任已重置" : "本机已退出 Mesh，Cloud 删除稍后可重试");
+        await onReloadSettings();
+        await loadRemoteControl();
+      } else if (result.local_trust_revoked && result.trust_revoke) {
         setStatus(`已移除并撤销本机信任，关闭 ${result.trust_revoke.closed_control_sessions} 个控制连接`);
       } else {
-        setStatus("已从账号 Mesh 移除设备");
+        setStatus("已从 Mesh 删除设备");
       }
       setConfirmCloudRemoveId("");
-      await loadRemoteControl();
+      if (!result.local_mesh_logout) {
+        await loadRemoteControl();
+      }
     } catch (removeError) {
       setError(removeError instanceof Error ? removeError.message : String(removeError));
     } finally {
@@ -817,8 +826,9 @@ function RemoteControlContent({
       await core.logoutCloudAuth();
       setCloudAccount(null);
       setCloudDevices([]);
-      setStatus("已退出云账号");
+      setStatus("已退出 Mesh，远控身份和信任已重置");
       await onReloadSettings();
+      await loadRemoteControl();
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : String(logoutError));
     } finally {
@@ -879,7 +889,7 @@ function RemoteControlContent({
         />
         <SettingRow
           title="云账号"
-          description={settings.cloud.enabled ? cloudBaseURLLabel(settings) : "账号关闭时不会同步设备状态"}
+          description={settings.cloud.enabled ? `${cloudBaseURLLabel(settings)}；退出会断开 Mesh 并重置远控身份，本地数据保留` : "未登录时本机仍可使用，但不能远控别人或被别人远控"}
           control={
             settings.cloud.enabled ? (
               <div className="flex items-center gap-2">
@@ -899,7 +909,7 @@ function RemoteControlContent({
             <InfoRow label="账号" value={cloudAccount?.account_id_hash || (error ? "读取失败" : "未加载")} />
             <InfoRow label="账号中继" value={cloudRelayLabel(cloudAccount)} />
             <SettingRow title="中继授权" description="由云端签发给本机使用，短期有效" control={<StatusPill label={cloudRelayCredentialLabel(cloudAccount)} tone={cloudRelayCredentialTone(cloudAccount)} />} />
-            <SettingRow title="账号设备" description="云端只保存设备公开身份、在线状态和路由元数据" control={<StatusPill label={`${cloudDevices.length} 台`} tone={cloudDevices.length > 0 ? "good" : "muted"} />} />
+            <SettingRow title="Mesh 设备" description="云端只保存设备公开身份、在线状态、撤销状态和路由元数据" control={<StatusPill label={`${cloudDevices.length} 台`} tone={cloudDevices.length > 0 ? "good" : "muted"} />} />
             {cloudDevices.length > 0 ? (
               cloudDevices.map((device) => (
                 <CloudDeviceRow
@@ -913,11 +923,11 @@ function RemoteControlContent({
                 />
               ))
             ) : (
-              <EmptySettingsRow title="暂无账号设备" description="本机注册到云账号后会显示账号 Mesh 设备" />
+              <EmptySettingsRow title="暂无 Mesh 设备" description="本机注册到云账号后会显示 Mesh 设备" />
             )}
           </>
         ) : (
-          <EmptySettingsRow title="云账号未开启" description="开启账号后，本机和其他设备会出现在这里" />
+          <EmptySettingsRow title="未加入 Mesh" description="登录 Cloud 后，本机和其他设备会出现在这里" />
         )}
       </SettingsSection>
 
@@ -1170,7 +1180,7 @@ function CloudDeviceRow({
   const removing = removingId === device.device_id;
   const confirming = confirmRemoveId === device.device_id;
   const name = device.device_name || device.device_id;
-  const removeLabel = current ? "本机" : revoked ? "已移除" : removing ? "移除中" : confirming ? "确认移除" : localTrustGrant ? "移除并撤销" : "移除";
+  const removeLabel = revoked ? "已删除" : removing ? "处理中" : confirming ? (current ? "确认退出" : "确认删除") : current ? "退出 Mesh" : localTrustGrant ? "删除并撤销" : "删除";
   return (
     <div className="grid min-h-[92px] grid-cols-[minmax(0,1fr)_auto] items-center gap-5 border-b border-[var(--ao-border)] px-4 py-3 last:border-b-0">
       <div className="min-w-0">
@@ -1192,7 +1202,7 @@ function CloudDeviceRow({
         </div>
       </div>
       <ButtonControl
-        disabled={current || revoked || removing}
+        disabled={revoked || removing}
         label={removeLabel}
         onClick={() => onRemove(device)}
       />

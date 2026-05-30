@@ -42,6 +42,7 @@ func (a *app) applyCloudSettings(settings CloudSettings) error {
 
 func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings) {
 	client := CloudClient{BaseURL: settings.BaseURL, Token: settings.AccountToken}
+	selfDeviceID := a.store.hostInfo().Identity.DeviceID
 	if err := a.cloudRegisterAndHeartbeat(ctx, client); err != nil {
 		log.Printf("astralops cloud sync: %v", err)
 	}
@@ -54,7 +55,7 @@ func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings) {
 	defer ticker.Stop()
 	relayTicker := time.NewTicker(controlRelayPollInterval)
 	defer relayTicker.Stop()
-	defer a.cloudMarkOffline(settings)
+	defer a.cloudMarkOffline(settings, selfDeviceID)
 
 	for {
 		select {
@@ -106,6 +107,7 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 	}
 	a.setCloudSelfRevoked(selfRevoked)
 	if selfRevoked {
+		a.handleCloudSelfRevoked()
 		return fmt.Errorf("current device has been removed from cloud mesh")
 	}
 
@@ -393,14 +395,18 @@ func (a *app) syncCloudPairingResolution(request PairingRequest) {
 	a.cloudResolvePairingSignal(ctx, CloudClient{BaseURL: settings.BaseURL, Token: settings.AccountToken}, request)
 }
 
-func (a *app) cloudMarkOffline(settings CloudSettings) {
+func (a *app) cloudMarkOffline(settings CloudSettings, deviceID string) {
 	if a == nil || a.store == nil || !settings.Enabled {
+		return
+	}
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	client := CloudClient{BaseURL: settings.BaseURL, Token: settings.AccountToken}
-	if _, err := client.MarkDeviceOffline(ctx, a.store.hostInfo().Identity.DeviceID); err != nil {
+	if _, err := client.MarkDeviceOffline(ctx, deviceID); err != nil {
 		log.Printf("astralops cloud offline: %v", err)
 	}
 }

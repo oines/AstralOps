@@ -451,16 +451,20 @@ func TestCloudRuntimeSelfRevokedBlocksRemoteTargets(t *testing.T) {
 	if _, err := client.RemoveDevice(t.Context(), app.store.hostInfo().Identity.DeviceID); err != nil {
 		t.Fatal(err)
 	}
+	oldDeviceID := app.store.hostInfo().Identity.DeviceID
 	if err := app.cloudRegisterAndHeartbeat(t.Context(), client); err == nil || !strings.Contains(err.Error(), "removed from cloud mesh") {
 		t.Fatalf("self revoked sync err = %v, want removed from cloud mesh", err)
 	}
-	if !app.currentDeviceCloudRevoked() {
-		t.Fatal("current device cloud revoked flag was not set")
+	if app.currentSettings().Cloud.Enabled || app.store.hostInfo().Identity.DeviceID == oldDeviceID {
+		t.Fatalf("self revoked did not force local mesh logout: cloud=%#v old=%s new=%s", app.currentSettings().Cloud, oldDeviceID, app.store.hostInfo().Identity.DeviceID)
+	}
+	if len(app.store.listKnownHosts()) != 0 {
+		t.Fatalf("known hosts = %#v, want cleared after self revoked", app.store.listKnownHosts())
 	}
 	if _, err := app.remoteHostTarget(hostStore.hostInfo().Identity.DeviceID); err == nil {
 		t.Fatal("remote Host target succeeded after current device was removed from cloud mesh")
 	} else {
-		assertActionError(t, err, http.StatusForbidden, "cloud_device_revoked")
+		assertActionError(t, err, http.StatusConflict, "cloud_mesh_inactive")
 	}
 }
 

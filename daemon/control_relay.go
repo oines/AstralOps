@@ -112,6 +112,9 @@ func (a *app) handleControlRelayHello(ctx context.Context, client RelayClient, e
 }
 
 func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySession, controlHelloAckFrame, error) {
+	if !a.cloudMeshActive() {
+		return nil, controlHelloAckFrame{}, errors.New("cloud mesh is not active")
+	}
 	if hello.Type != "hello" || hello.Version != controlProtocolVersion {
 		return nil, controlHelloAckFrame{}, errors.New("invalid control hello")
 	}

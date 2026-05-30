@@ -549,6 +549,33 @@ func (a *app) closeControlSessionsForDevice(controllerDeviceID, reason string) i
 	return a.closeControlSessionsForDeviceExcept(controllerDeviceID, reason, "")
 }
 
+func (a *app) closeAllControlSessions(reason string) int {
+	a.controlMu.Lock()
+	wsSessions := make([]*controlWSConn, 0, len(a.controlSessions))
+	for id, conn := range a.controlSessions {
+		wsSessions = append(wsSessions, conn)
+		delete(a.controlSessions, id)
+	}
+	relaySessions := make([]*controlRelaySession, 0, len(a.controlRelaySessions))
+	for id, session := range a.controlRelaySessions {
+		relaySessions = append(relaySessions, session)
+		delete(a.controlRelaySessions, id)
+	}
+	a.controlMu.Unlock()
+	for _, conn := range wsSessions {
+		conn.cancelControlSession()
+		conn.cancelAllControlStreams()
+		a.detachTerminalViewersForControlSession(conn.id, reason)
+		conn.writeEncryptedClose(reason, reason)
+		_ = conn.socket.Close()
+	}
+	for _, session := range relaySessions {
+		session.writePlain(controlPlainFrame{Type: "close", Code: reason, Reason: reason})
+		session.close(reason)
+	}
+	return len(wsSessions) + len(relaySessions)
+}
+
 func (a *app) closeControlSessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID string) int {
 	a.controlMu.Lock()
 	sessions := []*controlWSConn{}

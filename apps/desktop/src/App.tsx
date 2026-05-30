@@ -832,7 +832,7 @@ export function App(): React.JSX.Element {
         id: host.device_id,
         name: host.device_name || host.device_id,
         kind: host.device_kind || "desktop",
-        subtitle: remoteHostNeedsPairing(host) ? "远端 Host · 未配对" : host.connection === "lan" ? "远端 Host · LAN" : host.connection === "cloud" ? "远端 Host · 云端" : "远端 Host",
+        subtitle: remoteHostNeedsPairing(host) ? "Mesh Host · 未授权" : host.connection === "lan" ? "Mesh Host · LAN" : host.connection === "cloud" ? "Mesh Host · Relay" : "Mesh Host",
         connection: host.connection,
       })),
     ],
@@ -1227,7 +1227,7 @@ function HostPairingPanel({
         </div>
         <div className="grid gap-3 px-4 py-4">
           <p className="m-0 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
-            {status || "这台设备还不是本机已知 Host。发起请求后，目标 Host 必须在本机信任列表中批准，云端状态不会直接授予控制权。"}
+            {status || "这台设备属于当前账号 Mesh，但还没有授予本机控制权。发起请求后，目标 Host 必须批准；Cloud 登录不会直接授予控制权。"}
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <button

@@ -45,11 +45,9 @@ func (a *app) handleRemoteHosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hosts := map[string]remoteHostRecord{}
-	for _, known := range a.store.listKnownHosts() {
-		if knownHostRevoked(known) {
-			continue
-		}
-		hosts[known.DeviceID] = remoteHostRecordFromKnownHost(known)
+	if !a.cloudMeshActive() {
+		writeJSON(w, http.StatusOK, remoteHostsResponse{Hosts: []remoteHostRecord{}})
+		return
 	}
 	a.mergeCloudRemoteHosts(r.Context(), hosts)
 	if truthyQuery(r.URL.Query().Get("discover")) {
@@ -112,6 +110,10 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 	}
 	client := &http.Client{Timeout: remoteHostLANTimeout}
 	for _, candidate := range candidates {
+		existing, ok := hosts[candidate.DeviceID]
+		if !ok {
+			continue
+		}
 		known, ok := a.store.knownHost(candidate.DeviceID)
 		if !ok || known.PublicKeyFingerprint != candidate.PublicKeyFingerprint {
 			continue
@@ -127,7 +129,11 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 			continue
 		}
 		known = a.rememberRemoteHostLANRoute(hostInfo, candidate.BaseURL, known)
-		hosts[candidate.DeviceID] = remoteHostRecordFromHostInfo(hostInfo, known, candidate.BaseURL)
+		next := remoteHostRecordFromHostInfo(hostInfo, known, candidate.BaseURL)
+		if next.Capabilities == nil {
+			next.Capabilities = existing.Capabilities
+		}
+		hosts[candidate.DeviceID] = next
 	}
 }
 
@@ -581,6 +587,9 @@ func controlResponseMessage(response ControlResponse) string {
 }
 
 func (a *app) remoteHostTarget(hostDeviceID string) (controlClientTarget, error) {
+	if !a.cloudMeshActive() {
+		return controlClientTarget{}, cloudMeshInactiveError()
+	}
 	return a.remoteTargetResolver().ResolveKnownHost(hostDeviceID)
 }
 

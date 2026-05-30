@@ -143,8 +143,8 @@ func TestSettingsRemoteControlLifecycle(t *testing.T) {
 		t.Fatalf("host info through remote listener = %v", err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("host status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("host status = %d, want 409 while cloud mesh is inactive", resp.StatusCode)
 	}
 	runtimeBody, err := os.ReadFile(filepath.Join(dir, "runtime", "daemon.json"))
 	if err != nil {

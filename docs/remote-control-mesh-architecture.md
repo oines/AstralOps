@@ -369,17 +369,19 @@ POST /v1/cloud/pairing/requests/:request_id/resolve
 
 `GET /v1/cloud/auth/callback` 是给系统浏览器回跳的本机入口，不要求 daemon auth token，但必须校验 daemon 内存中的一次性 state。state 过期、重复使用或不匹配时只能显示失败页，不能兑换 login code。兑换成功后 daemon 保存 `cloud.base_url` 和 `cloud.account_token` 到本机 settings，并触发 cloud sync。renderer 不能直接接触 OAuth client secret、login code exchange 细节或 relay credential 本体。
 
-`POST /v1/cloud/auth/logout` 只清理本机 cloud enabled 状态和 account token。它不是账号删除，也不会自动移除 Host trust grant；从账号 Mesh 移除设备仍走 cloud device remove 和本机 trust revoke 两个边界明确的动作。
+`POST /v1/cloud/auth/logout` 是本机退出当前账号 Mesh 的身份边界。daemon 会先 best-effort 调 cloud `remove` 撤销当前 device id，再关闭 cloud sync/relay、断开远控连接、清理 account token，并重置本机 mesh device identity、Host trust grants、known hosts 和 pairing requests。本地 workspace、session、event、文件和 SSH 配置不属于 Mesh 生命周期，退出账号不会删除这些数据。即使 cloud remove 因网络失败没有完成，本机也必须先退出 Mesh；旧 cloud presence 依赖 cloud 端 TTL 变成 offline/不可连。
 
 `/v1/cloud/devices` 注册的是当前 daemon 的 public device identity。默认 `can_control=true`，`can_host` 取本机 `remote_control.enabled`，调用方也可以在注册请求里显式覆盖。这个动作不会自动开启 Host listener；是否允许被远控仍然由本机 `remote_control` settings 决定。
 
-daemon 启动后如果 `cloud.enabled=true`，会先读取 `GET /v1/account` 的账号 relay 配置，再向 cloud 注册当前设备并定时 heartbeat。注册和 heartbeat 中的 `relay_url` 只是 presence/routing metadata，来自账号默认 relay，不是每台设备任意选择的 relay。关闭 cloud settings 时，daemon 会尝试把当前设备标记为 offline。自动同步只发送 public device identity、capabilities、can_host/can_control、presence 和账号 relay routing metadata，不发送工作区、session、事件、SSH 或路径数据。
+daemon 启动后如果 `cloud.enabled=true`，会先读取 `GET /v1/account` 的账号 relay 配置，再向 cloud 注册当前设备并定时 heartbeat。注册和 heartbeat 中的 `relay_url` 只是 presence/routing metadata，来自账号默认 relay，不是每台设备任意选择的 relay。关闭 cloud settings 时，daemon 会尝试把当前设备标记为 offline；正式退出登录则走上面的 Mesh logout/reset 语义。自动同步只发送 public device identity、capabilities、can_host/can_control、presence 和账号 relay routing metadata，不发送工作区、session、事件、SSH 或路径数据。
 
 如果本机 `remote_control.enabled=true`，daemon 的 cloud sync 还会拉取 `host_device_id == 本机 device_id` 的 pending pairing request。这个同步只能把云端信令转换成 Host 本地 `PairingRequest(source=cloud, cloud_request_id=...)`，并通过 cloud device registry 取得 Controller 的 public key；它不能直接写入 `TrustGrant`。Host UI 或已有可信 `host.manage` Controller 批准/拒绝本地 request 后，Host 再把同一个 `cloud_request_id` 回写为 approved/denied。云端状态只是信令状态，真正可控条件仍然是 Host 本地 trust store、E2EE 握手和 capability 校验。
 
-`GET /v1/remote/hosts` 会把同账号 cloud devices 中 `can_host=true` 的设备并入远端 Host 候选列表。Cloud 候选只代表“账号下可发现的 Host 设备”，不代表已经获得控制权。真正发起远控 action 前仍必须满足：
+`GET /v1/remote/hosts` 只在本机已登录 Cloud 且当前 device 未被 revoked 时返回远端 Host。列表来源是同账号 cloud devices 中 `can_host=true` 的设备；`known_hosts.json` 只是 Controller 侧 Host identity cache，不能单独把 stale 设备放回 selector。LAN discovery 只能把已经属于 cloud Mesh 列表且 known host fingerprint 匹配的设备升级成 `lan` 路由。Cloud 候选只代表“账号下可发现的 Host 设备”，不代表已经获得控制权。真正发起远控 action 前仍必须满足：
 
 ```text
+本机 Controller 已登录 Cloud Mesh
+目标 Host 已登录 Cloud Mesh
 本地已知 Host identity / known host 匹配
 Host 本地 trust grant 存在且未 revoked
 E2EE control channel 握手成功
@@ -834,6 +836,8 @@ POST /v1/devices/:device_id/remove
 
 它不会替代 Host 本地 trust revoke。mesh 注册状态只决定“账号里是否还能发现和中继这个设备”，真正能不能控制某台 Host 仍由那台 Host 本地 trust store 和当前 E2EE control session 决定。如果要让正在控制某台 Host 的设备立即断开，仍必须对目标 Host 执行 `POST /v1/trust/devices/:device_id/revoke` 或等价的 `host.trust.revoke` 控制动作。
 
+如果移除的是当前本机 device id，本机 daemon 必须把它当作 `cloud auth logout` 处理：从账号 Mesh 删除旧 device id，并立即执行本地 mesh identity reset。下一次登录同一个账号时，本机会以新的 device id 重新加入 Mesh，并需要重新建立 Host trust。
+
 Desktop 设置页可以在用户从账号 Mesh 移除设备时请求本机 daemon 一并撤销本机 trust：
 
 ```json
@@ -855,7 +859,7 @@ cloud device.status == revoked
   -> 本地 pending pairing request 标记 denied
 ```
 
-如果当前设备自身已经在云端被标记为 `revoked`，daemon 必须停止把它当作账号 Mesh 成员继续发起远控目标解析；即使目标 Host 仍在 LAN 内，也不能因为本地 known host 缓存而继续走 LAN 控制。
+如果当前设备自身已经在云端被标记为 `revoked`，daemon 必须停止把它当作账号 Mesh 成员继续发起或接受远控，关闭现有 control session，并执行本地 mesh logout/reset；即使目标 Host 仍在 LAN 内，也不能因为本地 known host 缓存而继续走 LAN 控制。
 
 ### 远控连接体验
 
@@ -1603,7 +1607,7 @@ POST /v1/remote/hosts/:host_device_id/sessions/:session_id/queue/:queue_id/steer
 POST /v1/remote/hosts/:host_device_id/approvals/:interaction_id/respond
 ```
 
-这些 endpoint 是本机 daemon 的 controller-side facade，不是 Host remote listener。它们必须只对本机 authenticated Desktop 开放；真正的远端执行仍然通过目标 Host 的 `/v1/control/ws`，并且只允许已知 Host identity。`discover=1` 只把 LAN 上匹配 known host fingerprint 且通过 `/v1/host` 校验的 Host 标为 `lan`，未知设备不能自动出现在可控列表里。
+这些 endpoint 是本机 daemon 的 controller-side facade，不是 Host remote listener。它们必须只对本机 authenticated Desktop 开放，并且要求本机已加入 Cloud Mesh；真正的远端执行仍然通过目标 Host 的 `/v1/control/ws`，目标 Host listener/relay hello 也必须要求 Host 当前 Cloud Mesh active。`discover=1` 只把 Cloud Mesh 列表中已存在、LAN 上匹配 known host fingerprint 且通过 `/v1/host` 校验的 Host 标为 `lan`，未知设备和本地 stale known host 不能自动出现在可控列表里。
 
 当前 Desktop 的 Host selector 使用这个 facade 拉取远端 Host 和 Host-scoped workspaces/sessions/events。创建 workspace 使用同一套 Host-scoped 目录选择器：本机 local、远端 local、本机 ssh、远端 ssh 都先通过当前 CoreClient 调用 `host.fs.browse`，再用 `core.control.workspace.create` 在所选 Host 上创建；SSH workspace 的 connect/disconnect 也通过 Host 侧 `core.control.workspace.connect/disconnect` 执行。远程 PTY 通过本机 daemon WebSocket facade 接入：Desktop 仍打开 `/v1/remote/hosts/:host_device_id/workspaces/:workspace_id/pty`，本机 daemon 再通过目标 Host 的 encrypted control WebSocket 转发 `terminal.open/attach/input/resize/close`，并把 `terminal.output` / `terminal.closed` frame 映射回本地终端 UI 的 ready/output/exit 消息。远端 Host 的 pending pairing request 管理由本机 daemon facade 转成 `host.pairing.*` E2EE action；发起 cloud pairing request 前，本机 daemon 会先注册当前 Controller public identity，避免首次启动还未 heartbeat 时请求失败；approved cloud pairing signal 只会导入 Host public identity 到 Controller `known_hosts`，不会写任何 Host trust grant。Desktop renderer 不直接持有远控密钥。尚未进入 control protocol 的本地 app 设置和 session command 列表不能在 UI 里伪造；下一步应为这些能力补明确协议 action 或保持不可用状态。
 

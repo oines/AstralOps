@@ -416,12 +416,16 @@ func (s *store) resolvePairingRequest(requestID, status string) (PairingRequest,
 }
 
 func (s *store) writePairingRequestsLocked() error {
-	requests := make([]PairingRequest, 0, len(s.pairingRequests))
-	for _, request := range s.pairingRequests {
+	return writePairingRequestsFile(s.dataDir, s.pairingRequests)
+}
+
+func writePairingRequestsFile(dataDir string, requestsByID map[string]PairingRequest) error {
+	requests := make([]PairingRequest, 0, len(requestsByID))
+	for _, request := range requestsByID {
 		requests = append(requests, normalizePairingRequest(request))
 	}
 	sort.Slice(requests, func(i, j int) bool { return requests[i].RequestID < requests[j].RequestID })
-	return writeJSONFile(pairingRequestsPath(s.dataDir), requests, defaultHostFileMode)
+	return writeJSONFile(pairingRequestsPath(dataDir), requests, defaultHostFileMode)
 }
 
 func (s *store) trustedControlGrantLocked(controllerDeviceID string) (TrustGrant, bool) {

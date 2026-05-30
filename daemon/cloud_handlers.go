@@ -22,9 +22,10 @@ type cloudDeviceRemoveRequest struct {
 }
 
 type cloudDeviceRemoveResponse struct {
-	Device            CloudDeviceRecord      `json:"device"`
-	LocalTrustRevoked bool                   `json:"local_trust_revoked"`
-	TrustRevoke       *hostTrustRevokeResult `json:"trust_revoke,omitempty"`
+	Device            CloudDeviceRecord        `json:"device"`
+	LocalTrustRevoked bool                     `json:"local_trust_revoked"`
+	TrustRevoke       *hostTrustRevokeResult   `json:"trust_revoke,omitempty"`
+	LocalMeshLogout   *cloudAuthLogoutResponse `json:"local_mesh_logout,omitempty"`
 }
 
 type cloudAccountStatusResponse struct {
@@ -161,6 +162,25 @@ func (a *app) handleCloudDeviceAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	selfID := strings.TrimSpace(a.store.hostInfo().Identity.DeviceID)
+	if parts[0] == selfID {
+		logout, err := a.logoutCloudMesh(ctx, true)
+		if err != nil {
+			writeActionError(w, newActionError(http.StatusBadRequest, "cloud_logout_failed", err.Error()))
+			return
+		}
+		device := CloudDeviceRecord{
+			DeviceID:  logout.OldDeviceID,
+			Status:    cloudDeviceStatusRevoked,
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		if logout.RemovedDevice != nil {
+			device = *logout.RemovedDevice
+		}
+		response := cloudDeviceRemoveResponse{Device: device, LocalMeshLogout: (*cloudAuthLogoutResponse)(&logout)}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
 	record, err := client.RemoveDevice(ctx, parts[0])
 	if err != nil {
 		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
@@ -274,6 +294,9 @@ func cloudAccountStatusFromAccount(account CloudAccount) cloudAccountStatusRespo
 
 func (a *app) cloudClientFromSettings() (CloudClient, error) {
 	settings := a.currentSettings().Cloud
+	if a.currentDeviceCloudRevoked() {
+		return CloudClient{}, newActionError(http.StatusForbidden, "cloud_device_revoked", "current device has been removed from cloud mesh")
+	}
 	if !settings.Enabled {
 		return CloudClient{}, newActionError(http.StatusConflict, "cloud_disabled", "cloud is not enabled")
 	}

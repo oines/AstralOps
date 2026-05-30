@@ -33,7 +33,24 @@ type remoteControlDiscoveryPacket struct {
 	Candidate *LanHostCandidate `json:"candidate,omitempty"`
 }
 
+type remoteControlDiscoveryIdentityProvider func() (DeviceIdentity, bool)
+
 func startRemoteControlDiscovery(identity DeviceIdentity, controlPort int) (*net.UDPConn, error) {
+	return startRemoteControlDiscoveryWithProvider(func() (DeviceIdentity, bool) {
+		return identity, true
+	}, controlPort)
+}
+
+func startRemoteControlDiscoveryForApp(a *app, controlPort int) (*net.UDPConn, error) {
+	return startRemoteControlDiscoveryWithProvider(func() (DeviceIdentity, bool) {
+		if a == nil || !a.cloudMeshActive() {
+			return DeviceIdentity{}, false
+		}
+		return a.store.hostInfo().Identity, true
+	}, controlPort)
+}
+
+func startRemoteControlDiscoveryWithProvider(identityProvider remoteControlDiscoveryIdentityProvider, controlPort int) (*net.UDPConn, error) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: controlPort})
 	if err != nil {
 		return nil, err
@@ -42,11 +59,11 @@ func startRemoteControlDiscovery(identity DeviceIdentity, controlPort int) (*net
 	if actualPort == 0 {
 		actualPort = conn.LocalAddr().(*net.UDPAddr).Port
 	}
-	go serveRemoteControlDiscovery(conn, identity, actualPort)
+	go serveRemoteControlDiscovery(conn, identityProvider, actualPort)
 	return conn, nil
 }
 
-func serveRemoteControlDiscovery(conn *net.UDPConn, identity DeviceIdentity, controlPort int) {
+func serveRemoteControlDiscovery(conn *net.UDPConn, identityProvider remoteControlDiscoveryIdentityProvider, controlPort int) {
 	buf := make([]byte, 4096)
 	for {
 		n, remoteAddr, err := conn.ReadFromUDP(buf)
@@ -62,6 +79,10 @@ func serveRemoteControlDiscovery(conn *net.UDPConn, identity DeviceIdentity, con
 			continue
 		}
 		if req.Type != remoteControlDiscoveryRequestType || req.Version != controlProtocolVersion {
+			continue
+		}
+		identity, ok := identityProvider()
+		if !ok {
 			continue
 		}
 		candidate := remoteControlDiscoveryCandidate(identity, controlPort, remoteAddr)
