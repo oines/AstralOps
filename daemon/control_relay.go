@@ -154,7 +154,7 @@ func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySes
 	}
 	connectionID := "ctrl_" + randomID(16)
 	hostEphemeralKey := base64.StdEncoding.EncodeToString(hostEphemeral.PublicKey().Bytes())
-	cipher, err := newControlCipher(deriveControlSessionKey(sharedSecret, hello, a.store.deviceIdentity.DeviceID, a.store.deviceIdentity.PublicKey, hostEphemeralKey, serverNonce, connectionID))
+	cipher, err := newControlHostCipher(sharedSecret, hello, a.store.deviceIdentity.DeviceID, a.store.deviceIdentity.PublicKey, hostEphemeralKey, serverNonce, connectionID)
 	if err != nil {
 		return nil, controlHelloAckFrame{}, err
 	}
@@ -661,7 +661,7 @@ func controlClientCipherFromHelloAck(hello controlHelloFrame, ack controlHelloAc
 	if err != nil {
 		return nil, err
 	}
-	return newControlCipher(deriveControlSessionKey(sharedSecret, hello, ack.HostDeviceID, ack.HostPublicKey, ack.HostEphemeralKey, ack.ServerNonce, ack.ConnectionID))
+	return newControlControllerCipher(sharedSecret, hello, ack.HostDeviceID, ack.HostPublicKey, ack.HostEphemeralKey, ack.ServerNonce, ack.ConnectionID)
 }
 
 func controlClientRelayWrite(ctx context.Context, target controlClientTarget, cipher *controlCipher, connectionID string, frame controlPlainFrame) error {

@@ -41,6 +41,71 @@ func TestControlRelayRoundTripReadsWorkspaces(t *testing.T) {
 	}
 }
 
+func TestControlRelayRejectsReplayedSealedFrame(t *testing.T) {
+	hostApp, _, controllerStore, _, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
+	client := RelayClient{BaseURL: relayServer.URL, Token: testCloudRelayCredential(t, "acct_test")}
+	runControlRelayPoller(t, hostApp, client)
+
+	conn, err := controlClientOpenRelayFrameConn(t.Context(), controlClientTarget{
+		HostInfo:           hostApp.store.hostInfo(),
+		Timeout:            3 * time.Second,
+		UseRelay:           true,
+		RelayClient:        client,
+		ControllerDeviceID: controllerStore.deviceIdentity.DeviceID,
+	}, controllerStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	frame := controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "relay_replay",
+			Capability: CapabilityCoreRead,
+			Action:     ControlActionWorkspaces,
+		},
+	}
+	sealed, err := conn.cipher.seal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := RelayEnvelope{
+		Version:       relayEnvelopeVersion,
+		ConnectionID:  conn.connectionID,
+		FromDeviceID:  controllerStore.deviceIdentity.DeviceID,
+		ToDeviceID:    hostApp.store.hostInfo().Identity.DeviceID,
+		PayloadKind:   relayPayloadKindControlSealedFrame,
+		PayloadBase64: base64.StdEncoding.EncodeToString(body),
+	}
+	if _, err := client.EnqueueRelayEnvelope(t.Context(), envelope); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := conn.ReadPlain(3 * time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("relay response = %#v, want ok response", plain)
+	}
+
+	if _, err := client.EnqueueRelayEnvelope(t.Context(), envelope); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if hostApp.activeControlRelaySessionCountForDevice(controllerStore.deviceIdentity.DeviceID) == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("replayed relay sealed frame did not close control session")
+}
+
 func TestControlRelayRoundTripAcksStaleHelloAckForSameHost(t *testing.T) {
 	hostApp, _, controllerStore, _, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
 	client := RelayClient{BaseURL: relayServer.URL, Token: testCloudRelayCredential(t, "acct_test")}

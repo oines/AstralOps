@@ -465,6 +465,8 @@ Core API 消息、event subscription payload、附件/媒体数据帧、PTY stre
 云端和 relay 不能解密业务 payload。
 ```
 
+控制会话必须把防重放作为协议层约束，而不是依赖 relay 投递语义。握手后派生两把方向密钥：`controller-to-host` 和 `host-to-controller`。每个 `sealed` frame 的 AES-GCM AAD 必须绑定 `protocol_version`、`connection_id`、方向和严格连续的 `seq`。接收端只接受 `seq == previous_seq + 1`；重复、乱序、跳号或跨方向复用的 frame 都必须视为非法 frame 并关闭 control session。LAN direct 和 relay transport 复用同一套 sealed frame 校验。
+
 推送通知不能包含 session 或任务内容。推送最多只能提示 AstralOps 有新活动；App 打开后必须通过 E2EE channel 拉取详情。
 
 ## 远控传输策略
