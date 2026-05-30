@@ -96,6 +96,59 @@ func TestCloudClientGetsAccountRelay(t *testing.T) {
 	}
 }
 
+func TestCloudClientListsAndSetsAccountRelay(t *testing.T) {
+	var patchedRelayID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer account-token" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/relays":
+			writeJSON(w, http.StatusOK, CloudRelayListResponse{
+				CurrentRelayID: "cn-nanjing",
+				Relays: []CloudRelayConfig{
+					{RelayID: "cn-nanjing", RelayURL: "http://119.45.166.88:43911", Region: "cn", Name: "China Nanjing", Credential: "must-not-forward"},
+					{RelayID: "us", RelayURL: "https://us-relay-astralops.oines.dev", Region: "us", Name: "United States"},
+				},
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/account/relay":
+			var input CloudRelayUpdateRequest
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatal(err)
+			}
+			patchedRelayID = input.RelayID
+			writeJSON(w, http.StatusOK, CloudAccount{
+				AccountIDHash: "acct_hash",
+				Relay: &CloudRelayConfig{
+					RelayID:             input.RelayID,
+					RelayURL:            "http://119.45.166.88:43911",
+					Credential:          "relay-credential",
+					CredentialExpiresAt: "2026-05-30T01:02:03Z",
+				},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := CloudClient{BaseURL: server.URL, Token: "account-token"}
+	relays, err := client.ListRelays(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relays.CurrentRelayID != "cn-nanjing" || len(relays.Relays) != 2 || relays.Relays[0].Credential != "" {
+		t.Fatalf("relays = %#v", relays)
+	}
+	account, err := client.SetAccountRelay(context.Background(), "cn-nanjing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patchedRelayID != "cn-nanjing" || account.Relay == nil || account.Relay.RelayID != "cn-nanjing" {
+		t.Fatalf("patchedRelayID=%q account=%#v", patchedRelayID, account)
+	}
+}
+
 func TestCloudClientListsPairingSignals(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/pairing/requests" || r.URL.Query().Get("device_id") != "dev_host" {

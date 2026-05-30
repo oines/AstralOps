@@ -12,6 +12,8 @@ import type {
   CloudDeviceRemoveRequest,
   CloudDeviceRemoveResponse,
   CloudPairingSignalResponse,
+  CloudRelayListResponse,
+  CloudRelayUpdateRequest,
   CreateWorkspaceRequest,
   EditLastUserMessageRequest,
   FileListResponse,
@@ -112,6 +114,8 @@ export interface CoreClient {
   cloudAccountStatus(): Promise<CloudAccountStatus>;
   startCloudAuth(input: CloudAuthStartRequest): Promise<CloudAuthStartResponse>;
   logoutCloudAuth(): Promise<CloudAuthLogoutResponse>;
+  listCloudRelays(): Promise<CloudRelayListResponse>;
+  setCloudAccountRelay(input: CloudRelayUpdateRequest): Promise<CloudAccountStatus>;
   listCloudDevices(): Promise<CloudDeviceRecord[]>;
   removeCloudDevice(deviceId: string, options?: CloudDeviceRemoveRequest): Promise<CloudDeviceRemoveResponse>;
   listWorkspaces(): Promise<Workspace[]>;
@@ -225,6 +229,8 @@ function requestAction(method: RequestMethod, pathname: string): string {
   if (pathname === "/v1/events") return method === "GET" ? "events.read" : "events";
   if (pathname === "/v1/remote/hosts") return "remote.hosts.list";
   if (pathname === "/v1/cloud/account") return "cloud.account.read";
+  if (pathname === "/v1/cloud/relays") return "cloud.relays.list";
+  if (pathname === "/v1/cloud/account/relay") return "cloud.account.relay.update";
   if (pathname === "/v1/cloud/auth/start") return "cloud.auth.start";
   if (pathname === "/v1/cloud/auth/logout") return "cloud.auth.logout";
   if (pathname === "/v1/cloud/devices") return "cloud.devices.list";
@@ -590,6 +596,14 @@ export class LocalCoreClient implements CoreClient {
     return this.channel.request("POST", "/v1/cloud/auth/logout", {});
   }
 
+  listCloudRelays(): Promise<CloudRelayListResponse> {
+    return this.channel.request("GET", "/v1/cloud/relays");
+  }
+
+  setCloudAccountRelay(input: CloudRelayUpdateRequest): Promise<CloudAccountStatus> {
+    return this.channel.request("PATCH", "/v1/cloud/account/relay", input);
+  }
+
   async listCloudDevices(): Promise<CloudDeviceRecord[]> {
     const result = await this.channel.request<CloudDeviceListResponse>("GET", "/v1/cloud/devices");
     if (!Array.isArray(result.devices)) {
@@ -763,6 +777,14 @@ class RemoteCoreClient extends LocalCoreClient {
 
   logoutCloudAuth(): Promise<CloudAuthLogoutResponse> {
     return Promise.reject(new Error("远端 Host cloud 登录不能由 Controller 退出"));
+  }
+
+  listCloudRelays(): Promise<CloudRelayListResponse> {
+    return Promise.reject(new Error("远端 Host cloud 中继列表不能由 Controller 读取"));
+  }
+
+  setCloudAccountRelay(): Promise<CloudAccountStatus> {
+    return Promise.reject(new Error("远端 Host cloud 中继不能由 Controller 切换"));
   }
 
   removeCloudDevice(): Promise<CloudDeviceRemoveResponse> {

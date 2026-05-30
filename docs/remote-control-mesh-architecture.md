@@ -143,6 +143,8 @@ Account
 ```text
 CloudClient:
   GET /v1/account
+  GET /v1/relays
+  PATCH /v1/account/relay
   GET/POST /v1/devices
   pairing requests
 
@@ -151,7 +153,7 @@ RelayClient:
   POST /v1/relay/envelopes/:id/ack
 ```
 
-客户端不能把 `cloud.base_url` 直接当 relay URL 使用，也不能把 cloud account token 发给 relay。它必须从账号响应的 `relay.relay_url` 和 `relay.credential` 构造 `RelayClient`。Cloud control plane 和 relay 是部署边界不同的服务：cloud 负责账号、设备 registry、presence、pairing signal、吊销、账号默认 relay 配置和短期 relay credential 签发；relay 只负责校验 credential 并投递 opaque envelope。开发测试可以临时把二者部署在同一台机器，但 daemon 代码必须继续通过 `CloudClient` / `RelayClient` 分离调用。
+客户端不能把 `cloud.base_url` 直接当 relay URL 使用，也不能把 cloud account token 发给 relay。它必须从账号响应的 `relay.relay_url` 和 `relay.credential` 构造 `RelayClient`。Cloud control plane 和 relay 是部署边界不同的服务：cloud 负责账号、设备 registry、presence、pairing signal、吊销、账号 relay catalog、账号当前 relay 配置和短期 relay credential 签发；relay 只负责校验 credential 并投递 opaque envelope。开发测试可以临时把二者部署在同一台机器，但 daemon 代码必须继续通过 `CloudClient` / `RelayClient` 分离调用。
 
 `GET /v1/account` 的 relay 字段：
 
@@ -192,8 +194,8 @@ exp - iat 不能超过 relay 配置的最大 TTL
 多地区支持方式是按账号选择 relay：
 
 ```text
-中国账号 -> relay-cn
-美国账号 -> relay-us
+账号当前 relay -> cn-nanjing / us / ...
+同账号所有设备 -> 使用同一个当前 relay
 ```
 
 同一个账号内所有设备默认使用同一个 relay。这样 A 找 B 时只需要：
@@ -206,6 +208,15 @@ A 通过账号 relay 投递 opaque envelope 给 B
 ```
 
 如果某台设备还拿着旧 relay 配置，v1 不做跨 relay 查找或转发；它需要等下一次 cloud sync 读取新的账号 relay 后再参与 relay fallback。LAN 直连不受这个限制，仍然优先使用。
+
+MVP 不做 previous relay grace、双 relay 投递、relay-to-relay 转发或跨 relay 查找。用户在设置里切换账号 relay 时，daemon 只调用本机 daemon 的 `PATCH /v1/cloud/account/relay`，daemon 再调用 Cloud 的 `PATCH /v1/account/relay`。Cloud 持久化账号当前 `relay_id` 后立即对后续 `GET /v1/account` 签发新 relay credential。其他设备在下一次 Cloud sync 后切到新 relay；切换窗口内 relay fallback 可能短暂不可用，但不会破坏 LAN 直连和设备 E2EE 信任边界。
+
+开发默认账号 relay 是 `cn-nanjing`：
+
+```text
+relay_id = cn-nanjing
+relay_url = http://119.45.166.88:43911
+```
 
 ## Cloud Control Plane
 
@@ -853,6 +864,7 @@ Desktop 远控设置页必须从本机 daemon 读取账号状态，而不是让 
 Cloud 连接状态
 account_id_hash
 账号默认 relay_id / relay_url
+可选 relay 列表和当前账号 relay
 relay credential 过期时间
 账号设备列表
 本机 Host trust grants

@@ -142,6 +142,8 @@ func main() {
 	mux.HandleFunc("/v1/cloud/auth/callback", a.handleCloudAuthCallback)
 	mux.HandleFunc("/v1/cloud/auth/", a.auth(a.handleCloudAuthAction))
 	mux.HandleFunc("/v1/cloud/account", a.auth(a.handleCloudAccount))
+	mux.HandleFunc("/v1/cloud/account/relay", a.auth(a.handleCloudAccountRelay))
+	mux.HandleFunc("/v1/cloud/relays", a.auth(a.handleCloudRelays))
 	mux.HandleFunc("/v1/cloud/devices", a.auth(a.handleCloudDevices))
 	mux.HandleFunc("/v1/cloud/devices/", a.auth(a.handleCloudDeviceAction))
 	mux.HandleFunc("/v1/cloud/heartbeat", a.auth(a.handleCloudHeartbeat))

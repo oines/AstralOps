@@ -53,8 +53,19 @@ type CloudMembershipLease struct {
 type CloudRelayConfig struct {
 	RelayID             string `json:"relay_id,omitempty"`
 	RelayURL            string `json:"relay_url,omitempty"`
+	Region              string `json:"region,omitempty"`
+	Name                string `json:"name,omitempty"`
 	Credential          string `json:"credential,omitempty"`
 	CredentialExpiresAt string `json:"credential_expires_at,omitempty"`
+}
+
+type CloudRelayListResponse struct {
+	Relays         []CloudRelayConfig `json:"relays"`
+	CurrentRelayID string             `json:"current_relay_id,omitempty"`
+}
+
+type CloudRelayUpdateRequest struct {
+	RelayID string `json:"relay_id"`
 }
 
 type RelayEnvelope struct {

@@ -22,7 +22,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import type { CoreClient } from "../api";
-import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, CloudAccountStatus, CloudAuthProvider, CloudDeviceRecord, DaemonInfo, HealthResponse, HostInfo, PairingRequest, TrustGrant } from "../types";
+import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, CloudAccountStatus, CloudAuthProvider, CloudDeviceRecord, CloudRelayListResponse, CloudRelayOption, DaemonInfo, HealthResponse, HostInfo, PairingRequest, TrustGrant } from "../types";
 
 type SettingsCategoryId =
   | "general"
@@ -650,6 +650,7 @@ function RemoteControlContent({
   const [grants, setGrants] = useState<TrustGrant[]>([]);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
   const [cloudAccount, setCloudAccount] = useState<CloudAccountStatus | null>(null);
+  const [cloudRelays, setCloudRelays] = useState<CloudRelayListResponse>({ relays: [] });
   const [cloudDevices, setCloudDevices] = useState<CloudDeviceRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -662,6 +663,7 @@ function RemoteControlContent({
   const [cloudBaseURLDraft, setCloudBaseURLDraft] = useState(settings.cloud.base_url || "");
   const [authenticatingProvider, setAuthenticatingProvider] = useState<CloudAuthProvider | "">("");
   const [loggingOutCloud, setLoggingOutCloud] = useState(false);
+  const [switchingRelayId, setSwitchingRelayId] = useState("");
 
   const trustedGrants = useMemo(() => grants.filter((grant) => grant.status === "trusted"), [grants]);
   const revokedGrants = useMemo(() => grants.filter((grant) => grant.status === "revoked"), [grants]);
@@ -683,6 +685,7 @@ function RemoteControlContent({
       setGrants([]);
       setPairingRequests([]);
       setCloudAccount(null);
+      setCloudRelays({ relays: [] });
       setCloudDevices([]);
       setError("Core 未连接");
       setStatus("");
@@ -692,6 +695,7 @@ function RemoteControlContent({
     try {
       const [hostInfo, trustList, pairingList] = await Promise.all([core.hostInfo(), core.listTrustedDevices(), core.listPairingRequests()]);
       let nextCloudAccount: CloudAccountStatus | null = null;
+      let nextCloudRelays: CloudRelayListResponse = { relays: [] };
       let nextCloudDevices: CloudDeviceRecord[] = [];
       let cloudError = "";
       if (settings.cloud.enabled) {
@@ -699,6 +703,11 @@ function RemoteControlContent({
           nextCloudAccount = await core.cloudAccountStatus();
         } catch (loadCloudError) {
           cloudError = loadCloudError instanceof Error ? loadCloudError.message : String(loadCloudError);
+        }
+        try {
+          nextCloudRelays = await core.listCloudRelays();
+        } catch (loadRelaysError) {
+          cloudError = cloudError || (loadRelaysError instanceof Error ? loadRelaysError.message : String(loadRelaysError));
         }
         try {
           nextCloudDevices = await core.listCloudDevices();
@@ -710,6 +719,7 @@ function RemoteControlContent({
       setGrants(sortTrustGrants(trustList.grants));
       setPairingRequests(sortPairingRequests(pairingList.requests));
       setCloudAccount(nextCloudAccount);
+      setCloudRelays(nextCloudRelays);
       setCloudDevices(sortCloudDevices(nextCloudDevices, hostInfo.identity.device_id));
       setError(cloudError);
       setStatus(cloudError ? "账号设备读取失败" : "已刷新");
@@ -792,6 +802,7 @@ function RemoteControlContent({
       const result = await core.removeCloudDevice(device.device_id, { revoke_local_trust: revokeLocalTrust });
       if (result.local_mesh_logout) {
         setCloudAccount(null);
+        setCloudRelays({ relays: [] });
         setCloudDevices([]);
         setStatus(result.local_mesh_logout.cloud_removed ? "本机已退出 Mesh，远控身份和信任已重置" : "本机已退出 Mesh，Cloud 删除稍后可重试");
         await onReloadSettings();
@@ -845,6 +856,7 @@ function RemoteControlContent({
     try {
       await core.logoutCloudAuth();
       setCloudAccount(null);
+      setCloudRelays({ relays: [] });
       setCloudDevices([]);
       setStatus("已退出 Mesh，远控身份和信任已重置");
       await onReloadSettings();
@@ -854,6 +866,22 @@ function RemoteControlContent({
       setError(logoutError instanceof Error ? logoutError.message : String(logoutError));
     } finally {
       setLoggingOutCloud(false);
+    }
+  }
+
+  async function switchCloudRelay(relayId: string): Promise<void> {
+    if (!core || !relayId || relayId === cloudRelaySelection(cloudAccount, cloudRelays)) return;
+    setSwitchingRelayId(relayId);
+    setError("");
+    try {
+      const account = await core.setCloudAccountRelay({ relay_id: relayId });
+      setCloudAccount(account);
+      setStatus("已切换账号中继，其他设备会在 Cloud 同步后跟随切换");
+      await loadRemoteControl();
+    } catch (switchError) {
+      setError(switchError instanceof Error ? switchError.message : String(switchError));
+    } finally {
+      setSwitchingRelayId("");
     }
   }
 
@@ -928,7 +956,18 @@ function RemoteControlContent({
         {settings.cloud.enabled ? (
           <>
             <InfoRow label="账号" value={cloudAccount?.account_id_hash || (error ? "读取失败" : "未加载")} />
-            <InfoRow label="中继节点" value={cloudRelayLabel(cloudAccount)} />
+            <SettingRow
+              title="中继节点"
+              description={cloudRelayDescription(cloudAccount, cloudRelays)}
+              control={
+                <SelectControl
+                  disabled={switchingRelayId !== "" || cloudRelays.relays.length === 0}
+                  options={cloudRelayOptions(cloudRelays)}
+                  value={cloudRelaySelection(cloudAccount, cloudRelays)}
+                  onChange={switchCloudRelay}
+                />
+              }
+            />
             <SettingRow title="中继凭证" description="由账号服务签发给本机使用，短期有效" control={<StatusPill label={cloudRelayCredentialLabel(cloudAccount)} tone={cloudRelayCredentialTone(cloudAccount)} />} />
             <SettingRow title="我的设备" description="账号服务只保存设备公开身份、在线状态、撤销状态和路由元数据" control={<StatusPill label={`${activeCloudDevices.length} 台`} tone={activeCloudDevices.length > 0 ? "good" : "muted"} />} />
             {activeCloudDevices.length > 0 ? (
@@ -1518,11 +1557,30 @@ function cloudConnectionTone(settings: AppSettings, account: CloudAccountStatus 
   return "muted";
 }
 
-function cloudRelayLabel(account: CloudAccountStatus | null): string {
-  const relay = account?.relay;
-  if (!relay) return "未配置";
-  const relayID = relay.relay_id || "default";
-  return relay.relay_url ? `${relayID} · ${relay.relay_url}` : relayID;
+function cloudRelaySelection(account: CloudAccountStatus | null, relays: CloudRelayListResponse): string {
+  return account?.relay?.relay_id || relays.current_relay_id || relays.relays[0]?.relay_id || "";
+}
+
+function cloudRelayOptions(relays: CloudRelayListResponse): SettingOption[] {
+  if (relays.relays.length === 0) return [{ label: "未配置", value: "" }];
+  return relays.relays.map((relay) => ({
+    label: cloudRelayOptionLabel(relay),
+    value: relay.relay_id,
+  }));
+}
+
+function cloudRelayOptionLabel(relay: CloudRelayOption): string {
+  if (relay.name && relay.name !== relay.relay_id) return `${relay.relay_id} · ${relay.name}`;
+  if (relay.region && relay.region !== relay.relay_id) return `${relay.relay_id} · ${relay.region}`;
+  return relay.relay_id;
+}
+
+function cloudRelayDescription(account: CloudAccountStatus | null, relays: CloudRelayListResponse): string {
+  const selectedID = cloudRelaySelection(account, relays);
+  const selected = relays.relays.find((relay) => relay.relay_id === selectedID);
+  const url = account?.relay?.relay_url || selected?.relay_url;
+  if (!url) return "账号内所有设备使用同一个中继；切换后其他设备会在同步后跟随";
+  return `${url}；账号内所有设备使用同一个中继`;
 }
 
 function cloudRelayCredentialLabel(account: CloudAccountStatus | null): string {

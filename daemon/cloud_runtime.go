@@ -16,6 +16,14 @@ const (
 )
 
 func (a *app) applyCloudSettings(settings CloudSettings) error {
+	return a.applyCloudSettingsWithOffline(settings, true)
+}
+
+func (a *app) restartCloudSync(settings CloudSettings) error {
+	return a.applyCloudSettingsWithOffline(settings, false)
+}
+
+func (a *app) applyCloudSettingsWithOffline(settings CloudSettings, markOfflineOnStop bool) error {
 	settings = normalizedAppSettings(AppSettings{Cloud: settings}).Cloud
 	if settings.Enabled {
 		if err := validateCloudSettings(settings); err != nil {
@@ -36,11 +44,11 @@ func (a *app) applyCloudSettings(settings CloudSettings) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cloudCancel = cancel
-	go a.cloudSyncLoop(ctx, settings)
+	go a.cloudSyncLoop(ctx, settings, markOfflineOnStop)
 	return nil
 }
 
-func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings) {
+func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings, markOfflineOnStop bool) {
 	client := CloudClient{BaseURL: settings.BaseURL, Token: settings.AccountToken}
 	selfDeviceID := a.store.hostInfo().Identity.DeviceID
 	if err := a.cloudRegisterAndHeartbeat(ctx, client); err != nil {
@@ -55,7 +63,9 @@ func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings) {
 	defer ticker.Stop()
 	relayTicker := time.NewTicker(controlRelayPollInterval)
 	defer relayTicker.Stop()
-	defer a.cloudMarkOffline(settings, selfDeviceID)
+	if markOfflineOnStop {
+		defer a.cloudMarkOffline(settings, selfDeviceID)
+	}
 
 	for {
 		select {

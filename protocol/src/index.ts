@@ -1099,6 +1099,8 @@ export type CloudDeviceStatus = "online" | "offline" | "revoked" | string;
 export type CloudRelayConfig = {
   relay_id?: string;
   relay_url?: string;
+  region?: string;
+  name?: string;
   credential?: string;
   credential_expires_at?: string;
 };
@@ -1121,6 +1123,8 @@ export type CloudMembershipLease = {
 export type CloudRelayStatus = {
   relay_id?: string;
   relay_url?: string;
+  region?: string;
+  name?: string;
   credential_available: boolean;
   credential_expires_at?: string;
 };
@@ -1128,6 +1132,22 @@ export type CloudRelayStatus = {
 export type CloudAccountStatus = {
   account_id_hash: string;
   relay?: CloudRelayStatus;
+};
+
+export type CloudRelayOption = {
+  relay_id: string;
+  relay_url: string;
+  region?: string;
+  name?: string;
+};
+
+export type CloudRelayListResponse = {
+  relays: CloudRelayOption[];
+  current_relay_id?: string;
+};
+
+export type CloudRelayUpdateRequest = {
+  relay_id: string;
 };
 
 export type CloudAuthProvider = "google" | "github";
