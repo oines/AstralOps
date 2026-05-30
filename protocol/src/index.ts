@@ -308,6 +308,55 @@ export type HostSnapshotResponse = {
   events: AstralEvent[];
   session_views: SessionView[];
   initial_session_events?: AstralEvent[];
+  workbench?: WorkbenchState;
+};
+
+export type TerminalTab = {
+  terminal_id: string;
+  workspace_id: string;
+  agent: AgentKind;
+  target: WorkspaceTarget;
+  shell?: string;
+  cwd?: string;
+  status: "open" | "closed" | string;
+  writer_device_id?: string;
+  output_seq: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkbenchPanel = {
+  id: string;
+  kind: string;
+  state?: Record<string, unknown>;
+  updated_at?: string;
+};
+
+export type WorkbenchState = {
+  version: number;
+  updated_at: string;
+  workspaces: Record<string, Workspace>;
+  sessions: Record<string, Session>;
+  session_views: Record<string, SessionView>;
+  workspace_connections: Record<string, WorkspaceConnection>;
+  terminal_tabs: Record<string, TerminalTab>;
+  panels: Record<string, WorkbenchPanel>;
+};
+
+export type WorkbenchCollectionName =
+  | "workspaces"
+  | "sessions"
+  | "session_views"
+  | "workspace_connections"
+  | "terminal_tabs"
+  | "panels";
+
+export type WorkbenchPatch = {
+  version: number;
+  ops: Array<
+    | { op: "upsert"; collection: WorkbenchCollectionName; id: string; value: unknown }
+    | { op: "remove"; collection: WorkbenchCollectionName; id: string }
+  >;
 };
 
 export type EventWindowParams = {
@@ -876,6 +925,7 @@ export type ControlAction =
   | "workspace.files.stream.cancel"
   | "workspace.exec"
   | "terminal.open"
+  | "terminal.list"
   | "terminal.attach"
   | "terminal.detach"
   | "terminal.input"
@@ -903,6 +953,7 @@ export type TerminalInputParams = {
 
 export type TerminalAttachParams = {
   terminal_id: string;
+  after_seq?: number;
 };
 
 export type TerminalDetachParams = {
@@ -929,6 +980,8 @@ export type TerminalOpenResult = {
   writer_device_id?: string;
   output_seq: number;
 };
+
+export type TerminalListResult = TerminalTab[];
 
 export type TerminalAckResult = {
   terminal_id: string;
@@ -1368,6 +1421,14 @@ export type RemoteHostRecord = {
   last_base_url?: string;
   lan_base_url?: string;
   capabilities?: ControlCapability[];
+  control?: {
+    state: "idle" | "connecting" | "connected" | "reconnecting" | "failed" | string;
+    transport?: "lan" | "relay" | string;
+    route_generation: number;
+    last_error_code?: string;
+    last_error?: string;
+    updated_at?: string;
+  };
 };
 
 export type RemoteHostsResponse = {
@@ -1465,6 +1526,7 @@ export type ControlActionParamMap = {
   "workspace.files.stream.cancel": WorkspaceFilesStreamCancelParams;
   "workspace.exec": WorkspaceExecParams;
   "terminal.open": TerminalOpenParams;
+  "terminal.list": undefined;
   "terminal.attach": TerminalAttachParams;
   "terminal.detach": TerminalDetachParams;
   "terminal.input": TerminalInputParams;
@@ -1516,6 +1578,7 @@ export type ControlActionResultMap = {
   "workspace.files.stream.cancel": WorkspaceFileStreamCancelResult;
   "workspace.exec": WorkspaceExecResult;
   "terminal.open": TerminalOpenResult;
+  "terminal.list": TerminalListResult;
   "terminal.attach": TerminalAttachResult;
   "terminal.detach": TerminalAttachResult;
   "terminal.input": TerminalAckResult;

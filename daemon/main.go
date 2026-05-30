@@ -48,6 +48,7 @@ type app struct {
 	codexRemoteHomeMu    sync.Mutex
 	codexRemoteHome      map[string]string
 	remoteManager        *remoteControlManager
+	network              *networkMonitor
 	remoteControlMu      sync.Mutex
 	remoteControl        *remoteControlRuntime
 	mesh                 *meshStateManager
@@ -114,6 +115,7 @@ func main() {
 		},
 	}
 	a.remoteManager = newRemoteControlManager(a)
+	a.network = newNetworkMonitor(a)
 	a.mesh = newMeshStateManager(a)
 	a.rebuildSessionProjections()
 	if err := a.backfillHistoricalContextEvents(); err != nil {
@@ -132,6 +134,7 @@ func main() {
 	if err := a.applyCloudSettings(a.currentSettings().Cloud); err != nil {
 		log.Fatal(err)
 	}
+	a.network.start(context.Background())
 
 	if err := a.writeRuntimeFile(); err != nil {
 		log.Fatal(err)
@@ -142,6 +145,7 @@ func main() {
 	mux.HandleFunc("/v1/control/ws", a.handleControlWS)
 	mux.HandleFunc("/v1/host", a.auth(a.handleHost))
 	mux.HandleFunc("/v1/snapshot", a.auth(a.handleHostSnapshot))
+	mux.HandleFunc("/v1/workbench", a.auth(a.handleWorkbench))
 	mux.HandleFunc("/v1/settings", a.auth(a.handleSettings))
 	mux.HandleFunc("/v1/settings/", a.auth(a.handleSettingsAction))
 	mux.HandleFunc("/v1/cloud/auth/callback", a.handleCloudAuthCallback)

@@ -42,6 +42,8 @@ import type {
   Session,
   SessionInputAttachment,
   SessionView,
+  WorkbenchPatch,
+  WorkbenchState,
   Workspace,
   WorkspaceConnection,
 } from "./types";
@@ -73,29 +75,17 @@ function sessionTimestamp(session: Session): number {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-function normalizedRecord(event: AstralEvent): Record<string, unknown> | null {
-  const value = event.normalized;
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+function sortWorkspacesByUpdated(workspaces: Workspace[]): Workspace[] {
+  return [...workspaces].sort((a, b) => workspaceTimestamp(b) - workspaceTimestamp(a));
 }
 
-function normalizedWorkspace(event: AstralEvent): Workspace | null {
-  const record = normalizedRecord(event);
-  return typeof record?.id === "string" ? (record as Workspace) : null;
+function workspaceTimestamp(workspace: Workspace): number {
+  const timestamp = Date.parse(workspace.updated_at || workspace.created_at || "");
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-function normalizedSession(event: AstralEvent): Session | null {
-  const record = normalizedRecord(event);
-  return typeof record?.id === "string" && typeof record?.workspace_id === "string" ? (record as Session) : null;
-}
-
-function normalizedWorkspaceID(event: AstralEvent): string {
-  const record = normalizedRecord(event);
-  return typeof record?.workspace_id === "string" ? record.workspace_id : event.workspace_id || "";
-}
-
-function normalizedSessionID(event: AstralEvent): string {
-  const record = normalizedRecord(event);
-  return typeof record?.session_id === "string" ? record.session_id : event.session_id || "";
+function workbenchValues<T>(values: Record<string, T> | undefined): T[] {
+  return values ? Object.values(values) : [];
 }
 
 export function App(): React.JSX.Element {
@@ -362,83 +352,104 @@ export function App(): React.JSX.Element {
     }, delayMs);
   }, [storeSessionView]);
 
-  const applyHostEventState = useCallback((event: AstralEvent, client: CoreClient, generation: number) => {
-    switch (event.kind) {
-      case "workspace.created": {
-        const workspace = normalizedWorkspace(event);
-        if (!workspace) return;
-        setWorkspaces((current) => [workspace, ...current.filter((item) => item.id !== workspace.id)]);
-        setActiveWorkspaceId((current) => current || workspace.id);
-        return;
-      }
-      case "workspace.removed": {
-        const workspaceID = normalizedWorkspaceID(event);
-        if (!workspaceID) return;
-        setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceID));
-        setWorkspaceConnections((current) => {
-          const next = { ...current };
-          delete next[workspaceID];
-          return next;
-        });
-        setSessions((current) => current.filter((session) => session.workspace_id !== workspaceID));
-        setSessionViews((current) => Object.fromEntries(Object.entries(current).filter(([, view]) => view.session.workspace_id !== workspaceID)));
-        setEventIndex((current) => removeWorkspaceEvents(current, workspaceID));
-        setActiveWorkspaceId((current) => (current === workspaceID ? "" : current));
-        setActiveSession((current) => (current?.workspace_id === workspaceID ? null : current));
-        return;
-      }
-      case "workspace.connection": {
-        const state = event.normalized as WorkspaceConnection;
-        if (state?.workspace_id) {
-          setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
+  const applyWorkbenchPatch = useCallback((patch: WorkbenchPatch) => {
+    for (const op of patch.ops) {
+      switch (op.collection) {
+        case "workspaces": {
+          if (op.op === "remove") {
+            const workspaceID = op.id;
+            setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceID));
+            setWorkspaceConnections((current) => {
+              const next = { ...current };
+              delete next[workspaceID];
+              return next;
+            });
+            setSessions((current) => current.filter((session) => session.workspace_id !== workspaceID));
+            setSessionViews((current) => Object.fromEntries(Object.entries(current).filter(([, view]) => view.session.workspace_id !== workspaceID)));
+            setEventIndex((current) => removeWorkspaceEvents(current, workspaceID));
+            setActiveWorkspaceId((current) => (current === workspaceID ? "" : current));
+            setActiveSession((current) => (current?.workspace_id === workspaceID ? null : current));
+            continue;
+          }
+          const workspace = op.value as Workspace;
+          if (!workspace?.id) continue;
+          setWorkspaces((current) => sortWorkspacesByUpdated(current.some((item) => item.id === workspace.id)
+            ? current.map((item) => (item.id === workspace.id ? { ...item, ...workspace } : item))
+            : [workspace, ...current]));
+          setActiveWorkspaceId((current) => current || workspace.id);
+          break;
         }
-        return;
-      }
-      case "session.started":
-      case "session.updated":
-      case "session.native": {
-        const session = normalizedSession(event);
-        if (!session) {
-          if (event.session_id) scheduleSessionViewRefresh(client, event.session_id, generation);
-          return;
+        case "sessions": {
+          if (op.op === "remove") {
+            const sessionID = op.id;
+            const currentSessions = sessionsRef.current;
+            const removed = currentSessions.find((session) => session.id === sessionID);
+            setSessions((current) => current.filter((session) => session.id !== sessionID));
+            setActiveSession((active) => {
+              if (active?.id !== sessionID) return active;
+              return removed ? currentSessions.find((session) => session.workspace_id === removed.workspace_id && session.id !== sessionID) ?? null : null;
+            });
+            setSessionViews((current) => {
+              const next = { ...current };
+              delete next[sessionID];
+              return next;
+            });
+            setEventIndex((current) => removeSessionEvents(current, sessionID));
+            setSessionWindows((current) => {
+              const next = { ...current };
+              delete next[sessionID];
+              return next;
+            });
+            continue;
+          }
+          const session = op.value as Session;
+          if (!session?.id || !session.workspace_id) continue;
+          setSessions((current) => sortSessionsByUpdated(current.some((item) => item.id === session.id)
+            ? current.map((item) => (item.id === session.id ? { ...item, ...session } : item))
+            : [session, ...current]));
+          setActiveWorkspaceId((current) => current || session.workspace_id);
+          setActiveSession((current) => (current?.id === session.id ? { ...current, ...session } : current));
+          break;
         }
-        setSessions((current) => sortSessionsByUpdated(current.some((item) => item.id === session.id)
-          ? current.map((item) => (item.id === session.id ? { ...item, ...session } : item))
-          : [session, ...current]));
-        setActiveWorkspaceId((current) => current || session.workspace_id);
-        setActiveSession((current) => (current?.id === session.id ? { ...current, ...session } : current));
-        scheduleSessionViewRefresh(client, session.id, generation);
-        return;
-      }
-      case "session.deleted": {
-        const sessionID = normalizedSessionID(event);
-        if (!sessionID) return;
-        const currentSessions = sessionsRef.current;
-        const removed = currentSessions.find((session) => session.id === sessionID);
-        setSessions((current) => current.filter((session) => session.id !== sessionID));
-        setActiveSession((active) => {
-          if (active?.id !== sessionID) return active;
-          return removed ? currentSessions.find((session) => session.workspace_id === removed.workspace_id && session.id !== sessionID) ?? null : null;
-        });
-        setSessionViews((current) => {
-          const next = { ...current };
-          delete next[sessionID];
-          return next;
-        });
-        setEventIndex((current) => removeSessionEvents(current, sessionID));
-        setSessionWindows((current) => {
-          const next = { ...current };
-          delete next[sessionID];
-          return next;
-        });
-        return;
-      }
-      default:
-        if (event.session_id) {
-          scheduleSessionViewRefresh(client, event.session_id, generation);
+        case "session_views": {
+          if (op.op === "remove") {
+            setSessionViews((current) => {
+              const next = { ...current };
+              delete next[op.id];
+              return next;
+            });
+            continue;
+          }
+          const view = op.value as SessionView;
+          if (view?.session?.id) storeSessionView(view);
+          break;
         }
+        case "workspace_connections": {
+          if (op.op === "remove") {
+            setWorkspaceConnections((current) => {
+              const next = { ...current };
+              delete next[op.id];
+              return next;
+            });
+            continue;
+          }
+          const connection = op.value as WorkspaceConnection;
+          if (connection?.workspace_id) {
+            setWorkspaceConnections((current) => ({ ...current, [connection.workspace_id]: connection }));
+          }
+          break;
+        }
+        default:
+          break;
+      }
     }
-  }, [scheduleSessionViewRefresh, setSessionWindows]);
+  }, [setSessionWindows, storeSessionView]);
+
+  const applyHostEventState = useCallback((event: AstralEvent, client: CoreClient, generation: number) => {
+    if (event.session_id) {
+      scheduleSessionViewRefresh(client, event.session_id, generation);
+    }
+  }, [scheduleSessionViewRefresh]);
 
   const {
     activeCommands,
@@ -464,19 +475,22 @@ export function App(): React.JSX.Element {
       event_limit: EVENT_WINDOW_SIZE,
       restore_on_launch: Boolean(options.restoreOnLaunch),
     });
+    const workbench: WorkbenchState | undefined = snapshot.workbench;
     const hostResponse = snapshot.host;
-    const workspaceResponse = snapshot.workspaces;
-    const sessionResponse = snapshot.sessions;
+    const workspaceResponse = workbench ? sortWorkspacesByUpdated(workbenchValues(workbench.workspaces)) : snapshot.workspaces;
+    const sessionResponse = workbench ? sortSessionsByUpdated(workbenchValues(workbench.sessions)) : snapshot.sessions;
     const recentEvents = snapshot.events;
     const connectionMap: Record<string, WorkspaceConnection> = {};
-    if (options.includeWorkspaceConnections) {
-      for (const connection of snapshot.workspace_connections ?? []) {
+    if (options.includeWorkspaceConnections || workbench) {
+      const connections = workbench ? workbenchValues(workbench.workspace_connections) : snapshot.workspace_connections ?? [];
+      for (const connection of connections) {
         connectionMap[connection.workspace_id] = connection;
       }
     }
     const initialSession = options.restoreOnLaunch ? sessionResponse[0] ?? null : null;
     const viewMap: Record<string, SessionView> = {};
-    for (const view of snapshot.session_views) {
+    const views = workbench ? workbenchValues(workbench.session_views) : snapshot.session_views;
+    for (const view of views) {
       viewMap[view.session.id] = view;
     }
     const sessionEvents = initialSession ? snapshot.initial_session_events ?? recentEvents.filter((event) => event.session_id === initialSession.id) : [];
@@ -1033,6 +1047,7 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     if (!daemonInfo || !localApi || !activeHostId) return;
     let subscription: EventSubscription | null = null;
+    let workbenchSubscription: EventSubscription | null = null;
     let cancelled = false;
     let resyncOnOpen = false;
     sessionViewRefreshGenerationRef.current += 1;
@@ -1067,6 +1082,21 @@ export function App(): React.JSX.Element {
         });
         if (cancelled) return;
         const afterSeq = Math.max(0, ...initialEvents.map((event) => event.seq));
+        workbenchSubscription = client.subscribeWorkbench({
+          onPatch: (patch) => {
+            if (cancelled) return;
+            applyWorkbenchPatch(patch);
+          },
+          onOpen: () => {
+            if (cancelled) return;
+            setConnection("connected");
+          },
+          onError: () => {
+            if (cancelled) return;
+            resyncOnOpen = true;
+            setConnection("reconnecting");
+          },
+        });
         subscription = client.subscribeEvents(afterSeq, {
           onEvent: (event) => {
             if (cancelled) return;
@@ -1124,6 +1154,7 @@ export function App(): React.JSX.Element {
     return () => {
       cancelled = true;
       subscription?.close();
+      workbenchSubscription?.close();
       if (sseFrameRef.current !== null) {
         window.cancelAnimationFrame(sseFrameRef.current);
         sseFrameRef.current = null;
@@ -1134,7 +1165,7 @@ export function App(): React.JSX.Element {
       sessionViewRefreshPendingRef.current.clear();
       sseQueueRef.current = [];
     };
-  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, activeHostAuthorizationOverride, applyHostEventState, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, refreshRemoteHosts, storeSessionView]);
+  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, activeHostAuthorizationOverride, applyHostEventState, applyWorkbenchPatch, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, refreshRemoteHosts, storeSessionView]);
 
   const sessionTitles = useMemo(
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),

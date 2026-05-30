@@ -23,6 +23,7 @@ type hostSnapshotResult struct {
 	Events               []AstralEvent         `json:"events"`
 	SessionViews         []sessionView         `json:"session_views"`
 	InitialSessionEvents []AstralEvent         `json:"initial_session_events,omitempty"`
+	Workbench            workbenchState        `json:"workbench"`
 }
 
 func (a *app) handleHostSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -70,6 +71,7 @@ func (a *app) buildHostSnapshot(params hostSnapshotParams) hostSnapshotResult {
 		WorkspaceConnections: connections,
 		Events:               sanitizeControlEvents(a.store.queryEventsWindow("", "", 0, 0, eventLimit)),
 		SessionViews:         views,
+		Workbench:            a.buildWorkbenchState(),
 	}
 	if params.RestoreOnLaunch && len(sessions) > 0 {
 		result.InitialSessionEvents = sanitizeControlEvents(a.store.queryEventsWindow("", sessions[0].ID, 0, 0, eventLimit))

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -34,19 +35,20 @@ type remoteHostsResponse struct {
 }
 
 type remoteHostRecord struct {
-	DeviceID             string   `json:"device_id"`
-	DeviceName           string   `json:"device_name,omitempty"`
-	DeviceKind           string   `json:"device_kind,omitempty"`
-	PublicKeyFingerprint string   `json:"public_key_fingerprint"`
-	KnownIdentity        bool     `json:"known_identity,omitempty"`
-	Status               string   `json:"status"`
-	Connection           string   `json:"connection"`
-	AuthorizationState   string   `json:"authorization_state,omitempty"`
-	PairingRequestID     string   `json:"pairing_request_id,omitempty"`
-	PairingStatus        string   `json:"pairing_status,omitempty"`
-	LastBaseURL          string   `json:"last_base_url,omitempty"`
-	LANBaseURL           string   `json:"lan_base_url,omitempty"`
-	Capabilities         []string `json:"capabilities,omitempty"`
+	DeviceID             string                 `json:"device_id"`
+	DeviceName           string                 `json:"device_name,omitempty"`
+	DeviceKind           string                 `json:"device_kind,omitempty"`
+	PublicKeyFingerprint string                 `json:"public_key_fingerprint"`
+	KnownIdentity        bool                   `json:"known_identity,omitempty"`
+	Status               string                 `json:"status"`
+	Connection           string                 `json:"connection"`
+	AuthorizationState   string                 `json:"authorization_state,omitempty"`
+	PairingRequestID     string                 `json:"pairing_request_id,omitempty"`
+	PairingStatus        string                 `json:"pairing_status,omitempty"`
+	LastBaseURL          string                 `json:"last_base_url,omitempty"`
+	LANBaseURL           string                 `json:"lan_base_url,omitempty"`
+	Capabilities         []string               `json:"capabilities,omitempty"`
+	Control              remoteHostControlState `json:"control"`
 }
 
 func (a *app) handleRemoteHosts(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +79,9 @@ func (a *app) buildRemoteHostRecords(ctx context.Context, discover bool) []remot
 	}
 	out := make([]remoteHostRecord, 0, len(hosts))
 	for _, host := range hosts {
+		if a.remoteManager != nil {
+			host.Control = a.remoteManager.controlState(host.DeviceID)
+		}
 		out = append(out, host)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -189,6 +194,9 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 			continue
 		}
 		known = a.rememberRemoteHostLANRoute(hostInfo, candidate.BaseURL, known)
+		if a.remoteManager != nil {
+			a.remoteManager.clearLANFailure(candidate.DeviceID)
+		}
 		next := remoteHostRecordFromHostInfo(hostInfo, known, candidate.BaseURL)
 		if next.Capabilities == nil {
 			next.Capabilities = existing.Capabilities
@@ -321,6 +329,12 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 	route := parts[1:]
 
 	switch {
+	case len(route) == 1 && route[0] == "workbench" && r.Method == http.MethodGet:
+		if r.URL.Query().Get("stream") == "1" || strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+			a.handleRemoteHostWorkbenchSSE(w, r, hostDeviceID)
+			return
+		}
+		a.writeRemoteWorkbenchResult(w, hostDeviceID)
 	case len(route) == 1 && route[0] == "snapshot" && r.Method == http.MethodGet:
 		eventLimit, _ := strconv.Atoi(r.URL.Query().Get("event_limit"))
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreRead, ControlActionHostSnapshot, map[string]any{
@@ -491,6 +505,114 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *app) writeRemoteWorkbenchResult(w http.ResponseWriter, hostDeviceID string) {
+	manager := a.remoteControlManager()
+	if manager == nil {
+		writeRemoteHostError(w, errors.New("remote control manager is not initialized"))
+		return
+	}
+	response, err := manager.Request(context.Background(), hostDeviceID, CapabilityCoreRead, ControlActionHostSnapshot, map[string]any{"event_limit": 1})
+	if err != nil {
+		writeRemoteHostError(w, err)
+		return
+	}
+	if !response.OK {
+		writeControlHTTPResult(w, response, ControlActionHostSnapshot)
+		return
+	}
+	workbench, err := remoteWorkbenchFromSnapshotResult(response.Result)
+	if err != nil {
+		writeRemoteHostError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, workbench)
+}
+
+func (a *app) handleRemoteHostWorkbenchSSE(w http.ResponseWriter, r *http.Request, hostDeviceID string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming is not supported"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	manager := a.remoteControlManager()
+	if manager == nil {
+		writeSSE(w, flusher, "workbench.error", map[string]string{"error": "remote control manager is not initialized"})
+		return
+	}
+	load := func() (workbenchState, error) {
+		response, err := manager.Request(r.Context(), hostDeviceID, CapabilityCoreRead, ControlActionHostSnapshot, map[string]any{"event_limit": 1})
+		if err != nil {
+			return workbenchState{}, err
+		}
+		if !response.OK {
+			return workbenchState{}, controlResponseActionError(response, ControlActionHostSnapshot)
+		}
+		return remoteWorkbenchFromSnapshotResult(response.Result)
+	}
+
+	current := workbenchState{}
+	if next, err := load(); err == nil {
+		writeSSE(w, flusher, "workbench.patch", diffWorkbenchState(current, next))
+		current = next
+	} else {
+		writeSSE(w, flusher, "workbench.error", map[string]string{"error": err.Error()})
+	}
+	stream, err := manager.SubscribeEvents(r.Context(), hostDeviceID, eventSubscriptionParams{})
+	if err != nil {
+		writeSSE(w, flusher, "workbench.error", map[string]string{"error": err.Error()})
+		return
+	}
+	defer stream.Close()
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			writeSSE(w, flusher, "heartbeat", map[string]any{"ts": time.Now().UTC().Format(time.RFC3339Nano)})
+		case _, ok := <-stream.Events:
+			if !ok {
+				writeSSE(w, flusher, "workbench.error", map[string]string{"error": "remote workbench stream closed"})
+				return
+			}
+			next, err := load()
+			if err != nil {
+				writeSSE(w, flusher, "workbench.error", map[string]string{"error": err.Error()})
+				continue
+			}
+			patch := diffWorkbenchState(current, next)
+			if len(patch.Ops) > 0 {
+				writeSSE(w, flusher, "workbench.patch", patch)
+			}
+			current = next
+		}
+	}
+}
+
+func remoteWorkbenchFromSnapshotResult(result any) (workbenchState, error) {
+	body, err := json.Marshal(result)
+	if err != nil {
+		return workbenchState{}, err
+	}
+	var snapshot struct {
+		Workbench workbenchState `json:"workbench"`
+	}
+	if err := json.Unmarshal(body, &snapshot); err != nil {
+		return workbenchState{}, err
+	}
+	if snapshot.Workbench.Workspaces == nil {
+		return workbenchState{}, errors.New("remote snapshot response missing workbench")
+	}
+	return snapshot.Workbench, nil
+}
+
 func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Request, hostDeviceID, workspaceID string) {
 	local, err := a.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -508,7 +630,7 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 		_ = local.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
-	defer terminal.Close()
+	defer terminal.Detach()
 
 	localWriter := &remotePTYLocalWriter{}
 	localWriter.write(local, map[string]any{
@@ -567,11 +689,9 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 			return
 		case read, ok := <-clientReads:
 			if !ok {
-				_ = terminal.Close()
 				return
 			}
 			if read.err != nil {
-				_ = terminal.Close()
 				return
 			}
 			if err := remoteTerminalHandleManagedClientMessage(terminal, read.message); err != nil {

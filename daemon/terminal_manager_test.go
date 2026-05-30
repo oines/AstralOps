@@ -239,7 +239,7 @@ func TestTerminalOutputIsSplitIntoBoundedFrames(t *testing.T) {
 		controllerDeviceID: "device_mobile",
 		frames:             make(chan terminalStreamFrame, 4),
 	}
-	if _, replaced, err := session.attachViewer(viewer); err != nil || replaced != nil {
+	if _, replaced, _, err := session.attachViewer(viewer, 0); err != nil || replaced != nil {
 		t.Fatalf("attach viewer replaced=%v err=%v", replaced, err)
 	}
 
@@ -260,6 +260,52 @@ func TestTerminalOutputIsSplitIntoBoundedFrames(t *testing.T) {
 	case frame := <-viewer.frames:
 		t.Fatalf("unexpected extra frame = %#v", frame)
 	default:
+	}
+}
+
+func TestTerminalAttachReplaysOutputHistoryAfterSeq(t *testing.T) {
+	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh", "device_mobile")
+	session.appendOutput("one\n")
+	session.appendOutput("two\n")
+	viewer := &terminalViewer{
+		connectionID:       "conn_replay",
+		controllerDeviceID: "device_mobile",
+		frames:             make(chan terminalStreamFrame, 4),
+	}
+
+	_, replaced, history, err := session.attachViewer(viewer, 1)
+	if err != nil || replaced != nil {
+		t.Fatalf("attach viewer replaced=%v err=%v", replaced, err)
+	}
+	if len(history) != 1 || history[0].OutputSeq != 2 || history[0].Data != "two\n" {
+		t.Fatalf("history = %#v, want output after seq 1", history)
+	}
+}
+
+func TestTerminalDetachKeepsHostTerminalOpen(t *testing.T) {
+	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh", "device_mobile")
+	viewer := &terminalViewer{
+		connectionID:       "conn_detach",
+		controllerDeviceID: "device_mobile",
+		frames:             make(chan terminalStreamFrame, 4),
+	}
+	if _, _, _, err := session.attachViewer(viewer, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	result, removed := session.detachViewer(viewer.connectionID)
+	if removed == nil {
+		t.Fatal("detach did not remove viewer")
+	}
+	if result.Status != terminalStatusOpen {
+		t.Fatalf("detach status = %q, want open", result.Status)
+	}
+	session.mu.Lock()
+	status := session.status
+	viewerCount := len(session.viewers)
+	session.mu.Unlock()
+	if status != terminalStatusOpen || viewerCount != 0 {
+		t.Fatalf("terminal status=%q viewers=%d, want open with no viewers", status, viewerCount)
 	}
 }
 

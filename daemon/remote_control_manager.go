@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,13 +15,22 @@ const (
 	remoteControlManagedRequestPrefix = "remote_mgr_"
 	remoteControlStreamBufferSize     = 128
 	remoteControlOrphanFrameLimit     = 128
+	remoteControlLANFailureSuppress   = 30 * time.Second
+	remoteControlStateIdle            = "idle"
+	remoteControlStateConnecting      = "connecting"
+	remoteControlStateConnected       = "connected"
+	remoteControlStateReconnecting    = "reconnecting"
+	remoteControlStateFailed          = "failed"
 )
 
 type remoteControlManager struct {
 	app *app
 	mu  sync.Mutex
 
-	sessions map[string]*remoteControlManagedSession
+	sessions       map[string]*remoteControlManagedSession
+	states         map[string]remoteHostControlState
+	lanFailedUntil map[string]time.Time
+	routeGen       int64
 }
 
 type remoteControlManagedSession struct {
@@ -53,8 +63,125 @@ type remoteManagedTerminalStream struct {
 	closeStream func()
 }
 
+type remoteHostControlState struct {
+	State           string `json:"state"`
+	Transport       string `json:"transport,omitempty"`
+	RouteGeneration int64  `json:"route_generation"`
+	LastErrorCode   string `json:"last_error_code,omitempty"`
+	LastError       string `json:"last_error,omitempty"`
+	UpdatedAt       string `json:"updated_at,omitempty"`
+}
+
 func newRemoteControlManager(a *app) *remoteControlManager {
-	return &remoteControlManager{app: a, sessions: map[string]*remoteControlManagedSession{}}
+	return &remoteControlManager{
+		app:            a,
+		sessions:       map[string]*remoteControlManagedSession{},
+		states:         map[string]remoteHostControlState{},
+		lanFailedUntil: map[string]time.Time{},
+	}
+}
+
+func (m *remoteControlManager) controlState(hostDeviceID string) remoteHostControlState {
+	hostDeviceID = strings.TrimSpace(hostDeviceID)
+	if m == nil || hostDeviceID == "" {
+		return remoteHostControlState{State: remoteControlStateIdle}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if state, ok := m.states[hostDeviceID]; ok && state.State != "" {
+		return state
+	}
+	return remoteHostControlState{State: remoteControlStateIdle, RouteGeneration: m.routeGen}
+}
+
+func (m *remoteControlManager) setControlState(hostDeviceID, state string, target controlClientTarget, err error) {
+	hostDeviceID = strings.TrimSpace(hostDeviceID)
+	if m == nil || hostDeviceID == "" {
+		return
+	}
+	if state == "" {
+		state = remoteControlStateIdle
+	}
+	next := remoteHostControlState{
+		State:           state,
+		Transport:       remoteControlTransport(target),
+		UpdatedAt:       time.Now().UTC().Format(time.RFC3339Nano),
+		LastError:       "",
+		LastErrorCode:   "",
+		RouteGeneration: 0,
+	}
+	if err != nil {
+		next.LastError = err.Error()
+		var actionErr *actionError
+		if errors.As(err, &actionErr) {
+			next.LastErrorCode = actionErr.Code
+		}
+	}
+	m.mu.Lock()
+	current := m.states[hostDeviceID]
+	if current.State != next.State || current.Transport != next.Transport || current.LastError != next.LastError || current.LastErrorCode != next.LastErrorCode {
+		m.routeGen++
+	}
+	next.RouteGeneration = m.routeGen
+	m.states[hostDeviceID] = next
+	m.mu.Unlock()
+}
+
+func (m *remoteControlManager) setAllControlStates(state string, err error) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.states))
+	for id := range m.states {
+		ids = append(ids, id)
+	}
+	m.mu.Unlock()
+	for _, id := range ids {
+		m.setControlState(id, state, controlClientTarget{}, err)
+	}
+}
+
+func (m *remoteControlManager) lanSuppressed(hostDeviceID string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	until := m.lanFailedUntil[strings.TrimSpace(hostDeviceID)]
+	return !until.IsZero() && time.Now().Before(until)
+}
+
+func (m *remoteControlManager) markLANFailed(hostDeviceID string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.lanFailedUntil[strings.TrimSpace(hostDeviceID)] = time.Now().Add(remoteControlLANFailureSuppress)
+	m.routeGen++
+	m.mu.Unlock()
+}
+
+func (m *remoteControlManager) clearLANFailure(hostDeviceID string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	if _, ok := m.lanFailedUntil[strings.TrimSpace(hostDeviceID)]; ok {
+		delete(m.lanFailedUntil, strings.TrimSpace(hostDeviceID))
+		m.routeGen++
+	}
+	m.mu.Unlock()
+}
+
+func remoteControlTransport(target controlClientTarget) string {
+	if target.UseRelay {
+		return remoteHostStatusRelay
+	}
+	if strings.TrimSpace(target.BaseURL) != "" {
+		return remoteHostStatusLAN
+	}
+	return ""
 }
 
 func (a *app) remoteControlManager() *remoteControlManager {
@@ -68,16 +195,19 @@ func (a *app) remoteControlManager() *remoteControlManager {
 }
 
 func (m *remoteControlManager) Request(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
-	session, err := m.getSession(ctx, hostDeviceID)
-	if err != nil {
-		return ControlResponse{}, err
+	req := func() ControlRequest {
+		return ControlRequest{
+			RequestID:  remoteControlManagedRequestPrefix + randomID(12),
+			Capability: capability,
+			Action:     action,
+			Params:     params,
+		}
 	}
-	response, err := session.request(ctx, ControlRequest{
-		RequestID:  remoteControlManagedRequestPrefix + randomID(12),
-		Capability: capability,
-		Action:     action,
-		Params:     params,
-	})
+	response, err := m.requestOnce(ctx, hostDeviceID, req())
+	if err != nil && remoteControlRequestCanRetry(capability, action) {
+		m.Invalidate(hostDeviceID, "retry_read_after_error")
+		response, err = m.requestOnce(ctx, hostDeviceID, req())
+	}
 	if err != nil {
 		return ControlResponse{}, fmt.Errorf("remote control request failed: %w", err)
 	}
@@ -87,13 +217,40 @@ func (m *remoteControlManager) Request(ctx context.Context, hostDeviceID, capabi
 	return response, nil
 }
 
+func (m *remoteControlManager) requestOnce(ctx context.Context, hostDeviceID string, req ControlRequest) (ControlResponse, error) {
+	session, err := m.getSession(ctx, hostDeviceID)
+	if err != nil {
+		return ControlResponse{}, err
+	}
+	return session.request(ctx, req)
+}
+
+func remoteControlRequestCanRetry(capability, action string) bool {
+	if capability != CapabilityCoreRead && capability != CapabilityWorkspaceFilesRead && capability != CapabilityMediaRead {
+		return false
+	}
+	switch action {
+	case ControlActionHostSnapshot,
+		ControlActionSessionView,
+		ControlActionSessions,
+		ControlActionWorkspaces,
+		ControlActionWorkspaceConnection,
+		ControlActionEvents,
+		ControlActionWorkspaceFilesRead,
+		ControlActionMediaRead:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *remoteControlManager) SubscribeEvents(ctx context.Context, hostDeviceID string, params eventSubscriptionParams) (remoteControlEventStream, error) {
 	session, err := m.getSession(ctx, hostDeviceID)
 	if err != nil {
 		return remoteControlEventStream{}, err
 	}
 	response, err := session.request(ctx, ControlRequest{
-		RequestID:  remoteControlManagedRequestPrefix + "events_" + randomID(12),
+		RequestID:  remoteControlManagedRequestPrefix + randomID(12),
 		Capability: CapabilityCoreRead,
 		Action:     ControlActionEventsSubscribe,
 		Params: map[string]any{
@@ -168,31 +325,16 @@ func (m *remoteControlManager) OpenTerminal(ctx context.Context, hostDeviceID, w
 	if err != nil {
 		return nil, err
 	}
-	open, err := session.request(ctx, ControlRequest{
-		RequestID:  remoteControlManagedRequestPrefix + "pty_open_" + randomID(12),
-		Capability: CapabilityTerminalOpen,
-		Action:     ControlActionTerminalOpen,
-		Params:     map[string]any{"workspace_id": workspaceID, "cols": defaultTerminalCols, "rows": defaultTerminalRows},
-	})
+	terminalID, shell, cwd, err := session.remoteTerminalForWorkspace(ctx, workspaceID)
 	if err != nil {
-		return nil, fmt.Errorf("remote terminal open failed: %w", err)
-	}
-	if !open.OK {
-		if open.Error != nil && open.Error.Code == controlAuthorizationRequiredCode {
-			m.Invalidate(hostDeviceID, controlAuthorizationRequiredCode)
-		}
-		return nil, controlResponseActionError(open, ControlActionTerminalOpen)
-	}
-	terminalID := stringValue(mapValue(open.Result)["terminal_id"])
-	if terminalID == "" {
-		return nil, errors.New("remote terminal response missing terminal_id")
+		return nil, err
 	}
 	frames, unregister := session.registerStream(terminalID)
 	attach, err := session.request(ctx, ControlRequest{
 		RequestID:  remoteControlManagedRequestPrefix + "pty_attach_" + randomID(12),
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalAttach,
-		Params:     map[string]any{"terminal_id": terminalID},
+		Params:     map[string]any{"terminal_id": terminalID, "after_seq": 0},
 	})
 	if err != nil {
 		unregister()
@@ -207,15 +349,66 @@ func (m *remoteControlManager) OpenTerminal(ctx context.Context, hostDeviceID, w
 		}
 		return nil, controlResponseActionError(attach, ControlActionTerminalAttach)
 	}
-	openResult := mapValue(open.Result)
 	return &remoteManagedTerminalStream{
 		session:     session,
 		terminalID:  terminalID,
-		shell:       stringValue(openResult["shell"]),
-		cwd:         stringValue(openResult["cwd"]),
+		shell:       shell,
+		cwd:         cwd,
 		frames:      frames,
 		closeStream: unregister,
 	}, nil
+}
+
+func (s *remoteControlManagedSession) remoteTerminalForWorkspace(ctx context.Context, workspaceID string) (string, string, string, error) {
+	list, err := s.request(ctx, ControlRequest{
+		RequestID:  remoteControlManagedRequestPrefix + "pty_list_" + randomID(12),
+		Capability: CapabilityTerminalOpen,
+		Action:     ControlActionTerminalList,
+	})
+	if err != nil {
+		return "", "", "", fmt.Errorf("remote terminal list failed: %w", err)
+	}
+	if !list.OK {
+		return "", "", "", controlResponseActionError(list, ControlActionTerminalList)
+	}
+	for _, tab := range terminalTabsFromControlResult(list.Result) {
+		if tab.WorkspaceID == workspaceID && tab.Status == terminalStatusOpen {
+			return tab.TerminalID, tab.Shell, tab.CWD, nil
+		}
+	}
+	open, err := s.request(ctx, ControlRequest{
+		RequestID:  remoteControlManagedRequestPrefix + "pty_open_" + randomID(12),
+		Capability: CapabilityTerminalOpen,
+		Action:     ControlActionTerminalOpen,
+		Params:     map[string]any{"workspace_id": workspaceID, "cols": defaultTerminalCols, "rows": defaultTerminalRows},
+	})
+	if err != nil {
+		return "", "", "", fmt.Errorf("remote terminal open failed: %w", err)
+	}
+	if !open.OK {
+		if open.Error != nil && open.Error.Code == controlAuthorizationRequiredCode && s.manager != nil {
+			s.manager.Invalidate(s.hostDeviceID, controlAuthorizationRequiredCode)
+		}
+		return "", "", "", controlResponseActionError(open, ControlActionTerminalOpen)
+	}
+	openResult := mapValue(open.Result)
+	terminalID := stringValue(openResult["terminal_id"])
+	if terminalID == "" {
+		return "", "", "", errors.New("remote terminal response missing terminal_id")
+	}
+	return terminalID, stringValue(openResult["shell"]), stringValue(openResult["cwd"]), nil
+}
+
+func terminalTabsFromControlResult(result any) []terminalTab {
+	body, err := json.Marshal(result)
+	if err != nil {
+		return nil
+	}
+	var tabs []terminalTab
+	if err := json.Unmarshal(body, &tabs); err != nil {
+		return nil
+	}
+	return tabs
 }
 
 func (m *remoteControlManager) Invalidate(hostDeviceID, reason string) {
@@ -230,6 +423,7 @@ func (m *remoteControlManager) Invalidate(hostDeviceID, reason string) {
 	if session != nil {
 		session.closeWithError(fmt.Errorf("remote control session invalidated: %s", reason))
 	}
+	m.setControlState(hostDeviceID, remoteControlStateReconnecting, controlClientTarget{}, fmt.Errorf("%s", reason))
 	if m.app != nil {
 		m.app.refreshMeshStateAsync(true)
 	}
@@ -246,6 +440,7 @@ func (m *remoteControlManager) InvalidateAll(reason string) {
 	for _, session := range sessions {
 		session.closeWithError(fmt.Errorf("remote control session invalidated: %s", reason))
 	}
+	m.setAllControlStates(remoteControlStateReconnecting, fmt.Errorf("%s", reason))
 	if m.app != nil {
 		m.app.refreshMeshStateAsync(true)
 	}
@@ -264,12 +459,21 @@ func (m *remoteControlManager) getSession(ctx context.Context, hostDeviceID stri
 	delete(m.sessions, hostDeviceID)
 	m.mu.Unlock()
 
+	m.setControlState(hostDeviceID, remoteControlStateConnecting, controlClientTarget{}, nil)
 	target, err := m.app.remoteHostTarget(hostDeviceID)
 	if err != nil {
+		m.setControlState(hostDeviceID, remoteControlStateFailed, controlClientTarget{}, err)
 		return nil, err
+	}
+	if m.lanSuppressed(hostDeviceID) && strings.TrimSpace(target.RelayClient.BaseURL) != "" && strings.TrimSpace(target.RelayClient.Token) != "" {
+		target.UseRelay = true
 	}
 	conn, activeTarget, err := controlClientOpenTargetWithTransports(ctx, target, m.app.store, controlClientTransportPlan(target))
 	if err != nil {
+		if !target.UseRelay {
+			m.markLANFailed(hostDeviceID)
+		}
+		m.setControlState(hostDeviceID, remoteControlStateFailed, activeTarget, err)
 		if controlClientTransportErrorIsTerminal(err) {
 			return nil, err
 		}
@@ -277,6 +481,11 @@ func (m *remoteControlManager) getSession(ctx context.Context, hostDeviceID stri
 			m.app.refreshMeshStateAsync(true)
 		}
 		return nil, err
+	}
+	if !target.UseRelay && activeTarget.UseRelay {
+		m.markLANFailed(hostDeviceID)
+	} else if !activeTarget.UseRelay {
+		m.clearLANFailure(hostDeviceID)
 	}
 	session := &remoteControlManagedSession{
 		manager:       m,
@@ -299,6 +508,7 @@ func (m *remoteControlManager) getSession(ctx context.Context, hostDeviceID stri
 	m.mu.Unlock()
 
 	go session.readLoop()
+	m.setControlState(hostDeviceID, remoteControlStateConnected, activeTarget, nil)
 	if m.app != nil {
 		m.app.refreshMeshStateAsync(true)
 	}
@@ -335,6 +545,9 @@ func (s *remoteControlManagedSession) readLoop() {
 	for {
 		frame, err := s.conn.ReadPlain(0)
 		if err != nil {
+			if s.manager != nil {
+				s.manager.setControlState(s.hostDeviceID, remoteControlStateFailed, s.target, err)
+			}
 			s.closeWithError(err)
 			return
 		}
@@ -363,14 +576,22 @@ func (s *remoteControlManagedSession) request(ctx context.Context, req ControlRe
 	s.mu.Unlock()
 	if err := s.conn.WritePlain(controlPlainFrame{Type: "request", Request: &req}); err != nil {
 		s.unregisterRequest(req.RequestID)
+		if s.manager != nil {
+			s.manager.setControlState(s.hostDeviceID, remoteControlStateFailed, s.target, err)
+		}
 		s.closeWithError(err)
 		return ControlResponse{}, err
 	}
 
 	select {
 	case <-ctx.Done():
+		err := ctx.Err()
 		s.unregisterRequest(req.RequestID)
-		return ControlResponse{}, ctx.Err()
+		if s.manager != nil {
+			s.manager.setControlState(s.hostDeviceID, remoteControlStateFailed, s.target, err)
+		}
+		s.closeWithError(err)
+		return ControlResponse{}, err
 	case frame, ok := <-ch:
 		if !ok {
 			return ControlResponse{}, s.closedError()
@@ -551,6 +772,18 @@ func (s *remoteControlManagedSession) remoteTerminalClose(terminalID string) err
 	})
 }
 
+func (s *remoteControlManagedSession) remoteTerminalDetach(terminalID string) error {
+	if strings.TrimSpace(terminalID) == "" {
+		return nil
+	}
+	return s.writeTerminalRequest(ControlRequest{
+		RequestID:  remoteControlManagedRequestPrefix + "pty_detach_" + randomID(8),
+		Capability: CapabilityTerminalOpen,
+		Action:     ControlActionTerminalDetach,
+		Params:     map[string]any{"terminal_id": terminalID},
+	})
+}
+
 func (s *remoteControlManagedSession) writeTerminalRequest(req ControlRequest) error {
 	if s.isClosed() {
 		return s.closedError()
@@ -594,6 +827,16 @@ func (t *remoteManagedTerminalStream) Close() error {
 		t.closeStream()
 	}
 	return t.session.remoteTerminalClose(t.terminalID)
+}
+
+func (t *remoteManagedTerminalStream) Detach() error {
+	if t == nil || t.session == nil {
+		return nil
+	}
+	if t.closeStream != nil {
+		t.closeStream()
+	}
+	return t.session.remoteTerminalDetach(t.terminalID)
 }
 
 func controlResponseActionError(response ControlResponse, action string) error {

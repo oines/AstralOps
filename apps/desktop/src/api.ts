@@ -38,6 +38,8 @@ import type {
   Workspace,
   WorkspaceCommandResponse,
   WorkspaceConnection,
+  WorkbenchPatch,
+  WorkbenchState,
 } from "@astralops/protocol";
 import type { DaemonInfo } from "./types";
 
@@ -81,6 +83,12 @@ export type MeshStateSubscriptionHandlers = {
   onError?: (error?: unknown) => void;
 };
 
+export type WorkbenchSubscriptionHandlers = {
+  onPatch: (patch: WorkbenchPatch) => void;
+  onOpen?: () => void;
+  onError?: (error?: unknown) => void;
+};
+
 export type TerminalReadyPayload = {
   shell?: string;
   cwd?: string;
@@ -114,6 +122,8 @@ export interface CoreClient {
   approvePairingRequest(requestId: string): Promise<PairingRequestResolveResult>;
   denyPairingRequest(requestId: string): Promise<PairingRequestResolveResult>;
   hostSnapshot(input?: HostSnapshotRequest): Promise<HostSnapshotResponse>;
+  workbench(): Promise<WorkbenchState>;
+  subscribeWorkbench(handlers: WorkbenchSubscriptionHandlers): EventSubscription;
   settings(): Promise<AppSettings>;
   patchSettings(patch: AppSettingsPatch): Promise<AppSettings>;
   clearMediaCache(): Promise<ClearMediaCacheResponse>;
@@ -158,6 +168,7 @@ export interface CoreClient {
 export interface ControlChannel {
   request<T>(method: "GET" | "PATCH" | "POST" | "DELETE", path: string, body?: unknown, auth?: boolean): Promise<T>;
   subscribeEvents(afterSeq: number, handlers: EventSubscriptionHandlers): EventSubscription;
+  subscribeWorkbench(handlers: WorkbenchSubscriptionHandlers): EventSubscription;
   openSocket(path: string): WebSocket;
 }
 
@@ -409,6 +420,35 @@ export class LocalHttpControlChannel implements ControlChannel {
     };
   }
 
+  subscribeWorkbench(handlers: WorkbenchSubscriptionHandlers): EventSubscription {
+    logClientEvent("workbench.subscribe.start", { remote: false });
+    const source = new EventSource(this.url("/v1/workbench", { stream: 1 }));
+    source.addEventListener("workbench.patch", (message) => {
+      try {
+        handlers.onPatch(JSON.parse((message as MessageEvent).data) as WorkbenchPatch);
+      } catch (error) {
+        handlers.onError?.(error);
+      }
+    });
+    source.addEventListener("workbench.error", (message) => {
+      handlers.onError?.(new Error((message as MessageEvent).data));
+    });
+    source.onopen = () => {
+      logClientEvent("workbench.subscribe.open", { remote: false });
+      handlers.onOpen?.();
+    };
+    source.onerror = (event) => {
+      logClientEvent("workbench.subscribe.error", { remote: false }, "warn");
+      handlers.onError?.(event);
+    };
+    return {
+      close: () => {
+        logClientEvent("workbench.subscribe.close", { remote: false });
+        source.close();
+      },
+    };
+  }
+
   openSocket(path: string): WebSocket {
     logClientEvent("websocket.open", requestLogContext("GET", path, undefined));
     const params = new URLSearchParams({ token: this.token });
@@ -517,6 +557,36 @@ class RemoteDaemonControlChannel implements ControlChannel {
     return {
       close: () => {
         logClientEvent("events.subscribe.close", { after_seq: afterSeq, remote: true, host_device_id: this.hostDeviceId });
+        source.close();
+      },
+    };
+  }
+
+  subscribeWorkbench(handlers: WorkbenchSubscriptionHandlers): EventSubscription {
+    logClientEvent("workbench.subscribe.start", { remote: true, host_device_id: this.hostDeviceId });
+    const source = new EventSource(`${this.baseUrl}${this.remotePath("/v1/workbench")}?${new URLSearchParams({ token: this.token, stream: "1" }).toString()}`);
+    source.addEventListener("workbench.patch", (message) => {
+      try {
+        handlers.onPatch(JSON.parse((message as MessageEvent).data) as WorkbenchPatch);
+      } catch (error) {
+        handlers.onError?.(error);
+      }
+    });
+    source.addEventListener("workbench.error", (message) => {
+      logClientEvent("workbench.subscribe.remote_error", { remote: true, host_device_id: this.hostDeviceId }, "warn");
+      handlers.onError?.(new Error((message as MessageEvent).data));
+    });
+    source.onopen = () => {
+      logClientEvent("workbench.subscribe.open", { remote: true, host_device_id: this.hostDeviceId });
+      handlers.onOpen?.();
+    };
+    source.onerror = (event) => {
+      logClientEvent("workbench.subscribe.error", { remote: true, host_device_id: this.hostDeviceId }, "warn");
+      handlers.onError?.(event);
+    };
+    return {
+      close: () => {
+        logClientEvent("workbench.subscribe.close", { remote: true, host_device_id: this.hostDeviceId });
         source.close();
       },
     };
@@ -648,6 +718,14 @@ export class LocalCoreClient implements CoreClient {
     if (input.restore_on_launch !== undefined) params.set("restore_on_launch", input.restore_on_launch ? "1" : "0");
     const search = params.toString();
     return this.channel.request("GET", `/v1/snapshot${search ? `?${search}` : ""}`);
+  }
+
+  workbench(): Promise<WorkbenchState> {
+    return this.channel.request("GET", "/v1/workbench");
+  }
+
+  subscribeWorkbench(handlers: WorkbenchSubscriptionHandlers): EventSubscription {
+    return this.channel.subscribeWorkbench(handlers);
   }
 
   listWorkspaces(): Promise<Workspace[]> {
@@ -891,9 +969,6 @@ class WebSocketTerminalConnection implements TerminalConnection {
 
   close(): void {
     logClientEvent("terminal.close");
-    if (this.socket.readyState === WebSocket.OPEN) {
-      this.send({ type: "close" });
-    }
     this.socket.close();
   }
 

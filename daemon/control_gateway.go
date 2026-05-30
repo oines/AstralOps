@@ -63,6 +63,7 @@ const (
 	ControlActionWorkspaceFilesStreamCancel = "workspace.files.stream.cancel"
 	ControlActionWorkspaceExec              = "workspace.exec"
 	ControlActionTerminalOpen               = "terminal.open"
+	ControlActionTerminalList               = "terminal.list"
 	ControlActionTerminalAttach             = "terminal.attach"
 	ControlActionTerminalDetach             = "terminal.detach"
 	ControlActionTerminalInput              = "terminal.input"
@@ -164,7 +165,7 @@ func controlActionCapability(action string) string {
 		return CapabilityWorkspaceFilesWrite
 	case ControlActionWorkspaceExec:
 		return CapabilityWorkspaceExec
-	case ControlActionTerminalOpen, ControlActionTerminalAttach, ControlActionTerminalDetach:
+	case ControlActionTerminalOpen, ControlActionTerminalList, ControlActionTerminalAttach, ControlActionTerminalDetach:
 		return CapabilityTerminalOpen
 	case ControlActionTerminalInput, ControlActionTerminalResize, ControlActionTerminalClose:
 		return CapabilityTerminalInput
@@ -496,6 +497,8 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 			return nil, err
 		}
 		return a.terminalManager().open(ctx, req.ControllerDeviceID, params)
+	case ControlActionTerminalList:
+		return a.terminalManager().listTabs(), nil
 	case ControlActionTerminalAttach:
 		var params terminalAttachParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
