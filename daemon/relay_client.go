@@ -42,11 +42,23 @@ func (c RelayClient) ListRelayEnvelopes(ctx context.Context, deviceID string, li
 }
 
 func (c RelayClient) AckRelayEnvelope(ctx context.Context, envelopeID, deviceID string) error {
-	return c.do(ctx, http.MethodPost, "/v1/relay/envelopes/"+pathEscape(envelopeID)+"/ack", relayEnvelopeAckInput{
+	err := c.do(ctx, http.MethodPost, "/v1/relay/envelopes/"+pathEscape(envelopeID)+"/ack", relayEnvelopeAckInput{
 		DeviceID: strings.TrimSpace(deviceID),
 	}, nil)
+	if relayEnvelopeAckAlreadyConsumed(err) {
+		return nil
+	}
+	return err
 }
 
 func (c RelayClient) do(ctx context.Context, method, path string, body any, out any) error {
 	return authedJSONRequest(ctx, "relay", c.BaseURL, c.Token, c.HTTPClient, method, path, body, out)
+}
+
+func relayEnvelopeAckAlreadyConsumed(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "404 Not Found") && strings.Contains(message, `"code":"relay_envelope_not_found"`)
 }

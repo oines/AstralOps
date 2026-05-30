@@ -207,7 +207,7 @@ func (s *Server) ack(accountIDHash, envelopeID, deviceID string) error {
 		s.queues[accountIDHash] = append(queue[:i], queue[i+1:]...)
 		return nil
 	}
-	return apiErr(http.StatusNotFound, "relay_envelope_not_found", "relay envelope not found")
+	return nil
 }
 
 func (s *Server) withAccount(next func(string, http.ResponseWriter, *http.Request)) http.HandlerFunc {

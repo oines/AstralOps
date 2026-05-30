@@ -33,6 +33,8 @@ func TestRelayBrokerEnvelopeRoundTrip(t *testing.T) {
 		t.Fatalf("listed = %#v, want created envelope", listed)
 	}
 
+	// Duplicate ACKs can happen when controller/host polling races consume the same envelope.
+	relayRequest[map[string]bool](t, http.MethodPost, server.URL+"/v1/relay/envelopes/"+created.EnvelopeID+"/ack", credential, EnvelopeAckInput{DeviceID: "dev_b"})
 	relayRequest[map[string]bool](t, http.MethodPost, server.URL+"/v1/relay/envelopes/"+created.EnvelopeID+"/ack", credential, EnvelopeAckInput{DeviceID: "dev_b"})
 	listed = relayRequest[EnvelopeListResponse](t, http.MethodGet, server.URL+"/v1/relay/envelopes?device_id=dev_b", credential, nil)
 	if len(listed.Envelopes) != 0 {

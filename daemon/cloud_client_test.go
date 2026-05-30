@@ -227,3 +227,24 @@ func TestRelayClientEnvelopeRoundTripCallsBrokerAPI(t *testing.T) {
 		t.Fatalf("requests = %#v, want 3 calls", requests)
 	}
 }
+
+func TestRelayClientAckTreatsEnvelopeNotFoundAsConsumed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer account-token" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/relay/envelopes/env_missing/ack" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"code":  "relay_envelope_not_found",
+			"error": "relay envelope not found",
+		})
+	}))
+	defer server.Close()
+
+	client := RelayClient{BaseURL: server.URL, Token: "account-token"}
+	if err := client.AckRelayEnvelope(context.Background(), "env_missing", "dev_host"); err != nil {
+		t.Fatal(err)
+	}
+}
