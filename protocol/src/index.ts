@@ -295,6 +295,70 @@ export type SessionView = {
   editable_user_message?: EditableUserMessageView | null;
 };
 
+export type HostSnapshotRequest = {
+  event_limit?: number;
+  restore_on_launch?: boolean;
+};
+
+export type HostSnapshotResponse = {
+  host: HostInfo;
+  workspaces: Workspace[];
+  sessions: Session[];
+  workspace_connections?: WorkspaceConnection[];
+  events: AstralEvent[];
+  session_views: SessionView[];
+  initial_session_events?: AstralEvent[];
+  workbench?: WorkbenchState;
+};
+
+export type TerminalTab = {
+  terminal_id: string;
+  workspace_id: string;
+  agent: AgentKind;
+  target: WorkspaceTarget;
+  shell?: string;
+  cwd?: string;
+  status: "open" | "closed" | string;
+  writer_device_id?: string;
+  output_seq: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkbenchPanel = {
+  id: string;
+  kind: string;
+  state?: Record<string, unknown>;
+  updated_at?: string;
+};
+
+export type WorkbenchState = {
+  version: number;
+  updated_at: string;
+  workspaces: Record<string, Workspace>;
+  sessions: Record<string, Session>;
+  session_views: Record<string, SessionView>;
+  workspace_connections: Record<string, WorkspaceConnection>;
+  terminal_tabs: Record<string, TerminalTab>;
+  panels: Record<string, WorkbenchPanel>;
+};
+
+export type WorkbenchCollectionName =
+  | "workspaces"
+  | "sessions"
+  | "session_views"
+  | "workspace_connections"
+  | "terminal_tabs"
+  | "panels";
+
+export type WorkbenchPatch = {
+  version: number;
+  ops: Array<
+    | { op: "upsert"; collection: WorkbenchCollectionName; id: string; value: unknown }
+    | { op: "remove"; collection: WorkbenchCollectionName; id: string }
+  >;
+};
+
 export type EventWindowParams = {
   workspace_id?: string;
   session_id?: string;
@@ -824,6 +888,7 @@ export type ControlCapability =
   | (string & {});
 
 export type ControlAction =
+  | "core.read.host_snapshot"
   | "core.read.session_view"
   | "core.read.sessions"
   | "core.read.workspaces"
@@ -838,6 +903,7 @@ export type ControlAction =
   | "core.control.workspace.create"
   | "core.control.workspace.connect"
   | "core.control.workspace.disconnect"
+  | "core.control.workspace.delete"
   | "core.control.session.create"
   | "core.control.session.fork"
   | "core.control.session.delete"
@@ -860,6 +926,7 @@ export type ControlAction =
   | "workspace.files.stream.cancel"
   | "workspace.exec"
   | "terminal.open"
+  | "terminal.list"
   | "terminal.attach"
   | "terminal.detach"
   | "terminal.input"
@@ -887,6 +954,7 @@ export type TerminalInputParams = {
 
 export type TerminalAttachParams = {
   terminal_id: string;
+  after_seq?: number;
 };
 
 export type TerminalDetachParams = {
@@ -913,6 +981,8 @@ export type TerminalOpenResult = {
   writer_device_id?: string;
   output_seq: number;
 };
+
+export type TerminalListResult = TerminalTab[];
 
 export type TerminalAckResult = {
   terminal_id: string;
@@ -1083,6 +1153,8 @@ export type CloudDeviceStatus = "online" | "offline" | "revoked" | string;
 export type CloudRelayConfig = {
   relay_id?: string;
   relay_url?: string;
+  region?: string;
+  name?: string;
   credential?: string;
   credential_expires_at?: string;
 };
@@ -1105,6 +1177,8 @@ export type CloudMembershipLease = {
 export type CloudRelayStatus = {
   relay_id?: string;
   relay_url?: string;
+  region?: string;
+  name?: string;
   credential_available: boolean;
   credential_expires_at?: string;
 };
@@ -1112,6 +1186,22 @@ export type CloudRelayStatus = {
 export type CloudAccountStatus = {
   account_id_hash: string;
   relay?: CloudRelayStatus;
+};
+
+export type CloudRelayOption = {
+  relay_id: string;
+  relay_url: string;
+  region?: string;
+  name?: string;
+};
+
+export type CloudRelayListResponse = {
+  relays: CloudRelayOption[];
+  current_relay_id?: string;
+};
+
+export type CloudRelayUpdateRequest = {
+  relay_id: string;
 };
 
 export type CloudAuthProvider = "google" | "github";
@@ -1325,17 +1415,46 @@ export type RemoteHostRecord = {
   public_key_fingerprint: string;
   known_identity?: boolean;
   status: "online" | "offline" | "lan" | string;
-  connection: "lan" | "cloud" | "relay" | "offline" | string;
+  connection: "local" | "lan" | "relay" | "offline" | string;
   authorization_state?: "needs_pairing" | "pending" | "approved" | "denied" | "known" | string;
   pairing_request_id?: string;
   pairing_status?: "pending" | "approved" | "denied" | string;
   last_base_url?: string;
   lan_base_url?: string;
   capabilities?: ControlCapability[];
+  control?: {
+    state: "idle" | "connecting" | "connected" | "reconnecting" | "failed" | string;
+    transport?: "lan" | "relay" | string;
+    route_generation: number;
+    last_error_code?: string;
+    last_error?: string;
+    updated_at?: string;
+  };
 };
 
 export type RemoteHostsResponse = {
   hosts: RemoteHostRecord[];
+};
+
+export type MeshState = {
+  self: {
+    device_id: string;
+    device_name: string;
+    can_host: boolean;
+    can_control: boolean;
+    cloud_active: boolean;
+    relay_connected: boolean;
+  };
+  cloud?: {
+    enabled: boolean;
+    account_id_hash?: string;
+    relay_id?: string;
+    relay_url?: string;
+    credential_expires_at?: string;
+  };
+  hosts: RemoteHostRecord[];
+  pending_pairing_count: number;
+  updated_at: string;
 };
 
 export type ControlDiscoveryRequest = {
@@ -1371,6 +1490,7 @@ export type SessionDeleteResult = {
 };
 
 export type ControlActionParamMap = {
+  "core.read.host_snapshot": HostSnapshotRequest;
   "core.read.session_view": SessionReferenceParams;
   "core.read.sessions": SessionsReadParams;
   "core.read.workspaces": undefined;
@@ -1385,6 +1505,7 @@ export type ControlActionParamMap = {
   "core.control.workspace.create": CreateWorkspaceRequest;
   "core.control.workspace.connect": WorkspaceReferenceParams;
   "core.control.workspace.disconnect": WorkspaceReferenceParams;
+  "core.control.workspace.delete": WorkspaceReferenceParams;
   "core.control.session.create": CreateSessionRequest;
   "core.control.session.fork": SessionForkControlParams;
   "core.control.session.delete": SessionDeleteParams;
@@ -1407,6 +1528,7 @@ export type ControlActionParamMap = {
   "workspace.files.stream.cancel": WorkspaceFilesStreamCancelParams;
   "workspace.exec": WorkspaceExecParams;
   "terminal.open": TerminalOpenParams;
+  "terminal.list": undefined;
   "terminal.attach": TerminalAttachParams;
   "terminal.detach": TerminalDetachParams;
   "terminal.input": TerminalInputParams;
@@ -1421,6 +1543,7 @@ export type ControlActionParamMap = {
 };
 
 export type ControlActionResultMap = {
+  "core.read.host_snapshot": HostSnapshotResponse;
   "core.read.session_view": SessionView;
   "core.read.sessions": Session[];
   "core.read.workspaces": Workspace[];
@@ -1435,6 +1558,7 @@ export type ControlActionResultMap = {
   "core.control.workspace.create": Workspace;
   "core.control.workspace.connect": WorkspaceConnection;
   "core.control.workspace.disconnect": WorkspaceConnection;
+  "core.control.workspace.delete": OkResult;
   "core.control.session.create": Session;
   "core.control.session.fork": SessionForkResponse;
   "core.control.session.delete": SessionDeleteResult;
@@ -1457,6 +1581,7 @@ export type ControlActionResultMap = {
   "workspace.files.stream.cancel": WorkspaceFileStreamCancelResult;
   "workspace.exec": WorkspaceExecResult;
   "terminal.open": TerminalOpenResult;
+  "terminal.list": TerminalListResult;
   "terminal.attach": TerminalAttachResult;
   "terminal.detach": TerminalAttachResult;
   "terminal.input": TerminalAckResult;

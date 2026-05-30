@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,10 +21,12 @@ const (
 	terminalOutputCoalesceWindow    = 25 * time.Millisecond
 	defaultTerminalCols             = 100
 	defaultTerminalRows             = 28
-	terminalViewerBuffer            = 256
+	terminalViewerBuffer            = 4096
 	terminalInputMaxBytes           = 64 * 1024
 	terminalOutputFrameMaxBytes     = 64 * 1024
-	defaultTerminalRetentionTimeout = 2 * time.Minute
+	defaultTerminalRetentionTimeout = 0
+	terminalOutputHistoryMaxFrames  = 2000
+	terminalOutputHistoryMaxBytes   = 256 * 1024
 )
 
 type terminalManager struct {
@@ -34,22 +37,24 @@ type terminalManager struct {
 }
 
 type terminalSession struct {
-	mu             sync.Mutex
-	closeOnce      sync.Once
-	id             string
-	workspaceID    string
-	agent          AgentKind
-	target         string
-	cwd            string
-	shell          string
-	writerDeviceID string
-	status         string
-	outputSeq      int64
-	createdAt      time.Time
-	updatedAt      time.Time
-	viewers        map[string]*terminalViewer
-	retentionTimer *time.Timer
-	retentionUntil time.Time
+	mu                 sync.Mutex
+	closeOnce          sync.Once
+	id                 string
+	workspaceID        string
+	agent              AgentKind
+	target             string
+	cwd                string
+	shell              string
+	writerDeviceID     string
+	status             string
+	outputSeq          int64
+	outputHistory      []terminalStreamFrame
+	outputHistoryBytes int
+	createdAt          time.Time
+	updatedAt          time.Time
+	viewers            map[string]*terminalViewer
+	retentionTimer     *time.Timer
+	retentionUntil     time.Time
 
 	localCmd *exec.Cmd
 	localPTY *os.File
@@ -74,6 +79,7 @@ type terminalInputParams struct {
 
 type terminalAttachParams struct {
 	TerminalID string `json:"terminal_id"`
+	AfterSeq   int64  `json:"after_seq,omitempty"`
 }
 
 type terminalDetachParams struct {
@@ -106,6 +112,20 @@ type terminalAckResult struct {
 	Status         string `json:"status"`
 	OutputSeq      int64  `json:"output_seq"`
 	WriterDeviceID string `json:"writer_device_id,omitempty"`
+}
+
+type terminalTab struct {
+	TerminalID     string `json:"terminal_id"`
+	WorkspaceID    string `json:"workspace_id"`
+	Agent          string `json:"agent"`
+	Target         string `json:"target"`
+	Shell          string `json:"shell,omitempty"`
+	CWD            string `json:"cwd,omitempty"`
+	Status         string `json:"status"`
+	WriterDeviceID string `json:"writer_device_id,omitempty"`
+	OutputSeq      int64  `json:"output_seq"`
+	CreatedAt      string `json:"created_at"`
+	UpdatedAt      string `json:"updated_at"`
 }
 
 type terminalAttachResult struct {
@@ -236,7 +256,7 @@ func (m *terminalManager) attach(controllerDeviceID string, conn controlConnecti
 		return terminalAttachResult{}, newActionError(http.StatusNotFound, "terminal_not_found", "terminal not found")
 	}
 	viewer := newTerminalViewer(conn)
-	result, replaced, err := session.attachViewer(viewer)
+	result, replaced, history, err := session.attachViewer(viewer, params.AfterSeq)
 	if err != nil {
 		viewer.close()
 		return terminalAttachResult{}, err
@@ -245,6 +265,11 @@ func (m *terminalManager) attach(controllerDeviceID string, conn controlConnecti
 		replaced.close()
 	}
 	go viewer.run()
+	for _, frame := range history {
+		if !viewer.enqueue(frame) {
+			break
+		}
+	}
 	m.app.emit(AstralEvent{
 		WorkspaceID: session.workspaceID,
 		Agent:       session.agent,
@@ -346,10 +371,73 @@ func (m *terminalManager) close(ctx context.Context, controllerDeviceID string, 
 	return session.ack(), nil
 }
 
+func (m *terminalManager) closeWorkspace(ctx context.Context, workspaceID, reason string) {
+	if m == nil {
+		return
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return
+	}
+	if reason == "" {
+		reason = "workspace_deleted"
+	}
+	m.mu.Lock()
+	sessions := make([]*terminalSession, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		if session.workspaceID == workspaceID {
+			sessions = append(sessions, session)
+		}
+	}
+	m.mu.Unlock()
+	for _, session := range sessions {
+		session.close(ctx, m.app, reason)
+	}
+}
+
 func (m *terminalManager) register(session *terminalSession) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessions[session.id] = session
+}
+
+func (m *terminalManager) listTabs() []terminalTab {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	sessions := make([]*terminalSession, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		sessions = append(sessions, session)
+	}
+	m.mu.Unlock()
+	tabs := make([]terminalTab, 0, len(sessions))
+	for _, session := range sessions {
+		tab := session.tab()
+		if tab.Status == terminalStatusOpen {
+			tabs = append(tabs, tab)
+		}
+	}
+	return tabs
+}
+
+func (m *terminalManager) openTerminalResult(terminalID string) (terminalOpenResult, bool) {
+	if m == nil || strings.TrimSpace(terminalID) == "" {
+		return terminalOpenResult{}, false
+	}
+	m.mu.Lock()
+	session := m.sessions[strings.TrimSpace(terminalID)]
+	m.mu.Unlock()
+	if session == nil {
+		return terminalOpenResult{}, false
+	}
+	session.mu.Lock()
+	open := session.status == terminalStatusOpen
+	session.mu.Unlock()
+	if !open {
+		return terminalOpenResult{}, false
+	}
+	return session.openResult(), true
 }
 
 func (m *terminalManager) detachConnection(connectionID, reason string) {
@@ -409,6 +497,11 @@ func (m *terminalManager) writerSession(controllerDeviceID, terminalID string) (
 		return session, nil
 	}
 	if session.writerDeviceID != controllerDeviceID {
+		if m.app != nil && m.app.store != nil && controllerDeviceID == m.app.store.hostInfo().Identity.DeviceID {
+			session.writerDeviceID = controllerDeviceID
+			session.updatedAt = time.Now().UTC()
+			return session, nil
+		}
 		return nil, newActionError(http.StatusForbidden, "terminal_writer_denied", "controller is not the terminal active writer")
 	}
 	return session, nil
@@ -501,7 +594,9 @@ func (s *terminalSession) appendOutput(data string) {
 	frames := make([]terminalStreamFrame, 0, len(chunks))
 	for _, chunk := range chunks {
 		s.outputSeq++
-		frames = append(frames, s.streamFrameLocked(terminalFrameOutput, chunk, ""))
+		frame := s.streamFrameLocked(terminalFrameOutput, chunk, "")
+		s.rememberOutputLocked(frame)
+		frames = append(frames, frame)
 	}
 	viewers := s.viewersSnapshotLocked()
 	s.mu.Unlock()
@@ -510,16 +605,16 @@ func (s *terminalSession) appendOutput(data string) {
 	}
 }
 
-func (s *terminalSession) attachViewer(viewer *terminalViewer) (terminalAttachResult, *terminalViewer, error) {
+func (s *terminalSession) attachViewer(viewer *terminalViewer, afterSeq int64) (terminalAttachResult, *terminalViewer, []terminalStreamFrame, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.status != terminalStatusOpen {
-		return terminalAttachResult{}, nil, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
+		return terminalAttachResult{}, nil, nil, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
 	}
 	s.cancelRetentionLocked()
 	replaced := s.viewers[viewer.connectionID]
 	s.viewers[viewer.connectionID] = viewer
-	return s.attachResultLocked(viewer.connectionID, viewer.controllerDeviceID), replaced, nil
+	return s.attachResultLocked(viewer.connectionID, viewer.controllerDeviceID), replaced, s.outputHistoryAfterLocked(afterSeq), nil
 }
 
 func (s *terminalSession) detachViewer(connectionID string) (terminalAttachResult, *terminalViewer) {
@@ -554,6 +649,38 @@ func (s *terminalSession) sendToViewers(frame terminalStreamFrame, viewers []*te
 			removed.close()
 		}
 	}
+}
+
+func (s *terminalSession) rememberOutputLocked(frame terminalStreamFrame) {
+	if frame.frameType != terminalFrameOutput || frame.Data == "" {
+		return
+	}
+	s.outputHistory = append(s.outputHistory, frame)
+	s.outputHistoryBytes += len(frame.Data)
+	for len(s.outputHistory) > terminalOutputHistoryMaxFrames || s.outputHistoryBytes > terminalOutputHistoryMaxBytes {
+		if len(s.outputHistory) == 0 {
+			s.outputHistoryBytes = 0
+			return
+		}
+		s.outputHistoryBytes -= len(s.outputHistory[0].Data)
+		s.outputHistory = s.outputHistory[1:]
+		if s.outputHistoryBytes < 0 {
+			s.outputHistoryBytes = 0
+		}
+	}
+}
+
+func (s *terminalSession) outputHistoryAfterLocked(afterSeq int64) []terminalStreamFrame {
+	if len(s.outputHistory) == 0 {
+		return nil
+	}
+	frames := make([]terminalStreamFrame, 0, len(s.outputHistory))
+	for _, frame := range s.outputHistory {
+		if frame.OutputSeq > afterSeq {
+			frames = append(frames, frame)
+		}
+	}
+	return frames
 }
 
 func (s *terminalSession) viewersSnapshotLocked() []*terminalViewer {
@@ -722,6 +849,24 @@ func (s *terminalSession) ack() terminalAckResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return terminalAckResult{TerminalID: s.id, Status: s.status, OutputSeq: s.outputSeq, WriterDeviceID: s.writerDeviceID}
+}
+
+func (s *terminalSession) tab() terminalTab {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return terminalTab{
+		TerminalID:     s.id,
+		WorkspaceID:    s.workspaceID,
+		Agent:          string(s.agent),
+		Target:         s.target,
+		Shell:          s.shell,
+		CWD:            s.cwd,
+		Status:         s.status,
+		WriterDeviceID: s.writerDeviceID,
+		OutputSeq:      s.outputSeq,
+		CreatedAt:      s.createdAt.Format(time.RFC3339Nano),
+		UpdatedAt:      s.updatedAt.Format(time.RFC3339Nano),
+	}
 }
 
 func (s *terminalSession) lifecycle(reason string) map[string]any {

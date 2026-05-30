@@ -100,6 +100,22 @@ func (c CloudClient) GetAccount(ctx context.Context) (CloudAccount, error) {
 	return out, nil
 }
 
+func (c CloudClient) ListRelays(ctx context.Context) (CloudRelayListResponse, error) {
+	var out CloudRelayListResponse
+	if err := c.do(ctx, http.MethodGet, "/v1/relays", nil, &out); err != nil {
+		return CloudRelayListResponse{}, err
+	}
+	return sanitizeCloudRelayList(out), nil
+}
+
+func (c CloudClient) SetAccountRelay(ctx context.Context, relayID string) (CloudAccount, error) {
+	var out CloudAccount
+	if err := c.do(ctx, http.MethodPatch, "/v1/account/relay", CloudRelayUpdateRequest{RelayID: strings.TrimSpace(relayID)}, &out); err != nil {
+		return CloudAccount{}, err
+	}
+	return out, nil
+}
+
 func (c CloudClient) RegisterDevice(ctx context.Context, identity DeviceIdentity, canHost, canControl bool, relayURL string) (CloudDeviceRecord, error) {
 	req := cloudDeviceRegistrationFromIdentity(identity, canHost, canControl, relayURL)
 	var out CloudDeviceRecord
@@ -209,6 +225,8 @@ func relayClientFromCloudAccount(account CloudAccount, httpClient *http.Client) 
 	relay := CloudRelayConfig{
 		RelayID:             strings.TrimSpace(account.Relay.RelayID),
 		RelayURL:            strings.TrimSpace(account.Relay.RelayURL),
+		Region:              strings.TrimSpace(account.Relay.Region),
+		Name:                strings.TrimSpace(account.Relay.Name),
 		Credential:          strings.TrimSpace(account.Relay.Credential),
 		CredentialExpiresAt: strings.TrimSpace(account.Relay.CredentialExpiresAt),
 	}
@@ -219,6 +237,23 @@ func relayClientFromCloudAccount(account CloudAccount, httpClient *http.Client) 
 		relay.RelayID = "default"
 	}
 	return RelayClient{BaseURL: relay.RelayURL, Token: relay.Credential, HTTPClient: httpClient}, relay, true
+}
+
+func sanitizeCloudRelayList(input CloudRelayListResponse) CloudRelayListResponse {
+	out := CloudRelayListResponse{CurrentRelayID: strings.TrimSpace(input.CurrentRelayID)}
+	for _, relay := range input.Relays {
+		relay.RelayID = strings.TrimSpace(relay.RelayID)
+		relay.RelayURL = strings.TrimSpace(relay.RelayURL)
+		relay.Region = strings.TrimSpace(relay.Region)
+		relay.Name = strings.TrimSpace(relay.Name)
+		relay.Credential = ""
+		relay.CredentialExpiresAt = ""
+		if relay.RelayID == "" || relay.RelayURL == "" {
+			continue
+		}
+		out.Relays = append(out.Relays, relay)
+	}
+	return out
 }
 
 func authedJSONRequest(ctx context.Context, serviceName, baseURLValue, token string, httpClient *http.Client, method, path string, body any, out any) error {

@@ -47,12 +47,16 @@ type app struct {
 	codexExec            map[string]codexExecCommand
 	codexRemoteHomeMu    sync.Mutex
 	codexRemoteHome      map[string]string
+	remoteManager        *remoteControlManager
+	network              *networkMonitor
 	remoteControlMu      sync.Mutex
 	remoteControl        *remoteControlRuntime
+	mesh                 *meshStateManager
 	cloudMu              sync.Mutex
 	cloudCancel          context.CancelFunc
 	cloudSettings        CloudSettings
 	cloudSelfRevoked     bool
+	cloudRelayConnected  bool
 	cloudAuthMu          sync.Mutex
 	cloudAuthStates      map[string]cloudAuthState
 }
@@ -110,6 +114,9 @@ func main() {
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
+	a.remoteManager = newRemoteControlManager(a)
+	a.network = newNetworkMonitor(a)
+	a.mesh = newMeshStateManager(a)
 	a.rebuildSessionProjections()
 	if err := a.backfillHistoricalContextEvents(); err != nil {
 		log.Fatal(err)
@@ -127,6 +134,7 @@ func main() {
 	if err := a.applyCloudSettings(a.currentSettings().Cloud); err != nil {
 		log.Fatal(err)
 	}
+	a.network.start(context.Background())
 
 	if err := a.writeRuntimeFile(); err != nil {
 		log.Fatal(err)
@@ -136,11 +144,15 @@ func main() {
 	mux.HandleFunc("/v1/health", a.handleHealth)
 	mux.HandleFunc("/v1/control/ws", a.handleControlWS)
 	mux.HandleFunc("/v1/host", a.auth(a.handleHost))
+	mux.HandleFunc("/v1/snapshot", a.auth(a.handleHostSnapshot))
+	mux.HandleFunc("/v1/workbench", a.auth(a.handleWorkbench))
 	mux.HandleFunc("/v1/settings", a.auth(a.handleSettings))
 	mux.HandleFunc("/v1/settings/", a.auth(a.handleSettingsAction))
 	mux.HandleFunc("/v1/cloud/auth/callback", a.handleCloudAuthCallback)
 	mux.HandleFunc("/v1/cloud/auth/", a.auth(a.handleCloudAuthAction))
 	mux.HandleFunc("/v1/cloud/account", a.auth(a.handleCloudAccount))
+	mux.HandleFunc("/v1/cloud/account/relay", a.auth(a.handleCloudAccountRelay))
+	mux.HandleFunc("/v1/cloud/relays", a.auth(a.handleCloudRelays))
 	mux.HandleFunc("/v1/cloud/devices", a.auth(a.handleCloudDevices))
 	mux.HandleFunc("/v1/cloud/devices/", a.auth(a.handleCloudDeviceAction))
 	mux.HandleFunc("/v1/cloud/heartbeat", a.auth(a.handleCloudHeartbeat))
@@ -150,6 +162,7 @@ func main() {
 	mux.HandleFunc("/v1/pairing/requests/", a.auth(a.handlePairingRequestAction))
 	mux.HandleFunc("/v1/trust/devices", a.auth(a.handleTrustDevices))
 	mux.HandleFunc("/v1/trust/devices/", a.auth(a.handleTrustDeviceAction))
+	mux.HandleFunc("/v1/mesh/state", a.auth(a.handleMeshState))
 	mux.HandleFunc("/v1/remote/hosts", a.auth(a.handleRemoteHosts))
 	mux.HandleFunc("/v1/remote/hosts/", a.auth(a.handleRemoteHostAction))
 	mux.HandleFunc("/v1/fs/browse", a.auth(a.handleHostFileSystemBrowse))

@@ -54,6 +54,8 @@ type testCloudBroker struct {
 	membershipPub   ed25519.PublicKey
 	membershipPriv  ed25519.PrivateKey
 	relay           *CloudRelayConfig
+	relays          []CloudRelayConfig
+	currentRelayID  string
 	devices         map[string]CloudDeviceRecord
 	pairing         []CloudPairingSignal
 	nextPairID      int
@@ -154,21 +156,61 @@ func signTestCloudMembershipLease(accountIDHash, deviceID, publicKeyFingerprint 
 func (b *testCloudBroker) SetDefaultRelay(config CloudRelayConfig) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.setDefaultRelayLocked(config)
+}
+
+func (b *testCloudBroker) setDefaultRelayLocked(config CloudRelayConfig) {
 	config.RelayID = strings.TrimSpace(config.RelayID)
 	config.RelayURL = strings.TrimSpace(config.RelayURL)
 	if config.RelayURL == "" {
 		b.relay = nil
+		b.relays = nil
+		b.currentRelayID = ""
 		return
 	}
 	if config.RelayID == "" {
 		config.RelayID = "test"
 	}
 	b.relay = &config
+	b.relays = []CloudRelayConfig{config}
+	b.currentRelayID = config.RelayID
+}
+
+func (b *testCloudBroker) SetRelays(currentRelayID string, relays ...CloudRelayConfig) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.relays = nil
+	b.relay = nil
+	b.currentRelayID = strings.TrimSpace(currentRelayID)
+	for _, relay := range relays {
+		relay.RelayID = strings.TrimSpace(relay.RelayID)
+		relay.RelayURL = strings.TrimSpace(relay.RelayURL)
+		if relay.RelayID == "" || relay.RelayURL == "" {
+			continue
+		}
+		b.relays = append(b.relays, relay)
+		if b.currentRelayID == "" {
+			b.currentRelayID = relay.RelayID
+		}
+	}
+	b.relay = b.relayByIDLocked(b.currentRelayID)
+}
+
+func (b *testCloudBroker) relayByIDLocked(relayID string) *CloudRelayConfig {
+	for _, relay := range b.relays {
+		if relay.RelayID == relayID {
+			next := relay
+			return &next
+		}
+	}
+	return nil
 }
 
 func (b *testCloudBroker) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/account", b.withAccount(b.handleAccount))
+	mux.HandleFunc("/v1/account/relay", b.withAccount(b.handleAccountRelay))
+	mux.HandleFunc("/v1/relays", b.withAccount(b.handleRelays))
 	mux.HandleFunc("/v1/devices", b.withAccount(b.handleDevices))
 	mux.HandleFunc("/v1/devices/", b.withAccount(b.handleDeviceAction))
 	mux.HandleFunc("/v1/pairing/requests", b.withAccount(b.handlePairingRequests))
@@ -187,11 +229,55 @@ func (b *testCloudBroker) withAccount(next func(http.ResponseWriter, *http.Reque
 	}
 }
 
+func (b *testCloudBroker) handleRelays(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	b.mu.Lock()
+	relays := make([]CloudRelayConfig, 0, len(b.relays))
+	for _, relay := range b.relays {
+		relay.Credential = ""
+		relay.CredentialExpiresAt = ""
+		relays = append(relays, relay)
+	}
+	currentRelayID := b.currentRelayID
+	b.mu.Unlock()
+	writeJSON(w, http.StatusOK, CloudRelayListResponse{Relays: relays, CurrentRelayID: currentRelayID})
+}
+
+func (b *testCloudBroker) handleAccountRelay(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch && r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var input CloudRelayUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_json", "error": err.Error()})
+		return
+	}
+	b.mu.Lock()
+	relay := b.relayByIDLocked(strings.TrimSpace(input.RelayID))
+	if relay == nil {
+		b.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "relay_not_found", "error": "relay not found"})
+		return
+	}
+	b.currentRelayID = relay.RelayID
+	b.relay = relay
+	b.mu.Unlock()
+	b.writeAccount(w)
+}
+
 func (b *testCloudBroker) handleAccount(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	b.writeAccount(w)
+}
+
+func (b *testCloudBroker) writeAccount(w http.ResponseWriter) {
 	b.mu.Lock()
 	account := CloudAccount{
 		AccountIDHash:              b.accountIDHash,

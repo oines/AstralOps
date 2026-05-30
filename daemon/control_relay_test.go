@@ -105,7 +105,7 @@ func TestControlRelayRejectsReplayedSealedFrame(t *testing.T) {
 		PayloadKind:   relayPayloadKindControlSealedFrame,
 		PayloadBase64: base64.StdEncoding.EncodeToString(body),
 	}
-	if _, err := client.EnqueueRelayEnvelope(t.Context(), envelope); err != nil {
+	if _, err := conn.relay.EnqueueRelayEnvelope(t.Context(), envelope); err != nil {
 		t.Fatal(err)
 	}
 	plain, err := conn.ReadPlain(3 * time.Second)
@@ -116,7 +116,7 @@ func TestControlRelayRejectsReplayedSealedFrame(t *testing.T) {
 		t.Fatalf("relay response = %#v, want ok response", plain)
 	}
 
-	if _, err := client.EnqueueRelayEnvelope(t.Context(), envelope); err != nil {
+	if _, err := conn.relay.EnqueueRelayEnvelope(t.Context(), envelope); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
@@ -127,67 +127,6 @@ func TestControlRelayRejectsReplayedSealedFrame(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("replayed relay sealed frame did not close control session")
-}
-
-func TestControlRelayRoundTripAcksStaleHelloAckForSameHost(t *testing.T) {
-	hostApp, _, controllerStore, _, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
-	client := RelayClient{BaseURL: relayServer.URL, Token: testCloudRelayCredential(t, "acct_test")}
-
-	oldHello, _, err := controlClientRelayHello(controllerStore, hostApp.store.hostInfo())
-	if err != nil {
-		t.Fatal(err)
-	}
-	staleSession, staleAck, err := hostApp.acceptControlRelayHello(oldHello)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		staleSession.cancelControlSession()
-		hostApp.unregisterControlRelaySession(staleSession.id)
-	})
-	body, err := json.Marshal(staleAck)
-	if err != nil {
-		t.Fatal(err)
-	}
-	staleEnvelope, err := client.EnqueueRelayEnvelope(t.Context(), RelayEnvelope{
-		Version:       relayEnvelopeVersion,
-		ConnectionID:  staleAck.ConnectionID,
-		FromDeviceID:  hostApp.store.hostInfo().Identity.DeviceID,
-		ToDeviceID:    controllerStore.deviceIdentity.DeviceID,
-		PayloadKind:   relayPayloadKindControlHelloAck,
-		PayloadBase64: base64.StdEncoding.EncodeToString(body),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	runControlRelayPoller(t, hostApp, client)
-
-	response, err := controlClientRelayRoundTrip(t.Context(), controlClientTarget{
-		HostInfo:           hostApp.store.hostInfo(),
-		Timeout:            3 * time.Second,
-		UseRelay:           true,
-		RelayClient:        client,
-		ControllerDeviceID: controllerStore.deviceIdentity.DeviceID,
-	}, controllerStore, ControlRequest{
-		RequestID:  "relay_workspaces",
-		Capability: CapabilityCoreRead,
-		Action:     ControlActionWorkspaces,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !response.OK {
-		t.Fatalf("response = %#v", response)
-	}
-	pending, err := client.ListRelayEnvelopes(t.Context(), controllerStore.deviceIdentity.DeviceID, 50)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, envelope := range pending {
-		if envelope.EnvelopeID == staleEnvelope.EnvelopeID {
-			t.Fatalf("stale hello_ack envelope was not acked: %#v", envelope)
-		}
-	}
 }
 
 func TestControlRelayRejectsUntrustedController(t *testing.T) {
@@ -283,6 +222,51 @@ func TestRemoteHostActionFallsBackToCloudRelay(t *testing.T) {
 	items, _ := response.Result.([]any)
 	if len(items) != 1 || stringValue(mapValue(items[0])["id"]) != workspace.ID {
 		t.Fatalf("workspaces = %#v, want %s", response.Result, workspace.ID)
+	}
+}
+
+func TestRemoteControlManagerReusesRelaySessionForSequentialRequests(t *testing.T) {
+	hostApp, workspace, controllerStore, cloudServer, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
+	client := RelayClient{BaseURL: relayServer.URL, Token: testCloudRelayCredential(t, "acct_test")}
+	runControlRelayPoller(t, hostApp, client)
+	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := loadSettingsStore(controllerStore.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	baseURL := cloudServer.URL
+	token := "account-token"
+	if _, err := settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, settings: settings, hub: newEventHub()}
+	hostDeviceID := hostApp.store.hostInfo().Identity.DeviceID
+
+	for i := 0; i < 2; i++ {
+		response, err := controllerApp.remoteControlResponse(hostDeviceID, CapabilityCoreRead, ControlActionWorkspaces, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !response.OK {
+			t.Fatalf("response %d = %#v", i, response)
+		}
+		items, _ := response.Result.([]any)
+		if len(items) != 1 || stringValue(mapValue(items[0])["id"]) != workspace.ID {
+			t.Fatalf("workspaces %d = %#v, want %s", i, response.Result, workspace.ID)
+		}
+	}
+
+	manager := controllerApp.remoteControlManager()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.sessions) != 1 {
+		t.Fatalf("manager sessions = %d, want 1", len(manager.sessions))
+	}
+	if manager.sessions[hostDeviceID] == nil || manager.sessions[hostDeviceID].isClosed() {
+		t.Fatalf("manager session for %s is not reusable", hostDeviceID)
 	}
 }
 
@@ -650,17 +634,28 @@ func newControlRelayTestRig(t *testing.T, capabilities ...string) (*app, Workspa
 func runControlRelayPoller(t *testing.T, app *app, client RelayClient) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	relay, err := client.ConnectRelayWebSocket(ctx, app.store.hostInfo().Identity.DeviceID)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		_ = relay.Close()
+	})
 	go func() {
-		ticker := time.NewTicker(10 * time.Millisecond)
-		defer ticker.Stop()
 		for {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				return
-			case <-ticker.C:
-				_ = app.cloudPollRelayEnvelopes(ctx, client)
 			}
+			envelope, err := relay.ReadRelayEnvelope(ctx)
+			if err != nil {
+				return
+			}
+			if strings.TrimSpace(envelope.ToDeviceID) != app.store.hostInfo().Identity.DeviceID {
+				continue
+			}
+			_ = app.handleControlRelayEnvelope(ctx, relay, envelope)
 		}
 	}()
 }

@@ -26,6 +26,7 @@ const (
 )
 
 const (
+	ControlActionHostSnapshot               = "core.read.host_snapshot"
 	ControlActionSessionView                = "core.read.session_view"
 	ControlActionSessions                   = "core.read.sessions"
 	ControlActionWorkspaces                 = "core.read.workspaces"
@@ -40,6 +41,7 @@ const (
 	ControlActionWorkspaceCreate            = "core.control.workspace.create"
 	ControlActionWorkspaceConnect           = "core.control.workspace.connect"
 	ControlActionWorkspaceDisconnect        = "core.control.workspace.disconnect"
+	ControlActionWorkspaceDelete            = "core.control.workspace.delete"
 	ControlActionSessionCreate              = "core.control.session.create"
 	ControlActionSessionFork                = "core.control.session.fork"
 	ControlActionSessionDelete              = "core.control.session.delete"
@@ -62,6 +64,7 @@ const (
 	ControlActionWorkspaceFilesStreamCancel = "workspace.files.stream.cancel"
 	ControlActionWorkspaceExec              = "workspace.exec"
 	ControlActionTerminalOpen               = "terminal.open"
+	ControlActionTerminalList               = "terminal.list"
 	ControlActionTerminalAttach             = "terminal.attach"
 	ControlActionTerminalDetach             = "terminal.detach"
 	ControlActionTerminalInput              = "terminal.input"
@@ -141,9 +144,9 @@ func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlR
 
 func controlActionCapability(action string) string {
 	switch action {
-	case ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionWorkspaceConnection, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
+	case ControlActionHostSnapshot, ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionWorkspaceConnection, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
 		return CapabilityCoreRead
-	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionWorkspaceCreate, ControlActionWorkspaceConnect, ControlActionWorkspaceDisconnect, ControlActionSessionCreate, ControlActionSessionFork, ControlActionSessionDelete:
+	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionWorkspaceCreate, ControlActionWorkspaceConnect, ControlActionWorkspaceDisconnect, ControlActionWorkspaceDelete, ControlActionSessionCreate, ControlActionSessionFork, ControlActionSessionDelete:
 		return CapabilityCoreControl
 	case ControlActionInteractionRespond:
 		return CapabilityInteractionRespond
@@ -163,7 +166,7 @@ func controlActionCapability(action string) string {
 		return CapabilityWorkspaceFilesWrite
 	case ControlActionWorkspaceExec:
 		return CapabilityWorkspaceExec
-	case ControlActionTerminalOpen, ControlActionTerminalAttach, ControlActionTerminalDetach:
+	case ControlActionTerminalOpen, ControlActionTerminalList, ControlActionTerminalAttach, ControlActionTerminalDetach:
 		return CapabilityTerminalOpen
 	case ControlActionTerminalInput, ControlActionTerminalResize, ControlActionTerminalClose:
 		return CapabilityTerminalInput
@@ -178,6 +181,12 @@ func controlActionCapability(action string) string {
 
 func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, conn controlConnection, grant TrustGrant) (any, error) {
 	switch req.Action {
+	case ControlActionHostSnapshot:
+		var params hostSnapshotParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.buildHostSnapshot(params), nil
 	case ControlActionSessionView:
 		var params struct {
 			SessionID string `json:"session_id"`
@@ -210,7 +219,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err != nil {
 			return nil, err
 		}
-		return a.ssh.getConnection(workspace), nil
+		return sanitizeControlWorkspaceConnection(a.ssh.getConnection(workspace)), nil
 	case ControlActionEvents:
 		var params struct {
 			WorkspaceID string `json:"workspace_id"`
@@ -317,6 +326,12 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 			return nil, err
 		}
 		return a.ssh.disconnect(workspace), nil
+	case ControlActionWorkspaceDelete:
+		var params workspaceReferenceParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.deleteWorkspace(params.WorkspaceID)
 	case ControlActionSessionCreate:
 		var params createSessionRequest
 		if err := decodeControlParams(req.Params, &params); err != nil {
@@ -489,6 +504,8 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 			return nil, err
 		}
 		return a.terminalManager().open(ctx, req.ControllerDeviceID, params)
+	case ControlActionTerminalList:
+		return a.terminalManager().listTabs(), nil
 	case ControlActionTerminalAttach:
 		var params terminalAttachParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

@@ -143,15 +143,18 @@ Account
 ```text
 CloudClient:
   GET /v1/account
+  GET /v1/relays
+  PATCH /v1/account/relay
   GET/POST /v1/devices
   pairing requests
 
 RelayClient:
-  GET/POST /v1/relay/envelopes
-  POST /v1/relay/envelopes/:id/ack
+  GET /v1/relay/connect (WebSocket)
+  GET/POST /v1/relay/envelopes (legacy/test HTTP queue)
+  POST /v1/relay/envelopes/:id/ack (legacy/test HTTP queue)
 ```
 
-客户端不能把 `cloud.base_url` 直接当 relay URL 使用，也不能把 cloud account token 发给 relay。它必须从账号响应的 `relay.relay_url` 和 `relay.credential` 构造 `RelayClient`。Cloud control plane 和 relay 是部署边界不同的服务：cloud 负责账号、设备 registry、presence、pairing signal、吊销、账号默认 relay 配置和短期 relay credential 签发；relay 只负责校验 credential 并投递 opaque envelope。开发测试可以临时把二者部署在同一台机器，但 daemon 代码必须继续通过 `CloudClient` / `RelayClient` 分离调用。
+客户端不能把 `cloud.base_url` 直接当 relay URL 使用，也不能把 cloud account token 发给 relay。它必须从账号响应的 `relay.relay_url` 和 `relay.credential` 构造 `RelayClient`。Cloud control plane 和 relay 是部署边界不同的服务：cloud 负责账号、设备 registry、presence、pairing signal、吊销、账号 relay catalog、账号当前 relay 配置和短期 relay credential 签发；relay 只负责校验 credential 并投递 opaque envelope。开发测试可以临时把二者部署在同一台机器，但 daemon 代码必须继续通过 `CloudClient` / `RelayClient` 分离调用。
 
 `GET /v1/account` 的 relay 字段：
 
@@ -192,8 +195,8 @@ exp - iat 不能超过 relay 配置的最大 TTL
 多地区支持方式是按账号选择 relay：
 
 ```text
-中国账号 -> relay-cn
-美国账号 -> relay-us
+账号当前 relay -> cn-nanjing / us / ...
+同账号所有设备 -> 使用同一个当前 relay
 ```
 
 同一个账号内所有设备默认使用同一个 relay。这样 A 找 B 时只需要：
@@ -202,10 +205,21 @@ exp - iat 不能超过 relay 配置的最大 TTL
 A 登录 cloud
 A 读取账号 relay
 A 从 cloud device registry 找 B 的 public metadata / presence
-A 通过账号 relay 投递 opaque envelope 给 B
+A 通过账号 relay 的 WebSocket 转发 opaque envelope 给 B
 ```
 
 如果某台设备还拿着旧 relay 配置，v1 不做跨 relay 查找或转发；它需要等下一次 cloud sync 读取新的账号 relay 后再参与 relay fallback。LAN 直连不受这个限制，仍然优先使用。
+
+MVP 不做 previous relay grace、双 relay 投递、relay-to-relay 转发或跨 relay 查找。用户在设置里切换账号 relay 时，daemon 只调用本机 daemon 的 `PATCH /v1/cloud/account/relay`，daemon 再调用 Cloud 的 `PATCH /v1/account/relay`。Cloud 持久化账号当前 `relay_id` 后立即对后续 `GET /v1/account` 签发新 relay credential。其他设备在下一次 Cloud sync 后切到新 relay；切换窗口内 relay fallback 可能短暂不可用，但不会破坏 LAN 直连和设备 E2EE 信任边界。
+
+默认 relay 传输是 WebSocket：Host daemon 登录 Mesh 后连接账号 relay，并用自己的 `device_id` 挂在线转发通道；Controller 需要控制 Host 时也连接同一个账号 relay，发送 `control.hello`，随后同一条 WebSocket 承载 `control.hello_ack` 与 `control.sealed_frame`。Relay 不持久化 WebSocket 消息，也不解析 payload。HTTP envelope queue 仍保留为旧接口和测试夹具，不作为 daemon 的默认交互路径。
+
+开发默认账号 relay 是 `cn-nanjing`：
+
+```text
+relay_id = cn-nanjing
+relay_url = http://119.45.166.88:43911
+```
 
 ## Cloud Control Plane
 
@@ -341,12 +355,14 @@ POST /v1/pairing/requests/:request_id/resolve
 Relay API 的职责：
 
 ```text
-GET  /v1/relay/envelopes?device_id=<device_id>
-POST /v1/relay/envelopes
-POST /v1/relay/envelopes/:envelope_id/ack
+GET  /v1/relay/connect?device_id=<device_id>  (WebSocket)
+GET  /v1/relay/envelopes?device_id=<device_id>&wait=10s  (legacy/test)
+POST /v1/relay/envelopes  (legacy/test)
+POST /v1/relay/envelopes/:envelope_id/ack  (legacy/test)
 ```
 
 Relay API 必须由独立 relay service 提供，不能由 cloud control plane 顺手挂载 `/v1/relay/*`。daemon 代码必须通过独立的 `RelayClient` 调用这些 endpoint。
+`/v1/relay/connect` 使用同一个短期 relay credential 鉴权。连接建立后客户端发送 `{"type":"send","envelope":{...}}`，relay 向目标设备当前在线 WebSocket 推送 `{"type":"envelope","envelope":{...}}`。这条通道只转发 opaque envelope，不做业务确认、不保存明文、不跨 relay 转发。旧 HTTP queue 的 `wait` 是长轮询参数，保留给测试和兼容，不是默认 daemon 传输路径。
 
 公开仓库提供独立 relay 进程：
 
@@ -371,7 +387,7 @@ ASTRALOPS_MEMBERSHIP_LEASE_TTL=24h
 
 Cloud 对 register/heartbeat 返回短期 `membership_lease`，由 Cloud membership signing key 签名。lease payload 只包含账号 hash、device_id、public_key_fingerprint、can_host/can_control、mesh_epoch、iat/exp。客户端把当前设备 lease 持久化在本机私有 daemon 数据里；lease 只证明“这个 device identity 当前仍属于账号 Mesh 且具备 host/control 角色”，不授予 Host trust。
 
-公网 relay 不能依赖 cloud 进程内状态，不能读取 cloud 数据库，也不能接受 cloud account token。它只能基于短期 relay credential 得到账号 namespace 并投递 opaque envelope。
+公网 relay 不能依赖 cloud 进程内状态，不能读取 cloud 数据库，也不能接受 cloud account token。它只能基于短期 relay credential 得到账号 namespace，并把 opaque envelope 转发给同账号 namespace 下的目标 `device_id` WebSocket。
 
 Desktop daemon 通过本机 authenticated API 接入 cloud service。这个 API 只读写本机 daemon settings 并调用 cloud，不暴露给远程 Host listener：
 
@@ -470,7 +486,7 @@ Relay envelope 只允许：
 }
 ```
 
-`control.hello` 和 `control.hello_ack` 是现有设备级 E2EE 握手帧的 relay 投递形态，用于在没有直连 WebSocket 时完成同一套签名校验和会话密钥派生。握手完成后，业务 `request/response/stream` 只能放进 `control.sealed_frame`。cloud/relay service 只能存储、投递、ack 并按账号/设备做路由和限流，不能解析业务协议。
+`control.hello` 和 `control.hello_ack` 是现有设备级 E2EE 握手帧的 relay 投递形态，用于在没有 LAN 直连时完成同一套签名校验和会话密钥派生。握手完成后，业务 `request/response/stream` 只能放进 `control.sealed_frame`。cloud/relay service 只能转发 opaque envelope 并按账号/设备做路由和限流，不能解析业务协议。
 
 ## 端到端加密控制通道
 
@@ -852,6 +868,7 @@ Desktop 远控设置页必须从本机 daemon 读取账号状态，而不是让 
 Cloud 连接状态
 account_id_hash
 账号默认 relay_id / relay_url
+可选 relay 列表和当前账号 relay
 relay credential 过期时间
 账号设备列表
 本机 Host trust grants
@@ -1513,7 +1530,7 @@ POST /v1/relay/envelopes/:envelope_id/ack
 body: { "device_id": "<to_device_id>" }
 ```
 
-relay 只在 `device_id == to_device_id` 时删除该 envelope。客户端不能把 `GET /v1/relay/envelopes` 当作历史查询接口；它是待投递队列视图，未 ack 的 envelope 会继续出现。
+relay 只在 `device_id == to_device_id` 时删除该 envelope。客户端不能把 `GET /v1/relay/envelopes` 当作历史查询接口；它是待投递队列视图，未 ack 的 envelope 会继续出现。长轮询超时返回空列表不是错误，客户端应立即继续下一轮等待，直到本地 control session 超时、取消或收到目标 frame。
 
 ### Phase 3 - Pairing and Trust
 
@@ -1621,14 +1638,15 @@ reconnect and resume semantics
 GET /v1/control/ws
 ```
 
-当前 relay MVP 已落地 Host 侧 envelope polling、Controller 侧 encrypted frame transport 和独立 `relay/` 服务：当 LAN discovery/direct WebSocket 不可用且目标 Host 是已知可信设备、cloud registry 显示在线时，本机 daemon 可以通过 relay service 投递 `control.hello` / `control.hello_ack` / `control.sealed_frame` 完成同一套 E2EE 握手，并在同一条逻辑 control connection 上承载 request/response、event subscription、workspace/media stream、attachment chunk ingest 和 remote PTY frame。
+当前 relay MVP 已落地 Host 侧 envelope long-polling、Controller 侧 encrypted frame transport 和独立 `relay/` 服务：当 LAN discovery/direct WebSocket 不可用且目标 Host 是已知可信设备、cloud registry 显示在线时，本机 daemon 可以通过 relay service 投递 `control.hello` / `control.hello_ack` / `control.sealed_frame` 完成同一套 E2EE 握手，并在同一条逻辑 control connection 上承载 request/response、event subscription、workspace/media stream、attachment chunk ingest 和 remote PTY frame。
 
-relay streaming 不是云端业务代理：`control.sealed_frame` 内部明文只存在于 Controller 和 Host 设备内存中。Broker 只能轮询、存储待投递密文 envelope、ack 删除和按账号/设备限流；不能缓存明文事件、文件、媒体、PTY 输出或 SSH 配置。连接关闭、设备踢出信任或 idle 过期时，Host 必须清理 relay control session 绑定的 stream context 和 PTY viewer。
+relay streaming 不是云端业务代理：`control.sealed_frame` 内部明文只存在于 Controller 和 Host 设备内存中。Broker 只能长轮询、存储待投递密文 envelope、ack 删除和按账号/设备做基础限流；不能缓存明文事件、文件、媒体、PTY 输出或 SSH 配置。连接关闭、设备踢出信任或 idle 过期时，Host 必须清理 relay control session 绑定的 stream context 和 PTY viewer。
 
 Desktop Controller 不直接在 React/Electron renderer 内实现远控握手，也不持有远控私钥。当前桌面端先通过本机 daemon 暴露 controller-side 代理 API，再由本机 daemon 复用同一套 Host identity、known_hosts、LAN discovery 和 E2EE control channel：
 
 ```text
 GET /v1/remote/hosts?discover=1
+GET /v1/remote/hosts/:host_device_id/snapshot
 GET /v1/remote/hosts/:host_device_id/host
 POST /v1/remote/hosts/:host_device_id/fs/browse
 GET /v1/remote/hosts/:host_device_id/workspaces
@@ -1658,7 +1676,7 @@ POST /v1/remote/hosts/:host_device_id/approvals/:interaction_id/respond
 
 这些 endpoint 是本机 daemon 的 controller-side facade，不是 Host remote listener。它们必须只对本机 authenticated Desktop 开放，并且要求本机已加入 Cloud Mesh；真正的远端执行仍然通过目标 Host 的 `/v1/control/ws`，目标 Host listener/relay hello 也必须要求 Host 当前 Cloud Mesh active。`discover=1` 只把 Cloud Mesh 列表中已存在、LAN 上匹配 known host fingerprint 且通过 `/v1/host` 校验的 Host 标为 `lan`，未知设备和本地 stale known host 不能自动出现在可控列表里。
 
-当前 Desktop 的 Host selector 使用这个 facade 拉取远端 Host 和 Host-scoped workspaces/sessions/events。创建 workspace 使用同一套 Host-scoped 目录选择器：本机 local、远端 local、本机 ssh、远端 ssh 都先通过当前 CoreClient 调用 `host.fs.browse`，再用 `core.control.workspace.create` 在所选 Host 上创建；SSH workspace 的 connect/disconnect 也通过 Host 侧 `core.control.workspace.connect/disconnect` 执行。远程 PTY 通过本机 daemon WebSocket facade 接入：Desktop 仍打开 `/v1/remote/hosts/:host_device_id/workspaces/:workspace_id/pty`，本机 daemon 再通过目标 Host 的 encrypted control WebSocket 转发 `terminal.open/attach/input/resize/close`，并把 `terminal.output` / `terminal.closed` frame 映射回本地终端 UI 的 ready/output/exit 消息。远端 Host 的 pending pairing request 管理由本机 daemon facade 转成 `host.pairing.*` E2EE action；发起 cloud pairing request 前，本机 daemon 会先注册当前 Controller public identity，避免首次启动还未 heartbeat 时请求失败；approved cloud pairing signal 只会导入 Host public identity 到 Controller `known_hosts`，不会写任何 Host trust grant。Desktop renderer 不直接持有远控密钥。尚未进入 control protocol 的本地 app 设置和 session command 列表不能在 UI 里伪造；下一步应为这些能力补明确协议 action 或保持不可用状态。
+当前 Desktop 的 Host selector 使用这个 facade 拉取远端 Host 和 Host-scoped workspaces/sessions/events。切换 Host 时优先调用 `core.read.host_snapshot` / `/snapshot` 一次性读取 Host info、workspaces、sessions、workspace connection、recent events 和 session views，避免 renderer 对远端 Host 发起多次串行状态请求；snapshot 仍然必须走 Core sanitization，不能把 raw payload、native runtime id、Host helper path、Host 本地路径或 SSH 私有配置泄露给 Controller。创建 workspace 使用同一套 Host-scoped 目录选择器：本机 local、远端 local、本机 ssh、远端 ssh 都先通过当前 CoreClient 调用 `host.fs.browse`，再用 `core.control.workspace.create` 在所选 Host 上创建；SSH workspace 的 connect/disconnect 也通过 Host 侧 `core.control.workspace.connect/disconnect` 执行。远程 PTY 通过本机 daemon WebSocket facade 接入：Desktop 仍打开 `/v1/remote/hosts/:host_device_id/workspaces/:workspace_id/pty`，本机 daemon 再通过目标 Host 的 encrypted control WebSocket 转发 `terminal.open/attach/input/resize/close`，并把 `terminal.output` / `terminal.closed` frame 映射回本地终端 UI 的 ready/output/exit 消息。远端 Host 的 pending pairing request 管理由本机 daemon facade 转成 `host.pairing.*` E2EE action；发起 cloud pairing request 前，本机 daemon 会先注册当前 Controller public identity，避免首次启动还未 heartbeat 时请求失败；approved cloud pairing signal 只会导入 Host public identity 到 Controller `known_hosts`，不会写任何 Host trust grant。Desktop renderer 不直接持有远控密钥。尚未进入 control protocol 的本地 app 设置和 session command 列表不能在 UI 里伪造；下一步应为这些能力补明确协议 action 或保持不可用状态。
 
 握手和帧语义：
 

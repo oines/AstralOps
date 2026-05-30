@@ -127,6 +127,12 @@ func sanitizeControlWorkspace(workspace Workspace) Workspace {
 	return workspace
 }
 
+func sanitizeControlWorkspaceConnection(connection WorkspaceConnection) WorkspaceConnection {
+	connection.HelperPath = ""
+	connection.Raw = nil
+	return connection
+}
+
 func sanitizeControlSessions(sessions []Session) []Session {
 	out := make([]Session, len(sessions))
 	for index, session := range sessions {

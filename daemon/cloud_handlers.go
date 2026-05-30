@@ -36,6 +36,8 @@ type cloudAccountStatusResponse struct {
 type cloudRelayStatusResult struct {
 	RelayID             string `json:"relay_id,omitempty"`
 	RelayURL            string `json:"relay_url,omitempty"`
+	Region              string `json:"region,omitempty"`
+	Name                string `json:"name,omitempty"`
 	CredentialAvailable bool   `json:"credential_available"`
 	CredentialExpiresAt string `json:"credential_expires_at,omitempty"`
 }
@@ -60,6 +62,70 @@ func (a *app) handleCloudAccount(w http.ResponseWriter, r *http.Request) {
 	account, err := client.GetAccount(ctx)
 	if err != nil {
 		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, cloudAccountStatusFromAccount(account))
+}
+
+func (a *app) handleCloudRelays(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	client, err := a.cloudClientFromSettings()
+	if err != nil {
+		writeActionError(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	relays, err := client.ListRelays(ctx)
+	if err != nil {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, relays)
+}
+
+func (a *app) handleCloudAccountRelay(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch && r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	client, err := a.cloudClientFromSettings()
+	if err != nil {
+		writeActionError(w, err)
+		return
+	}
+	var req CloudRelayUpdateRequest
+	if err := decodeJSON(r.Body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	account, err := client.SetAccountRelay(ctx, req.RelayID)
+	if err != nil {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+		return
+	}
+	_, relay, hasRelay := relayClientFromCloudAccount(account, client.HTTPClient)
+	if !hasRelay {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_relay_missing", "cloud relay is not configured"))
+		return
+	}
+	settings := a.currentSettings()
+	record, err := client.RegisterDevice(ctx, a.store.hostInfo().Identity, settings.RemoteControl.Enabled, true, relay.RelayURL)
+	if err != nil {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+		return
+	}
+	if err := a.store.updateCloudMembership(account, record); err != nil {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_membership_failed", err.Error()))
+		return
+	}
+	if err := a.restartCloudSync(settings.Cloud); err != nil {
+		writeActionError(w, newActionError(http.StatusBadRequest, "cloud_settings_invalid", err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, cloudAccountStatusFromAccount(account))
@@ -300,6 +366,8 @@ func cloudAccountStatusFromAccount(account CloudAccount) cloudAccountStatusRespo
 	relay := cloudRelayStatusResult{
 		RelayID:             strings.TrimSpace(account.Relay.RelayID),
 		RelayURL:            strings.TrimSpace(account.Relay.RelayURL),
+		Region:              strings.TrimSpace(account.Relay.Region),
+		Name:                strings.TrimSpace(account.Relay.Name),
 		CredentialAvailable: strings.TrimSpace(account.Relay.Credential) != "",
 		CredentialExpiresAt: strings.TrimSpace(account.Relay.CredentialExpiresAt),
 	}

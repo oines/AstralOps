@@ -14,9 +14,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/creack/pty"
+	"github.com/gorilla/websocket"
 )
 
 func (a *app) auth(next http.HandlerFunc) http.HandlerFunc {
@@ -82,21 +83,32 @@ func (a *app) createWorkspace(req createWorkspaceRequest) (Workspace, error) {
 	return ws, nil
 }
 
+func (a *app) deleteWorkspace(workspaceID string) (map[string]any, error) {
+	ws, ok := a.store.getWorkspace(workspaceID)
+	if !ok {
+		return nil, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found")
+	}
+	a.stopWorkspaceSessions(ws.ID, "workspace deleted")
+	if terminals := a.terminalManager(); terminals != nil {
+		terminals.closeWorkspace(context.Background(), ws.ID, "workspace_deleted")
+	}
+	if ws.Target == "ssh" {
+		a.ssh.disconnect(ws)
+	}
+	a.store.deleteWorkspace(workspaceID)
+	a.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.removed", Normalized: map[string]any{"workspace_id": ws.ID}})
+	return map[string]any{"ok": true}, nil
+}
+
 func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/workspaces/"), "/")
 	if len(parts) == 1 && r.Method == http.MethodDelete {
-		ws, ok := a.store.getWorkspace(parts[0])
-		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+		result, err := a.deleteWorkspace(parts[0])
+		if err != nil {
+			writeActionError(w, err)
 			return
 		}
-		a.stopWorkspaceSessions(ws.ID, "workspace deleted")
-		if ws.Target == "ssh" {
-			a.ssh.disconnect(ws)
-		}
-		a.store.deleteWorkspace(parts[0])
-		a.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.removed", Normalized: map[string]any{"workspace_id": ws.ID}})
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(w, http.StatusOK, result)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "files" && r.Method == http.MethodGet {
@@ -106,6 +118,39 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.handleWorkspaceFiles(w, ws, r.URL.Query().Get("path"))
+		return
+	}
+	if len(parts) == 2 && parts[1] == "terminal" && r.Method == http.MethodPost {
+		ws, ok := a.store.getWorkspace(parts[0])
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+			return
+		}
+		open, err := a.terminalManager().open(r.Context(), a.store.hostInfo().Identity.DeviceID, terminalOpenParams{WorkspaceID: ws.ID, Cols: defaultTerminalCols, Rows: defaultTerminalRows})
+		if err != nil {
+			writeActionError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, open)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "terminals" && r.Method == http.MethodDelete {
+		ws, ok := a.store.getWorkspace(parts[0])
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+			return
+		}
+		open, ok := a.terminalManager().openTerminalResult(parts[2])
+		if !ok || open.WorkspaceID != ws.ID {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "terminal not found"})
+			return
+		}
+		closed, err := a.terminalManager().close(r.Context(), a.store.hostInfo().Identity.DeviceID, terminalCloseParams{TerminalID: parts[2]})
+		if err != nil {
+			writeActionError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, closed)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "exec" && r.Method == http.MethodPost {
@@ -409,61 +454,48 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": windowsTerminalDisabledReason})
 		return
 	}
-	if ws.Target == "ssh" {
-		a.handleRemoteWorkspacePTY(w, r, ws)
-		return
-	}
 	conn, err := a.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer conn.Close()
 
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/zsh"
+	controllerID := a.store.hostInfo().Identity.DeviceID
+	terminals := a.terminalManager()
+	terminalID := strings.TrimSpace(r.URL.Query().Get("terminal_id"))
+	afterSeq, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
+	open, ok := terminalOpenResult{}, false
+	if terminalID != "" {
+		open, ok = terminals.openTerminalResult(terminalID)
+		if !ok || open.WorkspaceID != ws.ID {
+			_ = conn.WriteJSON(map[string]any{"type": "error", "message": "terminal not found"})
+			return
+		}
 	}
-	cmd := exec.Command(shell, "-l")
-	cmd.Dir = ws.LocalCWD
-	cmd.Env = terminalEnv(os.Environ())
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 28, Cols: 100})
-	if err != nil {
+	if !ok {
+		var err error
+		open, err = terminals.open(r.Context(), controllerID, terminalOpenParams{WorkspaceID: ws.ID, Cols: defaultTerminalCols, Rows: defaultTerminalRows})
+		if err != nil {
+			_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+			return
+		}
+	}
+	_ = conn.WriteJSON(terminalReadySocketPayload(open.TerminalID, open.Shell, open.CWD, open.OutputSeq))
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	localControl := newLocalPTYControlConnection(ctx, cancel, controllerID, conn)
+	if _, err := terminals.attach(controllerID, localControl, terminalAttachParams{TerminalID: open.TerminalID, AfterSeq: afterSeq}); err != nil {
 		_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
 	defer func() {
-		_ = killCommandProcessGroup(cmd)
-		_ = ptmx.Close()
-		_, _ = cmd.Process.Wait()
-	}()
-
-	_ = conn.WriteJSON(map[string]any{
-		"type":  "ready",
-		"shell": filepath.Base(shell),
-		"cwd":   ws.LocalCWD,
-	})
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		buf := make([]byte, 4096)
-		for {
-			n, err := ptmx.Read(buf)
-			if n > 0 {
-				if writeErr := conn.WriteJSON(map[string]any{"type": "output", "data": string(buf[:n])}); writeErr != nil {
-					return
-				}
-			}
-			if err != nil {
-				_ = conn.WriteJSON(map[string]any{"type": "exit"})
-				return
-			}
-		}
+		_, _ = terminals.detach(controllerID, localControl, terminalDetachParams{TerminalID: open.TerminalID})
 	}()
 
 	for {
 		select {
-		case <-done:
+		case <-ctx.Done():
 			return
 		default:
 		}
@@ -473,72 +505,87 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 		}
 		switch message.Type {
 		case "input":
-			_, _ = ptmx.Write([]byte(message.Data))
+			_, _ = terminals.input(r.Context(), controllerID, terminalInputParams{TerminalID: open.TerminalID, Data: message.Data})
 		case "resize":
 			if message.Cols > 0 && message.Rows > 0 {
-				_ = pty.Setsize(ptmx, &pty.Winsize{Rows: message.Rows, Cols: message.Cols})
+				_, _ = terminals.resize(r.Context(), controllerID, terminalResizeParams{TerminalID: open.TerminalID, Cols: message.Cols, Rows: message.Rows})
 			}
 		case "close":
+			_, _ = terminals.close(r.Context(), controllerID, terminalCloseParams{TerminalID: open.TerminalID})
+			return
+		case "detach":
 			return
 		}
 	}
 }
 
-func (a *app) handleRemoteWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Workspace) {
-	conn, err := a.upgrader.Upgrade(w, r, nil)
-	if err != nil {
+type localPTYControlConnection struct {
+	id                 string
+	controllerDeviceID string
+	ctx                context.Context
+	cancel             context.CancelFunc
+	socket             *websocket.Conn
+	writeMu            sync.Mutex
+}
+
+func newLocalPTYControlConnection(ctx context.Context, cancel context.CancelFunc, controllerDeviceID string, socket *websocket.Conn) *localPTYControlConnection {
+	return &localPTYControlConnection{
+		id:                 "local_pty_" + randomID(12),
+		controllerDeviceID: controllerDeviceID,
+		ctx:                ctx,
+		cancel:             cancel,
+		socket:             socket,
+	}
+}
+
+func (c *localPTYControlConnection) connectionID() string {
+	if c == nil {
+		return ""
+	}
+	return c.id
+}
+
+func (c *localPTYControlConnection) controllerID() string {
+	if c == nil {
+		return ""
+	}
+	return c.controllerDeviceID
+}
+
+func (c *localPTYControlConnection) requestContext() context.Context {
+	if c == nil || c.ctx == nil {
+		return context.Background()
+	}
+	return c.ctx
+}
+
+func (c *localPTYControlConnection) writePlain(frame controlPlainFrame) {
+	if c == nil || c.socket == nil {
 		return
 	}
-	defer conn.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	ptyID := "pty_" + randomID(12)
-	_, events, unsubscribe, started, err := a.ssh.startPTY(ctx, ws, ptyID, map[string]any{"cwd": ws.SSH.RemoteCWD, "cols": 100, "rows": 28})
-	if err != nil {
-		_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
-		return
-	}
-	defer unsubscribe()
-	_ = conn.WriteJSON(map[string]any{"type": "ready", "shell": stringValue(started["shell"]), "cwd": ws.SSH.RemoteCWD})
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for event := range events {
-			switch event.Event {
-			case "output":
-				if err := conn.WriteJSON(map[string]any{"type": "output", "data": stringValue(event.Result["data"])}); err != nil {
-					return
-				}
-			case "exit":
-				_ = conn.WriteJSON(map[string]any{"type": "exit", "exit_code": int(numberValue(event.Result["exit_code"]))})
-				return
-			}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	switch frame.Type {
+	case terminalFrameOutput:
+		if payload := terminalOutputSocketPayload(frame.Terminal); payload != nil {
+			_ = c.socket.WriteJSON(payload)
 		}
-	}()
-	for {
-		select {
-		case <-done:
-			return
-		default:
+	case terminalFrameClosed:
+		_ = c.socket.WriteJSON(terminalExitSocketPayload(frame.Terminal))
+		if c.cancel != nil {
+			c.cancel()
 		}
-		var message ptyClientMessage
-		if err := conn.ReadJSON(&message); err != nil {
-			_ = a.ssh.call(context.Background(), ws, "pty_kill", map[string]any{"id": ptyID}, nil)
-			return
-		}
-		switch message.Type {
-		case "input":
-			_ = a.ssh.call(context.Background(), ws, "pty_write", map[string]any{"id": ptyID, "data": message.Data}, nil)
-		case "resize":
-			_ = a.ssh.call(context.Background(), ws, "pty_resize", map[string]any{"id": ptyID, "cols": message.Cols, "rows": message.Rows}, nil)
-		case "close":
-			_ = a.ssh.call(context.Background(), ws, "pty_kill", map[string]any{"id": ptyID}, nil)
-			return
+	case "response":
+		if frame.Response != nil && !frame.Response.OK {
+			_ = c.socket.WriteJSON(map[string]any{"type": "error", "message": controlResponseMessage(*frame.Response)})
 		}
 	}
 }
+
+func (c *localPTYControlConnection) registerControlStream(string, context.CancelFunc) {}
+func (c *localPTYControlConnection) unregisterControlStream(string)                   {}
+func (c *localPTYControlConnection) cancelControlStream(string) bool                  { return false }
+func (c *localPTYControlConnection) cancelAllControlStreams()                         {}
 
 func resolveWorkspacePath(root, queryPath string) (string, string, error) {
 	if root == "" {

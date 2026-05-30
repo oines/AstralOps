@@ -87,6 +87,63 @@ func TestCloudAccountStatusDoesNotExposeRelayCredential(t *testing.T) {
 	}
 }
 
+func TestCloudHandlersListAndSwitchAccountRelay(t *testing.T) {
+	brokerImpl, broker := newTestCloudBrokerServer(t, "account-token")
+	defer broker.Close()
+	brokerImpl.SetRelays("cn-nanjing",
+		CloudRelayConfig{RelayID: "cn-nanjing", RelayURL: "http://119.45.166.88:43911", Region: "cn", Name: "China Nanjing"},
+		CloudRelayConfig{RelayID: "us", RelayURL: "https://us-relay-astralops.oines.dev", Region: "us", Name: "United States"},
+	)
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := loadSettingsStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	baseURL := broker.URL
+	token := "account-token"
+	if _, err := settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
+		t.Fatal(err)
+	}
+	app := &app{store: st, settings: settings, hub: newEventHub(), projections: newSessionProjectionCache()}
+
+	listRR := httptest.NewRecorder()
+	app.handleCloudRelays(listRR, httptest.NewRequest(http.MethodGet, "/v1/cloud/relays", nil))
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("relays status = %d body=%s", listRR.Code, listRR.Body.String())
+	}
+	var list CloudRelayListResponse
+	if err := json.Unmarshal(listRR.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.CurrentRelayID != "cn-nanjing" || len(list.Relays) != 2 {
+		t.Fatalf("relays = %#v", list)
+	}
+	if strings.Contains(listRR.Body.String(), "credential") {
+		t.Fatalf("relay list exposed credential: %s", listRR.Body.String())
+	}
+
+	switchRR := httptest.NewRecorder()
+	app.handleCloudAccountRelay(switchRR, httptest.NewRequest(http.MethodPatch, "/v1/cloud/account/relay", strings.NewReader(`{"relay_id":"us"}`)))
+	if switchRR.Code != http.StatusOK {
+		t.Fatalf("switch status = %d body=%s", switchRR.Code, switchRR.Body.String())
+	}
+	var status cloudAccountStatusResponse
+	if err := json.Unmarshal(switchRR.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Relay == nil || status.Relay.RelayID != "us" || status.Relay.CredentialAvailable != true {
+		t.Fatalf("status = %#v", status)
+	}
+	if strings.Contains(switchRR.Body.String(), "relay-credential") || strings.Contains(switchRR.Body.String(), token) {
+		t.Fatalf("switch response exposed secret: %s", switchRR.Body.String())
+	}
+}
+
 func TestCloudHandlersRemoveDevice(t *testing.T) {
 	app, broker := testCloudApp(t)
 	defer broker.Close()
@@ -567,7 +624,7 @@ func TestRemoteHostsIncludesCloudHostCandidatesWithoutGrantingControl(t *testing
 	if len(hosts.Hosts) != 1 {
 		t.Fatalf("hosts = %#v, want only cloud desktop Host candidate", hosts.Hosts)
 	}
-	if hosts.Hosts[0].DeviceID != "dev_cloud_host" || hosts.Hosts[0].Connection != remoteHostStatusCloud || hosts.Hosts[0].Status != remoteHostStatusOnline {
+	if hosts.Hosts[0].DeviceID != "dev_cloud_host" || hosts.Hosts[0].Connection != remoteHostStatusRelay || hosts.Hosts[0].Status != remoteHostStatusOnline {
 		t.Fatalf("cloud host = %#v", hosts.Hosts[0])
 	}
 	if hosts.Hosts[0].KnownIdentity {

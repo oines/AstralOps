@@ -1,6 +1,7 @@
 package relaybroker
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -14,11 +15,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/oines/astralops/internal/relayauth"
 )
 
 const (
-	maxJSONBodyBytes int64 = 1 << 20
+	maxJSONBodyBytes      int64 = 1 << 20
+	maxEnvelopeWait             = 25 * time.Second
+	webSocketWriteWait          = 15 * time.Second
+	webSocketPingInterval       = 20 * time.Second
+	webSocketSendBuffer         = 128
 
 	EnvelopeVersion               = "astralops-relay-envelope-v1"
 	PayloadKindControlHello       = "control.hello"
@@ -32,6 +38,8 @@ type Server struct {
 	credentialSecrets map[string][]byte
 	maxCredentialTTL  time.Duration
 	queues            map[string][]Envelope
+	waiters           map[string][]chan struct{}
+	webSocketClients  map[string]map[*webSocketClient]struct{}
 	now               func() time.Time
 }
 
@@ -60,6 +68,22 @@ type EnvelopeAckInput struct {
 	DeviceID string `json:"device_id"`
 }
 
+type WebSocketFrame struct {
+	Type     string    `json:"type"`
+	Envelope *Envelope `json:"envelope,omitempty"`
+	Code     string    `json:"code,omitempty"`
+	Error    string    `json:"error,omitempty"`
+}
+
+type webSocketClient struct {
+	accountIDHash string
+	deviceID      string
+	conn          *websocket.Conn
+	send          chan WebSocketFrame
+	done          chan struct{}
+	closeOnce     sync.Once
+}
+
 type APIError struct {
 	Status  int
 	Code    string
@@ -86,6 +110,8 @@ func NewServer(options ServerOptions) (*Server, error) {
 		credentialSecrets: cloneSecrets(options.CredentialSecrets),
 		maxCredentialTTL:  options.MaxCredentialTTL,
 		queues:            map[string][]Envelope{},
+		waiters:           map[string][]chan struct{}{},
+		webSocketClients:  map[string]map[*webSocketClient]struct{}{},
 		now:               func() time.Time { return time.Now().UTC() },
 	}, nil
 }
@@ -93,6 +119,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", s.handleHealth)
+	mux.HandleFunc("/v1/relay/connect", s.withAccount(s.handleRelayConnect))
 	mux.HandleFunc("/v1/relay/envelopes", s.withAccount(s.handleEnvelopes))
 	mux.HandleFunc("/v1/relay/envelopes/", s.withAccount(s.handleEnvelopeAction))
 	return withSecurityHeaders(withRequestBodyLimit(withCORS(mux)))
@@ -114,7 +141,12 @@ func (s *Server) handleEnvelopes(accountIDHash string, w http.ResponseWriter, r 
 			limit = 100
 		}
 		deviceID := strings.TrimSpace(r.URL.Query().Get("device_id"))
-		writeJSON(w, http.StatusOK, EnvelopeListResponse{Envelopes: s.list(accountIDHash, deviceID, limit)})
+		wait, err := envelopeWaitDuration(r.URL.Query().Get("wait"))
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, EnvelopeListResponse{Envelopes: s.listOrWait(r.Context(), accountIDHash, deviceID, limit, wait)})
 	case http.MethodPost:
 		var envelope Envelope
 		if err := decodeJSON(r, &envelope); err != nil {
@@ -150,6 +182,53 @@ func (s *Server) handleEnvelopeAction(accountIDHash string, w http.ResponseWrite
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+func (s *Server) handleRelayConnect(accountIDHash string, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	deviceID := strings.TrimSpace(r.URL.Query().Get("device_id"))
+	if deviceID == "" {
+		writeError(w, apiErr(http.StatusBadRequest, "device_id_required", "device_id required"))
+		return
+	}
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(*http.Request) bool { return true },
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	conn.SetReadLimit(maxJSONBodyBytes)
+	client := &webSocketClient{
+		accountIDHash: accountIDHash,
+		deviceID:      deviceID,
+		conn:          conn,
+		send:          make(chan WebSocketFrame, webSocketSendBuffer),
+		done:          make(chan struct{}),
+	}
+	s.registerWebSocketClient(client)
+	go client.writeLoop()
+	defer func() {
+		s.unregisterWebSocketClient(client)
+		client.close()
+	}()
+
+	for {
+		var frame WebSocketFrame
+		if err := conn.ReadJSON(&frame); err != nil {
+			return
+		}
+		if strings.TrimSpace(frame.Type) != "send" || frame.Envelope == nil {
+			client.sendError("relay_ws_frame_invalid", "relay websocket frame invalid")
+			continue
+		}
+		if _, err := s.forwardWebSocketEnvelope(accountIDHash, deviceID, *frame.Envelope); err != nil {
+			client.sendError(apiErrorCode(err), err.Error())
+		}
+	}
+}
+
 func (s *Server) enqueue(accountIDHash string, envelope Envelope) (Envelope, error) {
 	envelope.EnvelopeID = strings.TrimSpace(envelope.EnvelopeID)
 	if envelope.EnvelopeID == "" {
@@ -162,6 +241,28 @@ func (s *Server) enqueue(accountIDHash string, envelope Envelope) (Envelope, err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.queues[accountIDHash] = append(s.queues[accountIDHash], envelope)
+	s.notifyWaitersLocked(accountIDHash, envelope.ToDeviceID)
+	return envelope, nil
+}
+
+func (s *Server) forwardWebSocketEnvelope(accountIDHash, fromDeviceID string, envelope Envelope) (Envelope, error) {
+	envelope.EnvelopeID = strings.TrimSpace(envelope.EnvelopeID)
+	if envelope.EnvelopeID == "" {
+		envelope.EnvelopeID = "env_" + randomHex(16)
+	}
+	envelope.CreatedAt = s.now().Format(time.RFC3339Nano)
+	envelope.FromDeviceID = strings.TrimSpace(envelope.FromDeviceID)
+	fromDeviceID = strings.TrimSpace(fromDeviceID)
+	if envelope.FromDeviceID == "" {
+		envelope.FromDeviceID = fromDeviceID
+	}
+	if envelope.FromDeviceID != fromDeviceID {
+		return Envelope{}, apiErr(http.StatusForbidden, "from_device_mismatch", "from_device_id does not match relay websocket device")
+	}
+	if err := validateEnvelope(envelope); err != nil {
+		return Envelope{}, err
+	}
+	s.deliverWebSocketEnvelope(accountIDHash, envelope)
 	return envelope, nil
 }
 
@@ -172,6 +273,41 @@ func (s *Server) list(accountIDHash, deviceID string, limit int) []Envelope {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.listLocked(accountIDHash, deviceID, limit)
+}
+
+func (s *Server) listOrWait(ctx context.Context, accountIDHash, deviceID string, limit int, wait time.Duration) []Envelope {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return []Envelope{}
+	}
+	s.mu.Lock()
+	out := s.listLocked(accountIDHash, deviceID, limit)
+	if len(out) > 0 || wait <= 0 {
+		s.mu.Unlock()
+		return out
+	}
+	key := envelopeWaiterKey(accountIDHash, deviceID)
+	waiter := make(chan struct{})
+	s.waiters[key] = append(s.waiters[key], waiter)
+	s.mu.Unlock()
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		s.removeWaiter(key, waiter)
+		return []Envelope{}
+	case <-timer.C:
+		s.removeWaiter(key, waiter)
+		return s.list(accountIDHash, deviceID, limit)
+	case <-waiter:
+		return s.list(accountIDHash, deviceID, limit)
+	}
+}
+
+func (s *Server) listLocked(accountIDHash, deviceID string, limit int) []Envelope {
 	out := make([]Envelope, 0)
 	for _, envelope := range s.queues[accountIDHash] {
 		if envelope.ToDeviceID != deviceID {
@@ -183,6 +319,155 @@ func (s *Server) list(accountIDHash, deviceID string, limit int) []Envelope {
 		}
 	}
 	return out
+}
+
+func (s *Server) notifyWaitersLocked(accountIDHash, deviceID string) {
+	key := envelopeWaiterKey(accountIDHash, deviceID)
+	waiters := s.waiters[key]
+	delete(s.waiters, key)
+	for _, waiter := range waiters {
+		close(waiter)
+	}
+}
+
+func (s *Server) removeWaiter(key string, waiter chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	waiters := s.waiters[key]
+	for i, candidate := range waiters {
+		if candidate != waiter {
+			continue
+		}
+		waiters = append(waiters[:i], waiters[i+1:]...)
+		break
+	}
+	if len(waiters) == 0 {
+		delete(s.waiters, key)
+		return
+	}
+	s.waiters[key] = waiters
+}
+
+func (s *Server) registerWebSocketClient(client *webSocketClient) {
+	if client == nil {
+		return
+	}
+	key := envelopeWaiterKey(client.accountIDHash, client.deviceID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.webSocketClients[key] == nil {
+		s.webSocketClients[key] = map[*webSocketClient]struct{}{}
+	}
+	s.webSocketClients[key][client] = struct{}{}
+}
+
+func (s *Server) unregisterWebSocketClient(client *webSocketClient) {
+	if client == nil {
+		return
+	}
+	key := envelopeWaiterKey(client.accountIDHash, client.deviceID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clients := s.webSocketClients[key]
+	if len(clients) == 0 {
+		return
+	}
+	delete(clients, client)
+	if len(clients) == 0 {
+		delete(s.webSocketClients, key)
+	}
+}
+
+func (s *Server) deliverWebSocketEnvelope(accountIDHash string, envelope Envelope) {
+	key := envelopeWaiterKey(accountIDHash, envelope.ToDeviceID)
+	s.mu.Lock()
+	clients := make([]*webSocketClient, 0, len(s.webSocketClients[key]))
+	for client := range s.webSocketClients[key] {
+		clients = append(clients, client)
+	}
+	s.mu.Unlock()
+
+	frame := WebSocketFrame{Type: "envelope", Envelope: &envelope}
+	for _, client := range clients {
+		if client.sendFrame(frame) {
+			continue
+		}
+		s.unregisterWebSocketClient(client)
+		client.close()
+	}
+}
+
+func (c *webSocketClient) sendFrame(frame WebSocketFrame) bool {
+	if c == nil {
+		return false
+	}
+	select {
+	case <-c.done:
+		return false
+	case c.send <- frame:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *webSocketClient) sendError(code, message string) {
+	if code == "" {
+		code = "relay_ws_error"
+	}
+	_ = c.sendFrame(WebSocketFrame{Type: "error", Code: code, Error: message})
+}
+
+func (c *webSocketClient) writeLoop() {
+	pingTicker := time.NewTicker(webSocketPingInterval)
+	defer pingTicker.Stop()
+	for {
+		select {
+		case <-c.done:
+			return
+		case frame := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(webSocketWriteWait))
+			if err := c.conn.WriteJSON(frame); err != nil {
+				c.close()
+				return
+			}
+		case <-pingTicker.C:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(webSocketWriteWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				c.close()
+				return
+			}
+		}
+	}
+}
+
+func (c *webSocketClient) close() {
+	if c == nil {
+		return
+	}
+	c.closeOnce.Do(func() {
+		close(c.done)
+		_ = c.conn.Close()
+	})
+}
+
+func envelopeWaiterKey(accountIDHash, deviceID string) string {
+	return strings.TrimSpace(accountIDHash) + "\x00" + strings.TrimSpace(deviceID)
+}
+
+func envelopeWaitDuration(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	wait, err := time.ParseDuration(value)
+	if err != nil || wait < 0 {
+		return 0, apiErr(http.StatusBadRequest, "relay_wait_invalid", "wait must be a non-negative duration")
+	}
+	if wait > maxEnvelopeWait {
+		return maxEnvelopeWait, nil
+	}
+	return wait, nil
 }
 
 func (s *Server) ack(accountIDHash, envelopeID, deviceID string) error {
@@ -207,7 +492,7 @@ func (s *Server) ack(accountIDHash, envelopeID, deviceID string) error {
 		s.queues[accountIDHash] = append(queue[:i], queue[i+1:]...)
 		return nil
 	}
-	return apiErr(http.StatusNotFound, "relay_envelope_not_found", "relay envelope not found")
+	return nil
 }
 
 func (s *Server) withAccount(next func(string, http.ResponseWriter, *http.Request)) http.HandlerFunc {
@@ -320,6 +605,14 @@ func writeError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error(), "code": "internal_error"})
+}
+
+func apiErrorCode(err error) string {
+	var api APIError
+	if errors.As(err, &api) {
+		return api.Code
+	}
+	return "relay_ws_error"
 }
 
 func withCORS(next http.Handler) http.Handler {

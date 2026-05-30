@@ -128,7 +128,7 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTestCloudMembership(t, controllerStore, false, true)
-	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead}); err != nil {
+	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead, CapabilityCoreControl, CapabilityWorkspaceFilesRead}); err != nil {
 		t.Fatal(err)
 	}
 	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
@@ -194,6 +194,23 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 	}
 	if files.Root != "" || files.Path != "" {
 		t.Fatalf("files = %#v, want CoreClient-compatible root without Host-private path", files)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/workspaces/"+workspace.ID, nil)
+	deleteResp := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(deleteResp, deleteReq)
+	if deleteResp.Code != http.StatusOK {
+		t.Fatalf("remote workspace delete status = %d body = %s", deleteResp.Code, deleteResp.Body.String())
+	}
+	var deleteResult map[string]any
+	if err := json.Unmarshal(deleteResp.Body.Bytes(), &deleteResult); err != nil {
+		t.Fatal(err)
+	}
+	if !boolValue(deleteResult["ok"]) {
+		t.Fatalf("delete result = %#v, want ok", deleteResult)
+	}
+	if _, ok := hostApp.store.getWorkspace(workspace.ID); ok {
+		t.Fatalf("host workspace %s still exists after remote delete", workspace.ID)
 	}
 }
 

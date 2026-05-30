@@ -11,11 +11,19 @@ import (
 )
 
 const (
-	cloudSyncInterval = 60 * time.Second
+	cloudSyncInterval = 10 * time.Second
 	cloudSyncTimeout  = 15 * time.Second
 )
 
 func (a *app) applyCloudSettings(settings CloudSettings) error {
+	return a.applyCloudSettingsWithOffline(settings, true)
+}
+
+func (a *app) restartCloudSync(settings CloudSettings) error {
+	return a.applyCloudSettingsWithOffline(settings, false)
+}
+
+func (a *app) applyCloudSettingsWithOffline(settings CloudSettings, markOfflineOnStop bool) error {
 	settings = normalizedAppSettings(AppSettings{Cloud: settings}).Cloud
 	if settings.Enabled {
 		if err := validateCloudSettings(settings); err != nil {
@@ -31,31 +39,35 @@ func (a *app) applyCloudSettings(settings CloudSettings) error {
 	}
 	a.cloudSettings = settings
 	if !settings.Enabled {
+		a.cloudRelayConnected = false
+		a.refreshMeshStateAsync(true)
 		return nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cloudCancel = cancel
-	go a.cloudSyncLoop(ctx, settings)
+	go a.cloudSyncLoop(ctx, settings, markOfflineOnStop)
 	return nil
 }
 
-func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings) {
+func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings, markOfflineOnStop bool) {
 	client := CloudClient{BaseURL: settings.BaseURL, Token: settings.AccountToken}
 	selfDeviceID := a.store.hostInfo().Identity.DeviceID
 	if err := a.cloudRegisterAndHeartbeat(ctx, client); err != nil {
 		log.Printf("astralops cloud sync: %v", err)
 	}
-	relayClient, _, hasRelay, err := cloudRelayClientFromCloud(ctx, client)
+	relayClient, relayURL, hasRelay, err := cloudRelayClientFromCloud(ctx, client)
 	if err != nil {
 		log.Printf("astralops cloud account relay: %v", err)
 	}
+	relayLoopCancel := a.startCloudRelayWebSocketLoop(ctx, client, relayClient, relayURL, hasRelay)
+	defer relayLoopCancel()
 
 	ticker := time.NewTicker(cloudSyncInterval)
 	defer ticker.Stop()
-	relayTicker := time.NewTicker(controlRelayPollInterval)
-	defer relayTicker.Stop()
-	defer a.cloudMarkOffline(settings, selfDeviceID)
+	if markOfflineOnStop {
+		defer a.cloudMarkOffline(settings, selfDeviceID)
+	}
 
 	for {
 		select {
@@ -65,24 +77,72 @@ func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings) {
 			if err := a.cloudRegisterAndHeartbeat(ctx, client); err != nil {
 				log.Printf("astralops cloud sync: %v", err)
 			}
-			nextRelayClient, _, nextHasRelay, err := cloudRelayClientFromCloud(ctx, client)
+			nextRelayClient, nextRelayURL, nextHasRelay, err := cloudRelayClientFromCloud(ctx, client)
 			if err != nil {
 				log.Printf("astralops cloud account relay: %v", err)
 			} else {
+				if relayWebSocketLoopKey(relayURL, hasRelay) != relayWebSocketLoopKey(nextRelayURL, nextHasRelay) {
+					relayLoopCancel()
+					relayLoopCancel = a.startCloudRelayWebSocketLoop(ctx, client, nextRelayClient, nextRelayURL, nextHasRelay)
+				}
 				relayClient = nextRelayClient
+				relayURL = nextRelayURL
 				hasRelay = nextHasRelay
 			}
-		case <-relayTicker.C:
-			if !hasRelay {
-				continue
-			}
-			relayCtx, relayCancel := context.WithTimeout(ctx, cloudSyncTimeout)
-			if err := a.cloudPollRelayEnvelopes(relayCtx, relayClient); err != nil {
-				log.Printf("astralops cloud relay: %v", err)
-			}
-			relayCancel()
 		}
 	}
+}
+
+func (a *app) startCloudRelayWebSocketLoop(ctx context.Context, cloudClient CloudClient, initialClient RelayClient, relayURL string, hasRelay bool) context.CancelFunc {
+	relayURL = strings.TrimSpace(relayURL)
+	if !hasRelay || relayURL == "" {
+		return func() {}
+	}
+	loopCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		relayClient := initialClient
+		for {
+			if err := loopCtx.Err(); err != nil {
+				return
+			}
+			if err := a.cloudRunRelayWebSocket(loopCtx, relayClient); err != nil && loopCtx.Err() == nil {
+				log.Printf("astralops cloud relay ws: %v", err)
+			}
+			refreshCtx, refreshCancel := context.WithTimeout(loopCtx, cloudSyncTimeout)
+			nextRelayClient, nextRelayURL, nextHasRelay, err := cloudRelayClientFromCloud(refreshCtx, cloudClient)
+			refreshCancel()
+			if err == nil && nextHasRelay && strings.TrimSpace(nextRelayURL) == relayURL {
+				relayClient = nextRelayClient
+			}
+			select {
+			case <-loopCtx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	}()
+	return cancel
+}
+
+func relayWebSocketLoopKey(relayURL string, hasRelay bool) string {
+	if !hasRelay {
+		return ""
+	}
+	return strings.TrimSpace(relayURL)
+}
+
+func (a *app) syncCloudRegistrationSoon(settings AppSettings) {
+	if a == nil || !settings.Cloud.Enabled || validateCloudSettings(settings.Cloud) != nil {
+		return
+	}
+	client := CloudClient{BaseURL: settings.Cloud.BaseURL, Token: settings.Cloud.AccountToken}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), cloudSyncTimeout)
+		defer cancel()
+		if err := a.cloudRegisterAndHeartbeat(ctx, client); err != nil {
+			log.Printf("astralops cloud sync: %v", err)
+		}
+	}()
 }
 
 func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient) error {
@@ -95,7 +155,7 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 	if err != nil {
 		return err
 	}
-	relayClient, relay, hasRelay := relayClientFromCloudAccount(account, client.HTTPClient)
+	_, relay, hasRelay := relayClientFromCloudAccount(account, client.HTTPClient)
 	relayURL := ""
 	if hasRelay {
 		relayURL = relay.RelayURL
@@ -143,14 +203,8 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 		if err := a.cloudSyncPendingPairingRequests(pairingCtx, client); err != nil {
 			return err
 		}
-		if hasRelay {
-			relayCtx, relayCancel := context.WithTimeout(ctx, cloudSyncTimeout)
-			defer relayCancel()
-			if err := a.cloudPollRelayEnvelopes(relayCtx, relayClient); err != nil {
-				return err
-			}
-		}
 	}
+	a.refreshMeshStateAsync(true)
 	return nil
 }
 

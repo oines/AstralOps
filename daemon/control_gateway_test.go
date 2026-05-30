@@ -312,6 +312,64 @@ func TestControlGatewayCoreReadHidesHostWorkspaceAndSessionInternals(t *testing.
 	}
 }
 
+func TestControlGatewayReadsHostSnapshot(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	workspace.LocalProjectionRoot = "/host/private/projection"
+	workspace.NativeSessionID = "workspace-native-session"
+	app.store.mu.Lock()
+	app.store.workspaces[workspace.ID] = workspace
+	session.NativeSessionID = "session-native-id"
+	session.NativeThreadID = "session-native-thread"
+	app.store.sessions[session.ID] = session
+	app.store.mu.Unlock()
+	if _, err := app.store.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       session.Agent,
+		Kind:        "message.user",
+		Normalized:  map[string]any{"text": "hello"},
+		Raw:         map[string]any{"native": "secret"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionHostSnapshot,
+		Params: map[string]any{
+			"event_limit":       10,
+			"restore_on_launch": true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, ok := response.Result.(hostSnapshotResult)
+	if !ok {
+		t.Fatalf("snapshot result = %#v, want hostSnapshotResult", response.Result)
+	}
+	if snapshot.Host.Identity.DeviceID == "" {
+		t.Fatalf("snapshot host identity missing: %#v", snapshot.Host)
+	}
+	if len(snapshot.Workspaces) != 1 || snapshot.Workspaces[0].LocalCWD != "" || snapshot.Workspaces[0].LocalProjectionRoot != "" || snapshot.Workspaces[0].NativeSessionID != "" {
+		t.Fatalf("snapshot workspaces = %#v, want sanitized workspace", snapshot.Workspaces)
+	}
+	if len(snapshot.Sessions) != 1 || snapshot.Sessions[0].NativeSessionID != "" || snapshot.Sessions[0].NativeThreadID != "" {
+		t.Fatalf("snapshot sessions = %#v, want sanitized session", snapshot.Sessions)
+	}
+	if len(snapshot.SessionViews) != 1 || snapshot.SessionViews[0].Session.NativeSessionID != "" {
+		t.Fatalf("snapshot session views = %#v, want sanitized session view", snapshot.SessionViews)
+	}
+	if len(snapshot.Events) != 1 || snapshot.Events[0].Raw != nil {
+		t.Fatalf("snapshot events = %#v, want sanitized events", snapshot.Events)
+	}
+	if len(snapshot.InitialSessionEvents) != 1 || snapshot.InitialSessionEvents[0].SessionID != session.ID {
+		t.Fatalf("initial session events = %#v, want selected session events", snapshot.InitialSessionEvents)
+	}
+}
+
 func TestControlGatewayReadsWorkspaceConnectionFromHostState(t *testing.T) {
 	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	workspace, err := app.store.createWorkspace(createWorkspaceRequest{
@@ -344,6 +402,41 @@ func TestControlGatewayReadsWorkspaceConnectionFromHostState(t *testing.T) {
 	}
 	if connection.WorkspaceID != workspace.ID || connection.Status != connectionConnected || connection.DisplayCWD == "" {
 		t.Fatalf("connection = %#v, want Host SSH connection state", connection)
+	}
+}
+
+func TestControlGatewayDeletesWorkspaceOnHost(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	terminal := newTerminalSession(workspace.ID, AgentCodex, "local", ".", "zsh", "device_mobile")
+	app.terminalManager().register(terminal)
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		RequestID:          "req_workspace_delete",
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionWorkspaceDelete,
+		Params:             map[string]any{"workspace_id": workspace.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := mapValue(response.Result)
+	if !response.OK || !boolValue(result["ok"]) {
+		t.Fatalf("response = %#v, want ok workspace delete", response)
+	}
+	if _, ok := app.store.getWorkspace(workspace.ID); ok {
+		t.Fatalf("workspace %s still exists after delete", workspace.ID)
+	}
+	if _, ok := app.store.getSession(session.ID); ok {
+		t.Fatalf("session %s still exists after workspace delete", session.ID)
+	}
+	if tabs := app.terminalManager().listTabs(); len(tabs) != 0 {
+		t.Fatalf("terminal tabs = %#v, want workspace terminals closed", tabs)
+	}
+	events := app.store.queryEvents(workspace.ID, "", 0)
+	if len(events) != 1 || events[0].Kind != "workspace.removed" {
+		t.Fatalf("events = %#v, want workspace.removed", events)
 	}
 }
 

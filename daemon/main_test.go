@@ -1680,10 +1680,19 @@ func TestLocalWorkspacePTYCloseTerminatesProcessGroup(t *testing.T) {
 		t.Skip("PTY process group test is POSIX-only")
 	}
 	dir := t.TempDir()
+	st, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := st.createWorkspace(createWorkspaceRequest{Name: "pty", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
 	app := &app{
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
+		store:    st,
+		hub:      newEventHub(),
 	}
-	ws := Workspace{ID: "ws_local_pty", Target: "local", Agent: AgentClaude, LocalCWD: dir}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		app.handleWorkspacePTY(w, r, ws)
 	}))

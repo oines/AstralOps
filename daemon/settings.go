@@ -468,6 +468,7 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 				if err := a.writeRuntimeFile(); err != nil {
 					return err
 				}
+				a.syncCloudRegistrationSoon(next)
 			}
 			if cloudSettingsChanged(previous.Cloud, next.Cloud) {
 				if err := a.applyCloudSettings(next.Cloud); err != nil {

@@ -12,6 +12,8 @@ import type {
   CloudDeviceRemoveRequest,
   CloudDeviceRemoveResponse,
   CloudPairingSignalResponse,
+  CloudRelayListResponse,
+  CloudRelayUpdateRequest,
   CreateWorkspaceRequest,
   EditLastUserMessageRequest,
   FileListResponse,
@@ -19,21 +21,27 @@ import type {
   HostFileSystemBrowseParams,
   HostFileSystemBrowseResult,
   HostInfo,
+  HostSnapshotRequest,
+  HostSnapshotResponse,
   HostTrustListResult,
   HostTrustRevokeResult,
+  MeshState,
   PairingRequestListResult,
   PairingRequestResolveResult,
   RemoteHostRecord,
-  RemoteHostsResponse,
   Session,
   SessionCommandListResponse,
   SessionCommandResponse,
   SessionInputAttachment,
   SessionForkResponse,
   SessionView,
+  TerminalAckResult,
+  TerminalOpenResult,
   Workspace,
   WorkspaceCommandResponse,
   WorkspaceConnection,
+  WorkbenchPatch,
+  WorkbenchState,
 } from "@astralops/protocol";
 import type { DaemonInfo } from "./types";
 
@@ -71,17 +79,33 @@ export type EventSubscriptionHandlers = {
   onError?: (error?: unknown) => void;
 };
 
+export type MeshStateSubscriptionHandlers = {
+  onState: (state: MeshState) => void;
+  onOpen?: () => void;
+  onError?: (error?: unknown) => void;
+};
+
+export type WorkbenchSubscriptionHandlers = {
+  onPatch: (patch: WorkbenchPatch) => void;
+  onOpen?: () => void;
+  onError?: (error?: unknown) => void;
+};
+
 export type TerminalReadyPayload = {
+  terminal_id?: string;
   shell?: string;
   cwd?: string;
+  output_seq?: number;
 };
 
 export type TerminalHandlers = {
   onOpen?: () => void;
   onReady?: (payload: TerminalReadyPayload) => void;
-  onOutput?: (data: string) => void;
+  onOutput?: (data: string, outputSeq?: number) => void;
   onExit?: (payload: Record<string, unknown>) => void;
   onError?: (message: string) => void;
+  onConnectionError?: (message: string) => void;
+  onClose?: (payload: { code?: number; reason?: string; wasClean?: boolean }) => void;
 };
 
 export type TerminalConnection = {
@@ -90,8 +114,15 @@ export type TerminalConnection = {
   close: () => void;
 };
 
+export type TerminalOpenOptions = {
+  terminalId?: string;
+  afterSeq?: number;
+};
+
 export interface TerminalClient {
-  openWorkspaceTerminal(workspaceId: string, handlers: TerminalHandlers): TerminalConnection;
+  createWorkspaceTerminal(workspaceId: string): Promise<TerminalOpenResult>;
+  openWorkspaceTerminal(workspaceId: string, handlers: TerminalHandlers, options?: TerminalOpenOptions): TerminalConnection;
+  closeWorkspaceTerminal(workspaceId: string, terminalId: string): Promise<TerminalAckResult>;
 }
 
 export interface CoreClient {
@@ -103,12 +134,17 @@ export interface CoreClient {
   listPairingRequests(): Promise<PairingRequestListResult>;
   approvePairingRequest(requestId: string): Promise<PairingRequestResolveResult>;
   denyPairingRequest(requestId: string): Promise<PairingRequestResolveResult>;
+  hostSnapshot(input?: HostSnapshotRequest): Promise<HostSnapshotResponse>;
+  workbench(): Promise<WorkbenchState>;
+  subscribeWorkbench(handlers: WorkbenchSubscriptionHandlers): EventSubscription;
   settings(): Promise<AppSettings>;
   patchSettings(patch: AppSettingsPatch): Promise<AppSettings>;
   clearMediaCache(): Promise<ClearMediaCacheResponse>;
   cloudAccountStatus(): Promise<CloudAccountStatus>;
   startCloudAuth(input: CloudAuthStartRequest): Promise<CloudAuthStartResponse>;
   logoutCloudAuth(): Promise<CloudAuthLogoutResponse>;
+  listCloudRelays(): Promise<CloudRelayListResponse>;
+  setCloudAccountRelay(input: CloudRelayUpdateRequest): Promise<CloudAccountStatus>;
   listCloudDevices(): Promise<CloudDeviceRecord[]>;
   removeCloudDevice(deviceId: string, options?: CloudDeviceRemoveRequest): Promise<CloudDeviceRemoveResponse>;
   listWorkspaces(): Promise<Workspace[]>;
@@ -145,6 +181,7 @@ export interface CoreClient {
 export interface ControlChannel {
   request<T>(method: "GET" | "PATCH" | "POST" | "DELETE", path: string, body?: unknown, auth?: boolean): Promise<T>;
   subscribeEvents(afterSeq: number, handlers: EventSubscriptionHandlers): EventSubscription;
+  subscribeWorkbench(handlers: WorkbenchSubscriptionHandlers): EventSubscription;
   openSocket(path: string): WebSocket;
 }
 
@@ -157,10 +194,29 @@ export function createRemoteCoreClient(info: DaemonInfo, hostDeviceId: string): 
 }
 
 export async function listRemoteHosts(info: DaemonInfo, discover = true): Promise<RemoteHostRecord[]> {
+  const state = await readMeshState(info, discover);
+  return state.hosts;
+}
+
+export async function readMeshState(info: DaemonInfo, discover = true): Promise<MeshState> {
   const channel = new LocalHttpControlChannel(info);
   const query = discover ? "?discover=1" : "";
-  const response = await channel.request<RemoteHostsResponse>("GET", `/v1/remote/hosts${query}`);
-  return response.hosts;
+  return channel.request<MeshState>("GET", `/v1/mesh/state${query}`);
+}
+
+export function subscribeMeshState(info: DaemonInfo, handlers: MeshStateSubscriptionHandlers): EventSubscription {
+  const channel = new LocalHttpControlChannel(info);
+  const source = new EventSource(channel.url("/v1/mesh/state", { stream: 1 }));
+  source.addEventListener("mesh-state", (message) => {
+    try {
+      handlers.onState(JSON.parse((message as MessageEvent).data) as MeshState);
+    } catch (error) {
+      handlers.onError?.(error);
+    }
+  });
+  source.onopen = () => handlers.onOpen?.();
+  source.onerror = (event) => handlers.onError?.(event);
+  return { close: () => source.close() };
 }
 
 export async function requestRemoteHostPairing(info: DaemonInfo, hostDeviceId: string): Promise<CloudPairingSignalResponse> {
@@ -200,7 +256,7 @@ function requestLogContext(
 }
 
 function safeQueryDetails(params: URLSearchParams): Record<string, string> | undefined {
-  const allowed = new Set(["after_seq", "before_seq", "limit", "session_id", "workspace_id", "stream", "discover", "path"]);
+  const allowed = new Set(["after_seq", "before_seq", "limit", "session_id", "workspace_id", "stream", "discover", "path", "event_limit", "restore_on_launch"]);
   const out: Record<string, string> = {};
   for (const [key, value] of params.entries()) {
     if (allowed.has(key)) out[key] = value;
@@ -211,7 +267,10 @@ function safeQueryDetails(params: URLSearchParams): Record<string, string> | und
 function requestAction(method: RequestMethod, pathname: string): string {
   const parts = pathname.split("/").filter(Boolean);
   if (method === "POST" && pathname === "/v1/workspaces") return "workspace.create";
+  if (pathname === "/v1/snapshot") return "host.snapshot";
   if (method === "DELETE" && parts[1] === "workspaces" && parts[2]) return "workspace.delete";
+  if (method === "POST" && parts[1] === "workspaces" && parts[3] === "terminal") return "terminal.open";
+  if (method === "DELETE" && parts[1] === "workspaces" && parts[3] === "terminals" && parts[4]) return "terminal.close";
   if (method === "POST" && parts[1] === "workspaces" && parts[3]) return `workspace.${parts[3]}`;
   if (method === "GET" && parts[1] === "workspaces" && parts[3]) return `workspace.${parts[3]}.read`;
   if (method === "POST" && pathname === "/v1/sessions") return "session.create";
@@ -219,8 +278,11 @@ function requestAction(method: RequestMethod, pathname: string): string {
   if (parts[1] === "sessions" && parts[3]) return `session.${parts[3]}`;
   if (parts[1] === "approvals" && parts[3] === "respond") return "interaction.respond";
   if (pathname === "/v1/events") return method === "GET" ? "events.read" : "events";
+  if (pathname === "/v1/mesh/state") return "mesh.state";
   if (pathname === "/v1/remote/hosts") return "remote.hosts.list";
   if (pathname === "/v1/cloud/account") return "cloud.account.read";
+  if (pathname === "/v1/cloud/relays") return "cloud.relays.list";
+  if (pathname === "/v1/cloud/account/relay") return "cloud.account.relay.update";
   if (pathname === "/v1/cloud/auth/start") return "cloud.auth.start";
   if (pathname === "/v1/cloud/auth/logout") return "cloud.auth.logout";
   if (pathname === "/v1/cloud/devices") return "cloud.devices.list";
@@ -373,6 +435,35 @@ export class LocalHttpControlChannel implements ControlChannel {
     };
   }
 
+  subscribeWorkbench(handlers: WorkbenchSubscriptionHandlers): EventSubscription {
+    logClientEvent("workbench.subscribe.start", { remote: false });
+    const source = new EventSource(this.url("/v1/workbench", { stream: 1 }));
+    source.addEventListener("workbench.patch", (message) => {
+      try {
+        handlers.onPatch(JSON.parse((message as MessageEvent).data) as WorkbenchPatch);
+      } catch (error) {
+        handlers.onError?.(error);
+      }
+    });
+    source.addEventListener("workbench.error", (message) => {
+      handlers.onError?.(new Error((message as MessageEvent).data));
+    });
+    source.onopen = () => {
+      logClientEvent("workbench.subscribe.open", { remote: false });
+      handlers.onOpen?.();
+    };
+    source.onerror = (event) => {
+      logClientEvent("workbench.subscribe.error", { remote: false }, "warn");
+      handlers.onError?.(event);
+    };
+    return {
+      close: () => {
+        logClientEvent("workbench.subscribe.close", { remote: false });
+        source.close();
+      },
+    };
+  }
+
   openSocket(path: string): WebSocket {
     logClientEvent("websocket.open", requestLogContext("GET", path, undefined));
     const params = new URLSearchParams({ token: this.token });
@@ -486,6 +577,36 @@ class RemoteDaemonControlChannel implements ControlChannel {
     };
   }
 
+  subscribeWorkbench(handlers: WorkbenchSubscriptionHandlers): EventSubscription {
+    logClientEvent("workbench.subscribe.start", { remote: true, host_device_id: this.hostDeviceId });
+    const source = new EventSource(`${this.baseUrl}${this.remotePath("/v1/workbench")}?${new URLSearchParams({ token: this.token, stream: "1" }).toString()}`);
+    source.addEventListener("workbench.patch", (message) => {
+      try {
+        handlers.onPatch(JSON.parse((message as MessageEvent).data) as WorkbenchPatch);
+      } catch (error) {
+        handlers.onError?.(error);
+      }
+    });
+    source.addEventListener("workbench.error", (message) => {
+      logClientEvent("workbench.subscribe.remote_error", { remote: true, host_device_id: this.hostDeviceId }, "warn");
+      handlers.onError?.(new Error((message as MessageEvent).data));
+    });
+    source.onopen = () => {
+      logClientEvent("workbench.subscribe.open", { remote: true, host_device_id: this.hostDeviceId });
+      handlers.onOpen?.();
+    };
+    source.onerror = (event) => {
+      logClientEvent("workbench.subscribe.error", { remote: true, host_device_id: this.hostDeviceId }, "warn");
+      handlers.onError?.(event);
+    };
+    return {
+      close: () => {
+        logClientEvent("workbench.subscribe.close", { remote: true, host_device_id: this.hostDeviceId });
+        source.close();
+      },
+    };
+  }
+
   openSocket(path: string): WebSocket {
     logClientEvent("websocket.open", requestLogContext("GET", path, undefined, { remote: true, hostDeviceId: this.hostDeviceId }));
     const params = new URLSearchParams({ token: this.token });
@@ -586,6 +707,14 @@ export class LocalCoreClient implements CoreClient {
     return this.channel.request("POST", "/v1/cloud/auth/logout", {});
   }
 
+  listCloudRelays(): Promise<CloudRelayListResponse> {
+    return this.channel.request("GET", "/v1/cloud/relays");
+  }
+
+  setCloudAccountRelay(input: CloudRelayUpdateRequest): Promise<CloudAccountStatus> {
+    return this.channel.request("PATCH", "/v1/cloud/account/relay", input);
+  }
+
   async listCloudDevices(): Promise<CloudDeviceRecord[]> {
     const result = await this.channel.request<CloudDeviceListResponse>("GET", "/v1/cloud/devices");
     if (!Array.isArray(result.devices)) {
@@ -596,6 +725,22 @@ export class LocalCoreClient implements CoreClient {
 
   removeCloudDevice(deviceId: string, options: CloudDeviceRemoveRequest = {}): Promise<CloudDeviceRemoveResponse> {
     return this.channel.request("POST", `/v1/cloud/devices/${encodeURIComponent(deviceId)}/remove`, options);
+  }
+
+  hostSnapshot(input: HostSnapshotRequest = {}): Promise<HostSnapshotResponse> {
+    const params = new URLSearchParams();
+    if (input.event_limit !== undefined) params.set("event_limit", String(input.event_limit));
+    if (input.restore_on_launch !== undefined) params.set("restore_on_launch", input.restore_on_launch ? "1" : "0");
+    const search = params.toString();
+    return this.channel.request("GET", `/v1/snapshot${search ? `?${search}` : ""}`);
+  }
+
+  workbench(): Promise<WorkbenchState> {
+    return this.channel.request("GET", "/v1/workbench");
+  }
+
+  subscribeWorkbench(handlers: WorkbenchSubscriptionHandlers): EventSubscription {
+    return this.channel.subscribeWorkbench(handlers);
   }
 
   listWorkspaces(): Promise<Workspace[]> {
@@ -753,12 +898,16 @@ class RemoteCoreClient extends LocalCoreClient {
     return Promise.reject(new Error("远端 Host cloud 登录不能由 Controller 退出"));
   }
 
-  removeCloudDevice(): Promise<CloudDeviceRemoveResponse> {
-    return Promise.reject(new Error("远端 Host cloud 设备不能由 Controller 移除"));
+  listCloudRelays(): Promise<CloudRelayListResponse> {
+    return Promise.reject(new Error("远端 Host cloud 中继列表不能由 Controller 读取"));
   }
 
-  deleteWorkspace(): Promise<{ ok: boolean }> {
-    return Promise.reject(new Error("远端删除 workspace 尚未进入控制协议"));
+  setCloudAccountRelay(): Promise<CloudAccountStatus> {
+    return Promise.reject(new Error("远端 Host cloud 中继不能由 Controller 切换"));
+  }
+
+  removeCloudDevice(): Promise<CloudDeviceRemoveResponse> {
+    return Promise.reject(new Error("远端 Host cloud 设备不能由 Controller 移除"));
   }
 
   sessionCommands(): Promise<SessionCommandListResponse> {
@@ -777,9 +926,24 @@ class RemoteCoreClient extends LocalCoreClient {
 class LocalTerminalClient implements TerminalClient {
   constructor(private readonly channel: ControlChannel) {}
 
-  openWorkspaceTerminal(workspaceId: string, handlers: TerminalHandlers): TerminalConnection {
-    logClientEvent("terminal.open.start", { workspace_id: workspaceId });
-    return new WebSocketTerminalConnection(this.channel.openSocket(`/v1/workspaces/${workspaceId}/pty`), handlers);
+  createWorkspaceTerminal(workspaceId: string): Promise<TerminalOpenResult> {
+    logClientEvent("terminal.create.start", { workspace_id: workspaceId });
+    return this.channel.request("POST", `/v1/workspaces/${workspaceId}/terminal`, {});
+  }
+
+  openWorkspaceTerminal(workspaceId: string, handlers: TerminalHandlers, options: TerminalOpenOptions = {}): TerminalConnection {
+    logClientEvent("terminal.open.start", { workspace_id: workspaceId, terminal_id: options.terminalId, after_seq: options.afterSeq });
+    const params = new URLSearchParams();
+    if (options.terminalId) params.set("terminal_id", options.terminalId);
+    if (options.afterSeq !== undefined && Number.isFinite(options.afterSeq) && options.afterSeq >= 0) params.set("after_seq", String(Math.floor(options.afterSeq)));
+    const queryString = params.toString();
+    const query = queryString ? `?${queryString}` : "";
+    return new WebSocketTerminalConnection(this.channel.openSocket(`/v1/workspaces/${workspaceId}/pty${query}`), handlers);
+  }
+
+  closeWorkspaceTerminal(workspaceId: string, terminalId: string): Promise<TerminalAckResult> {
+    logClientEvent("terminal.close.start", { workspace_id: workspaceId, terminal_id: terminalId });
+    return this.channel.request("DELETE", `/v1/workspaces/${workspaceId}/terminals/${encodeURIComponent(terminalId)}`);
   }
 }
 
@@ -791,12 +955,12 @@ class WebSocketTerminalConnection implements TerminalConnection {
     };
     socket.onmessage = (event) => {
       try {
-        const message = JSON.parse(event.data as string) as { type: string; data?: string; message?: string; shell?: string; cwd?: string };
+        const message = JSON.parse(event.data as string) as { type: string; terminal_id?: string; data?: string; message?: string; shell?: string; cwd?: string; output_seq?: number };
         if (message.type === "ready") {
-          logClientEvent("terminal.ready", { shell: message.shell, cwd: message.cwd });
-          handlers.onReady?.({ shell: message.shell, cwd: message.cwd });
+          logClientEvent("terminal.ready", { terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
+          handlers.onReady?.({ terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
         }
-        if (message.type === "output" && message.data) handlers.onOutput?.(message.data);
+        if (message.type === "output" && message.data) handlers.onOutput?.(message.data, message.output_seq);
         if (message.type === "exit") {
           const exitPayload = message as unknown as Record<string, unknown>;
           logClientEvent("terminal.exit", { code: exitPayload.code, exit_code: exitPayload.exit_code });
@@ -812,10 +976,11 @@ class WebSocketTerminalConnection implements TerminalConnection {
     };
     socket.onerror = () => {
       logClientEvent("terminal.connection_failed", {}, "error");
-      handlers.onError?.("PTY 连接失败");
+      handlers.onConnectionError?.("PTY 连接失败");
     };
-    socket.onclose = () => {
-      logClientEvent("terminal.closed");
+    socket.onclose = (event) => {
+      logClientEvent("terminal.closed", { code: event.code, reason: event.reason, was_clean: event.wasClean });
+      handlers.onClose?.({ code: event.code, reason: event.reason, wasClean: event.wasClean });
     };
   }
 
@@ -831,9 +996,6 @@ class WebSocketTerminalConnection implements TerminalConnection {
 
   close(): void {
     logClientEvent("terminal.close");
-    if (this.socket.readyState === WebSocket.OPEN) {
-      this.send({ type: "close" });
-    }
     this.socket.close();
   }
 
