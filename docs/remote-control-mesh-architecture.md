@@ -645,7 +645,7 @@ else:
   use relay
 ```
 
-LAN identity validation 成功只说明候选地址属于目标 Host，不能把目标降级成 direct-only。只要账号 relay 可用，`RemoteTargetResolver` 返回的 LAN target 也必须携带 relay fallback；后续 control websocket dial、hello/ack 或 request/response 超时都可以切到 relay，但不能绕过同一个 Host identity、trust grant、capability 和 E2EE 校验。
+LAN identity validation 成功只说明候选地址属于目标 Host，不能把目标降级成 direct-only。只要账号 relay 可用，`RemoteTargetResolver` 返回的 LAN target 也必须携带 relay fallback；后续 control websocket dial、hello/ack 或 request/response 超时都可以切到 relay，但不能绕过同一个 Host identity、trust grant、capability 和 E2EE 校验。Transport 打开超时和业务 action 响应超时必须分开：LAN dial/handshake 可以短超时，`core.control.workspace.connect` 这类 Host-owned SSH 连接操作必须使用足够的 action timeout，不能因为 LAN transport 是 2 秒窗口就提前判失败。
 
 这个判断是 per Controller-Host pair 的。一个账号的 mesh 里可以同时存在：
 

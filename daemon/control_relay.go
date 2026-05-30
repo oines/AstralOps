@@ -529,7 +529,7 @@ func controlClientRelayRoundTrip(parent context.Context, target controlClientTar
 		return ControlResponse{}, err
 	}
 	defer conn.Close()
-	return controlClientFrameRoundTrip(conn, activeTarget.Timeout, st, req)
+	return controlClientFrameRoundTrip(conn, controlClientRequestRoundTripTimeout(activeTarget.Timeout, req), st, req)
 }
 
 func controlClientOpenRelayFrameConn(parent context.Context, target controlClientTarget, st *store) (*controlClientRelayFrameConn, error) {

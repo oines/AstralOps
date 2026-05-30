@@ -2028,7 +2028,7 @@ func controlClientRequestToTarget(target controlClientTarget, st *store, req Con
 	}
 	defer conn.Close()
 
-	return controlClientFrameRoundTrip(conn, activeTarget.Timeout, st, req)
+	return controlClientFrameRoundTrip(conn, controlClientRequestRoundTripTimeout(activeTarget.Timeout, req), st, req)
 }
 
 func controlClientRoundTrip(socket *websocket.Conn, cipher *controlCipher, timeout time.Duration, st *store, req ControlRequest) (ControlResponse, error) {
@@ -2379,6 +2379,25 @@ func controlClientFrameRoundTrip(conn controlClientFrameConn, timeout time.Durat
 		}
 		return *plain.Response, nil
 	}
+}
+
+func controlClientRequestRoundTripTimeout(transportTimeout time.Duration, req ControlRequest) time.Duration {
+	switch req.Action {
+	case ControlActionWorkspaceConnect:
+		return maxDuration(transportTimeout, 45*time.Second)
+	default:
+		return transportTimeout
+	}
+}
+
+func maxDuration(left, right time.Duration) time.Duration {
+	if left <= 0 || right <= 0 {
+		return 0
+	}
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func controlClientHostInfo(host string) (HostInfo, error) {

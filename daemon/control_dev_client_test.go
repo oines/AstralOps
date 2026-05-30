@@ -212,6 +212,21 @@ func TestControlClientTransportPlanUsesOnlyRelayForForcedRelay(t *testing.T) {
 	}
 }
 
+func TestControlClientRequestRoundTripTimeoutExtendsWorkspaceConnect(t *testing.T) {
+	timeout := controlClientRequestRoundTripTimeout(remoteHostLANTimeout, ControlRequest{Action: ControlActionWorkspaceConnect})
+	if timeout < 45*time.Second {
+		t.Fatalf("workspace connect timeout = %s, want at least 45s", timeout)
+	}
+	readTimeout := controlClientRequestRoundTripTimeout(remoteHostLANTimeout, ControlRequest{Action: ControlActionWorkspaces})
+	if readTimeout != remoteHostLANTimeout {
+		t.Fatalf("workspace read timeout = %s, want %s", readTimeout, remoteHostLANTimeout)
+	}
+	unbounded := controlClientRequestRoundTripTimeout(0, ControlRequest{Action: ControlActionWorkspaceConnect})
+	if unbounded != 0 {
+		t.Fatalf("unbounded timeout = %s, want 0", unbounded)
+	}
+}
+
 func controlClientTransportKinds(transports []controlClientTransport) []controlClientTransportKind {
 	kinds := make([]controlClientTransportKind, 0, len(transports))
 	for _, transport := range transports {
