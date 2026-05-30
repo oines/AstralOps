@@ -18,6 +18,7 @@ import (
 const (
 	controlRelayPollInterval      = time.Second
 	controlRelayPollLimit         = 50
+	controlRelayLongPollWait      = 10 * time.Second
 	controlRelayRoundTripTimeout  = 15 * time.Second
 	controlRelaySessionMaxIdle    = 5 * time.Minute
 	controlRelayPayloadMaxBytes   = controlSealedFrameMaxBytesDefault
@@ -50,7 +51,7 @@ func (a *app) cloudPollRelayEnvelopes(ctx context.Context, client RelayClient) e
 		return nil
 	}
 	deviceID := a.store.hostInfo().Identity.DeviceID
-	envelopes, err := client.ListRelayEnvelopes(ctx, deviceID, controlRelayPollLimit)
+	envelopes, err := client.ListRelayEnvelopesWait(ctx, deviceID, controlRelayPollLimit, controlRelayLongPollWait)
 	if err != nil {
 		return err
 	}
@@ -624,7 +625,7 @@ func controlClientRelayWaitHelloAck(ctx context.Context, target controlClientTar
 		if err := ctx.Err(); err != nil {
 			return controlHelloAckFrame{}, err
 		}
-		envelopes, err := target.RelayClient.ListRelayEnvelopes(ctx, st.deviceIdentity.DeviceID, controlRelayPollLimit)
+		envelopes, err := target.RelayClient.ListRelayEnvelopesWait(ctx, st.deviceIdentity.DeviceID, controlRelayPollLimit, controlRelayLongPollWait)
 		if err != nil {
 			return controlHelloAckFrame{}, err
 		}
@@ -718,7 +719,7 @@ func controlClientRelayRead(ctx context.Context, target controlClientTarget, cip
 		if err := ctx.Err(); err != nil {
 			return controlPlainFrame{}, err
 		}
-		envelopes, err := target.RelayClient.ListRelayEnvelopes(ctx, target.ControllerDeviceID, controlRelayPollLimit)
+		envelopes, err := target.RelayClient.ListRelayEnvelopesWait(ctx, target.ControllerDeviceID, controlRelayPollLimit, controlRelayLongPollWait)
 		if err != nil {
 			return controlPlainFrame{}, err
 		}

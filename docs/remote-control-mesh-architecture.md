@@ -341,12 +341,13 @@ POST /v1/pairing/requests/:request_id/resolve
 Relay API 的职责：
 
 ```text
-GET  /v1/relay/envelopes?device_id=<device_id>
+GET  /v1/relay/envelopes?device_id=<device_id>&wait=10s
 POST /v1/relay/envelopes
 POST /v1/relay/envelopes/:envelope_id/ack
 ```
 
 Relay API 必须由独立 relay service 提供，不能由 cloud control plane 顺手挂载 `/v1/relay/*`。daemon 代码必须通过独立的 `RelayClient` 调用这些 endpoint。
+`wait` 是 relay 层长轮询参数：如果目标设备队列暂时为空，relay 可以最多等待一小段时间再返回空列表；一旦有 envelope 入队必须立即返回。当前公开 relay 将单次等待上限限制为 25s，daemon 默认使用 10s。这个优化只减少空轮询和弱网下的可感知等待，不改变 envelope/ack/E2EE sealed frame 语义。
 
 公开仓库提供独立 relay 进程：
 
@@ -1513,7 +1514,7 @@ POST /v1/relay/envelopes/:envelope_id/ack
 body: { "device_id": "<to_device_id>" }
 ```
 
-relay 只在 `device_id == to_device_id` 时删除该 envelope。客户端不能把 `GET /v1/relay/envelopes` 当作历史查询接口；它是待投递队列视图，未 ack 的 envelope 会继续出现。
+relay 只在 `device_id == to_device_id` 时删除该 envelope。客户端不能把 `GET /v1/relay/envelopes` 当作历史查询接口；它是待投递队列视图，未 ack 的 envelope 会继续出现。长轮询超时返回空列表不是错误，客户端应立即继续下一轮等待，直到本地 control session 超时、取消或收到目标 frame。
 
 ### Phase 3 - Pairing and Trust
 
@@ -1621,9 +1622,9 @@ reconnect and resume semantics
 GET /v1/control/ws
 ```
 
-当前 relay MVP 已落地 Host 侧 envelope polling、Controller 侧 encrypted frame transport 和独立 `relay/` 服务：当 LAN discovery/direct WebSocket 不可用且目标 Host 是已知可信设备、cloud registry 显示在线时，本机 daemon 可以通过 relay service 投递 `control.hello` / `control.hello_ack` / `control.sealed_frame` 完成同一套 E2EE 握手，并在同一条逻辑 control connection 上承载 request/response、event subscription、workspace/media stream、attachment chunk ingest 和 remote PTY frame。
+当前 relay MVP 已落地 Host 侧 envelope long-polling、Controller 侧 encrypted frame transport 和独立 `relay/` 服务：当 LAN discovery/direct WebSocket 不可用且目标 Host 是已知可信设备、cloud registry 显示在线时，本机 daemon 可以通过 relay service 投递 `control.hello` / `control.hello_ack` / `control.sealed_frame` 完成同一套 E2EE 握手，并在同一条逻辑 control connection 上承载 request/response、event subscription、workspace/media stream、attachment chunk ingest 和 remote PTY frame。
 
-relay streaming 不是云端业务代理：`control.sealed_frame` 内部明文只存在于 Controller 和 Host 设备内存中。Broker 只能轮询、存储待投递密文 envelope、ack 删除和按账号/设备限流；不能缓存明文事件、文件、媒体、PTY 输出或 SSH 配置。连接关闭、设备踢出信任或 idle 过期时，Host 必须清理 relay control session 绑定的 stream context 和 PTY viewer。
+relay streaming 不是云端业务代理：`control.sealed_frame` 内部明文只存在于 Controller 和 Host 设备内存中。Broker 只能长轮询、存储待投递密文 envelope、ack 删除和按账号/设备做基础限流；不能缓存明文事件、文件、媒体、PTY 输出或 SSH 配置。连接关闭、设备踢出信任或 idle 过期时，Host 必须清理 relay control session 绑定的 stream context 和 PTY viewer。
 
 Desktop Controller 不直接在 React/Electron renderer 内实现远控握手，也不持有远控私钥。当前桌面端先通过本机 daemon 暴露 controller-side 代理 API，再由本机 daemon 复用同一套 Host identity、known_hosts、LAN discovery 和 E2EE control channel：
 

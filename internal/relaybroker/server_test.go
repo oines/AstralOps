@@ -3,6 +3,8 @@ package relaybroker
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,6 +60,84 @@ func TestRelayBrokerRejectsAccountToken(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want unauthorized", res.StatusCode)
+	}
+}
+
+func TestRelayBrokerLongPollReturnsWhenEnvelopeArrives(t *testing.T) {
+	server := newTestRelayServer(t)
+	defer server.Close()
+	credential := testRelayCredential(t, "acct_test")
+
+	type result struct {
+		response EnvelopeListResponse
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodGet, server.URL+"/v1/relay/envelopes?device_id=dev_b&limit=10&wait=2s", nil)
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+credential)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(res.Body)
+			done <- result{err: errors.New(strings.TrimSpace(string(body)))}
+			return
+		}
+		var out EnvelopeListResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			done <- result{err: err}
+			return
+		}
+		done <- result{response: out}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	created := relayRequest[Envelope](t, http.MethodPost, server.URL+"/v1/relay/envelopes", credential, Envelope{
+		Version:       EnvelopeVersion,
+		FromDeviceID:  "dev_a",
+		ToDeviceID:    "dev_b",
+		PayloadKind:   PayloadKindControlHello,
+		PayloadBase64: "aGVsbG8=",
+	})
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if len(got.response.Envelopes) != 1 || got.response.Envelopes[0].EnvelopeID != created.EnvelopeID {
+			t.Fatalf("long poll response = %#v, want created envelope", got.response)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("long poll did not return after enqueue")
+	}
+}
+
+func TestRelayBrokerRejectsInvalidWait(t *testing.T) {
+	server := newTestRelayServer(t)
+	defer server.Close()
+	credential := testRelayCredential(t, "acct_test")
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/v1/relay/envelopes?device_id=dev_b&wait=bad", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+credential)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want bad request", res.StatusCode)
 	}
 }
 

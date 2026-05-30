@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type RelayClient struct {
@@ -30,9 +31,16 @@ func (c RelayClient) EnqueueRelayEnvelope(ctx context.Context, envelope RelayEnv
 }
 
 func (c RelayClient) ListRelayEnvelopes(ctx context.Context, deviceID string, limit int) ([]RelayEnvelope, error) {
+	return c.ListRelayEnvelopesWait(ctx, deviceID, limit, 0)
+}
+
+func (c RelayClient) ListRelayEnvelopesWait(ctx context.Context, deviceID string, limit int, wait time.Duration) ([]RelayEnvelope, error) {
 	path := "/v1/relay/envelopes?device_id=" + queryEscape(deviceID)
 	if limit > 0 {
 		path += "&limit=" + queryEscape(fmt.Sprintf("%d", limit))
+	}
+	if wait > 0 {
+		path += "&wait=" + queryEscape(wait.String())
 	}
 	var out relayEnvelopeListResponse
 	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {

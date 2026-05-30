@@ -1,6 +1,7 @@
 package relaybroker
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 
 const (
 	maxJSONBodyBytes int64 = 1 << 20
+	maxEnvelopeWait        = 25 * time.Second
 
 	EnvelopeVersion               = "astralops-relay-envelope-v1"
 	PayloadKindControlHello       = "control.hello"
@@ -32,6 +34,7 @@ type Server struct {
 	credentialSecrets map[string][]byte
 	maxCredentialTTL  time.Duration
 	queues            map[string][]Envelope
+	waiters           map[string][]chan struct{}
 	now               func() time.Time
 }
 
@@ -86,6 +89,7 @@ func NewServer(options ServerOptions) (*Server, error) {
 		credentialSecrets: cloneSecrets(options.CredentialSecrets),
 		maxCredentialTTL:  options.MaxCredentialTTL,
 		queues:            map[string][]Envelope{},
+		waiters:           map[string][]chan struct{}{},
 		now:               func() time.Time { return time.Now().UTC() },
 	}, nil
 }
@@ -114,7 +118,12 @@ func (s *Server) handleEnvelopes(accountIDHash string, w http.ResponseWriter, r 
 			limit = 100
 		}
 		deviceID := strings.TrimSpace(r.URL.Query().Get("device_id"))
-		writeJSON(w, http.StatusOK, EnvelopeListResponse{Envelopes: s.list(accountIDHash, deviceID, limit)})
+		wait, err := envelopeWaitDuration(r.URL.Query().Get("wait"))
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, EnvelopeListResponse{Envelopes: s.listOrWait(r.Context(), accountIDHash, deviceID, limit, wait)})
 	case http.MethodPost:
 		var envelope Envelope
 		if err := decodeJSON(r, &envelope); err != nil {
@@ -162,6 +171,7 @@ func (s *Server) enqueue(accountIDHash string, envelope Envelope) (Envelope, err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.queues[accountIDHash] = append(s.queues[accountIDHash], envelope)
+	s.notifyWaitersLocked(accountIDHash, envelope.ToDeviceID)
 	return envelope, nil
 }
 
@@ -172,6 +182,41 @@ func (s *Server) list(accountIDHash, deviceID string, limit int) []Envelope {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.listLocked(accountIDHash, deviceID, limit)
+}
+
+func (s *Server) listOrWait(ctx context.Context, accountIDHash, deviceID string, limit int, wait time.Duration) []Envelope {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return []Envelope{}
+	}
+	s.mu.Lock()
+	out := s.listLocked(accountIDHash, deviceID, limit)
+	if len(out) > 0 || wait <= 0 {
+		s.mu.Unlock()
+		return out
+	}
+	key := envelopeWaiterKey(accountIDHash, deviceID)
+	waiter := make(chan struct{})
+	s.waiters[key] = append(s.waiters[key], waiter)
+	s.mu.Unlock()
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		s.removeWaiter(key, waiter)
+		return []Envelope{}
+	case <-timer.C:
+		s.removeWaiter(key, waiter)
+		return s.list(accountIDHash, deviceID, limit)
+	case <-waiter:
+		return s.list(accountIDHash, deviceID, limit)
+	}
+}
+
+func (s *Server) listLocked(accountIDHash, deviceID string, limit int) []Envelope {
 	out := make([]Envelope, 0)
 	for _, envelope := range s.queues[accountIDHash] {
 		if envelope.ToDeviceID != deviceID {
@@ -183,6 +228,52 @@ func (s *Server) list(accountIDHash, deviceID string, limit int) []Envelope {
 		}
 	}
 	return out
+}
+
+func (s *Server) notifyWaitersLocked(accountIDHash, deviceID string) {
+	key := envelopeWaiterKey(accountIDHash, deviceID)
+	waiters := s.waiters[key]
+	delete(s.waiters, key)
+	for _, waiter := range waiters {
+		close(waiter)
+	}
+}
+
+func (s *Server) removeWaiter(key string, waiter chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	waiters := s.waiters[key]
+	for i, candidate := range waiters {
+		if candidate != waiter {
+			continue
+		}
+		waiters = append(waiters[:i], waiters[i+1:]...)
+		break
+	}
+	if len(waiters) == 0 {
+		delete(s.waiters, key)
+		return
+	}
+	s.waiters[key] = waiters
+}
+
+func envelopeWaiterKey(accountIDHash, deviceID string) string {
+	return strings.TrimSpace(accountIDHash) + "\x00" + strings.TrimSpace(deviceID)
+}
+
+func envelopeWaitDuration(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	wait, err := time.ParseDuration(value)
+	if err != nil || wait < 0 {
+		return 0, apiErr(http.StatusBadRequest, "relay_wait_invalid", "wait must be a non-negative duration")
+	}
+	if wait > maxEnvelopeWait {
+		return maxEnvelopeWait, nil
+	}
+	return wait, nil
 }
 
 func (s *Server) ack(accountIDHash, envelopeID, deviceID string) error {
