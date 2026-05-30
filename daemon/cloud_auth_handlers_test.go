@@ -180,11 +180,28 @@ func newTestCloudAuthServer(t *testing.T, loginCode, accountToken string, exchan
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_login_code", "error": "unexpected login code"})
 			return
 		}
+		if strings.TrimSpace(req.Device.DeviceID) == "" || strings.TrimSpace(req.Device.PublicKeyFingerprint) == "" || !req.Device.CanControl {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "device_required", "error": "device registration required"})
+			return
+		}
 		atomic.AddInt32(exchanges, 1)
 		writeJSON(w, http.StatusOK, cloudLoginCodeExchangeResponse{
 			Account:      CloudAccount{AccountIDHash: "acct_oauth"},
 			AccountToken: accountToken,
 			ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+			Device: &CloudDeviceRecord{
+				AccountIDHash:        "acct_oauth",
+				DeviceID:             req.Device.DeviceID,
+				DeviceName:           req.Device.DeviceName,
+				DeviceKind:           req.Device.DeviceKind,
+				PublicKey:            req.Device.PublicKey,
+				PublicKeyFingerprint: req.Device.PublicKeyFingerprint,
+				Capabilities:         req.Device.Capabilities,
+				CanHost:              req.Device.CanHost,
+				CanControl:           req.Device.CanControl,
+				Status:               cloudDeviceStatusOnline,
+				UpdatedAt:            time.Now().UTC().Format(time.RFC3339),
+			},
 		})
 	})
 	mux.HandleFunc("/v1/account", func(w http.ResponseWriter, r *http.Request) {

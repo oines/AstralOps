@@ -258,8 +258,8 @@ Desktop daemon
   -> browser OAuth
   -> Cloud callback
   -> redirect localhost /v1/cloud/auth/callback with login_code + desktop state
-  -> POST /v1/auth/login-code/exchange
-  -> receive AstralOps account session token
+  -> POST /v1/auth/login-code/exchange with current public device identity
+  -> receive device-bound AstralOps account session token
   -> save cloud settings locally and start cloud device sync
 ```
 
@@ -273,7 +273,27 @@ GET  /v1/auth/github/callback
 POST /v1/auth/login-code/exchange
 ```
 
-不管用户用 Google、GitHub 或后续邮箱/passkey 登录，Cloud 内部都必须映射到 AstralOps 自己的 `account_id`，对客户端只暴露 `account_id_hash`。OAuth state、login code、account session token 都必须按一次性/过期语义处理；login code 和 account session token 不得明文落盘，只能保存 hash。换到正式账号后，外部设备 API 仍保持账号下设备注册、presence、pairing signal、账号 relay 配置、relay envelope 这几个边界。
+不管用户用 Google、GitHub 或后续邮箱/passkey 登录，Cloud 内部都必须映射到 AstralOps 自己的 `account_id`，对客户端只暴露 `account_id_hash`。OAuth state、login code、account session token 都必须按一次性/过期语义处理；login code 和 account session token 不得明文落盘，只能保存 hash。正式 OAuth 登录换取的 account session token 必须绑定发起登录时提交的 `device_id` 和 `public_key_fingerprint`，不能作为账号级万能 token 使用。换到正式账号后，外部设备 API 仍保持账号下设备注册、presence、pairing signal、账号 relay 配置、relay envelope 这几个边界。
+
+`POST /v1/auth/login-code/exchange` 请求体：
+
+```json
+{
+  "login_code": "<one-time-login-code>",
+  "device": {
+    "device_id": "dev_...",
+    "device_name": "oinesdeMacBook-Air.local",
+    "device_kind": "desktop",
+    "public_key": "<base64-ed25519-public-key>",
+    "public_key_fingerprint": "sha256:...",
+    "capabilities": ["core.read", "terminal.open"],
+    "can_host": true,
+    "can_control": true
+  }
+}
+```
+
+Cloud 在兑换 login code 时原子注册/更新这台设备，并把返回的 session token 绑定到这台设备。绑定后的 token 只能注册、heartbeat、offline 当前 device identity；不能拿同一个 token 注册另一个 `device_id`。删除某台设备时，Cloud 必须同时撤销该设备绑定的 sessions。这样“从 Mesh 删除设备”才是从账号 Mesh 踢出这台设备，而不是只隐藏一个旧 device record。
 
 私有 cloud MVP 可以先使用 VPS 本地 JSON 文件持久化：
 
@@ -374,7 +394,7 @@ POST /v1/cloud/pairing/requests/:request_id/resolve
 
 `POST /v1/cloud/auth/start` 只能由本机 authenticated Desktop UI 调用。daemon 生成高熵一次性 state 和 `http://127.0.0.1:<daemon-port>/v1/cloud/auth/callback`，返回 Cloud OAuth start URL；Desktop 只负责用系统浏览器打开这个 URL。
 
-`GET /v1/cloud/auth/callback` 是给系统浏览器回跳的本机入口，不要求 daemon auth token，但必须校验 daemon 内存中的一次性 state。state 过期、重复使用或不匹配时只能显示失败页，不能兑换 login code。兑换成功后 daemon 保存 `cloud.base_url` 和 `cloud.account_token` 到本机 settings，并触发 cloud sync。renderer 不能直接接触 OAuth client secret、login code exchange 细节或 relay credential 本体。
+`GET /v1/cloud/auth/callback` 是给系统浏览器回跳的本机入口，不要求 daemon auth token，但必须校验 daemon 内存中的一次性 state。state 过期、重复使用或不匹配时只能显示失败页，不能兑换 login code。兑换 login code 时 daemon 必须提交当前 public device identity，让 Cloud 返回绑定这台设备的 account session token。兑换成功后 daemon 保存 `cloud.base_url` 和 `cloud.account_token` 到本机 settings，并触发 cloud sync。renderer 不能直接接触 OAuth client secret、login code exchange 细节或 relay credential 本体。
 
 `POST /v1/cloud/auth/logout` 是本机退出当前账号 Mesh 的身份边界。daemon 会先 best-effort 调 cloud `remove` 撤销当前 device id，再关闭 cloud sync/relay、断开远控连接、清理 account token，并重置本机 mesh device identity、Host trust grants、known hosts 和 pairing requests。本地 workspace、session、event、文件和 SSH 配置不属于 Mesh 生命周期，退出账号不会删除这些数据。即使 cloud remove 因网络失败没有完成，本机也必须先退出 Mesh；旧 cloud presence 依赖 cloud 端 TTL 变成 offline/不可连。
 
@@ -382,7 +402,7 @@ POST /v1/cloud/pairing/requests/:request_id/resolve
 
 daemon 启动后如果 `cloud.enabled=true`，会先读取 `GET /v1/account` 的账号 relay 配置和 membership signing public key，再向 cloud 注册当前设备并定时 heartbeat。注册和 heartbeat 中的 `relay_url` 只是 presence/routing metadata，来自账号默认 relay，不是每台设备任意选择的 relay。register/heartbeat 必须返回当前设备 `membership_lease`；daemon 验签通过后才认为本机是 active Cloud Mesh 成员。关闭 cloud settings 时，daemon 会尝试把当前设备标记为 offline；正式退出登录则走上面的 Mesh logout/reset 语义。自动同步只发送 public device identity、capabilities、can_host/can_control、presence 和账号 relay routing metadata，不发送工作区、session、事件、SSH 或路径数据。
 
-如果本机 `remote_control.enabled=true`，daemon 的 cloud sync 还会拉取 `host_device_id == 本机 device_id` 的 pending pairing request。这个同步只能把云端信令转换成 Host 本地 `PairingRequest(source=cloud, cloud_request_id=...)`，并通过 cloud device registry 取得 Controller 的 public key；它不能直接写入 `TrustGrant`。Host UI 或已有可信 `host.manage` Controller 批准/拒绝本地 request 后，Host 再把同一个 `cloud_request_id` 回写为 approved/denied。云端状态只是信令状态，真正可控条件仍然是 Host 本地 trust store、E2EE 握手和 capability 校验。
+如果本机 `remote_control.enabled=true`，daemon 的 cloud sync 还会拉取 `host_device_id == 本机 device_id` 的 pending pairing request。这个同步只能把云端信令转换成 Host 本地 `PairingRequest(source=cloud, cloud_request_id=...)`，并通过 cloud device registry 取得 Controller 的 public key；它不能直接写入 `TrustGrant`。Host UI 或已有可信 `host.manage` Controller 批准/拒绝本地 request 后，Host 再把同一个 `cloud_request_id` 回写为 approved/denied。Cloud 必须校验 resolve 请求来自该 pairing request 的 Host 设备绑定 session，`resolver_device_id` 不能由任意同账号设备伪造。云端状态只是信令状态，真正可控条件仍然是 Host 本地 trust store、E2EE 握手和 capability 校验。
 
 `GET /v1/remote/hosts` 只在本机已登录 Cloud、当前 device 未被 revoked 且本机 membership lease 仍有效时返回远端 Host。列表来源是同账号 cloud devices 中 `can_host=true` 的设备；`known_hosts.json` 只是 Controller 侧 Host identity cache，不能单独把 stale 设备放回 selector。LAN discovery 只能把已经属于 cloud Mesh 列表且 known host fingerprint 匹配的设备升级成 `lan` 路由。Cloud 候选只代表“账号下可发现的 Host 设备”，不代表已经获得控制权。真正发起远控 action 前仍必须满足：
 

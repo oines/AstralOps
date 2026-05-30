@@ -81,13 +81,15 @@ type cloudPairingSignalListResponse struct {
 }
 
 type cloudLoginCodeExchangeRequest struct {
-	LoginCode string `json:"login_code"`
+	LoginCode string                  `json:"login_code"`
+	Device    cloudDeviceRegistration `json:"device"`
 }
 
 type cloudLoginCodeExchangeResponse struct {
-	Account      CloudAccount `json:"account"`
-	AccountToken string       `json:"account_token"`
-	ExpiresAt    string       `json:"expires_at,omitempty"`
+	Account      CloudAccount       `json:"account"`
+	AccountToken string             `json:"account_token"`
+	ExpiresAt    string             `json:"expires_at,omitempty"`
+	Device       *CloudDeviceRecord `json:"device,omitempty"`
 }
 
 func (c CloudClient) GetAccount(ctx context.Context) (CloudAccount, error) {
@@ -99,17 +101,7 @@ func (c CloudClient) GetAccount(ctx context.Context) (CloudAccount, error) {
 }
 
 func (c CloudClient) RegisterDevice(ctx context.Context, identity DeviceIdentity, canHost, canControl bool, relayURL string) (CloudDeviceRecord, error) {
-	req := cloudDeviceRegistration{
-		DeviceID:             identity.DeviceID,
-		DeviceName:           identity.DeviceName,
-		DeviceKind:           identity.DeviceKind,
-		PublicKey:            identity.PublicKey,
-		PublicKeyFingerprint: identity.PublicKeyFingerprint,
-		Capabilities:         normalizeCapabilities(identity.Capabilities),
-		CanHost:              canHost,
-		CanControl:           canControl,
-		RelayURL:             strings.TrimSpace(relayURL),
-	}
+	req := cloudDeviceRegistrationFromIdentity(identity, canHost, canControl, relayURL)
 	var out CloudDeviceRecord
 	if err := c.do(ctx, http.MethodPost, "/v1/devices", req, &out); err != nil {
 		return CloudDeviceRecord{}, err
@@ -180,12 +172,30 @@ func (c CloudClient) ResolvePairingSignal(ctx context.Context, requestID, status
 	return out.Request, nil
 }
 
-func ExchangeCloudLoginCode(ctx context.Context, baseURL, loginCode string, httpClient *http.Client) (cloudLoginCodeExchangeResponse, error) {
+func ExchangeCloudLoginCode(ctx context.Context, baseURL, loginCode string, identity DeviceIdentity, canHost, canControl bool, httpClient *http.Client) (cloudLoginCodeExchangeResponse, error) {
 	var out cloudLoginCodeExchangeResponse
-	if err := jsonRequest(ctx, "cloud", baseURL, httpClient, http.MethodPost, "/v1/auth/login-code/exchange", cloudLoginCodeExchangeRequest{LoginCode: strings.TrimSpace(loginCode)}, &out, nil); err != nil {
+	req := cloudLoginCodeExchangeRequest{
+		LoginCode: strings.TrimSpace(loginCode),
+		Device:    cloudDeviceRegistrationFromIdentity(identity, canHost, canControl, ""),
+	}
+	if err := jsonRequest(ctx, "cloud", baseURL, httpClient, http.MethodPost, "/v1/auth/login-code/exchange", req, &out, nil); err != nil {
 		return cloudLoginCodeExchangeResponse{}, err
 	}
 	return out, nil
+}
+
+func cloudDeviceRegistrationFromIdentity(identity DeviceIdentity, canHost, canControl bool, relayURL string) cloudDeviceRegistration {
+	return cloudDeviceRegistration{
+		DeviceID:             identity.DeviceID,
+		DeviceName:           identity.DeviceName,
+		DeviceKind:           identity.DeviceKind,
+		PublicKey:            identity.PublicKey,
+		PublicKeyFingerprint: identity.PublicKeyFingerprint,
+		Capabilities:         normalizeCapabilities(identity.Capabilities),
+		CanHost:              canHost,
+		CanControl:           canControl,
+		RelayURL:             strings.TrimSpace(relayURL),
+	}
 }
 
 func (c CloudClient) do(ctx context.Context, method, path string, body any, out any) error {

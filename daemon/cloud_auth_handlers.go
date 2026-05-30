@@ -123,7 +123,8 @@ func (a *app) handleCloudAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), cloudSyncTimeout)
 	defer cancel()
-	exchanged, err := ExchangeCloudLoginCode(ctx, state.BaseURL, loginCode, nil)
+	settings := a.currentSettings()
+	exchanged, err := ExchangeCloudLoginCode(ctx, state.BaseURL, loginCode, a.store.hostInfo().Identity, settings.RemoteControl.Enabled, true, nil)
 	if err != nil {
 		writeCloudAuthCallbackHTML(w, "登录失败", "Cloud token exchange 失败："+err.Error())
 		return
