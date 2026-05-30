@@ -863,7 +863,7 @@ function RemoteControlContent({
         <InfoRow label="设备名" value={host?.identity.device_name || "未加载"} />
         <InfoRow label="设备类型" value={deviceKindLabel(host?.identity.device_kind)} />
         <InfoRow label="设备 ID" value={host?.identity.device_id || "未加载"} />
-        <InfoRow label="公钥指纹" value={host?.identity.public_key_fingerprint || "未加载"} />
+        <InfoRow label="公钥指纹" value={host?.identity.public_key_fingerprint || "未加载"} mono wrap />
         <InfoRow label="平台" value={host ? `${host.platform.os}/${host.platform.arch}` : "未加载"} />
         <SettingRow title="可开放能力" description="批准后的控制设备可以请求这些能力" control={<CapabilityList capabilities={host?.capabilities ?? []} align="right" />} />
       </SettingsSection>
@@ -1081,11 +1081,14 @@ function SettingRow({ control, description, title }: { control: React.ReactNode;
   );
 }
 
-function InfoRow({ label, value }: { label: string; value: string }): React.JSX.Element {
+function InfoRow({ label, mono = false, value, wrap = false }: { label: string; mono?: boolean; value: string; wrap?: boolean }): React.JSX.Element {
+  const valueClassName = wrap
+    ? `max-w-[640px] min-w-0 overflow-hidden text-right text-[13px] font-semibold leading-5 text-[var(--ao-muted)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere] ${mono ? "font-mono" : ""}`
+    : `max-w-[460px] truncate text-[13px] font-semibold text-[var(--ao-muted)] ${mono ? "font-mono" : ""}`;
   return (
     <div className="grid min-h-[44px] grid-cols-[minmax(0,1fr)_auto] items-center gap-5 border-b border-[var(--ao-border)] px-4 py-2 last:border-b-0">
       <div className="text-[13px] font-semibold text-[var(--ao-text-soft)]">{label}</div>
-      <div className="max-w-[460px] truncate text-[13px] font-semibold text-[var(--ao-muted)]" title={value}>{value}</div>
+      <div className={valueClassName} title={value}>{value}</div>
     </div>
   );
 }
@@ -1125,10 +1128,7 @@ function TrustGrantRow({
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
           <span className="truncate">ID {grant.controller_device_id}</span>
-          <span className="inline-flex min-w-0 items-center gap-1">
-            <KeyRound size={12} strokeWidth={1.9} />
-            <span className="truncate">{fingerprint}</span>
-          </span>
+          <FingerprintInline value={fingerprint} />
           <span>{policyLabel(grant.workspace_exec_policy)}</span>
           <span>{trusted ? `更新于 ${formatTimestamp(grant.updated_at)}` : `撤销于 ${formatTimestamp(grant.revoked_at || grant.updated_at)}`}</span>
         </div>
@@ -1167,10 +1167,7 @@ function PairingRequestRow({
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
           <span className="truncate">ID {request.controller_device_id}</span>
           <span>{deviceKindLabel(request.controller_device_kind)}</span>
-          <span className="inline-flex min-w-0 items-center gap-1">
-            <KeyRound size={12} strokeWidth={1.9} />
-            <span className="truncate">{request.controller_public_key_fingerprint}</span>
-          </span>
+          <FingerprintInline value={request.controller_public_key_fingerprint} />
           <span>{policyLabel(request.workspace_exec_policy)}</span>
           <span>{`请求于 ${formatTimestamp(request.created_at)}`}</span>
         </div>
@@ -1218,10 +1215,7 @@ function CloudDeviceRow({
           <span>{deviceKindLabel(device.device_kind)}</span>
           <span>{cloudDeviceRoleLabel(device)}</span>
           {localTrustGrant ? <span>本机已信任</span> : null}
-          <span className="inline-flex min-w-0 items-center gap-1">
-            <KeyRound size={12} strokeWidth={1.9} />
-            <span className="truncate">{device.public_key_fingerprint}</span>
-          </span>
+          <FingerprintInline value={device.public_key_fingerprint} />
           <span>{`更新于 ${formatTimestamp(device.updated_at || device.last_seen)}`}</span>
         </div>
       </div>
@@ -1240,6 +1234,15 @@ function StatusPill({ icon: Icon, label, tone = "muted" }: { icon?: LucideIcon; 
     <span className={`inline-flex h-7 max-w-[280px] items-center gap-1.5 rounded-lg bg-black/[0.045] px-2.5 text-[12px] font-semibold ${toneClass}`} title={label}>
       {Icon ? <Icon size={14} strokeWidth={1.9} /> : null}
       <span className="truncate">{label}</span>
+    </span>
+  );
+}
+
+function FingerprintInline({ value }: { value: string }): React.JSX.Element {
+  return (
+    <span className="inline-flex min-w-0 max-w-full items-start gap-1 font-mono" title={value}>
+      <KeyRound className="mt-1 shrink-0" size={12} strokeWidth={1.9} />
+      <span className="min-w-0 max-w-[640px] overflow-hidden break-all leading-5 [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]">{value}</span>
     </span>
   );
 }

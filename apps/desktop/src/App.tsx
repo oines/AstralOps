@@ -1315,10 +1315,13 @@ function HostPairingPanel({
 }
 
 function HostPairingInfoRow({ label, mono = false, value }: { label: string; mono?: boolean; value: string }): React.JSX.Element {
+  const valueClassName = mono
+    ? "min-w-0 overflow-hidden break-all text-right font-mono text-[12px] font-semibold leading-5 text-[var(--ao-muted)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
+    : "min-w-0 truncate text-right text-[12px] font-semibold text-[var(--ao-muted)]";
   return (
     <div className="grid min-h-[44px] grid-cols-[112px_minmax(0,1fr)] items-center gap-4 border-b border-[var(--ao-border)] px-4 py-2 last:border-b-0">
       <div className="text-[12px] font-semibold text-[var(--ao-text-soft)]">{label}</div>
-      <div className={`min-w-0 truncate text-right text-[12px] font-semibold text-[var(--ao-muted)] ${mono ? "font-mono" : ""}`} title={value}>{value}</div>
+      <div className={valueClassName} title={value}>{value}</div>
     </div>
   );
 }
