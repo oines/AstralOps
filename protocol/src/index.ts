@@ -1361,7 +1361,7 @@ export type RemoteHostRecord = {
   public_key_fingerprint: string;
   known_identity?: boolean;
   status: "online" | "offline" | "lan" | string;
-  connection: "lan" | "cloud" | "relay" | "offline" | string;
+  connection: "local" | "lan" | "relay" | "offline" | string;
   authorization_state?: "needs_pairing" | "pending" | "approved" | "denied" | "known" | string;
   pairing_request_id?: string;
   pairing_status?: "pending" | "approved" | "denied" | string;
@@ -1372,6 +1372,27 @@ export type RemoteHostRecord = {
 
 export type RemoteHostsResponse = {
   hosts: RemoteHostRecord[];
+};
+
+export type MeshState = {
+  self: {
+    device_id: string;
+    device_name: string;
+    can_host: boolean;
+    can_control: boolean;
+    cloud_active: boolean;
+    relay_connected: boolean;
+  };
+  cloud?: {
+    enabled: boolean;
+    account_id_hash?: string;
+    relay_id?: string;
+    relay_url?: string;
+    credential_expires_at?: string;
+  };
+  hosts: RemoteHostRecord[];
+  pending_pairing_count: number;
+  updated_at: string;
 };
 
 export type ControlDiscoveryRequest = {

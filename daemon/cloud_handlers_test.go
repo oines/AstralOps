@@ -624,7 +624,7 @@ func TestRemoteHostsIncludesCloudHostCandidatesWithoutGrantingControl(t *testing
 	if len(hosts.Hosts) != 1 {
 		t.Fatalf("hosts = %#v, want only cloud desktop Host candidate", hosts.Hosts)
 	}
-	if hosts.Hosts[0].DeviceID != "dev_cloud_host" || hosts.Hosts[0].Connection != remoteHostStatusCloud || hosts.Hosts[0].Status != remoteHostStatusOnline {
+	if hosts.Hosts[0].DeviceID != "dev_cloud_host" || hosts.Hosts[0].Connection != remoteHostStatusRelay || hosts.Hosts[0].Status != remoteHostStatusOnline {
 		t.Fatalf("cloud host = %#v", hosts.Hosts[0])
 	}
 	if hosts.Hosts[0].KnownIdentity {

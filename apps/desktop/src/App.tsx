@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, KeyRound, LoaderCircle, PanelLeft, PanelRight, RefreshCw, X } from "lucide-react";
-import { createLocalCoreClient, createRemoteCoreClient, isCoreRequestError, listRemoteHosts, requestRemoteHostPairing, type CoreClient, type EventSubscription } from "./api";
+import { createLocalCoreClient, createRemoteCoreClient, isCoreRequestError, readMeshState, requestRemoteHostPairing, subscribeMeshState, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
 import { SettingsView } from "./components/SettingsView";
@@ -34,6 +34,7 @@ import type {
   HostFileSystemBrowseParams,
   HostFileSystemBrowseResult,
   HostInfo,
+  MeshState,
   PermissionMode,
   ReasoningEffort,
   RemoteHostRecord,
@@ -48,8 +49,6 @@ import type {
 const EVENT_WINDOW_SIZE = 1000;
 const LOCAL_HOST_ID = "local";
 const DEFAULT_CLOUD_BASE_URL = "https://cloud-astralops.oines.dev";
-const FOREGROUND_STATUS_REFRESH_MS = 5_000;
-const BACKGROUND_STATUS_REFRESH_MS = 60_000;
 type RemoteAuthorizationOverride = "revoked" | "pending";
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -74,12 +73,38 @@ function sessionTimestamp(session: Session): number {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
+function normalizedRecord(event: AstralEvent): Record<string, unknown> | null {
+  const value = event.normalized;
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function normalizedWorkspace(event: AstralEvent): Workspace | null {
+  const record = normalizedRecord(event);
+  return typeof record?.id === "string" ? (record as Workspace) : null;
+}
+
+function normalizedSession(event: AstralEvent): Session | null {
+  const record = normalizedRecord(event);
+  return typeof record?.id === "string" && typeof record?.workspace_id === "string" ? (record as Session) : null;
+}
+
+function normalizedWorkspaceID(event: AstralEvent): string {
+  const record = normalizedRecord(event);
+  return typeof record?.workspace_id === "string" ? record.workspace_id : event.workspace_id || "";
+}
+
+function normalizedSessionID(event: AstralEvent): string {
+  const record = normalizedRecord(event);
+  return typeof record?.session_id === "string" ? record.session_id : event.session_id || "";
+}
+
 export function App(): React.JSX.Element {
   const [connection, setConnection] = useState<ConnectionState>("booting");
   const [api, setApi] = useState<CoreClient | null>(null);
   const [localApi, setLocalApi] = useState<CoreClient | null>(null);
   const [daemonInfo, setDaemonInfo] = useState<DaemonInfo | null>(null);
   const [localHostInfo, setLocalHostInfo] = useState<HostInfo | null>(null);
+  const [meshState, setMeshState] = useState<MeshState | null>(null);
   const [remoteHosts, setRemoteHosts] = useState<RemoteHostRecord[]>([]);
   const [selectedHostId, setSelectedHostId] = useState(LOCAL_HOST_ID);
   const [hostPairingStatus, setHostPairingStatus] = useState<Record<string, string>>({});
@@ -130,6 +155,7 @@ export function App(): React.JSX.Element {
   const sessionViewRefreshInFlightRef = useRef<Set<string>>(new Set());
   const sessionViewRefreshPendingRef = useRef<Set<string>>(new Set());
   const sessionViewRefreshGenerationRef = useRef(0);
+  const sessionsRef = useRef<Session[]>([]);
 
   const commitRemoteHosts = useCallback((hosts: RemoteHostRecord[]) => {
     setRemoteHosts(hosts);
@@ -141,15 +167,10 @@ export function App(): React.JSX.Element {
       setRemoteHosts([]);
       return;
     }
-    const cloudHosts = await listRemoteHosts(daemonInfo, false);
-    commitRemoteHosts(cloudHosts);
-    if (!discover) return;
-    try {
-      const discoveredHosts = await listRemoteHosts(daemonInfo, true);
-      commitRemoteHosts(discoveredHosts);
-    } catch {
-      // Keep the cloud snapshot visible when LAN discovery is slow or unavailable.
-    }
+    const state = await readMeshState(daemonInfo, discover);
+    setMeshState(state);
+    setPendingPairingCount(state.pending_pairing_count);
+    commitRemoteHosts(state.hosts);
   }, [commitRemoteHosts, daemonInfo]);
 
   const refreshLocalPairingState = useCallback(async (): Promise<void> => {
@@ -276,6 +297,10 @@ export function App(): React.JSX.Element {
   }, [activeSessionId]);
 
   useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
     appSettingsRef.current = appSettings;
   }, [appSettings]);
 
@@ -305,7 +330,13 @@ export function App(): React.JSX.Element {
 
   const storeSessionView = useCallback((view: SessionView) => {
     setSessionViews((current) => ({ ...current, [view.session.id]: view }));
-    setSessions((current) => sortSessionsByUpdated(current.map((session) => (session.id === view.session.id ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session))));
+    setSessions((current) => {
+      const displaySession = { ...view.session, title: view.title || view.session.title, status: view.status };
+      const exists = current.some((session) => session.id === view.session.id);
+      return sortSessionsByUpdated(exists
+        ? current.map((session) => (session.id === view.session.id ? { ...session, ...displaySession } : session))
+        : [displaySession, ...current]);
+    });
     setActiveSession((current) => (current?.id === view.session.id ? { ...current, ...view.session, title: view.title || view.session.title, status: view.status } : current));
   }, []);
 
@@ -331,6 +362,84 @@ export function App(): React.JSX.Element {
     }, delayMs);
   }, [storeSessionView]);
 
+  const applyHostEventState = useCallback((event: AstralEvent, client: CoreClient, generation: number) => {
+    switch (event.kind) {
+      case "workspace.created": {
+        const workspace = normalizedWorkspace(event);
+        if (!workspace) return;
+        setWorkspaces((current) => [workspace, ...current.filter((item) => item.id !== workspace.id)]);
+        setActiveWorkspaceId((current) => current || workspace.id);
+        return;
+      }
+      case "workspace.removed": {
+        const workspaceID = normalizedWorkspaceID(event);
+        if (!workspaceID) return;
+        setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceID));
+        setWorkspaceConnections((current) => {
+          const next = { ...current };
+          delete next[workspaceID];
+          return next;
+        });
+        setSessions((current) => current.filter((session) => session.workspace_id !== workspaceID));
+        setSessionViews((current) => Object.fromEntries(Object.entries(current).filter(([, view]) => view.session.workspace_id !== workspaceID)));
+        setEventIndex((current) => removeWorkspaceEvents(current, workspaceID));
+        setActiveWorkspaceId((current) => (current === workspaceID ? "" : current));
+        setActiveSession((current) => (current?.workspace_id === workspaceID ? null : current));
+        return;
+      }
+      case "workspace.connection": {
+        const state = event.normalized as WorkspaceConnection;
+        if (state?.workspace_id) {
+          setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
+        }
+        return;
+      }
+      case "session.started":
+      case "session.updated":
+      case "session.native": {
+        const session = normalizedSession(event);
+        if (!session) {
+          if (event.session_id) scheduleSessionViewRefresh(client, event.session_id, generation);
+          return;
+        }
+        setSessions((current) => sortSessionsByUpdated(current.some((item) => item.id === session.id)
+          ? current.map((item) => (item.id === session.id ? { ...item, ...session } : item))
+          : [session, ...current]));
+        setActiveWorkspaceId((current) => current || session.workspace_id);
+        setActiveSession((current) => (current?.id === session.id ? { ...current, ...session } : current));
+        scheduleSessionViewRefresh(client, session.id, generation);
+        return;
+      }
+      case "session.deleted": {
+        const sessionID = normalizedSessionID(event);
+        if (!sessionID) return;
+        const currentSessions = sessionsRef.current;
+        const removed = currentSessions.find((session) => session.id === sessionID);
+        setSessions((current) => current.filter((session) => session.id !== sessionID));
+        setActiveSession((active) => {
+          if (active?.id !== sessionID) return active;
+          return removed ? currentSessions.find((session) => session.workspace_id === removed.workspace_id && session.id !== sessionID) ?? null : null;
+        });
+        setSessionViews((current) => {
+          const next = { ...current };
+          delete next[sessionID];
+          return next;
+        });
+        setEventIndex((current) => removeSessionEvents(current, sessionID));
+        setSessionWindows((current) => {
+          const next = { ...current };
+          delete next[sessionID];
+          return next;
+        });
+        return;
+      }
+      default:
+        if (event.session_id) {
+          scheduleSessionViewRefresh(client, event.session_id, generation);
+        }
+    }
+  }, [scheduleSessionViewRefresh, setSessionWindows]);
+
   const {
     activeCommands,
     activeCommandsLoaded,
@@ -349,7 +458,7 @@ export function App(): React.JSX.Element {
 
   const loadHostState = useCallback(async (
     client: CoreClient,
-    options: { includeWorkspaceConnections?: boolean; restoreOnLaunch?: boolean; updateLocalHostInfo?: boolean } = {},
+    options: { includeWorkspaceConnections?: boolean; restoreOnLaunch?: boolean; updateLocalHostInfo?: boolean; preserveSelection?: boolean } = {},
   ) => {
     const snapshot = await client.hostSnapshot({
       event_limit: EVENT_WINDOW_SIZE,
@@ -385,8 +494,17 @@ export function App(): React.JSX.Element {
     if (initialSession) {
       setSessionWindows((current) => updateWindowAfterLatest(current, initialSession.id, sessionEvents, EVENT_WINDOW_SIZE));
     }
-    setActiveWorkspaceId(initialSession?.workspace_id || sessionResponse[0]?.workspace_id || workspaceResponse[0]?.id || "");
-    setActiveSession(initialSession);
+    if (options.preserveSelection) {
+      setActiveWorkspaceId((current) => (current && workspaceResponse.some((workspace) => workspace.id === current) ? current : initialSession?.workspace_id || sessionResponse[0]?.workspace_id || workspaceResponse[0]?.id || ""));
+      setActiveSession((current) => {
+        if (!current) return initialSession;
+        const next = sessionResponse.find((session) => session.id === current.id);
+        return next ? { ...current, ...next } : initialSession;
+      });
+    } else {
+      setActiveWorkspaceId(initialSession?.workspace_id || sessionResponse[0]?.workspace_id || workspaceResponse[0]?.id || "");
+      setActiveSession(initialSession);
+    }
     return eventResponse;
   }, []);
 
@@ -430,106 +548,31 @@ export function App(): React.JSX.Element {
     if (!daemonInfo) return;
     const info = daemonInfo;
     let cancelled = false;
-    let refreshing = false;
-    let timer: number | undefined;
-
-    function refreshDelay(): number {
-      return document.visibilityState === "visible" ? FOREGROUND_STATUS_REFRESH_MS : BACKGROUND_STATUS_REFRESH_MS;
-    }
-
-    function scheduleNextRefresh(): void {
+    const applyState = (state: MeshState): void => {
       if (cancelled) return;
-      if (timer !== undefined) window.clearTimeout(timer);
-      timer = window.setTimeout(() => void refresh(), refreshDelay());
-    }
-
-    async function refresh(): Promise<void> {
-      if (refreshing) return;
-      refreshing = true;
-      try {
-        const cloudHosts = await listRemoteHosts(info, false);
-        if (!cancelled) commitRemoteHosts(cloudHosts);
-        try {
-          const discoveredHosts = await listRemoteHosts(info, true);
-          if (!cancelled) commitRemoteHosts(discoveredHosts);
-        } catch {
-          // Keep the cloud snapshot visible when LAN discovery is slow or unavailable.
-        }
-      } catch {
-        if (!cancelled) setRemoteHosts([]);
-      } finally {
-        refreshing = false;
-        scheduleNextRefresh();
+      setMeshState(state);
+      setPendingPairingCount(state.pending_pairing_count);
+      commitRemoteHosts(state.hosts);
+    };
+    void readMeshState(info, true).then(applyState).catch(() => {
+      if (!cancelled) {
+        setMeshState(null);
+        setRemoteHosts([]);
       }
-    }
-
-    function handleVisibilityChange(): void {
-      if (document.visibilityState === "visible") {
-        void refresh();
-        return;
-      }
-      scheduleNextRefresh();
-    }
-
-    void refresh();
-    document.addEventListener("visibilitychange", handleVisibilityChange);
+    });
+    const subscription = subscribeMeshState(info, {
+      onState: applyState,
+      onError: () => undefined,
+    });
     return () => {
       cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      subscription.close();
     };
   }, [commitRemoteHosts, daemonInfo]);
 
   useEffect(() => {
-    if (!localApi) {
-      setPendingPairingCount(0);
-      return;
-    }
-    const client = localApi;
-    let cancelled = false;
-    let refreshing = false;
-    let timer: number | undefined;
-
-    function refreshDelay(): number {
-      return document.visibilityState === "visible" ? FOREGROUND_STATUS_REFRESH_MS : BACKGROUND_STATUS_REFRESH_MS;
-    }
-
-    function scheduleNextRefresh(): void {
-      if (cancelled) return;
-      if (timer !== undefined) window.clearTimeout(timer);
-      timer = window.setTimeout(() => void refresh(), refreshDelay());
-    }
-
-    async function refresh(): Promise<void> {
-      if (refreshing) return;
-      refreshing = true;
-      try {
-        const result = await client.listPairingRequests();
-        if (!cancelled) setPendingPairingCount(result.requests.filter((request) => request.status === "pending").length);
-      } catch {
-        if (!cancelled) setPendingPairingCount(0);
-      } finally {
-        refreshing = false;
-        scheduleNextRefresh();
-      }
-    }
-
-    function handleVisibilityChange(): void {
-      if (document.visibilityState === "visible") {
-        void refresh();
-        return;
-      }
-      scheduleNextRefresh();
-    }
-
-    void refresh();
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [localApi]);
+    if (!localApi && !meshState) setPendingPairingCount(0);
+  }, [localApi, meshState]);
 
   useEffect(() => {
     if (!modelOverride) return;
@@ -991,6 +1034,7 @@ export function App(): React.JSX.Element {
     if (!daemonInfo || !localApi || !activeHostId) return;
     let subscription: EventSubscription | null = null;
     let cancelled = false;
+    let resyncOnOpen = false;
     sessionViewRefreshGenerationRef.current += 1;
     const refreshGeneration = sessionViewRefreshGenerationRef.current;
     for (const timer of Object.values(sessionViewRefreshTimersRef.current)) window.clearTimeout(timer);
@@ -1026,25 +1070,29 @@ export function App(): React.JSX.Element {
         subscription = client.subscribeEvents(afterSeq, {
           onEvent: (event) => {
             if (cancelled) return;
-            if (event.kind === "workspace.connection") {
-              const state = event.normalized as WorkspaceConnection;
-              setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
-            }
+            applyHostEventState(event, client, refreshGeneration);
             if (activeHostIsLocal && event.kind.startsWith("control.pairing.")) {
-              void refreshLocalPairingState();
-            }
-            if (event.session_id) {
-              scheduleSessionViewRefresh(client, event.session_id, refreshGeneration);
+              void refreshRemoteHosts();
             }
             if (activeHostIsLocal) maybeNotifyLiveEvent(event);
             queueLiveEvent(event);
           },
           onOpen: () => {
-            if (!cancelled) setConnection("connected");
+            if (cancelled) return;
+            setConnection("connected");
+            if (!resyncOnOpen) return;
+            resyncOnOpen = false;
+            void loadHostState(client, {
+              includeWorkspaceConnections: true,
+              restoreOnLaunch: false,
+              updateLocalHostInfo: activeHostIsLocal,
+              preserveSelection: true,
+            }).catch(() => undefined);
           },
           onError: (event) => {
             if (cancelled) return;
             if (event instanceof SyntaxError) setError("bad SSE event payload");
+            resyncOnOpen = true;
             setConnection("reconnecting");
           },
         });
@@ -1086,7 +1134,7 @@ export function App(): React.JSX.Element {
       sessionViewRefreshPendingRef.current.clear();
       sseQueueRef.current = [];
     };
-  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, activeHostAuthorizationOverride, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, refreshLocalPairingState, scheduleSessionViewRefresh, storeSessionView]);
+  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, activeHostAuthorizationOverride, applyHostEventState, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, refreshRemoteHosts, storeSessionView]);
 
   const sessionTitles = useMemo(
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),
@@ -1460,17 +1508,16 @@ function remoteHostSubtitle(host: RemoteHostRecord, override?: RemoteAuthorizati
 
 function remoteHostStatusLabel(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): string {
   const state = remoteHostEffectiveAuthorizationState(host, override);
-  if (state === "pending") return "待授权";
-  if (state === "revoked") return "需重授权";
-  if (state === "denied") return "已拒绝";
-  if (state === "needs_pairing") return "未授权";
+  if (state === "pending") return "等待批准";
+  if (state === "revoked" || state === "denied") return "已撤销";
+  if (state === "needs_pairing") return "待授权";
   switch (host.connection) {
+    case "local":
+      return "本机";
     case "lan":
       return "LAN";
     case "relay":
-      return "Relay";
-    case "cloud":
-      return "云端";
+      return "中继";
     case "offline":
       return "离线";
     default:
@@ -1480,7 +1527,7 @@ function remoteHostStatusLabel(host: RemoteHostRecord, override?: RemoteAuthoriz
 
 function remoteHostStatusTone(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): "good" | "warning" | "muted" {
   if (remoteHostNeedsPairing(host, override)) return "warning";
-  if (host.connection === "lan" || host.connection === "relay" || host.connection === "cloud") return "good";
+  if (host.connection === "local" || host.connection === "lan" || host.connection === "relay") return "good";
   return "muted";
 }
 
@@ -1493,10 +1540,10 @@ function pairingStatusLabel(status: string): string {
 
 function hostConnectionLabel(connection?: string): string {
   switch (connection) {
+    case "local":
+      return "本机";
     case "lan":
-      return "局域网";
-    case "cloud":
-      return "云端";
+      return "LAN";
     case "relay":
       return "中继";
     case "offline":

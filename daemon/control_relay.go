@@ -93,6 +93,8 @@ func (a *app) cloudRunRelayWebSocket(ctx context.Context, client RelayClient) er
 	if err != nil {
 		return err
 	}
+	a.setCloudRelayConnected(true)
+	defer a.setCloudRelayConnected(false)
 	defer relay.Close()
 	done := make(chan struct{})
 	go func() {

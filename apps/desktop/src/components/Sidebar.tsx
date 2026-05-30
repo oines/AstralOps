@@ -646,9 +646,7 @@ function hostConnectionLabel(connection?: string): string {
     case "lan":
       return "LAN";
     case "relay":
-      return "Relay";
-    case "cloud":
-      return "云端";
+      return "中继";
     case "offline":
       return "离线";
     default:

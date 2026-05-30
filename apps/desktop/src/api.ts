@@ -25,10 +25,10 @@ import type {
   HostSnapshotResponse,
   HostTrustListResult,
   HostTrustRevokeResult,
+  MeshState,
   PairingRequestListResult,
   PairingRequestResolveResult,
   RemoteHostRecord,
-  RemoteHostsResponse,
   Session,
   SessionCommandListResponse,
   SessionCommandResponse,
@@ -71,6 +71,12 @@ export function isCoreRequestError(error: unknown, code: string): boolean {
 
 export type EventSubscriptionHandlers = {
   onEvent: (event: AstralEvent) => void;
+  onOpen?: () => void;
+  onError?: (error?: unknown) => void;
+};
+
+export type MeshStateSubscriptionHandlers = {
+  onState: (state: MeshState) => void;
   onOpen?: () => void;
   onError?: (error?: unknown) => void;
 };
@@ -164,10 +170,29 @@ export function createRemoteCoreClient(info: DaemonInfo, hostDeviceId: string): 
 }
 
 export async function listRemoteHosts(info: DaemonInfo, discover = true): Promise<RemoteHostRecord[]> {
+  const state = await readMeshState(info, discover);
+  return state.hosts;
+}
+
+export async function readMeshState(info: DaemonInfo, discover = true): Promise<MeshState> {
   const channel = new LocalHttpControlChannel(info);
   const query = discover ? "?discover=1" : "";
-  const response = await channel.request<RemoteHostsResponse>("GET", `/v1/remote/hosts${query}`);
-  return response.hosts;
+  return channel.request<MeshState>("GET", `/v1/mesh/state${query}`);
+}
+
+export function subscribeMeshState(info: DaemonInfo, handlers: MeshStateSubscriptionHandlers): EventSubscription {
+  const channel = new LocalHttpControlChannel(info);
+  const source = new EventSource(channel.url("/v1/mesh/state", { stream: 1 }));
+  source.addEventListener("mesh-state", (message) => {
+    try {
+      handlers.onState(JSON.parse((message as MessageEvent).data) as MeshState);
+    } catch (error) {
+      handlers.onError?.(error);
+    }
+  });
+  source.onopen = () => handlers.onOpen?.();
+  source.onerror = (event) => handlers.onError?.(event);
+  return { close: () => source.close() };
 }
 
 export async function requestRemoteHostPairing(info: DaemonInfo, hostDeviceId: string): Promise<CloudPairingSignalResponse> {
@@ -227,6 +252,7 @@ function requestAction(method: RequestMethod, pathname: string): string {
   if (parts[1] === "sessions" && parts[3]) return `session.${parts[3]}`;
   if (parts[1] === "approvals" && parts[3] === "respond") return "interaction.respond";
   if (pathname === "/v1/events") return method === "GET" ? "events.read" : "events";
+  if (pathname === "/v1/mesh/state") return "mesh.state";
   if (pathname === "/v1/remote/hosts") return "remote.hosts.list";
   if (pathname === "/v1/cloud/account") return "cloud.account.read";
   if (pathname === "/v1/cloud/relays") return "cloud.relays.list";

@@ -225,6 +225,51 @@ func TestRemoteHostActionFallsBackToCloudRelay(t *testing.T) {
 	}
 }
 
+func TestRemoteControlManagerReusesRelaySessionForSequentialRequests(t *testing.T) {
+	hostApp, workspace, controllerStore, cloudServer, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
+	client := RelayClient{BaseURL: relayServer.URL, Token: testCloudRelayCredential(t, "acct_test")}
+	runControlRelayPoller(t, hostApp, client)
+	if _, err := controllerStore.rememberKnownHost(hostApp.store.hostInfo(), "http://127.0.0.1:1"); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := loadSettingsStore(controllerStore.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	baseURL := cloudServer.URL
+	token := "account-token"
+	if _, err := settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, settings: settings, hub: newEventHub()}
+	hostDeviceID := hostApp.store.hostInfo().Identity.DeviceID
+
+	for i := 0; i < 2; i++ {
+		response, err := controllerApp.remoteControlResponse(hostDeviceID, CapabilityCoreRead, ControlActionWorkspaces, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !response.OK {
+			t.Fatalf("response %d = %#v", i, response)
+		}
+		items, _ := response.Result.([]any)
+		if len(items) != 1 || stringValue(mapValue(items[0])["id"]) != workspace.ID {
+			t.Fatalf("workspaces %d = %#v, want %s", i, response.Result, workspace.ID)
+		}
+	}
+
+	manager := controllerApp.remoteControlManager()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.sessions) != 1 {
+		t.Fatalf("manager sessions = %d, want 1", len(manager.sessions))
+	}
+	if manager.sessions[hostDeviceID] == nil || manager.sessions[hostDeviceID].isClosed() {
+		t.Fatalf("manager session for %s is not reusable", hostDeviceID)
+	}
+}
+
 func TestRemoteHostActionFallsBackToCloudRelayAfterCachedLANHandshakeFailure(t *testing.T) {
 	hostApp, workspace, controllerStore, cloudServer, relayServer := newControlRelayTestRig(t, CapabilityCoreRead)
 	client := RelayClient{BaseURL: relayServer.URL, Token: testCloudRelayCredential(t, "acct_test")}

@@ -39,6 +39,8 @@ func (a *app) applyCloudSettingsWithOffline(settings CloudSettings, markOfflineO
 	}
 	a.cloudSettings = settings
 	if !settings.Enabled {
+		a.cloudRelayConnected = false
+		a.refreshMeshStateAsync(true)
 		return nil
 	}
 
@@ -202,6 +204,7 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 			return err
 		}
 	}
+	a.refreshMeshStateAsync(true)
 	return nil
 }
 

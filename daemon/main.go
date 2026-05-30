@@ -47,12 +47,15 @@ type app struct {
 	codexExec            map[string]codexExecCommand
 	codexRemoteHomeMu    sync.Mutex
 	codexRemoteHome      map[string]string
+	remoteManager        *remoteControlManager
 	remoteControlMu      sync.Mutex
 	remoteControl        *remoteControlRuntime
+	mesh                 *meshStateManager
 	cloudMu              sync.Mutex
 	cloudCancel          context.CancelFunc
 	cloudSettings        CloudSettings
 	cloudSelfRevoked     bool
+	cloudRelayConnected  bool
 	cloudAuthMu          sync.Mutex
 	cloudAuthStates      map[string]cloudAuthState
 }
@@ -110,6 +113,8 @@ func main() {
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
+	a.remoteManager = newRemoteControlManager(a)
+	a.mesh = newMeshStateManager(a)
 	a.rebuildSessionProjections()
 	if err := a.backfillHistoricalContextEvents(); err != nil {
 		log.Fatal(err)
@@ -153,6 +158,7 @@ func main() {
 	mux.HandleFunc("/v1/pairing/requests/", a.auth(a.handlePairingRequestAction))
 	mux.HandleFunc("/v1/trust/devices", a.auth(a.handleTrustDevices))
 	mux.HandleFunc("/v1/trust/devices/", a.auth(a.handleTrustDeviceAction))
+	mux.HandleFunc("/v1/mesh/state", a.auth(a.handleMeshState))
 	mux.HandleFunc("/v1/remote/hosts", a.auth(a.handleRemoteHosts))
 	mux.HandleFunc("/v1/remote/hosts/", a.auth(a.handleRemoteHostAction))
 	mux.HandleFunc("/v1/fs/browse", a.auth(a.handleHostFileSystemBrowse))

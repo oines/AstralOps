@@ -26,6 +26,7 @@ type remoteControlRuntime struct {
 
 func (a *app) applyRemoteControlSettings(settings RemoteControlSettings) error {
 	settings = normalizedRemoteControlSettings(settings)
+	defer a.refreshMeshStateAsync(true)
 	a.remoteControlMu.Lock()
 	defer a.remoteControlMu.Unlock()
 

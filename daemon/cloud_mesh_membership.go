@@ -108,6 +108,9 @@ func (a *app) logoutCloudMesh(ctx context.Context, removeSelf bool) (cloudMeshLo
 	}
 
 	result.ClosedControlSessions = a.closeAllControlSessions("mesh_logout")
+	if a.remoteManager != nil {
+		a.remoteManager.InvalidateAll("mesh_logout")
+	}
 	for _, grant := range a.store.listTrustGrants() {
 		result.ReleasedTerminalWriters += a.releaseTerminalWritersForDevice(grant.ControllerDeviceID)
 	}
