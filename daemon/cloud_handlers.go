@@ -17,6 +17,16 @@ type cloudHeartbeatRequest struct {
 	RelayURL string `json:"relay_url,omitempty"`
 }
 
+type cloudDeviceRemoveRequest struct {
+	RevokeLocalTrust bool `json:"revoke_local_trust,omitempty"`
+}
+
+type cloudDeviceRemoveResponse struct {
+	Device            CloudDeviceRecord      `json:"device"`
+	LocalTrustRevoked bool                   `json:"local_trust_revoked"`
+	TrustRevoke       *hostTrustRevokeResult `json:"trust_revoke,omitempty"`
+}
+
 type cloudAccountStatusResponse struct {
 	AccountIDHash string                  `json:"account_id_hash"`
 	Relay         *cloudRelayStatusResult `json:"relay,omitempty"`
@@ -144,12 +154,31 @@ func (a *app) handleCloudDeviceAction(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+	var req cloudDeviceRemoveRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := decodeJSON(r.Body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
 	record, err := client.RemoveDevice(ctx, parts[0])
 	if err != nil {
 		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
 		return
 	}
-	writeJSON(w, http.StatusOK, record)
+	response := cloudDeviceRemoveResponse{Device: record}
+	if req.RevokeLocalTrust {
+		if _, ok := a.store.trustedControlGrant(parts[0]); ok {
+			result, err := a.revokeTrustedControlDevice(parts[0], "")
+			if err != nil {
+				writeActionError(w, err)
+				return
+			}
+			response.LocalTrustRevoked = true
+			response.TrustRevoke = &result
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (a *app) handleCloudPairingRequests(w http.ResponseWriter, r *http.Request) {

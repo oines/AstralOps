@@ -107,11 +107,56 @@ func TestCloudHandlersRemoveDevice(t *testing.T) {
 		t.Fatalf("remove status = %d body=%s", removeRR.Code, removeRR.Body.String())
 	}
 	var removed CloudDeviceRecord
-	if err := json.Unmarshal(removeRR.Body.Bytes(), &removed); err != nil {
+	var removeResult cloudDeviceRemoveResponse
+	if err := json.Unmarshal(removeRR.Body.Bytes(), &removeResult); err != nil {
 		t.Fatal(err)
 	}
+	removed = removeResult.Device
 	if removed.DeviceID != "dev_phone" || removed.Status != cloudDeviceStatusRevoked {
 		t.Fatalf("removed = %#v", removed)
+	}
+}
+
+func TestCloudHandlersRemoveDeviceCanRevokeLocalTrust(t *testing.T) {
+	app, broker := testCloudApp(t)
+	defer broker.Close()
+
+	controller := testControllerRegistration(t, "dev_phone")
+	res, err := httpClientPostJSON(broker.URL+"/v1/devices", "account-token", controller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("register controller status = %d", res.StatusCode)
+	}
+	if _, err := app.store.trustDevice(trustDeviceRequest{
+		ControllerDeviceID:             controller.DeviceID,
+		ControllerDeviceName:           controller.DeviceName,
+		ControllerPublicKey:            controller.PublicKey,
+		ControllerPublicKeyFingerprint: controller.PublicKeyFingerprint,
+		Capabilities:                   []string{CapabilityCoreRead},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	removeRR := httptest.NewRecorder()
+	app.handleCloudDeviceAction(removeRR, httptest.NewRequest(http.MethodPost, "/v1/cloud/devices/dev_phone/remove", strings.NewReader(`{"revoke_local_trust":true}`)))
+	if removeRR.Code != http.StatusOK {
+		t.Fatalf("remove status = %d body=%s", removeRR.Code, removeRR.Body.String())
+	}
+	var result cloudDeviceRemoveResponse
+	if err := json.Unmarshal(removeRR.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Device.DeviceID != "dev_phone" || result.Device.Status != cloudDeviceStatusRevoked || !result.LocalTrustRevoked || result.TrustRevoke == nil {
+		t.Fatalf("result = %#v", result)
+	}
+	if _, ok := app.store.trustedControlGrant("dev_phone"); ok {
+		t.Fatal("trusted local grant still active after cloud remove with local revoke")
+	}
+	if !containsEventKind(app.store.queryEvents("", "", 0), "control.trust.revoked") {
+		t.Fatalf("events = %#v, want trust revoked audit event", eventKinds(app.store.queryEvents("", "", 0)))
 	}
 }
 

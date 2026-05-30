@@ -793,6 +793,16 @@ POST /v1/devices/:device_id/remove
 
 它不会替代 Host 本地 trust revoke。mesh 注册状态只决定“账号里是否还能发现和中继这个设备”，真正能不能控制某台 Host 仍由那台 Host 本地 trust store 和当前 E2EE control session 决定。如果要让正在控制某台 Host 的设备立即断开，仍必须对目标 Host 执行 `POST /v1/trust/devices/:device_id/revoke` 或等价的 `host.trust.revoke` 控制动作。
 
+Desktop 设置页可以在用户从账号 Mesh 移除设备时请求本机 daemon 一并撤销本机 trust：
+
+```json
+{
+  "revoke_local_trust": true
+}
+```
+
+这个合并操作仍然是两个边界清晰的动作：cloud registry 负责把设备从账号 Mesh 移除，本机 Host/Core 负责撤销本机 trust、关闭 active control sessions、释放 PTY writer。renderer 只表达用户意图，不能自己把 cloud remove 和 trust revoke 拼成业务状态。
+
 为了覆盖“设备被移除时目标 Host 离线”的情况，每台设备上线并执行 cloud sync 时必须把云端 `revoked` 设备投影到本地：
 
 ```text

@@ -6,6 +6,8 @@ import type {
   CloudAccountStatus,
   CloudDeviceListResponse,
   CloudDeviceRecord,
+  CloudDeviceRemoveRequest,
+  CloudDeviceRemoveResponse,
   CloudPairingSignalResponse,
   CreateWorkspaceRequest,
   EditLastUserMessageRequest,
@@ -87,7 +89,7 @@ export interface CoreClient {
   clearMediaCache(): Promise<ClearMediaCacheResponse>;
   cloudAccountStatus(): Promise<CloudAccountStatus>;
   listCloudDevices(): Promise<CloudDeviceRecord[]>;
-  removeCloudDevice(deviceId: string): Promise<CloudDeviceRecord>;
+  removeCloudDevice(deviceId: string, options?: CloudDeviceRemoveRequest): Promise<CloudDeviceRemoveResponse>;
   listWorkspaces(): Promise<Workspace[]>;
   createWorkspace(input: CreateWorkspaceRequest): Promise<Workspace>;
   browseHostFileSystem(input: HostFileSystemBrowseParams): Promise<HostFileSystemBrowseResult>;
@@ -558,8 +560,8 @@ export class LocalCoreClient implements CoreClient {
     return result.devices;
   }
 
-  removeCloudDevice(deviceId: string): Promise<CloudDeviceRecord> {
-    return this.channel.request("POST", `/v1/cloud/devices/${encodeURIComponent(deviceId)}/remove`, {});
+  removeCloudDevice(deviceId: string, options: CloudDeviceRemoveRequest = {}): Promise<CloudDeviceRemoveResponse> {
+    return this.channel.request("POST", `/v1/cloud/devices/${encodeURIComponent(deviceId)}/remove`, options);
   }
 
   listWorkspaces(): Promise<Workspace[]> {
@@ -709,7 +711,7 @@ class RemoteCoreClient extends LocalCoreClient {
     return Promise.reject(new Error("远端 Host cloud 账号状态不能由 Controller 读取"));
   }
 
-  removeCloudDevice(): Promise<CloudDeviceRecord> {
+  removeCloudDevice(): Promise<CloudDeviceRemoveResponse> {
     return Promise.reject(new Error("远端 Host cloud 设备不能由 Controller 移除"));
   }
 

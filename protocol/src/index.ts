@@ -1123,6 +1123,16 @@ export type CloudDeviceListResponse = {
   devices: CloudDeviceRecord[];
 };
 
+export type CloudDeviceRemoveRequest = {
+  revoke_local_trust?: boolean;
+};
+
+export type CloudDeviceRemoveResponse = {
+  device: CloudDeviceRecord;
+  local_trust_revoked: boolean;
+  trust_revoke?: HostTrustRevokeResult;
+};
+
 export type CloudPairingSignalInput = {
   host_device_id: string;
   controller_device_id: string;

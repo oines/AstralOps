@@ -638,6 +638,11 @@ function RemoteControlContent({
   const trustedGrants = useMemo(() => grants.filter((grant) => grant.status === "trusted"), [grants]);
   const revokedGrants = useMemo(() => grants.filter((grant) => grant.status === "revoked"), [grants]);
   const pendingPairingRequests = useMemo(() => pairingRequests.filter((request) => request.status === "pending"), [pairingRequests]);
+  const trustedGrantByDeviceId = useMemo(() => {
+    const byDeviceId = new Map<string, TrustGrant>();
+    trustedGrants.forEach((grant) => byDeviceId.set(grant.controller_device_id, grant));
+    return byDeviceId;
+  }, [trustedGrants]);
 
   const loadRemoteControl = useCallback(async (): Promise<void> => {
     if (!core) {
@@ -739,16 +744,21 @@ function RemoteControlContent({
 
   async function removeCloudDevice(device: CloudDeviceRecord): Promise<void> {
     if (!core || device.status === "revoked") return;
+    const revokeLocalTrust = trustedGrantByDeviceId.has(device.device_id);
     if (confirmCloudRemoveId !== device.device_id) {
       setConfirmCloudRemoveId(device.device_id);
-      setStatus("再次点击确认从账号 Mesh 移除");
+      setStatus(revokeLocalTrust ? "再次点击确认移除并撤销本机信任" : "再次点击确认从账号 Mesh 移除");
       return;
     }
     setRemovingCloudDeviceId(device.device_id);
     setError("");
     try {
-      await core.removeCloudDevice(device.device_id);
-      setStatus("已从账号 Mesh 移除设备");
+      const result = await core.removeCloudDevice(device.device_id, { revoke_local_trust: revokeLocalTrust });
+      if (result.local_trust_revoked && result.trust_revoke) {
+        setStatus(`已移除并撤销本机信任，关闭 ${result.trust_revoke.closed_control_sessions} 个控制连接`);
+      } else {
+        setStatus("已从账号 Mesh 移除设备");
+      }
       setConfirmCloudRemoveId("");
       await loadRemoteControl();
     } catch (removeError) {
@@ -818,6 +828,7 @@ function RemoteControlContent({
                   currentDeviceId={host?.identity.device_id || ""}
                   device={device}
                   key={device.device_id}
+                  localTrustGrant={trustedGrantByDeviceId.get(device.device_id) ?? null}
                   removingId={removingCloudDeviceId}
                   onRemove={removeCloudDevice}
                 />
@@ -1064,12 +1075,14 @@ function CloudDeviceRow({
   confirmRemoveId,
   currentDeviceId,
   device,
+  localTrustGrant,
   removingId,
   onRemove,
 }: {
   confirmRemoveId: string;
   currentDeviceId: string;
   device: CloudDeviceRecord;
+  localTrustGrant: TrustGrant | null;
   removingId: string;
   onRemove: (device: CloudDeviceRecord) => Promise<void>;
 }): React.JSX.Element {
@@ -1078,6 +1091,7 @@ function CloudDeviceRow({
   const removing = removingId === device.device_id;
   const confirming = confirmRemoveId === device.device_id;
   const name = device.device_name || device.device_id;
+  const removeLabel = current ? "本机" : revoked ? "已移除" : removing ? "移除中" : confirming ? "确认移除" : localTrustGrant ? "移除并撤销" : "移除";
   return (
     <div className="grid min-h-[92px] grid-cols-[minmax(0,1fr)_auto] items-center gap-5 border-b border-[var(--ao-border)] px-4 py-3 last:border-b-0">
       <div className="min-w-0">
@@ -1090,6 +1104,7 @@ function CloudDeviceRow({
           <span className="truncate">ID {device.device_id}</span>
           <span>{deviceKindLabel(device.device_kind)}</span>
           <span>{cloudDeviceRoleLabel(device)}</span>
+          {localTrustGrant ? <span>本机已信任</span> : null}
           <span className="inline-flex min-w-0 items-center gap-1">
             <KeyRound size={12} strokeWidth={1.9} />
             <span className="truncate">{device.public_key_fingerprint}</span>
@@ -1099,7 +1114,7 @@ function CloudDeviceRow({
       </div>
       <ButtonControl
         disabled={current || revoked || removing}
-        label={current ? "本机" : revoked ? "已移除" : removing ? "移除中" : confirming ? "确认移除" : "移除"}
+        label={removeLabel}
         onClick={() => onRemove(device)}
       />
     </div>
