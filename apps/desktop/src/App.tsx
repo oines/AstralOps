@@ -147,6 +147,7 @@ export function App(): React.JSX.Element {
   const sessionViewRefreshInFlightRef = useRef<Set<string>>(new Set());
   const sessionViewRefreshPendingRef = useRef<Set<string>>(new Set());
   const sessionViewRefreshGenerationRef = useRef(0);
+  const hostStateGenerationRef = useRef(0);
   const sessionsRef = useRef<Session[]>([]);
 
   const commitRemoteHosts = useCallback((hosts: RemoteHostRecord[]) => {
@@ -492,12 +493,19 @@ export function App(): React.JSX.Element {
 
   const loadHostState = useCallback(async (
     client: CoreClient,
-    options: { includeWorkspaceConnections?: boolean; restoreOnLaunch?: boolean; updateLocalHostInfo?: boolean; preserveSelection?: boolean } = {},
+    options: {
+      includeWorkspaceConnections?: boolean;
+      isCurrent?: () => boolean;
+      preserveSelection?: boolean;
+      restoreOnLaunch?: boolean;
+      updateLocalHostInfo?: boolean;
+    } = {},
   ) => {
     const snapshot = await client.hostSnapshot({
       event_limit: EVENT_WINDOW_SIZE,
       restore_on_launch: Boolean(options.restoreOnLaunch),
     });
+    if (options.isCurrent && !options.isCurrent()) return [];
     const workbench: WorkbenchState | undefined = snapshot.workbench;
     const hostResponse = snapshot.host;
     const workspaceResponse = workbench ? sortWorkspacesByUpdated(workbenchValues(workbench.workspaces)) : snapshot.workspaces;
@@ -545,6 +553,19 @@ export function App(): React.JSX.Element {
     }
     return eventResponse;
   }, []);
+
+  const clearDisplayedWorkbenchState = useCallback(() => {
+    setWorkspaces([]);
+    setWorkspaceConnections({});
+    setTerminalTabs({});
+    setSessions([]);
+    setSessionViews({});
+    setEventIndex(EMPTY_EVENT_INDEX);
+    setActiveWorkspaceId("");
+    setActiveSession(null);
+    setSessionWindows({});
+    sseQueueRef.current = [];
+  }, [setSessionWindows]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1041,6 +1062,17 @@ export function App(): React.JSX.Element {
   const activeHostNeedsPairing = Boolean(activeRemoteHost && remoteHostNeedsPairing(activeRemoteHost, activeHostAuthorizationOverride));
   const activeHostPairingStatus = activeRemoteHost ? hostPairingStatus[activeRemoteHost.device_id] || "" : "";
 
+  const handleSelectHost = useCallback((hostId: string) => {
+    if (hostId !== activeHostId) {
+      hostStateGenerationRef.current += 1;
+      sessionViewRefreshGenerationRef.current += 1;
+      clearDisplayedWorkbenchState();
+      setConnection("booting");
+      setError("");
+    }
+    setSelectedHostId(hostId);
+  }, [activeHostId, clearDisplayedWorkbenchState]);
+
   const handleBrowseHostFileSystem = useCallback(async (input: HostFileSystemBrowseParams): Promise<HostFileSystemBrowseResult> => {
     if (!api) throw new Error("Core 未连接");
     return api.browseHostFileSystem(input);
@@ -1079,55 +1111,51 @@ export function App(): React.JSX.Element {
     let cancelled = false;
     let resyncOnOpen = false;
     sessionViewRefreshGenerationRef.current += 1;
+    hostStateGenerationRef.current += 1;
     const refreshGeneration = sessionViewRefreshGenerationRef.current;
+    const hostGeneration = hostStateGenerationRef.current;
     for (const timer of Object.values(sessionViewRefreshTimersRef.current)) window.clearTimeout(timer);
     sessionViewRefreshTimersRef.current = {};
     sessionViewRefreshInFlightRef.current.clear();
     sessionViewRefreshPendingRef.current.clear();
     const client = activeHostIsLocal ? localApi : createRemoteCoreClient(daemonInfo, activeHostId);
+    const isCurrentHost = (): boolean => !cancelled && hostStateGenerationRef.current === hostGeneration;
+    setApi(activeHostNeedsPairing ? null : client);
+    setConnection(activeHostNeedsPairing ? "connected" : "booting");
+    setError("");
+    clearDisplayedWorkbenchState();
 
     async function loadSelectedHost(): Promise<void> {
       if (activeHostNeedsPairing) {
-        setApi(null);
-        setConnection("connected");
-        setError("");
-        setWorkspaces([]);
-        setWorkspaceConnections({});
-        setSessions([]);
-        setSessionViews({});
-        setEventIndex(EMPTY_EVENT_INDEX);
-        setActiveWorkspaceId("");
-        setActiveSession(null);
         return;
       }
-      setConnection("booting");
-      setError("");
       try {
         const initialEvents = await loadHostState(client, {
           includeWorkspaceConnections: true,
+          isCurrent: isCurrentHost,
           restoreOnLaunch: appSettingsRef.current.general.restore_on_launch,
           updateLocalHostInfo: activeHostIsLocal,
         });
-        if (cancelled) return;
+        if (!isCurrentHost()) return;
         const afterSeq = Math.max(0, ...initialEvents.map((event) => event.seq));
         workbenchSubscription = client.subscribeWorkbench({
           onPatch: (patch) => {
-            if (cancelled) return;
+            if (!isCurrentHost()) return;
             applyWorkbenchPatch(patch);
           },
           onOpen: () => {
-            if (cancelled) return;
+            if (!isCurrentHost()) return;
             setConnection("connected");
           },
           onError: () => {
-            if (cancelled) return;
+            if (!isCurrentHost()) return;
             resyncOnOpen = true;
             setConnection("reconnecting");
           },
         });
         subscription = client.subscribeEvents(afterSeq, {
           onEvent: (event) => {
-            if (cancelled) return;
+            if (!isCurrentHost()) return;
             applyHostEventState(event, client, refreshGeneration);
             if (activeHostIsLocal && event.kind.startsWith("control.pairing.")) {
               void refreshRemoteHosts();
@@ -1136,39 +1164,31 @@ export function App(): React.JSX.Element {
             queueLiveEvent(event);
           },
           onOpen: () => {
-            if (cancelled) return;
+            if (!isCurrentHost()) return;
             setConnection("connected");
             if (!resyncOnOpen) return;
             resyncOnOpen = false;
             void loadHostState(client, {
               includeWorkspaceConnections: true,
+              isCurrent: isCurrentHost,
               restoreOnLaunch: false,
               updateLocalHostInfo: activeHostIsLocal,
               preserveSelection: true,
             }).catch(() => undefined);
           },
           onError: (event) => {
-            if (cancelled) return;
+            if (!isCurrentHost()) return;
             if (event instanceof SyntaxError) setError("bad SSE event payload");
             resyncOnOpen = true;
             setConnection("reconnecting");
           },
         });
-        setApi(client);
         setConnection("connected");
       } catch (hostError) {
-        if (!cancelled) {
-          setApi(client);
+        if (isCurrentHost()) {
           if (!activeHostIsLocal && isCoreRequestError(hostError, "control_authorization_required")) {
             setHostAuthorizationOverrides((current) => ({ ...current, [activeHostId]: "revoked" }));
             setHostPairingStatus((current) => ({ ...current, [activeHostId]: "目标 Host 已撤销本机控制权，需要重新请求授权" }));
-            setWorkspaces([]);
-            setWorkspaceConnections({});
-            setSessions([]);
-            setSessionViews({});
-            setEventIndex(EMPTY_EVENT_INDEX);
-            setActiveWorkspaceId("");
-            setActiveSession(null);
             setError("");
           } else {
             setError(hostError instanceof Error ? hostError.message : String(hostError));
@@ -1193,7 +1213,7 @@ export function App(): React.JSX.Element {
       sessionViewRefreshPendingRef.current.clear();
       sseQueueRef.current = [];
     };
-  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, activeHostAuthorizationOverride, applyHostEventState, applyWorkbenchPatch, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, refreshRemoteHosts, storeSessionView]);
+  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, activeHostAuthorizationOverride, applyHostEventState, applyWorkbenchPatch, clearDisplayedWorkbenchState, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, refreshRemoteHosts, storeSessionView]);
 
   const sessionTitles = useMemo(
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),
@@ -1247,7 +1267,7 @@ export function App(): React.JSX.Element {
         onDeleteWorkspace={(workspaceId) => void deleteWorkspace(workspaceId)}
         onOpenSettings={() => setSettingsOpen(true)}
         onResize={setSidebarWidth}
-        onSelectHost={setSelectedHostId}
+        onSelectHost={handleSelectHost}
         onSelectSession={handleSelectSession}
         onSelectWorkspace={handleSelectWorkspace}
       />
