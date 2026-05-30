@@ -367,12 +367,16 @@ func (s *store) trustedControlGrant(controllerDeviceID string) (TrustGrant, bool
 }
 
 func (s *store) writeTrustGrantsLocked() error {
-	grants := make([]TrustGrant, 0, len(s.trustGrants))
-	for _, grant := range s.trustGrants {
+	return writeTrustGrantsFile(s.dataDir, s.trustGrants)
+}
+
+func writeTrustGrantsFile(dataDir string, grantsByController map[string]TrustGrant) error {
+	grants := make([]TrustGrant, 0, len(grantsByController))
+	for _, grant := range grantsByController {
 		grants = append(grants, normalizeTrustGrant(grant))
 	}
 	sort.Slice(grants, func(i, j int) bool { return grants[i].ControllerDeviceID < grants[j].ControllerDeviceID })
-	return writeJSONFile(trustGrantsPath(s.dataDir), grants, defaultHostFileMode)
+	return writeJSONFile(trustGrantsPath(dataDir), grants, defaultHostFileMode)
 }
 
 func normalizeTrustGrant(grant TrustGrant) TrustGrant {

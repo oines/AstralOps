@@ -17,6 +17,7 @@ const (
 	terminalStatusClosed            = "closed"
 	terminalFrameOutput             = "terminal.output"
 	terminalFrameClosed             = "terminal.closed"
+	terminalOutputCoalesceWindow    = 25 * time.Millisecond
 	defaultTerminalCols             = 100
 	defaultTerminalRows             = 28
 	terminalViewerBuffer            = 256
@@ -134,7 +135,7 @@ type terminalViewer struct {
 	mu                 sync.Mutex
 	connectionID       string
 	controllerDeviceID string
-	conn               *controlWSConn
+	conn               controlConnection
 	frames             chan terminalStreamFrame
 	closed             bool
 }
@@ -226,8 +227,8 @@ func (m *terminalManager) openSSH(ctx context.Context, controllerDeviceID string
 	return session.openResult(), nil
 }
 
-func (m *terminalManager) attach(controllerDeviceID string, conn *controlWSConn, params terminalAttachParams) (terminalAttachResult, error) {
-	if conn == nil || conn.id == "" {
+func (m *terminalManager) attach(controllerDeviceID string, conn controlConnection, params terminalAttachParams) (terminalAttachResult, error) {
+	if conn == nil || conn.connectionID() == "" {
 		return terminalAttachResult{}, newActionError(http.StatusBadRequest, "control_connection_required", "terminal.attach requires an encrypted control connection")
 	}
 	session, ok := m.session(params.TerminalID)
@@ -248,20 +249,20 @@ func (m *terminalManager) attach(controllerDeviceID string, conn *controlWSConn,
 		WorkspaceID: session.workspaceID,
 		Agent:       session.agent,
 		Kind:        "control.terminal.attached",
-		Normalized:  session.viewerLifecycle(controllerDeviceID, conn.id, "attached"),
+		Normalized:  session.viewerLifecycle(controllerDeviceID, conn.connectionID(), "attached"),
 	})
 	return result, nil
 }
 
-func (m *terminalManager) detach(controllerDeviceID string, conn *controlWSConn, params terminalDetachParams) (terminalAttachResult, error) {
-	if conn == nil || conn.id == "" {
+func (m *terminalManager) detach(controllerDeviceID string, conn controlConnection, params terminalDetachParams) (terminalAttachResult, error) {
+	if conn == nil || conn.connectionID() == "" {
 		return terminalAttachResult{}, newActionError(http.StatusBadRequest, "control_connection_required", "terminal.detach requires an encrypted control connection")
 	}
 	session, ok := m.session(params.TerminalID)
 	if !ok {
 		return terminalAttachResult{}, newActionError(http.StatusNotFound, "terminal_not_found", "terminal not found")
 	}
-	result, removed := session.detachViewer(conn.id)
+	result, removed := session.detachViewer(conn.connectionID())
 	if removed != nil {
 		removed.close()
 		session.scheduleRetention(m.app, m.retentionTimeout)
@@ -269,7 +270,7 @@ func (m *terminalManager) detach(controllerDeviceID string, conn *controlWSConn,
 			WorkspaceID: session.workspaceID,
 			Agent:       session.agent,
 			Kind:        "control.terminal.detached",
-			Normalized:  session.viewerLifecycle(controllerDeviceID, conn.id, "detached"),
+			Normalized:  session.viewerLifecycle(controllerDeviceID, conn.connectionID(), "detached"),
 		})
 	}
 	return result, nil
@@ -764,19 +765,74 @@ func (s *terminalSession) viewerLifecycle(viewerDeviceID, connectionID, reason s
 	return value
 }
 
-func newTerminalViewer(conn *controlWSConn) *terminalViewer {
+func newTerminalViewer(conn controlConnection) *terminalViewer {
 	return &terminalViewer{
-		connectionID:       conn.id,
-		controllerDeviceID: conn.controllerDeviceID,
+		connectionID:       conn.connectionID(),
+		controllerDeviceID: conn.controllerID(),
 		conn:               conn,
 		frames:             make(chan terminalStreamFrame, terminalViewerBuffer),
 	}
 }
 
 func (v *terminalViewer) run() {
-	for frame := range v.frames {
-		v.conn.writePlain(controlPlainFrame{Type: frame.frameType, Terminal: &frame})
+	var pending *terminalStreamFrame
+	for {
+		var frame terminalStreamFrame
+		if pending != nil {
+			frame = *pending
+			pending = nil
+		} else {
+			next, ok := <-v.frames
+			if !ok {
+				return
+			}
+			frame = next
+		}
+		if frame.frameType != terminalFrameOutput {
+			v.writeFrame(frame)
+			continue
+		}
+		batch, next, hasNext := v.coalesceOutput(frame)
+		v.writeFrame(batch)
+		if hasNext {
+			pending = &next
+		}
 	}
+}
+
+func (v *terminalViewer) writeFrame(frame terminalStreamFrame) {
+	v.conn.writePlain(controlPlainFrame{Type: frame.frameType, Terminal: &frame})
+}
+
+func (v *terminalViewer) coalesceOutput(first terminalStreamFrame) (terminalStreamFrame, terminalStreamFrame, bool) {
+	batch := first
+	timer := time.NewTimer(terminalOutputCoalesceWindow)
+	defer timer.Stop()
+	for len(batch.Data) < terminalOutputFrameMaxBytes {
+		select {
+		case next, ok := <-v.frames:
+			if !ok {
+				return batch, terminalStreamFrame{}, false
+			}
+			if next.frameType != terminalFrameOutput || next.TerminalID != batch.TerminalID || len(batch.Data)+len(next.Data) > terminalOutputFrameMaxBytes {
+				return batch, next, true
+			}
+			batch.Data += next.Data
+			batch.OutputSeq = next.OutputSeq
+			batch.Status = next.Status
+			batch.Reason = next.Reason
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(terminalOutputCoalesceWindow)
+		case <-timer.C:
+			return batch, terminalStreamFrame{}, false
+		}
+	}
+	return batch, terminalStreamFrame{}, false
 }
 
 func (v *terminalViewer) enqueue(frame terminalStreamFrame) bool {
@@ -789,6 +845,19 @@ func (v *terminalViewer) enqueue(frame terminalStreamFrame) bool {
 	case v.frames <- frame:
 		return true
 	default:
+	}
+	ctx := context.Background()
+	if v.conn != nil {
+		ctx = v.conn.requestContext()
+	}
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case v.frames <- frame:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
 		return false
 	}
 }

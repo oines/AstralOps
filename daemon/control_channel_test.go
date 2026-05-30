@@ -45,6 +45,7 @@ func newControlChannelTestApp(t *testing.T, capabilities ...string) (*app, Works
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	app := &app{
 		store:    st,
 		hub:      newEventHub(),
@@ -90,6 +91,7 @@ func dialControlChannelAs(t *testing.T, serverURL string, app *app, controllerDe
 		ControllerPublicKey:    base64.StdEncoding.EncodeToString(controllerPublicKey),
 		ControllerEphemeralKey: base64.StdEncoding.EncodeToString(controllerEphemeral.PublicKey().Bytes()),
 		ClientNonce:            clientNonce,
+		MembershipLease:        testCloudMembershipLeaseForDevice(t, "acct_test", controllerDeviceID, devicePublicKeyFingerprint(controllerPublicKey), false, true),
 	}
 	hello.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(controllerPrivateKey, controlClientSignaturePayload(app.store.deviceIdentity.DeviceID, hello)))
 	if err := client.WriteJSON(hello); err != nil {
@@ -100,7 +102,7 @@ func dialControlChannelAs(t *testing.T, serverURL string, app *app, controllerDe
 	if err := client.ReadJSON(&ack); err != nil {
 		t.Fatal(err)
 	}
-	if ack.Type != "hello_ack" || ack.Version != controlProtocolVersion || ack.ConnectionID == "" {
+	if ack.Type != "hello_ack" || ack.Version != controlProtocolVersion || ack.ConnectionID == "" || ack.ClientNonce != hello.ClientNonce {
 		t.Fatalf("ack = %#v, want hello_ack", ack)
 	}
 	hostPublicKey, err := decodeDevicePublicKey(ack.HostPublicKey)
@@ -126,11 +128,46 @@ func dialControlChannelAs(t *testing.T, serverURL string, app *app, controllerDe
 	if err != nil {
 		t.Fatal(err)
 	}
-	cipher, err := newControlCipher(deriveControlSessionKey(sharedSecret, hello, ack.HostDeviceID, ack.HostPublicKey, ack.HostEphemeralKey, ack.ServerNonce, ack.ConnectionID))
+	cipher, err := newControlControllerCipher(sharedSecret, hello, ack.HostDeviceID, ack.HostPublicKey, ack.HostEphemeralKey, ack.ServerNonce, ack.ConnectionID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return client, cipher, ack
+}
+
+func newControlCipherTestPair(t *testing.T) (*controlCipher, *controlCipher) {
+	t.Helper()
+
+	sharedSecret := make([]byte, 32)
+	if _, err := rand.Read(sharedSecret); err != nil {
+		t.Fatal(err)
+	}
+	hello := controlHelloFrame{
+		Type:                   "hello",
+		Version:                controlProtocolVersion,
+		ControllerDeviceID:     "dev_controller",
+		ControllerPublicKey:    "controller_public_key",
+		ControllerEphemeralKey: "controller_ephemeral_key",
+		ClientNonce:            "client_nonce",
+	}
+	ack := controlHelloAckFrame{
+		Type:             "hello_ack",
+		Version:          controlProtocolVersion,
+		ConnectionID:     "ctrl_test_pair",
+		HostDeviceID:     "dev_host",
+		HostPublicKey:    "host_public_key",
+		HostEphemeralKey: "host_ephemeral_key",
+		ServerNonce:      "server_nonce",
+	}
+	controllerCipher, err := newControlControllerCipher(sharedSecret, hello, ack.HostDeviceID, ack.HostPublicKey, ack.HostEphemeralKey, ack.ServerNonce, ack.ConnectionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostCipher, err := newControlHostCipher(sharedSecret, hello, ack.HostDeviceID, ack.HostPublicKey, ack.HostEphemeralKey, ack.ServerNonce, ack.ConnectionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return controllerCipher, hostCipher
 }
 
 func controlSessionForAck(t *testing.T, app *app, ack controlHelloAckFrame) *controlWSConn {
@@ -245,6 +282,69 @@ func TestControlWebSocketEncryptedRequestResponse(t *testing.T) {
 	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "req_workspaces" {
 		t.Fatalf("plain response = %#v, want ok response", plain)
 	}
+}
+
+func TestControlCipherRejectsReplaySkippedSequenceAndWrongDirection(t *testing.T) {
+	controllerCipher, hostCipher := newControlCipherTestPair(t)
+	first, err := controllerCipher.seal(controlPlainFrame{Type: "request", Request: &ControlRequest{RequestID: "first"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hostCipher.open(first); err != nil {
+		t.Fatalf("first frame open failed: %v", err)
+	}
+	if _, err := hostCipher.open(first); err == nil {
+		t.Fatal("replayed control frame opened, want sequence rejection")
+	}
+
+	controllerCipher, hostCipher = newControlCipherTestPair(t)
+	if _, err := controllerCipher.seal(controlPlainFrame{Type: "request", Request: &ControlRequest{RequestID: "discarded"}}); err != nil {
+		t.Fatal(err)
+	}
+	skipped, err := controllerCipher.seal(controlPlainFrame{Type: "request", Request: &ControlRequest{RequestID: "skipped"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hostCipher.open(skipped); err == nil {
+		t.Fatal("skipped control frame sequence opened, want strict sequence rejection")
+	}
+
+	_, hostCipher = newControlCipherTestPair(t)
+	wrongDirection, err := hostCipher.seal(controlPlainFrame{Type: "response", Response: &ControlResponse{RequestID: "wrong_direction", OK: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hostCipher.open(wrongDirection); err == nil {
+		t.Fatal("opposite-direction control frame opened, want direction-bound AEAD rejection")
+	}
+}
+
+func TestControlWebSocketRejectsReplayedSealedFrame(t *testing.T) {
+	app, _, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	body := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "req_replay",
+			Capability: CapabilityCoreRead,
+			Action:     ControlActionWorkspaces,
+		},
+	})
+	plain := readEncryptedControlFrame(t, client, cipher)
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK {
+		t.Fatalf("plain response = %#v, want ok response", plain)
+	}
+	if err := client.WriteMessage(websocket.TextMessage, body); err != nil {
+		t.Fatal(err)
+	}
+	plain = readEncryptedControlFrame(t, client, cipher)
+	if plain.Type != "close" || plain.Code != "invalid_frame" {
+		t.Fatalf("replay close frame = %#v, want invalid_frame close", plain)
+	}
+	expectControlWebSocketReadError(t, client)
 }
 
 func TestControlWebSocketMediaReadResponseIsEncrypted(t *testing.T) {
@@ -1992,6 +2092,7 @@ func TestControlWebSocketRemoteWorkspaceFileStreamUsesProxyReadRange(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	workspace, err := st.createWorkspace(createWorkspaceRequest{
 		Name:   "Remote",
 		Target: "ssh",
@@ -2081,6 +2182,7 @@ func TestControlWebSocketRemoteWorkspaceFileStreamReportsTruncatedReadRange(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	workspace, err := st.createWorkspace(createWorkspaceRequest{
 		Name:   "Remote",
 		Target: "ssh",
@@ -2209,6 +2311,7 @@ func TestControlWebSocketRemoteWorkspaceFileWriteUsesProxyOverEncryptedChannel(t
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	workspace, err := st.createWorkspace(createWorkspaceRequest{
 		Name:   "Remote",
 		Target: "ssh",
@@ -2299,6 +2402,7 @@ func TestControlWebSocketRemoteWorkspacePatchUsesProxyOverEncryptedChannel(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	workspace, err := st.createWorkspace(createWorkspaceRequest{
 		Name:   "Remote",
 		Target: "ssh",
@@ -2388,6 +2492,7 @@ func TestControlWebSocketRemoteWorkspaceExecUsesProxyOverEncryptedChannel(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, st, true, true)
 	workspace, err := st.createWorkspace(createWorkspaceRequest{
 		Name:   "Remote",
 		Target: "ssh",
@@ -2533,6 +2638,29 @@ func TestControlWebSocketRejectsUntrustedController(t *testing.T) {
 	if closeFrame.Type != "close" || closeFrame.Code != "capability_denied" {
 		t.Fatalf("close frame = %#v, want capability_denied", closeFrame)
 	}
+}
+
+func TestControlClientDialReturnsAuthorizationRequiredForUntrustedController(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestCloudMembership(t, st, true, true)
+	app := &app{
+		store:    st,
+		hub:      newEventHub(),
+		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
+	}
+	server := startControlChannelTestServer(t, app)
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestCloudMembership(t, controllerStore, false, true)
+
+	_, _, err = controlClientDialWithTimeout(server.URL, controllerStore, app.store.hostInfo(), time.Second)
+	assertActionError(t, err, http.StatusForbidden, controlAuthorizationRequiredCode)
 }
 
 func TestControlWebSocketRevokeClosesActiveSession(t *testing.T) {

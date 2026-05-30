@@ -17,9 +17,52 @@ type cloudHeartbeatRequest struct {
 	RelayURL string `json:"relay_url,omitempty"`
 }
 
+type cloudDeviceRemoveRequest struct {
+	RevokeLocalTrust bool `json:"revoke_local_trust,omitempty"`
+}
+
+type cloudDeviceRemoveResponse struct {
+	Device            CloudDeviceRecord        `json:"device"`
+	LocalTrustRevoked bool                     `json:"local_trust_revoked"`
+	TrustRevoke       *hostTrustRevokeResult   `json:"trust_revoke,omitempty"`
+	LocalMeshLogout   *cloudAuthLogoutResponse `json:"local_mesh_logout,omitempty"`
+}
+
+type cloudAccountStatusResponse struct {
+	AccountIDHash string                  `json:"account_id_hash"`
+	Relay         *cloudRelayStatusResult `json:"relay,omitempty"`
+}
+
+type cloudRelayStatusResult struct {
+	RelayID             string `json:"relay_id,omitempty"`
+	RelayURL            string `json:"relay_url,omitempty"`
+	CredentialAvailable bool   `json:"credential_available"`
+	CredentialExpiresAt string `json:"credential_expires_at,omitempty"`
+}
+
 type cloudPairingResolveInput struct {
 	Status           string `json:"status"`
 	ResolverDeviceID string `json:"resolver_device_id,omitempty"`
+}
+
+func (a *app) handleCloudAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	client, err := a.cloudClientFromSettings()
+	if err != nil {
+		writeActionError(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	account, err := client.GetAccount(ctx)
+	if err != nil {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, cloudAccountStatusFromAccount(account))
 }
 
 func (a *app) handleCloudDevices(w http.ResponseWriter, r *http.Request) {
@@ -53,9 +96,23 @@ func (a *app) handleCloudDevices(w http.ResponseWriter, r *http.Request) {
 		if req.CanControl != nil {
 			canControl = *req.CanControl
 		}
-		record, err := client.RegisterDevice(ctx, a.store.hostInfo().Identity, canHost, canControl, req.RelayURL)
+		account, err := client.GetAccount(ctx)
 		if err != nil {
 			writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+			return
+		}
+		_, relay, hasRelay := relayClientFromCloudAccount(account, client.HTTPClient)
+		relayURL := ""
+		if hasRelay {
+			relayURL = relay.RelayURL
+		}
+		record, err := client.RegisterDevice(ctx, a.store.hostInfo().Identity, canHost, canControl, relayURL)
+		if err != nil {
+			writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+			return
+		}
+		if err := a.store.updateCloudMembership(account, record); err != nil {
+			writeActionError(w, newActionError(http.StatusBadGateway, "cloud_membership_failed", err.Error()))
 			return
 		}
 		writeJSON(w, http.StatusOK, record)
@@ -81,12 +138,85 @@ func (a *app) handleCloudHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	record, err := client.HeartbeatDevice(ctx, a.store.hostInfo().Identity.DeviceID, req.RelayURL)
+	account, err := client.GetAccount(ctx)
 	if err != nil {
 		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
 		return
 	}
+	_, relay, hasRelay := relayClientFromCloudAccount(account, client.HTTPClient)
+	relayURL := ""
+	if hasRelay {
+		relayURL = relay.RelayURL
+	}
+	record, err := client.HeartbeatDevice(ctx, a.store.hostInfo().Identity.DeviceID, relayURL)
+	if err != nil {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+		return
+	}
+	if err := a.store.updateCloudMembership(account, record); err != nil {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_membership_failed", err.Error()))
+		return
+	}
 	writeJSON(w, http.StatusOK, record)
+}
+
+func (a *app) handleCloudDeviceAction(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/cloud/devices/"), "/"), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] != "remove" || r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	client, err := a.cloudClientFromSettings()
+	if err != nil {
+		writeActionError(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	var req cloudDeviceRemoveRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := decodeJSON(r.Body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	selfID := strings.TrimSpace(a.store.hostInfo().Identity.DeviceID)
+	if parts[0] == selfID {
+		logout, err := a.logoutCloudMesh(ctx, true)
+		if err != nil {
+			writeActionError(w, newActionError(http.StatusBadRequest, "cloud_logout_failed", err.Error()))
+			return
+		}
+		device := CloudDeviceRecord{
+			DeviceID:  logout.OldDeviceID,
+			Status:    cloudDeviceStatusRevoked,
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		if logout.RemovedDevice != nil {
+			device = *logout.RemovedDevice
+		}
+		response := cloudDeviceRemoveResponse{Device: device, LocalMeshLogout: (*cloudAuthLogoutResponse)(&logout)}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+	record, err := client.RemoveDevice(ctx, parts[0])
+	if err != nil {
+		writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+		return
+	}
+	response := cloudDeviceRemoveResponse{Device: record}
+	if req.RevokeLocalTrust {
+		if _, ok := a.store.trustedControlGrant(parts[0]); ok {
+			result, err := a.revokeTrustedControlDevice(parts[0], "")
+			if err != nil {
+				writeActionError(w, err)
+				return
+			}
+			response.LocalTrustRevoked = true
+			response.TrustRevoke = &result
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (a *app) handleCloudPairingRequests(w http.ResponseWriter, r *http.Request) {
@@ -110,6 +240,19 @@ func (a *app) handleCloudPairingRequests(w http.ResponseWriter, r *http.Request)
 		if err := decodeJSON(r.Body, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
+		}
+		self := a.store.hostInfo().Identity
+		if strings.TrimSpace(req.ControllerDeviceID) == self.DeviceID {
+			settings := a.currentSettings()
+			_, relayURL, _, err := cloudRelayClientFromCloud(ctx, client)
+			if err != nil {
+				writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+				return
+			}
+			if _, err := client.RegisterDevice(ctx, self, settings.RemoteControl.Enabled, true, relayURL); err != nil {
+				writeActionError(w, newActionError(http.StatusBadGateway, "cloud_request_failed", err.Error()))
+				return
+			}
 		}
 		request, err := client.SubmitPairingSignal(ctx, req)
 		if err != nil {
@@ -149,8 +292,29 @@ func (a *app) handleCloudPairingRequestAction(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, cloudPairingSignalResponse{Request: request})
 }
 
+func cloudAccountStatusFromAccount(account CloudAccount) cloudAccountStatusResponse {
+	out := cloudAccountStatusResponse{AccountIDHash: strings.TrimSpace(account.AccountIDHash)}
+	if account.Relay == nil {
+		return out
+	}
+	relay := cloudRelayStatusResult{
+		RelayID:             strings.TrimSpace(account.Relay.RelayID),
+		RelayURL:            strings.TrimSpace(account.Relay.RelayURL),
+		CredentialAvailable: strings.TrimSpace(account.Relay.Credential) != "",
+		CredentialExpiresAt: strings.TrimSpace(account.Relay.CredentialExpiresAt),
+	}
+	if relay.RelayID == "" {
+		relay.RelayID = "default"
+	}
+	out.Relay = &relay
+	return out
+}
+
 func (a *app) cloudClientFromSettings() (CloudClient, error) {
 	settings := a.currentSettings().Cloud
+	if a.currentDeviceCloudRevoked() {
+		return CloudClient{}, newActionError(http.StatusForbidden, "cloud_device_revoked", "current device has been removed from cloud mesh")
+	}
 	if !settings.Enabled {
 		return CloudClient{}, newActionError(http.StatusConflict, "cloud_disabled", "cloud is not enabled")
 	}

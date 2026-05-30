@@ -8,6 +8,8 @@ import {
   FolderKanban,
   Info,
   KeyRound,
+  LogIn,
+  LogOut,
   MonitorCog,
   RefreshCw,
   Settings,
@@ -20,7 +22,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import type { CoreClient } from "../api";
-import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, DaemonInfo, HealthResponse, HostInfo, PairingRequest, TrustGrant } from "../types";
+import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, CloudAccountStatus, CloudAuthProvider, CloudDeviceRecord, DaemonInfo, HealthResponse, HostInfo, PairingRequest, TrustGrant } from "../types";
 
 type SettingsCategoryId =
   | "general"
@@ -54,6 +56,9 @@ type SettingsViewProps = {
   onClearMediaCache: () => Promise<ClearMediaCacheResponse>;
   onOpenLogs: () => Promise<void>;
   onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
+  onPairingRequestsChanged?: () => void;
+  onReloadSettings: () => Promise<AppSettings | null>;
+  pendingPairingCount?: number;
   savingKeys: ReadonlySet<string>;
   settings: AppSettings | null;
   settingsError: string;
@@ -64,6 +69,8 @@ type SettingOption<T extends string = string> = {
   label: string;
   value: T;
 };
+
+const DEFAULT_CLOUD_BASE_URL = "https://cloud-astralops.oines.dev";
 
 const SETTINGS_GROUPS: SettingsGroup[] = [
   {
@@ -96,7 +103,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
   diagnostics: { logging_enabled: false },
   remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true },
-  cloud: { enabled: false },
+  cloud: { enabled: false, base_url: DEFAULT_CLOUD_BASE_URL },
   updates: { auto_check: true },
 };
 
@@ -229,6 +236,9 @@ export function SettingsView({
   onClearMediaCache,
   onOpenLogs,
   onPatchSettings,
+  onPairingRequestsChanged,
+  onReloadSettings,
+  pendingPairingCount = 0,
   savingKeys,
   settings,
   settingsError,
@@ -330,6 +340,11 @@ export function SettingsView({
                     >
                       <Icon size={16} strokeWidth={1.9} />
                       <span className="truncate">{item.title}</span>
+                      {item.id === "remote" && pendingPairingCount > 0 ? (
+                        <span className="ml-auto grid min-w-5 place-items-center rounded-md bg-black/[0.055] px-1.5 text-[11px] font-bold text-[var(--ao-warning)]">
+                          {pendingPairingCount}
+                        </span>
+                      ) : null}
                     </button>
                   );
                 })}
@@ -356,6 +371,8 @@ export function SettingsView({
             onLanguageChange={setLanguage}
             onOpenLogs={openLogs}
             onPatchSettings={onPatchSettings}
+            onPairingRequestsChanged={onPairingRequestsChanged}
+            onReloadSettings={onReloadSettings}
             savingKeys={savingKeys}
             settings={resolvedSettings}
             updateStatus={updateStatus}
@@ -379,6 +396,8 @@ function SettingsContent({
   onLanguageChange,
   onOpenLogs,
   onPatchSettings,
+  onPairingRequestsChanged,
+  onReloadSettings,
   onCheckForUpdates,
   onInstallUpdate,
   savingKeys,
@@ -397,13 +416,15 @@ function SettingsContent({
   onLanguageChange: (value: string) => void;
   onOpenLogs: () => Promise<void>;
   onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
+  onPairingRequestsChanged?: () => void;
+  onReloadSettings: () => Promise<AppSettings | null>;
   savingKeys: ReadonlySet<string>;
   settings: AppSettings;
   updateStatus: AppUpdateStatus | null;
 }): React.JSX.Element {
   switch (activeId) {
     case "remote":
-      return <RemoteControlContent core={core} daemonInfo={daemonInfo} onPatchSettings={onPatchSettings} savingKeys={savingKeys} settings={settings} />;
+      return <RemoteControlContent core={core} daemonInfo={daemonInfo} onPairingRequestsChanged={onPairingRequestsChanged} onPatchSettings={onPatchSettings} onReloadSettings={onReloadSettings} savingKeys={savingKeys} settings={settings} />;
     case "appearance":
       return (
         <div className="grid gap-8">
@@ -531,7 +552,7 @@ function SettingsContent({
             />
             <SettingRow
               title="需要确认"
-              description="权限、Ask 或计划需要处理时提醒"
+              description="权限、Ask、计划或配对请求需要处理时提醒"
               control={
                 <ToggleControl
                   disabled={savingKeys.has("notifications.requires_action")}
@@ -611,35 +632,58 @@ function SettingsContent({
 function RemoteControlContent({
   core,
   daemonInfo,
+  onPairingRequestsChanged,
   onPatchSettings,
+  onReloadSettings,
   savingKeys,
   settings,
 }: {
   core: CoreClient | null;
   daemonInfo: DaemonInfo | null;
+  onPairingRequestsChanged?: () => void;
   onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
+  onReloadSettings: () => Promise<AppSettings | null>;
   savingKeys: ReadonlySet<string>;
   settings: AppSettings;
 }): React.JSX.Element {
   const [host, setHost] = useState<HostInfo | null>(null);
   const [grants, setGrants] = useState<TrustGrant[]>([]);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
+  const [cloudAccount, setCloudAccount] = useState<CloudAccountStatus | null>(null);
+  const [cloudDevices, setCloudDevices] = useState<CloudDeviceRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [confirmRevokeId, setConfirmRevokeId] = useState("");
+  const [confirmCloudRemoveId, setConfirmCloudRemoveId] = useState("");
   const [revokingId, setRevokingId] = useState("");
+  const [removingCloudDeviceId, setRemovingCloudDeviceId] = useState("");
   const [resolvingPairingId, setResolvingPairingId] = useState("");
+  const [cloudBaseURLDraft, setCloudBaseURLDraft] = useState(settings.cloud.base_url || "");
+  const [authenticatingProvider, setAuthenticatingProvider] = useState<CloudAuthProvider | "">("");
+  const [loggingOutCloud, setLoggingOutCloud] = useState(false);
 
   const trustedGrants = useMemo(() => grants.filter((grant) => grant.status === "trusted"), [grants]);
   const revokedGrants = useMemo(() => grants.filter((grant) => grant.status === "revoked"), [grants]);
   const pendingPairingRequests = useMemo(() => pairingRequests.filter((request) => request.status === "pending"), [pairingRequests]);
+  const activeCloudDevices = useMemo(() => cloudDevices.filter((device) => device.status !== "revoked"), [cloudDevices]);
+  const trustedGrantByDeviceId = useMemo(() => {
+    const byDeviceId = new Map<string, TrustGrant>();
+    trustedGrants.forEach((grant) => byDeviceId.set(grant.controller_device_id, grant));
+    return byDeviceId;
+  }, [trustedGrants]);
+
+  useEffect(() => {
+    setCloudBaseURLDraft(settings.cloud.base_url || "");
+  }, [settings.cloud.base_url]);
 
   const loadRemoteControl = useCallback(async (): Promise<void> => {
     if (!core) {
       setHost(null);
       setGrants([]);
       setPairingRequests([]);
+      setCloudAccount(null);
+      setCloudDevices([]);
       setError("Core 未连接");
       setStatus("");
       return;
@@ -647,17 +691,34 @@ function RemoteControlContent({
     setLoading(true);
     try {
       const [hostInfo, trustList, pairingList] = await Promise.all([core.hostInfo(), core.listTrustedDevices(), core.listPairingRequests()]);
+      let nextCloudAccount: CloudAccountStatus | null = null;
+      let nextCloudDevices: CloudDeviceRecord[] = [];
+      let cloudError = "";
+      if (settings.cloud.enabled) {
+        try {
+          nextCloudAccount = await core.cloudAccountStatus();
+        } catch (loadCloudError) {
+          cloudError = loadCloudError instanceof Error ? loadCloudError.message : String(loadCloudError);
+        }
+        try {
+          nextCloudDevices = await core.listCloudDevices();
+        } catch (loadCloudDevicesError) {
+          cloudError = cloudError || (loadCloudDevicesError instanceof Error ? loadCloudDevicesError.message : String(loadCloudDevicesError));
+        }
+      }
       setHost(hostInfo);
       setGrants(sortTrustGrants(trustList.grants));
       setPairingRequests(sortPairingRequests(pairingList.requests));
-      setError("");
-      setStatus("已刷新");
+      setCloudAccount(nextCloudAccount);
+      setCloudDevices(sortCloudDevices(nextCloudDevices, hostInfo.identity.device_id));
+      setError(cloudError);
+      setStatus(cloudError ? "账号设备读取失败" : "已刷新");
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
       setLoading(false);
     }
-  }, [core]);
+  }, [core, settings.cloud.account_token, settings.cloud.base_url, settings.cloud.enabled]);
 
   useEffect(() => {
     void loadRemoteControl();
@@ -692,6 +753,7 @@ function RemoteControlContent({
       await core.approvePairingRequest(request.request_id);
       setStatus("已允许设备控制本机");
       await loadRemoteControl();
+      onPairingRequestsChanged?.();
     } catch (approveError) {
       setError(approveError instanceof Error ? approveError.message : String(approveError));
     } finally {
@@ -707,10 +769,91 @@ function RemoteControlContent({
       await core.denyPairingRequest(request.request_id);
       setStatus("已拒绝设备加入");
       await loadRemoteControl();
+      onPairingRequestsChanged?.();
     } catch (denyError) {
       setError(denyError instanceof Error ? denyError.message : String(denyError));
     } finally {
       setResolvingPairingId("");
+    }
+  }
+
+  async function removeCloudDevice(device: CloudDeviceRecord): Promise<void> {
+    if (!core || device.status === "revoked") return;
+    const currentDevice = device.device_id === host?.identity.device_id;
+    const revokeLocalTrust = trustedGrantByDeviceId.has(device.device_id);
+    if (confirmCloudRemoveId !== device.device_id) {
+      setConfirmCloudRemoveId(device.device_id);
+      setStatus(currentDevice ? "再次点击确认本机退出 Mesh" : revokeLocalTrust ? "再次点击确认从 Mesh 删除并撤销本机信任" : "再次点击确认从 Mesh 删除设备");
+      return;
+    }
+    setRemovingCloudDeviceId(device.device_id);
+    setError("");
+    try {
+      const result = await core.removeCloudDevice(device.device_id, { revoke_local_trust: revokeLocalTrust });
+      if (result.local_mesh_logout) {
+        setCloudAccount(null);
+        setCloudDevices([]);
+        setStatus(result.local_mesh_logout.cloud_removed ? "本机已退出 Mesh，远控身份和信任已重置" : "本机已退出 Mesh，Cloud 删除稍后可重试");
+        await onReloadSettings();
+        await loadRemoteControl();
+        onPairingRequestsChanged?.();
+      } else if (result.local_trust_revoked && result.trust_revoke) {
+        setStatus(`已移除并撤销本机信任，关闭 ${result.trust_revoke.closed_control_sessions} 个控制连接`);
+      } else {
+        setStatus("已从 Mesh 删除设备");
+      }
+      setConfirmCloudRemoveId("");
+      if (!result.local_mesh_logout) {
+        await loadRemoteControl();
+      }
+    } catch (removeError) {
+      setError(removeError instanceof Error ? removeError.message : String(removeError));
+    } finally {
+      setRemovingCloudDeviceId("");
+    }
+  }
+
+  async function beginCloudAuth(provider: CloudAuthProvider): Promise<void> {
+    if (!core) {
+      setError("Core 未连接");
+      return;
+    }
+    const baseURL = normalizeCloudBaseURLDraft(cloudBaseURLDraft || settings.cloud.base_url || "");
+    if (!baseURL) {
+      setError("先填写 Cloud 服务地址");
+      return;
+    }
+    setAuthenticatingProvider(provider);
+    setError("");
+    try {
+      const result = await core.startCloudAuth({ provider, base_url: baseURL });
+      const opened = await window.astral.openExternal(result.auth_url);
+      if (!opened.ok) throw new Error(opened.error || "无法打开浏览器");
+      setStatus("已打开浏览器登录，完成后会自动连接账号");
+      await waitForCloudAuthCompletion(core, onReloadSettings, baseURL, (message) => setStatus(message));
+    } catch (authError) {
+      setError(authError instanceof Error ? authError.message : String(authError));
+    } finally {
+      setAuthenticatingProvider("");
+    }
+  }
+
+  async function logoutCloud(): Promise<void> {
+    if (!core) return;
+    setLoggingOutCloud(true);
+    setError("");
+    try {
+      await core.logoutCloudAuth();
+      setCloudAccount(null);
+      setCloudDevices([]);
+      setStatus("已退出 Mesh，远控身份和信任已重置");
+      await onReloadSettings();
+      await loadRemoteControl();
+      onPairingRequestsChanged?.();
+    } catch (logoutError) {
+      setError(logoutError instanceof Error ? logoutError.message : String(logoutError));
+    } finally {
+      setLoggingOutCloud(false);
     }
   }
 
@@ -720,15 +863,15 @@ function RemoteControlContent({
         <InfoRow label="设备名" value={host?.identity.device_name || "未加载"} />
         <InfoRow label="设备类型" value={deviceKindLabel(host?.identity.device_kind)} />
         <InfoRow label="设备 ID" value={host?.identity.device_id || "未加载"} />
-        <InfoRow label="公钥指纹" value={host?.identity.public_key_fingerprint || "未加载"} />
+        <InfoRow label="公钥指纹" value={host?.identity.public_key_fingerprint || "未加载"} mono wrap />
         <InfoRow label="平台" value={host ? `${host.platform.os}/${host.platform.arch}` : "未加载"} />
-        <SettingRow title="Host 能力" description="远端可信设备可通过加密控制通道请求的能力" control={<CapabilityList capabilities={host?.capabilities ?? []} align="right" />} />
+        <SettingRow title="可开放能力" description="批准后的控制设备可以请求这些能力" control={<CapabilityList capabilities={host?.capabilities ?? []} align="right" />} />
       </SettingsSection>
 
       <SettingsSection title="连接">
         <SettingRow
           title="允许被远控"
-          description="开启后启动 Host LAN listener；本机完整 API 不直接开放给远端"
+          description={settings.cloud.enabled ? "开启后本机可以接受已批准设备控制" : "登录 Cloud 后才能加入 Mesh 并接受远控"}
           control={
             <ToggleControl
               disabled={savingKeys.has("remote_control.enabled")}
@@ -739,15 +882,15 @@ function RemoteControlContent({
         />
         <SettingRow
           title="监听地址"
-          description="远控只暴露 /v1/host 和 /v1/control/ws"
+          description="只开放 Host 身份和加密控制通道"
           control={<StatusPill label={daemonInfo?.remote_control?.listen_addr ? `实际 ${daemonInfo.remote_control.listen_addr}` : `配置 ${settings.remote_control.listen_addr}`} tone={daemonInfo?.remote_control?.listen_addr ? "good" : "muted"} />}
         />
         <SettingRow
           title="局域网发现"
-          description="使用 UDP 广播发现；发现后仍需要 Host 身份校验和信任授权"
+          description="同一局域网内优先直连；仍需要 Host 身份校验和授权"
           control={
             <div className="flex items-center gap-2">
-              <StatusPill label={settings.remote_control.enabled && settings.remote_control.lan_discovery ? "跟随监听端口" : "未开启"} tone={settings.remote_control.enabled && settings.remote_control.lan_discovery ? "good" : "muted"} icon={Wifi} />
+              <StatusPill label={!settings.cloud.enabled ? "登录后生效" : settings.remote_control.enabled && settings.remote_control.lan_discovery ? "跟随监听端口" : "未开启"} tone={settings.cloud.enabled && settings.remote_control.enabled && settings.remote_control.lan_discovery ? "good" : "muted"} icon={Wifi} />
               <ToggleControl
                 disabled={!settings.remote_control.enabled || savingKeys.has("remote_control.lan_discovery")}
                 enabled={settings.remote_control.enabled && settings.remote_control.lan_discovery}
@@ -756,10 +899,63 @@ function RemoteControlContent({
             </div>
           }
         />
-        <SettingRow title="远程终端" description="远端渲染工作区 PTY，输入和 resize 走加密控制通道" control={<StatusPill label={terminalFeatureLabel(host)} tone={terminalFeatureAvailable(host) ? "good" : "muted"} icon={TerminalSquare} />} />
+        <SettingRow title="远程终端" description="工作区终端可以在控制端渲染，输入和 resize 走加密控制通道" control={<StatusPill label={terminalFeatureLabel(host)} tone={terminalFeatureAvailable(host) ? "good" : "muted"} icon={TerminalSquare} />} />
       </SettingsSection>
 
-      <SettingsSection title="可信设备">
+      <SettingsSection title="账号 Mesh">
+        <SettingRow
+          title="账号服务"
+          description="登录后这台设备会加入当前账号 Mesh"
+          control={<TextInputControl disabled={settings.cloud.enabled || Boolean(authenticatingProvider)} onChange={setCloudBaseURLDraft} placeholder={DEFAULT_CLOUD_BASE_URL} value={cloudBaseURLDraft} />}
+        />
+        <SettingRow
+          title="账号"
+          description={settings.cloud.enabled ? `${cloudBaseURLLabel(settings)}；退出会断开 Mesh 并重置远控身份，本地数据保留` : "未登录时本机仍可使用，但不能远控别人或被别人远控"}
+          control={
+            settings.cloud.enabled ? (
+              <div className="flex items-center gap-2">
+                <StatusPill label={cloudConnectionLabel(settings, cloudAccount, error)} tone={cloudConnectionTone(settings, cloudAccount, error)} />
+                <ButtonControl disabled={loggingOutCloud} icon={LogOut} label={loggingOutCloud ? "退出中" : "退出登录"} onClick={logoutCloud} />
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <ButtonControl disabled={Boolean(authenticatingProvider)} icon={LogIn} label={authenticatingProvider === "google" ? "等待登录" : "Google 登录"} onClick={() => beginCloudAuth("google")} />
+                <ButtonControl disabled={Boolean(authenticatingProvider)} icon={LogIn} label={authenticatingProvider === "github" ? "等待登录" : "GitHub 登录"} onClick={() => beginCloudAuth("github")} />
+              </div>
+            )
+          }
+        />
+        {settings.cloud.enabled ? (
+          <>
+            <InfoRow label="账号" value={cloudAccount?.account_id_hash || (error ? "读取失败" : "未加载")} />
+            <InfoRow label="中继节点" value={cloudRelayLabel(cloudAccount)} />
+            <SettingRow title="中继凭证" description="由账号服务签发给本机使用，短期有效" control={<StatusPill label={cloudRelayCredentialLabel(cloudAccount)} tone={cloudRelayCredentialTone(cloudAccount)} />} />
+            <SettingRow title="我的设备" description="账号服务只保存设备公开身份、在线状态、撤销状态和路由元数据" control={<StatusPill label={`${activeCloudDevices.length} 台`} tone={activeCloudDevices.length > 0 ? "good" : "muted"} />} />
+            {activeCloudDevices.length > 0 ? (
+              activeCloudDevices.map((device) => (
+                <CloudDeviceRow
+                  confirmRemoveId={confirmCloudRemoveId}
+                  currentDeviceId={host?.identity.device_id || ""}
+                  device={device}
+                  key={device.device_id}
+                  localTrustGrant={trustedGrantByDeviceId.get(device.device_id) ?? null}
+                  removingId={removingCloudDeviceId}
+                  onRemove={removeCloudDevice}
+                />
+              ))
+            ) : (
+              <EmptySettingsRow title="暂无设备" description="本机注册到账号后会显示在这里" />
+            )}
+          </>
+        ) : (
+          <EmptySettingsRow title="未加入 Mesh" description="登录 Cloud 后，本机和其他设备会出现在这里" />
+        )}
+      </SettingsSection>
+
+      <SettingsSection title="可控制本机的设备">
+        {pendingPairingRequests.length > 0 ? (
+          <SettingRow title="待批准请求" description="批准前，对方不能读取本机工作区、session 或终端" control={<StatusPill label={`${pendingPairingRequests.length} 个`} tone="warning" icon={KeyRound} />} />
+        ) : null}
         {pendingPairingRequests.map((request) => (
           <PairingRequestRow
             key={request.request_id}
@@ -780,7 +976,7 @@ function RemoteControlContent({
             />
           ))
         ) : pendingPairingRequests.length === 0 ? (
-          <EmptySettingsRow title="暂无可信控制设备" description="手机、桌面端或其他控制端完成配对后会显示在这里" />
+          <EmptySettingsRow title="暂无已批准设备" description="其他设备请求控制本机后，需要在这里允许" />
         ) : null}
       </SettingsSection>
 
@@ -885,11 +1081,14 @@ function SettingRow({ control, description, title }: { control: React.ReactNode;
   );
 }
 
-function InfoRow({ label, value }: { label: string; value: string }): React.JSX.Element {
+function InfoRow({ label, mono = false, value, wrap = false }: { label: string; mono?: boolean; value: string; wrap?: boolean }): React.JSX.Element {
+  const valueClassName = wrap
+    ? `max-w-[640px] min-w-0 overflow-hidden text-right text-[13px] font-semibold leading-5 text-[var(--ao-muted)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere] ${mono ? "font-mono" : ""}`
+    : `max-w-[460px] truncate text-[13px] font-semibold text-[var(--ao-muted)] ${mono ? "font-mono" : ""}`;
   return (
     <div className="grid min-h-[44px] grid-cols-[minmax(0,1fr)_auto] items-center gap-5 border-b border-[var(--ao-border)] px-4 py-2 last:border-b-0">
       <div className="text-[13px] font-semibold text-[var(--ao-text-soft)]">{label}</div>
-      <div className="max-w-[460px] truncate text-[13px] font-semibold text-[var(--ao-muted)]" title={value}>{value}</div>
+      <div className={valueClassName} title={value}>{value}</div>
     </div>
   );
 }
@@ -929,10 +1128,7 @@ function TrustGrantRow({
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
           <span className="truncate">ID {grant.controller_device_id}</span>
-          <span className="inline-flex min-w-0 items-center gap-1">
-            <KeyRound size={12} strokeWidth={1.9} />
-            <span className="truncate">{fingerprint}</span>
-          </span>
+          <FingerprintInline value={fingerprint} />
           <span>{policyLabel(grant.workspace_exec_policy)}</span>
           <span>{trusted ? `更新于 ${formatTimestamp(grant.updated_at)}` : `撤销于 ${formatTimestamp(grant.revoked_at || grant.updated_at)}`}</span>
         </div>
@@ -940,7 +1136,7 @@ function TrustGrantRow({
       </div>
       <ButtonControl
         disabled={!trusted || revoking}
-        label={!trusted ? "已撤销" : revoking ? "撤销中" : confirming ? "确认撤销" : "撤销"}
+        label={!trusted ? "已撤销" : revoking ? "撤销中" : confirming ? "确认撤销" : "撤销控制权"}
         onClick={() => onRevoke(grant)}
       />
     </div>
@@ -971,10 +1167,7 @@ function PairingRequestRow({
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
           <span className="truncate">ID {request.controller_device_id}</span>
           <span>{deviceKindLabel(request.controller_device_kind)}</span>
-          <span className="inline-flex min-w-0 items-center gap-1">
-            <KeyRound size={12} strokeWidth={1.9} />
-            <span className="truncate">{request.controller_public_key_fingerprint}</span>
-          </span>
+          <FingerprintInline value={request.controller_public_key_fingerprint} />
           <span>{policyLabel(request.workspace_exec_policy)}</span>
           <span>{`请求于 ${formatTimestamp(request.created_at)}`}</span>
         </div>
@@ -988,12 +1181,68 @@ function PairingRequestRow({
   );
 }
 
+function CloudDeviceRow({
+  confirmRemoveId,
+  currentDeviceId,
+  device,
+  localTrustGrant,
+  removingId,
+  onRemove,
+}: {
+  confirmRemoveId: string;
+  currentDeviceId: string;
+  device: CloudDeviceRecord;
+  localTrustGrant: TrustGrant | null;
+  removingId: string;
+  onRemove: (device: CloudDeviceRecord) => Promise<void>;
+}): React.JSX.Element {
+  const current = device.device_id === currentDeviceId;
+  const revoked = device.status === "revoked";
+  const removing = removingId === device.device_id;
+  const confirming = confirmRemoveId === device.device_id;
+  const name = device.device_name || device.device_id;
+  const removeLabel = revoked ? "已删除" : removing ? "处理中" : confirming ? (current ? "确认退出" : "确认删除") : current ? "退出 Mesh" : localTrustGrant ? "删除并撤销" : "删除";
+  return (
+    <div className="grid min-h-[92px] grid-cols-[minmax(0,1fr)_auto] items-center gap-5 border-b border-[var(--ao-border)] px-4 py-3 last:border-b-0">
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <MonitorCog size={15} strokeWidth={1.9} className={revoked ? "text-[var(--ao-muted)]" : "text-[var(--ao-text-soft)]"} />
+          <span className="truncate text-[13px] font-bold leading-5 text-[var(--ao-text)]">{name}</span>
+          <StatusPill label={current ? "本机" : cloudDeviceStatusLabel(device.status)} tone={device.status === "online" ? "good" : revoked ? "muted" : "warning"} />
+        </div>
+        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
+          <span className="truncate">ID {device.device_id}</span>
+          <span>{deviceKindLabel(device.device_kind)}</span>
+          <span>{cloudDeviceRoleLabel(device)}</span>
+          {localTrustGrant ? <span>本机已信任</span> : null}
+          <FingerprintInline value={device.public_key_fingerprint} />
+          <span>{`更新于 ${formatTimestamp(device.updated_at || device.last_seen)}`}</span>
+        </div>
+      </div>
+      <ButtonControl
+        disabled={revoked || removing}
+        label={removeLabel}
+        onClick={() => onRemove(device)}
+      />
+    </div>
+  );
+}
+
 function StatusPill({ icon: Icon, label, tone = "muted" }: { icon?: LucideIcon; label: string; tone?: "good" | "muted" | "warning" }): React.JSX.Element {
   const toneClass = tone === "good" ? "text-[var(--ao-green)]" : tone === "warning" ? "text-[var(--ao-warning)]" : "text-[var(--ao-muted-strong)]";
   return (
     <span className={`inline-flex h-7 max-w-[280px] items-center gap-1.5 rounded-lg bg-black/[0.045] px-2.5 text-[12px] font-semibold ${toneClass}`} title={label}>
       {Icon ? <Icon size={14} strokeWidth={1.9} /> : null}
       <span className="truncate">{label}</span>
+    </span>
+  );
+}
+
+function FingerprintInline({ value }: { value: string }): React.JSX.Element {
+  return (
+    <span className="inline-flex min-w-0 max-w-full items-start gap-1 font-mono" title={value}>
+      <KeyRound className="mt-1 shrink-0" size={12} strokeWidth={1.9} />
+      <span className="min-w-0 max-w-[640px] overflow-hidden break-all leading-5 [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]">{value}</span>
     </span>
   );
 }
@@ -1113,6 +1362,30 @@ function SelectControl<T extends string>({ disabled = false, options, value, onC
   );
 }
 
+function TextInputControl({
+  disabled = false,
+  onChange,
+  placeholder,
+  value,
+}: {
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  value: string;
+}): React.JSX.Element {
+  return (
+    <input
+      className="h-8 w-[280px] rounded-lg bg-black/[0.045] px-3 text-[12px] font-semibold text-[var(--ao-text)] outline-none transition-colors placeholder:text-[var(--ao-subtle)] focus:bg-black/[0.07] disabled:cursor-default disabled:opacity-55"
+      disabled={disabled}
+      onChange={(event) => onChange(event.currentTarget.value)}
+      placeholder={placeholder}
+      spellCheck={false}
+      type="url"
+      value={value}
+    />
+  );
+}
+
 function ButtonControl({ disabled = false, icon: Icon, label, onClick }: { disabled?: boolean; icon?: LucideIcon; label: string; onClick: () => void | Promise<void> }): React.JSX.Element {
   return (
     <button
@@ -1184,6 +1457,92 @@ function sortPairingRequests(requests: PairingRequest[]): PairingRequest[] {
   });
 }
 
+function sortCloudDevices(devices: CloudDeviceRecord[], currentDeviceId: string): CloudDeviceRecord[] {
+  return [...devices].sort((left, right) => {
+    if (left.device_id === currentDeviceId && right.device_id !== currentDeviceId) return -1;
+    if (left.device_id !== currentDeviceId && right.device_id === currentDeviceId) return 1;
+    if (left.status !== right.status) return cloudDeviceStatusRank(left.status) - cloudDeviceStatusRank(right.status);
+    return timestampValue(right.updated_at || right.last_seen) - timestampValue(left.updated_at || left.last_seen);
+  });
+}
+
+function cloudDeviceStatusRank(status: string): number {
+  if (status === "online") return 0;
+  if (status === "offline") return 1;
+  if (status === "revoked") return 2;
+  return 3;
+}
+
+function cloudBaseURLLabel(settings: AppSettings): string {
+  return settings.cloud.base_url ? `服务地址 ${settings.cloud.base_url}` : "服务地址未配置";
+}
+
+function normalizeCloudBaseURLDraft(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
+async function waitForCloudAuthCompletion(
+  core: CoreClient,
+  onReloadSettings: () => Promise<AppSettings | null>,
+  baseURL: string,
+  onStatus: (message: string) => void,
+): Promise<void> {
+  const expectedBaseURL = normalizeCloudBaseURLDraft(baseURL);
+  for (let attempt = 0; attempt < 45; attempt += 1) {
+    await delay(2_000);
+    const next = await core.settings();
+    if (next.cloud.enabled && normalizeCloudBaseURLDraft(next.cloud.base_url || "") === expectedBaseURL && Boolean(next.cloud.account_token)) {
+      await onReloadSettings();
+      onStatus("已登录云账号");
+      return;
+    }
+  }
+  onStatus("浏览器登录仍在等待中，完成后可刷新远控状态");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function cloudConnectionLabel(settings: AppSettings, account: CloudAccountStatus | null, error: string): string {
+  if (!settings.cloud.enabled) return "未开启";
+  if (error) return "读取失败";
+  if (account?.account_id_hash) return "已连接";
+  return "未加载";
+}
+
+function cloudConnectionTone(settings: AppSettings, account: CloudAccountStatus | null, error: string): "good" | "muted" | "warning" {
+  if (!settings.cloud.enabled) return "muted";
+  if (error) return "warning";
+  if (account?.account_id_hash) return "good";
+  return "muted";
+}
+
+function cloudRelayLabel(account: CloudAccountStatus | null): string {
+  const relay = account?.relay;
+  if (!relay) return "未配置";
+  const relayID = relay.relay_id || "default";
+  return relay.relay_url ? `${relayID} · ${relay.relay_url}` : relayID;
+}
+
+function cloudRelayCredentialLabel(account: CloudAccountStatus | null): string {
+  const relay = account?.relay;
+  if (!relay) return "未配置";
+  if (!relay.credential_available) return "未下发";
+  if (!relay.credential_expires_at) return "已下发";
+  const parsed = Date.parse(relay.credential_expires_at);
+  if (Number.isFinite(parsed) && parsed <= Date.now()) return "已过期";
+  return `有效到 ${formatTimestamp(relay.credential_expires_at)}`;
+}
+
+function cloudRelayCredentialTone(account: CloudAccountStatus | null): "good" | "muted" | "warning" {
+  const relay = account?.relay;
+  if (!relay?.credential_available) return "muted";
+  const parsed = Date.parse(relay.credential_expires_at || "");
+  if (Number.isFinite(parsed) && parsed <= Date.now()) return "warning";
+  return "good";
+}
+
 function timestampValue(value?: string): number {
   if (!value) return 0;
   const parsed = Date.parse(value);
@@ -1217,6 +1576,20 @@ function deviceKindLabel(kind?: string): string {
   if (kind === "desktop") return "桌面端";
   if (kind === "mobile") return "手机端";
   return kind || "未加载";
+}
+
+function cloudDeviceStatusLabel(status: string): string {
+  if (status === "online") return "在线";
+  if (status === "offline") return "离线";
+  if (status === "revoked") return "已移除";
+  return status || "未知";
+}
+
+function cloudDeviceRoleLabel(device: CloudDeviceRecord): string {
+  if (device.can_host && device.can_control) return "Host / Controller";
+  if (device.can_host) return "Host";
+  if (device.can_control) return "Controller";
+  return "未声明角色";
 }
 
 function trustStatusLabel(status: string): string {

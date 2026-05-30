@@ -827,6 +827,7 @@ export type ControlAction =
   | "core.read.session_view"
   | "core.read.sessions"
   | "core.read.workspaces"
+  | "core.read.workspace.connection"
   | "core.read.events"
   | "core.subscribe.events"
   | "core.unsubscribe.events"
@@ -837,6 +838,7 @@ export type ControlAction =
   | "core.control.workspace.create"
   | "core.control.workspace.connect"
   | "core.control.workspace.disconnect"
+  | "core.control.session.create"
   | "core.control.session.fork"
   | "core.control.session.delete"
   | "interaction.respond"
@@ -1078,6 +1080,72 @@ export type HostTrustRevokeResult = {
 
 export type CloudDeviceStatus = "online" | "offline" | "revoked" | string;
 
+export type CloudRelayConfig = {
+  relay_id?: string;
+  relay_url?: string;
+  credential?: string;
+  credential_expires_at?: string;
+};
+
+export type CloudAccount = {
+  account_id_hash: string;
+  relay?: CloudRelayConfig;
+  membership_key_id?: string;
+  membership_signing_public_key?: string;
+};
+
+export type CloudMembershipLease = {
+  version: string;
+  alg: string;
+  kid: string;
+  payload_base64: string;
+  signature: string;
+};
+
+export type CloudRelayStatus = {
+  relay_id?: string;
+  relay_url?: string;
+  credential_available: boolean;
+  credential_expires_at?: string;
+};
+
+export type CloudAccountStatus = {
+  account_id_hash: string;
+  relay?: CloudRelayStatus;
+};
+
+export type CloudAuthProvider = "google" | "github";
+
+export type CloudAuthStartRequest = {
+  provider: CloudAuthProvider;
+  base_url?: string;
+};
+
+export type CloudAuthStartResponse = {
+  auth_url: string;
+  callback_url: string;
+  provider: CloudAuthProvider;
+  expires_at: string;
+};
+
+export type CloudAuthLogoutResponse = {
+  ok: boolean;
+  cloud_removed?: boolean;
+  cloud_remove_error?: string;
+  mesh_reset?: boolean;
+  old_device_id?: string;
+  new_device_id?: string;
+  closed_control_sessions?: number;
+  released_terminal_writers?: number;
+  reset?: {
+    old_device_id?: string;
+    new_device_id?: string;
+    trust_grants_cleared?: number;
+    known_hosts_cleared?: number;
+    pairing_requests_cleared?: number;
+  };
+};
+
 export type CloudDeviceRecord = {
   account_id_hash: string;
   device_id: string;
@@ -1092,6 +1160,22 @@ export type CloudDeviceRecord = {
   relay_url?: string;
   last_seen?: string;
   updated_at: string;
+  membership_lease?: CloudMembershipLease;
+};
+
+export type CloudDeviceListResponse = {
+  devices: CloudDeviceRecord[];
+};
+
+export type CloudDeviceRemoveRequest = {
+  revoke_local_trust?: boolean;
+};
+
+export type CloudDeviceRemoveResponse = {
+  device: CloudDeviceRecord;
+  local_trust_revoked: boolean;
+  trust_revoke?: HostTrustRevokeResult;
+  local_mesh_logout?: CloudAuthLogoutResponse;
 };
 
 export type CloudPairingSignalInput = {
@@ -1127,11 +1211,12 @@ export type CloudPairingSignalResponse = {
   request: CloudPairingSignal;
 };
 
-export type RelayPayloadKind = "control.sealed_frame" | string;
+export type RelayPayloadKind = "control.hello" | "control.hello_ack" | "control.sealed_frame";
 
 export type RelayEnvelope = {
   version: "astralops-relay-envelope-v1" | string;
   envelope_id?: string;
+  connection_id?: string;
   from_device_id: string;
   to_device_id: string;
   payload_kind: RelayPayloadKind;
@@ -1241,6 +1326,9 @@ export type RemoteHostRecord = {
   known_identity?: boolean;
   status: "online" | "offline" | "lan" | string;
   connection: "lan" | "cloud" | "relay" | "offline" | string;
+  authorization_state?: "needs_pairing" | "pending" | "approved" | "denied" | "known" | string;
+  pairing_request_id?: string;
+  pairing_status?: "pending" | "approved" | "denied" | string;
   last_base_url?: string;
   lan_base_url?: string;
   capabilities?: ControlCapability[];
@@ -1286,6 +1374,7 @@ export type ControlActionParamMap = {
   "core.read.session_view": SessionReferenceParams;
   "core.read.sessions": SessionsReadParams;
   "core.read.workspaces": undefined;
+  "core.read.workspace.connection": WorkspaceReferenceParams;
   "core.read.events": EventWindowParams;
   "core.subscribe.events": EventSubscriptionParams;
   "core.unsubscribe.events": EventSubscriptionCancelParams;
@@ -1296,6 +1385,7 @@ export type ControlActionParamMap = {
   "core.control.workspace.create": CreateWorkspaceRequest;
   "core.control.workspace.connect": WorkspaceReferenceParams;
   "core.control.workspace.disconnect": WorkspaceReferenceParams;
+  "core.control.session.create": CreateSessionRequest;
   "core.control.session.fork": SessionForkControlParams;
   "core.control.session.delete": SessionDeleteParams;
   "interaction.respond": InteractionRespondParams;
@@ -1334,6 +1424,7 @@ export type ControlActionResultMap = {
   "core.read.session_view": SessionView;
   "core.read.sessions": Session[];
   "core.read.workspaces": Workspace[];
+  "core.read.workspace.connection": WorkspaceConnection;
   "core.read.events": AstralEvent[];
   "core.subscribe.events": EventSubscriptionResult;
   "core.unsubscribe.events": EventSubscriptionCancelResult;
@@ -1344,6 +1435,7 @@ export type ControlActionResultMap = {
   "core.control.workspace.create": Workspace;
   "core.control.workspace.connect": WorkspaceConnection;
   "core.control.workspace.disconnect": WorkspaceConnection;
+  "core.control.session.create": Session;
   "core.control.session.fork": SessionForkResponse;
   "core.control.session.delete": SessionDeleteResult;
   "interaction.respond": OkResult;

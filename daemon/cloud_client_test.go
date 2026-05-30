@@ -62,6 +62,40 @@ func TestCloudClientRegistersDeviceWithoutPrivateHostData(t *testing.T) {
 	}
 }
 
+func TestCloudClientGetsAccountRelay(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer account-token" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		if r.URL.Path != "/v1/account" || r.Method != http.MethodGet {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(w, http.StatusOK, CloudAccount{
+			AccountIDHash: "acct_hash",
+			Relay: &CloudRelayConfig{
+				RelayID:             "us-west",
+				RelayURL:            "https://relay-us.example.test",
+				Credential:          "relay-credential",
+				CredentialExpiresAt: "2026-05-30T01:02:03Z",
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := CloudClient{BaseURL: server.URL, Token: "account-token"}
+	account, err := client.GetAccount(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.AccountIDHash != "acct_hash" || account.Relay == nil || account.Relay.RelayURL != "https://relay-us.example.test" {
+		t.Fatalf("account = %#v", account)
+	}
+	relayClient, relay, ok := relayClientFromCloudAccount(account, nil)
+	if !ok || relay.RelayID != "us-west" || relayClient.BaseURL != "https://relay-us.example.test" || relayClient.Token != "relay-credential" {
+		t.Fatalf("relay client = %#v relay=%#v ok=%v", relayClient, relay, ok)
+	}
+}
+
 func TestCloudClientListsPairingSignals(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/pairing/requests" || r.URL.Query().Get("device_id") != "dev_host" {
@@ -87,5 +121,109 @@ func TestCloudClientListsPairingSignals(t *testing.T) {
 	}
 	if len(requests) != 1 || requests[0].RequestID != "pair_1" {
 		t.Fatalf("requests = %#v", requests)
+	}
+}
+
+func TestCloudClientRemovesDevice(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer account-token" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		if r.URL.Path != "/v1/devices/dev_phone/remove" || r.Method != http.MethodPost {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"account_id_hash":        "acct_hash",
+			"device_id":              "dev_phone",
+			"device_name":            "Phone",
+			"device_kind":            "mobile",
+			"public_key":             "ignored-by-client-test",
+			"public_key_fingerprint": "sha256:test",
+			"can_host":               false,
+			"can_control":            true,
+			"status":                 "revoked",
+			"updated_at":             time.Now().UTC().Format(time.RFC3339Nano),
+		})
+	}))
+	defer server.Close()
+
+	client := CloudClient{BaseURL: server.URL, Token: "account-token"}
+	removed, err := client.RemoveDevice(context.Background(), "dev_phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.DeviceID != "dev_phone" || removed.Status != cloudDeviceStatusRevoked {
+		t.Fatalf("removed = %#v", removed)
+	}
+}
+
+func TestRelayClientEnvelopeRoundTripCallsBrokerAPI(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer account-token" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		requests = append(requests, r.Method+" "+r.URL.String())
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/relay/envelopes":
+			var envelope RelayEnvelope
+			if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
+				t.Fatal(err)
+			}
+			envelope.EnvelopeID = "env_1"
+			writeJSON(w, http.StatusAccepted, envelope)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/relay/envelopes":
+			if r.URL.Query().Get("device_id") != "dev_host" || r.URL.Query().Get("limit") != "5" {
+				t.Fatalf("query = %s", r.URL.RawQuery)
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"envelopes": []RelayEnvelope{{
+				Version:       relayEnvelopeVersion,
+				EnvelopeID:    "env_1",
+				FromDeviceID:  "dev_phone",
+				ToDeviceID:    "dev_host",
+				PayloadKind:   relayPayloadKindControlHello,
+				PayloadBase64: "aGVsbG8=",
+			}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/relay/envelopes/env_1/ack":
+			var input relayEnvelopeAckInput
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatal(err)
+			}
+			if input.DeviceID != "dev_host" {
+				t.Fatalf("ack input = %#v", input)
+			}
+			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := RelayClient{BaseURL: server.URL, Token: "account-token"}
+	created, err := client.EnqueueRelayEnvelope(context.Background(), RelayEnvelope{
+		Version:       relayEnvelopeVersion,
+		FromDeviceID:  "dev_phone",
+		ToDeviceID:    "dev_host",
+		PayloadKind:   relayPayloadKindControlHello,
+		PayloadBase64: "aGVsbG8=",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.EnvelopeID != "env_1" {
+		t.Fatalf("created = %#v", created)
+	}
+	envelopes, err := client.ListRelayEnvelopes(context.Background(), "dev_host", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(envelopes) != 1 || envelopes[0].PayloadKind != relayPayloadKindControlHello {
+		t.Fatalf("envelopes = %#v", envelopes)
+	}
+	if err := client.AckRelayEnvelope(context.Background(), "env_1", "dev_host"); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 3 {
+		t.Fatalf("requests = %#v, want 3 calls", requests)
 	}
 }

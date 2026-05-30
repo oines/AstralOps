@@ -12,7 +12,10 @@ import (
 	"sync"
 )
 
-const appSettingsVersion = 1
+const (
+	appSettingsVersion  = 1
+	defaultCloudBaseURL = "https://cloud-astralops.oines.dev"
+)
 
 type AppSettings struct {
 	Version       int                   `json:"version"`
@@ -174,6 +177,7 @@ func defaultAppSettings() AppSettings {
 		},
 		Cloud: CloudSettings{
 			Enabled: false,
+			BaseURL: defaultCloudBaseURL,
 		},
 		Updates: UpdateSettings{
 			AutoCheck: true,
@@ -338,6 +342,9 @@ func normalizedAppSettings(settings AppSettings) AppSettings {
 		settings.RemoteControl.ListenAddr = defaultRemoteControlListenAddr
 	}
 	settings.Cloud.BaseURL = strings.TrimRight(strings.TrimSpace(settings.Cloud.BaseURL), "/")
+	if settings.Cloud.BaseURL == "" {
+		settings.Cloud.BaseURL = defaultCloudBaseURL
+	}
 	settings.Cloud.AccountToken = strings.TrimSpace(settings.Cloud.AccountToken)
 	return settings
 }

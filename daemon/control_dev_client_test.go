@@ -181,6 +181,60 @@ func TestControlClientResolveTargetRequiresKnownIdentityForFallback(t *testing.T
 	}
 }
 
+func TestControlClientTransportPlanOrdersDirectFallbackRelay(t *testing.T) {
+	transports := controlClientTransportPlan(controlClientTarget{
+		BaseURL:      "http://lan-host",
+		FallbackHost: "http://explicit-host",
+		RelayClient:  RelayClient{BaseURL: "https://relay.example.test", Token: "account-token"},
+	})
+	kinds := controlClientTransportKinds(transports)
+	want := []controlClientTransportKind{controlClientTransportDirect, controlClientTransportExplicitHost, controlClientTransportRelay}
+	if len(kinds) != len(want) {
+		t.Fatalf("transport plan = %#v, want %#v", kinds, want)
+	}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Fatalf("transport plan = %#v, want %#v", kinds, want)
+		}
+	}
+}
+
+func TestControlClientTransportPlanUsesOnlyRelayForForcedRelay(t *testing.T) {
+	transports := controlClientTransportPlan(controlClientTarget{
+		UseRelay:     true,
+		BaseURL:      "http://lan-host",
+		FallbackHost: "http://explicit-host",
+		RelayClient:  RelayClient{BaseURL: "https://relay.example.test", Token: "account-token"},
+	})
+	kinds := controlClientTransportKinds(transports)
+	if len(kinds) != 1 || kinds[0] != controlClientTransportRelay {
+		t.Fatalf("transport plan = %#v, want forced relay only", kinds)
+	}
+}
+
+func TestControlClientRequestRoundTripTimeoutExtendsWorkspaceConnect(t *testing.T) {
+	timeout := controlClientRequestRoundTripTimeout(remoteHostLANTimeout, ControlRequest{Action: ControlActionWorkspaceConnect})
+	if timeout < 45*time.Second {
+		t.Fatalf("workspace connect timeout = %s, want at least 45s", timeout)
+	}
+	readTimeout := controlClientRequestRoundTripTimeout(remoteHostLANTimeout, ControlRequest{Action: ControlActionWorkspaces})
+	if readTimeout != remoteHostLANTimeout {
+		t.Fatalf("workspace read timeout = %s, want %s", readTimeout, remoteHostLANTimeout)
+	}
+	unbounded := controlClientRequestRoundTripTimeout(0, ControlRequest{Action: ControlActionWorkspaceConnect})
+	if unbounded != 0 {
+		t.Fatalf("unbounded timeout = %s, want 0", unbounded)
+	}
+}
+
+func controlClientTransportKinds(transports []controlClientTransport) []controlClientTransportKind {
+	kinds := make([]controlClientTransportKind, 0, len(transports))
+	for _, transport := range transports {
+		kinds = append(kinds, transport.Kind())
+	}
+	return kinds
+}
+
 func TestControlClientRequestFallsBackWhenLanControlDialFails(t *testing.T) {
 	hostApp, _ := newRemoteControlHandlerTestApp(t)
 	hostServer := httptest.NewServer(remoteControlHandler(hostApp, false))
@@ -189,6 +243,7 @@ func TestControlClientRequestFallsBackWhenLanControlDialFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	_, err = hostApp.store.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:             controllerStore.deviceIdentity.DeviceID,
 		ControllerPublicKey:            controllerStore.deviceIdentity.PublicKey,
@@ -240,6 +295,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	capabilities := []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceFilesWrite, CapabilityWorkspaceExec, CapabilityAttachmentIngest, CapabilityMediaStream, CapabilityHostManage}
 	runTerminal := terminalAvailableOnHost()
 	if runTerminal {

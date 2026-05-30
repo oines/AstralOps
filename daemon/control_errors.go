@@ -5,6 +5,8 @@ import (
 	"net/http"
 )
 
+const controlAuthorizationRequiredCode = "control_authorization_required"
+
 type actionError struct {
 	Status  int
 	Code    string

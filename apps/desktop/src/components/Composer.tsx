@@ -103,7 +103,7 @@ export function Composer({
   const effectiveEffort = effortOverride || normalizeEffort(currentEffort);
   const effectivePermissionMode: PermissionMode = permissionLocked ? "bypassPermissions" : permissionMode;
   const slashQuery = input.startsWith("/") && !input.includes("\n") ? input.slice(1).trim().toLowerCase() : "";
-  const slashPaletteOpen = input.startsWith("/") && !disabled && !sending && !input.includes("\n");
+  const slashPaletteOpen = input.startsWith("/") && !disabled && !input.includes("\n");
   const filteredCommands = useMemo(
     () => filterCommands(commands, slashQuery),
     [commands, slashQuery],
@@ -152,13 +152,17 @@ export function Composer({
 
   async function submit(): Promise<void> {
     const trimmed = input.trim();
-    if (!trimmed && attachments.length === 0) return;
+    const draftAttachments = attachments;
+    if (!trimmed && draftAttachments.length === 0) return;
     if (disabled || sending) return;
+    setInput("");
+    setAttachments([]);
     setSending(true);
     try {
-      await onSend(trimmed, attachments);
-      setInput("");
-      setAttachments([]);
+      await onSend(trimmed, draftAttachments);
+    } catch {
+      setInput((current) => current || trimmed);
+      setAttachments((current) => current.length > 0 ? current : draftAttachments);
     } finally {
       setSending(false);
     }
@@ -185,7 +189,7 @@ export function Composer({
   }
 
   async function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
-    if (disabled || sending) return;
+    if (disabled) return;
     const files = Array.from(event.clipboardData.files || []);
     const paths = files.map((file) => (file as File & { path?: string }).path || "").filter(Boolean);
     if (paths.length > 0) {
@@ -286,8 +290,8 @@ export function Composer({
         ) : null}
         <textarea
           className="block max-h-32 min-h-8 w-full resize-none overflow-y-auto border-0 bg-transparent px-2 py-1 text-[14px] font-medium leading-5 text-[#202124] outline-none placeholder:font-medium placeholder:text-[#b8b5af] select-text"
-          disabled={disabled || sending}
-          placeholder={sending ? "正在发送..." : placeholder}
+          disabled={disabled}
+          placeholder={placeholder}
           ref={textareaRef}
           rows={1}
           value={input}

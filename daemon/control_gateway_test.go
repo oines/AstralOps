@@ -26,7 +26,9 @@ func newControlGatewayTestApp(t *testing.T, agent AgentKind, runtime AgentRuntim
 		t.Fatal(err)
 	}
 	session := st.createSession(workspace, agent)
-	return &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{agent: runtime}}, workspace, session
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{agent: runtime}}
+	app.ssh = newSSHManager(app)
+	return app, workspace, session
 }
 
 func trustControlDevice(t *testing.T, app *app, deviceID string, capabilities ...string) TrustGrant {
@@ -307,6 +309,76 @@ func TestControlGatewayCoreReadHidesHostWorkspaceAndSessionInternals(t *testing.
 	storedSession, ok := app.store.getSession(session.ID)
 	if !ok || storedSession.NativeSessionID != "session-native-id" || storedSession.NativeThreadID != "session-native-thread" || storedSession.ForkedFromNativeAnchor != "native-anchor" {
 		t.Fatalf("stored session was mutated: %#v", storedSession)
+	}
+}
+
+func TestControlGatewayReadsWorkspaceConnectionFromHostState(t *testing.T) {
+	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	workspace, err := app.store.createWorkspace(createWorkspaceRequest{
+		Name:   "Remote SSH",
+		Target: "ssh",
+		Agent:  AgentCodex,
+		SSH:    &SSHConfig{Endpoint: "root@example.com", Port: 22, RemoteCWD: "/srv/app"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := initialSSHConnection(workspace, connectionConnected)
+	state.RemoteOS = "linux"
+	app.ssh.seedState(workspace, state)
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		RequestID:          "req_workspace_connection",
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionWorkspaceConnection,
+		Params:             map[string]any{"workspace_id": workspace.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, ok := response.Result.(WorkspaceConnection)
+	if !ok {
+		t.Fatalf("result = %#v, want WorkspaceConnection", response.Result)
+	}
+	if connection.WorkspaceID != workspace.ID || connection.Status != connectionConnected || connection.DisplayCWD == "" {
+		t.Fatalf("connection = %#v, want Host SSH connection state", connection)
+	}
+}
+
+func TestControlGatewayCreatesSession(t *testing.T) {
+	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionSessionCreate,
+		Params: map[string]any{
+			"workspace_id": workspace.ID,
+			"agent":        AgentClaude,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, ok := response.Result.(Session)
+	if !ok {
+		t.Fatalf("session create result = %#v, want Session", response.Result)
+	}
+	if session.WorkspaceID != workspace.ID || session.Agent != AgentClaude || session.Status != "idle" {
+		t.Fatalf("session = %#v", session)
+	}
+	if session.NativeSessionID != "" || session.NativeThreadID != "" {
+		t.Fatalf("remote session leaked native ids: %#v", session)
+	}
+	stored, ok := app.store.getSession(session.ID)
+	if !ok || stored.NativeSessionID == "" {
+		t.Fatalf("stored session = %#v ok=%v, want Host-owned native id", stored, ok)
+	}
+	if !containsEventKind(app.store.queryEvents("", session.ID, 0), "session.started") {
+		t.Fatalf("events = %#v, want session.started", eventKinds(app.store.queryEvents("", session.ID, 0)))
 	}
 }
 

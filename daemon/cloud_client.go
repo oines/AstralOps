@@ -80,18 +80,28 @@ type cloudPairingSignalListResponse struct {
 	Requests []CloudPairingSignal `json:"requests"`
 }
 
-func (c CloudClient) RegisterDevice(ctx context.Context, identity DeviceIdentity, canHost, canControl bool, relayURL string) (CloudDeviceRecord, error) {
-	req := cloudDeviceRegistration{
-		DeviceID:             identity.DeviceID,
-		DeviceName:           identity.DeviceName,
-		DeviceKind:           identity.DeviceKind,
-		PublicKey:            identity.PublicKey,
-		PublicKeyFingerprint: identity.PublicKeyFingerprint,
-		Capabilities:         normalizeCapabilities(identity.Capabilities),
-		CanHost:              canHost,
-		CanControl:           canControl,
-		RelayURL:             strings.TrimSpace(relayURL),
+type cloudLoginCodeExchangeRequest struct {
+	LoginCode string                  `json:"login_code"`
+	Device    cloudDeviceRegistration `json:"device"`
+}
+
+type cloudLoginCodeExchangeResponse struct {
+	Account      CloudAccount       `json:"account"`
+	AccountToken string             `json:"account_token"`
+	ExpiresAt    string             `json:"expires_at,omitempty"`
+	Device       *CloudDeviceRecord `json:"device,omitempty"`
+}
+
+func (c CloudClient) GetAccount(ctx context.Context) (CloudAccount, error) {
+	var out CloudAccount
+	if err := c.do(ctx, http.MethodGet, "/v1/account", nil, &out); err != nil {
+		return CloudAccount{}, err
 	}
+	return out, nil
+}
+
+func (c CloudClient) RegisterDevice(ctx context.Context, identity DeviceIdentity, canHost, canControl bool, relayURL string) (CloudDeviceRecord, error) {
+	req := cloudDeviceRegistrationFromIdentity(identity, canHost, canControl, relayURL)
 	var out CloudDeviceRecord
 	if err := c.do(ctx, http.MethodPost, "/v1/devices", req, &out); err != nil {
 		return CloudDeviceRecord{}, err
@@ -118,6 +128,14 @@ func (c CloudClient) HeartbeatDevice(ctx context.Context, deviceID, relayURL str
 func (c CloudClient) MarkDeviceOffline(ctx context.Context, deviceID string) (CloudDeviceRecord, error) {
 	var out CloudDeviceRecord
 	if err := c.do(ctx, http.MethodPost, "/v1/devices/"+pathEscape(deviceID)+"/offline", map[string]any{}, &out); err != nil {
+		return CloudDeviceRecord{}, err
+	}
+	return out, nil
+}
+
+func (c CloudClient) RemoveDevice(ctx context.Context, deviceID string) (CloudDeviceRecord, error) {
+	var out CloudDeviceRecord
+	if err := c.do(ctx, http.MethodPost, "/v1/devices/"+pathEscape(deviceID)+"/remove", map[string]any{}, &out); err != nil {
 		return CloudDeviceRecord{}, err
 	}
 	return out, nil
@@ -154,13 +172,66 @@ func (c CloudClient) ResolvePairingSignal(ctx context.Context, requestID, status
 	return out.Request, nil
 }
 
-func (c CloudClient) do(ctx context.Context, method, path string, body any, out any) error {
-	baseURL := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
-	if baseURL == "" {
-		return fmt.Errorf("cloud base url required")
+func ExchangeCloudLoginCode(ctx context.Context, baseURL, loginCode string, identity DeviceIdentity, canHost, canControl bool, httpClient *http.Client) (cloudLoginCodeExchangeResponse, error) {
+	var out cloudLoginCodeExchangeResponse
+	req := cloudLoginCodeExchangeRequest{
+		LoginCode: strings.TrimSpace(loginCode),
+		Device:    cloudDeviceRegistrationFromIdentity(identity, canHost, canControl, ""),
 	}
-	if strings.TrimSpace(c.Token) == "" {
-		return fmt.Errorf("cloud token required")
+	if err := jsonRequest(ctx, "cloud", baseURL, httpClient, http.MethodPost, "/v1/auth/login-code/exchange", req, &out, nil); err != nil {
+		return cloudLoginCodeExchangeResponse{}, err
+	}
+	return out, nil
+}
+
+func cloudDeviceRegistrationFromIdentity(identity DeviceIdentity, canHost, canControl bool, relayURL string) cloudDeviceRegistration {
+	return cloudDeviceRegistration{
+		DeviceID:             identity.DeviceID,
+		DeviceName:           identity.DeviceName,
+		DeviceKind:           identity.DeviceKind,
+		PublicKey:            identity.PublicKey,
+		PublicKeyFingerprint: identity.PublicKeyFingerprint,
+		Capabilities:         normalizeCapabilities(identity.Capabilities),
+		CanHost:              canHost,
+		CanControl:           canControl,
+		RelayURL:             strings.TrimSpace(relayURL),
+	}
+}
+
+func (c CloudClient) do(ctx context.Context, method, path string, body any, out any) error {
+	return authedJSONRequest(ctx, "cloud", c.BaseURL, c.Token, c.HTTPClient, method, path, body, out)
+}
+
+func relayClientFromCloudAccount(account CloudAccount, httpClient *http.Client) (RelayClient, CloudRelayConfig, bool) {
+	if account.Relay == nil {
+		return RelayClient{}, CloudRelayConfig{}, false
+	}
+	relay := CloudRelayConfig{
+		RelayID:             strings.TrimSpace(account.Relay.RelayID),
+		RelayURL:            strings.TrimSpace(account.Relay.RelayURL),
+		Credential:          strings.TrimSpace(account.Relay.Credential),
+		CredentialExpiresAt: strings.TrimSpace(account.Relay.CredentialExpiresAt),
+	}
+	if relay.RelayURL == "" || relay.Credential == "" {
+		return RelayClient{}, CloudRelayConfig{}, false
+	}
+	if relay.RelayID == "" {
+		relay.RelayID = "default"
+	}
+	return RelayClient{BaseURL: relay.RelayURL, Token: relay.Credential, HTTPClient: httpClient}, relay, true
+}
+
+func authedJSONRequest(ctx context.Context, serviceName, baseURLValue, token string, httpClient *http.Client, method, path string, body any, out any) error {
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("%s token required", serviceName)
+	}
+	return jsonRequest(ctx, serviceName, baseURLValue, httpClient, method, path, body, out, map[string]string{"Authorization": "Bearer " + strings.TrimSpace(token)})
+}
+
+func jsonRequest(ctx context.Context, serviceName, baseURLValue string, httpClient *http.Client, method, path string, body any, out any, headers map[string]string) error {
+	baseURL := strings.TrimRight(strings.TrimSpace(baseURLValue), "/")
+	if baseURL == "" {
+		return fmt.Errorf("%s base url required", serviceName)
 	}
 	var reader io.Reader
 	if body != nil {
@@ -174,11 +245,13 @@ func (c CloudClient) do(ctx context.Context, method, path string, body any, out 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := c.HTTPClient
+	client := httpClient
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
@@ -189,7 +262,7 @@ func (c CloudClient) do(ctx context.Context, method, path string, body any, out 
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		payload, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return fmt.Errorf("cloud request failed: %s: %s", res.Status, strings.TrimSpace(string(payload)))
+		return fmt.Errorf("%s request failed: %s: %s", serviceName, res.Status, strings.TrimSpace(string(payload)))
 	}
 	if out == nil {
 		return nil

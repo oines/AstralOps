@@ -41,6 +41,7 @@ declare global {
       ingestClipboardImage: (sessionId: string) => Promise<import("@astralops/protocol").SessionInputAttachment | null>;
       getWorkspaceOpeners: () => Promise<WorkspaceOpenerInfo[]>;
       openWorkspace: (opener: WorkspaceOpenerId, workspace: unknown) => Promise<{ ok: boolean; error?: string }>;
+      openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>;
       openLogsDirectory: () => Promise<{ ok: boolean; error?: string }>;
       logClientEvent: (payload: { event: string; level?: "info" | "warn" | "error"; details?: Record<string, unknown> }) => Promise<{ ok: boolean; error?: string }>;
       setDiagnosticsLoggingEnabled: (enabled: boolean) => Promise<{ ok: boolean; error?: string }>;

@@ -83,7 +83,7 @@ func startRemoteControlRuntime(a *app, settings RemoteControlSettings) (*remoteC
 	}
 	if settings.LANDiscovery {
 		if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok {
-			discoveryConn, err := startRemoteControlDiscovery(a.store.hostInfo().Identity, tcpAddr.Port)
+			discoveryConn, err := startRemoteControlDiscoveryForApp(a, tcpAddr.Port)
 			if err != nil {
 				_ = ln.Close()
 				return nil, fmt.Errorf("remote control discovery: %w", err)
@@ -113,7 +113,7 @@ func (r *remoteControlRuntime) applyDiscovery(a *app, enabled bool) error {
 		if !ok {
 			return fmt.Errorf("remote control listener address is not TCP")
 		}
-		conn, err := startRemoteControlDiscovery(a.store.hostInfo().Identity, tcpAddr.Port)
+		conn, err := startRemoteControlDiscoveryForApp(a, tcpAddr.Port)
 		if err != nil {
 			return fmt.Errorf("remote control discovery: %w", err)
 		}
@@ -185,13 +185,41 @@ func validateRemoteControlListenAddr(addr string) error {
 
 func remoteControlHandler(a *app, devPairing bool) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/host", a.handleHost)
-	mux.HandleFunc("/v1/pairing/requests", a.handlePairingRequestSubmit)
-	mux.HandleFunc("/v1/pairing/requests/", a.handlePairingRequestStatus)
-	mux.HandleFunc("/v1/control/ws", a.handleControlWS)
+	mux.HandleFunc("/v1/host", a.handleRemoteControlHost)
+	mux.HandleFunc("/v1/pairing/requests", a.handleRemoteControlPairingRequestSubmit)
+	mux.HandleFunc("/v1/pairing/requests/", a.handleRemoteControlPairingRequestStatus)
+	mux.HandleFunc("/v1/control/ws", a.handleRemoteControlWS)
 	if devPairing {
 		mux.HandleFunc("/v1/trust/devices", a.handleTrustDevices)
 		mux.HandleFunc("/v1/trust/devices/", a.handleTrustDeviceAction)
 	}
 	return mux
+}
+
+func (a *app) handleRemoteControlHost(w http.ResponseWriter, r *http.Request) {
+	if !a.requireCloudMeshRemoteControl(w) {
+		return
+	}
+	a.handleHost(w, r)
+}
+
+func (a *app) handleRemoteControlPairingRequestSubmit(w http.ResponseWriter, r *http.Request) {
+	if !a.requireCloudMeshRemoteControl(w) {
+		return
+	}
+	a.handlePairingRequestSubmit(w, r)
+}
+
+func (a *app) handleRemoteControlPairingRequestStatus(w http.ResponseWriter, r *http.Request) {
+	if !a.requireCloudMeshRemoteControl(w) {
+		return
+	}
+	a.handlePairingRequestStatus(w, r)
+}
+
+func (a *app) handleRemoteControlWS(w http.ResponseWriter, r *http.Request) {
+	if !a.requireCloudMeshRemoteControl(w) {
+		return
+	}
+	a.handleControlWS(w, r)
 }

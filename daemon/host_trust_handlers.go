@@ -110,7 +110,14 @@ func (a *app) cleanupExceptedControlSessionForDevice(controllerDeviceID, connect
 	a.controlMu.Lock()
 	conn := a.controlSessions[connectionID]
 	if conn == nil || conn.controllerDeviceID != controllerDeviceID {
+		relaySession := a.controlRelaySessions[connectionID]
+		if relaySession == nil || relaySession.controllerDeviceID != controllerDeviceID {
+			a.controlMu.Unlock()
+			return
+		}
 		a.controlMu.Unlock()
+		relaySession.cancelAllControlStreams()
+		a.detachTerminalViewersForControlSession(relaySession.id, reason)
 		return
 	}
 	a.controlMu.Unlock()

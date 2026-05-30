@@ -23,34 +23,38 @@ import (
 var version = "dev"
 
 type app struct {
-	store             *store
-	settings          *settingsStore
-	token             string
-	addr              string
-	runtimePort       int
-	hub               *eventHub
-	upgrader          websocket.Upgrader
-	agents            map[AgentKind]agentInfo
-	runtimes          map[AgentKind]AgentRuntime
-	ssh               *sshManager
-	projections       *sessionProjectionCache
-	controlHelloLimit int64
-	controlFrameLimit int64
-	controlMu         sync.Mutex
-	controlSessions   map[string]*controlWSConn
-	terminalMu        sync.Mutex
-	terminals         *terminalManager
-	queueMu           sync.Mutex
-	queues            map[string][]queuedTurn
-	codexExecMu       sync.Mutex
-	codexExec         map[string]codexExecCommand
-	codexRemoteHomeMu sync.Mutex
-	codexRemoteHome   map[string]string
-	remoteControlMu   sync.Mutex
-	remoteControl     *remoteControlRuntime
-	cloudMu           sync.Mutex
-	cloudCancel       context.CancelFunc
-	cloudSettings     CloudSettings
+	store                *store
+	settings             *settingsStore
+	token                string
+	addr                 string
+	runtimePort          int
+	hub                  *eventHub
+	upgrader             websocket.Upgrader
+	agents               map[AgentKind]agentInfo
+	runtimes             map[AgentKind]AgentRuntime
+	ssh                  *sshManager
+	projections          *sessionProjectionCache
+	controlHelloLimit    int64
+	controlFrameLimit    int64
+	controlMu            sync.Mutex
+	controlSessions      map[string]*controlWSConn
+	controlRelaySessions map[string]*controlRelaySession
+	terminalMu           sync.Mutex
+	terminals            *terminalManager
+	queueMu              sync.Mutex
+	queues               map[string][]queuedTurn
+	codexExecMu          sync.Mutex
+	codexExec            map[string]codexExecCommand
+	codexRemoteHomeMu    sync.Mutex
+	codexRemoteHome      map[string]string
+	remoteControlMu      sync.Mutex
+	remoteControl        *remoteControlRuntime
+	cloudMu              sync.Mutex
+	cloudCancel          context.CancelFunc
+	cloudSettings        CloudSettings
+	cloudSelfRevoked     bool
+	cloudAuthMu          sync.Mutex
+	cloudAuthStates      map[string]cloudAuthState
 }
 
 func main() {
@@ -134,7 +138,11 @@ func main() {
 	mux.HandleFunc("/v1/host", a.auth(a.handleHost))
 	mux.HandleFunc("/v1/settings", a.auth(a.handleSettings))
 	mux.HandleFunc("/v1/settings/", a.auth(a.handleSettingsAction))
+	mux.HandleFunc("/v1/cloud/auth/callback", a.handleCloudAuthCallback)
+	mux.HandleFunc("/v1/cloud/auth/", a.auth(a.handleCloudAuthAction))
+	mux.HandleFunc("/v1/cloud/account", a.auth(a.handleCloudAccount))
 	mux.HandleFunc("/v1/cloud/devices", a.auth(a.handleCloudDevices))
+	mux.HandleFunc("/v1/cloud/devices/", a.auth(a.handleCloudDeviceAction))
 	mux.HandleFunc("/v1/cloud/heartbeat", a.auth(a.handleCloudHeartbeat))
 	mux.HandleFunc("/v1/cloud/pairing/requests", a.auth(a.handleCloudPairingRequests))
 	mux.HandleFunc("/v1/cloud/pairing/requests/", a.auth(a.handleCloudPairingRequestAction))

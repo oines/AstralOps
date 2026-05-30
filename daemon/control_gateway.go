@@ -29,6 +29,7 @@ const (
 	ControlActionSessionView                = "core.read.session_view"
 	ControlActionSessions                   = "core.read.sessions"
 	ControlActionWorkspaces                 = "core.read.workspaces"
+	ControlActionWorkspaceConnection        = "core.read.workspace.connection"
 	ControlActionEvents                     = "core.read.events"
 	ControlActionEventsSubscribe            = "core.subscribe.events"
 	ControlActionEventsUnsubscribe          = "core.unsubscribe.events"
@@ -39,6 +40,7 @@ const (
 	ControlActionWorkspaceCreate            = "core.control.workspace.create"
 	ControlActionWorkspaceConnect           = "core.control.workspace.connect"
 	ControlActionWorkspaceDisconnect        = "core.control.workspace.disconnect"
+	ControlActionSessionCreate              = "core.control.session.create"
 	ControlActionSessionFork                = "core.control.session.fork"
 	ControlActionSessionDelete              = "core.control.session.delete"
 	ControlActionInteractionRespond         = "interaction.respond"
@@ -98,7 +100,7 @@ func (a *app) executeControlRequest(req ControlRequest) (ControlResponse, error)
 	return a.executeControlRequestWithConnection(req, nil)
 }
 
-func (a *app) executeControlRequestWithConnection(req ControlRequest, conn *controlWSConn) (ControlResponse, error) {
+func (a *app) executeControlRequestWithConnection(req ControlRequest, conn controlConnection) (ControlResponse, error) {
 	ctx := context.Background()
 	if conn != nil {
 		ctx = conn.requestContext()
@@ -106,7 +108,7 @@ func (a *app) executeControlRequestWithConnection(req ControlRequest, conn *cont
 	return a.executeControlRequestWithContext(ctx, req, conn)
 }
 
-func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlRequest, conn *controlWSConn) (response ControlResponse, err error) {
+func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlRequest, conn controlConnection) (response ControlResponse, err error) {
 	startedAt := logControlActionStart(req)
 	defer func() {
 		if err != nil {
@@ -139,9 +141,9 @@ func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlR
 
 func controlActionCapability(action string) string {
 	switch action {
-	case ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
+	case ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionWorkspaceConnection, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
 		return CapabilityCoreRead
-	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionWorkspaceCreate, ControlActionWorkspaceConnect, ControlActionWorkspaceDisconnect, ControlActionSessionFork, ControlActionSessionDelete:
+	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionWorkspaceCreate, ControlActionWorkspaceConnect, ControlActionWorkspaceDisconnect, ControlActionSessionCreate, ControlActionSessionFork, ControlActionSessionDelete:
 		return CapabilityCoreControl
 	case ControlActionInteractionRespond:
 		return CapabilityInteractionRespond
@@ -174,7 +176,7 @@ func controlActionCapability(action string) string {
 	}
 }
 
-func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, conn *controlWSConn, grant TrustGrant) (any, error) {
+func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, conn controlConnection, grant TrustGrant) (any, error) {
 	switch req.Action {
 	case ControlActionSessionView:
 		var params struct {
@@ -199,6 +201,16 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		return sanitizeControlSessions(a.store.listSessions(params.WorkspaceID)), nil
 	case ControlActionWorkspaces:
 		return sanitizeControlWorkspaces(a.store.listWorkspaces()), nil
+	case ControlActionWorkspaceConnection:
+		var params workspaceReferenceParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		workspace, err := a.controlWorkspace(params.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		return a.ssh.getConnection(workspace), nil
 	case ControlActionEvents:
 		var params struct {
 			WorkspaceID string `json:"workspace_id"`
@@ -232,7 +244,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if streamID == "" {
 			return nil, newActionError(http.StatusBadRequest, "event_subscription_id_required", "stream_id required")
 		}
-		return eventSubscriptionCancelResult{StreamID: streamID, Cancelled: conn.cancelEventSubscription(streamID)}, nil
+		return eventSubscriptionCancelResult{StreamID: streamID, Cancelled: conn.cancelControlStream(streamID)}, nil
 	case ControlActionSessionInput:
 		var params struct {
 			SessionID       string            `json:"session_id"`
@@ -305,6 +317,16 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 			return nil, err
 		}
 		return a.ssh.disconnect(workspace), nil
+	case ControlActionSessionCreate:
+		var params createSessionRequest
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		session, err := a.createSession(params)
+		if err != nil {
+			return nil, err
+		}
+		return sanitizeControlSession(session), nil
 	case ControlActionSessionFork:
 		var params sessionForkControlParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
@@ -402,7 +424,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if streamID == "" {
 			return nil, newActionError(http.StatusBadRequest, "media_stream_id_required", "stream_id required")
 		}
-		return mediaStreamCancelResult{StreamID: streamID, Cancelled: conn.cancelMediaStream(streamID)}, nil
+		return mediaStreamCancelResult{StreamID: streamID, Cancelled: conn.cancelControlStream(streamID)}, nil
 	case ControlActionWorkspaceFilesRead:
 		var params workspaceFilesReadParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
@@ -454,7 +476,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if streamID == "" {
 			return nil, newActionError(http.StatusBadRequest, "workspace_file_stream_id_required", "stream_id required")
 		}
-		return workspaceFileStreamCancelResult{StreamID: streamID, Cancelled: conn.cancelWorkspaceFileStream(streamID)}, nil
+		return workspaceFileStreamCancelResult{StreamID: streamID, Cancelled: conn.cancelControlStream(streamID)}, nil
 	case ControlActionWorkspaceExec:
 		var params workspaceExecParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
@@ -512,7 +534,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		}
 		exceptConnectionID := ""
 		if conn != nil {
-			exceptConnectionID = conn.id
+			exceptConnectionID = conn.connectionID()
 		}
 		return a.revokeTrustedControlDevice(params.ControllerDeviceID, exceptConnectionID)
 	case ControlActionHostPairingList:

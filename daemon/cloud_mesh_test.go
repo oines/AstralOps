@@ -51,15 +51,24 @@ func TestCloudDeviceRecordRejectsFingerprintMismatch(t *testing.T) {
 	}
 }
 
-func TestRelayEnvelopeRequiresOpaqueSealedPayload(t *testing.T) {
+func TestRelayEnvelopeRequiresOpaqueControlTransportPayload(t *testing.T) {
 	envelope := RelayEnvelope{
 		Version:       relayEnvelopeVersion,
 		FromDeviceID:  "dev_phone",
 		ToDeviceID:    "dev_desktop",
-		PayloadKind:   relayPayloadKindControlSealedFrame,
-		PayloadBase64: base64.StdEncoding.EncodeToString([]byte(`{"type":"sealed","ciphertext":"..."}`)),
+		PayloadKind:   relayPayloadKindControlHello,
+		PayloadBase64: base64.StdEncoding.EncodeToString([]byte(`{"type":"hello"}`)),
 		CreatedAt:     "2026-05-29T00:00:00Z",
 	}
+	if err := validateRelayEnvelope(envelope); err != nil {
+		t.Fatal(err)
+	}
+	envelope.PayloadKind = relayPayloadKindControlHelloAck
+	envelope.ConnectionID = "ctrl_1"
+	if err := validateRelayEnvelope(envelope); err != nil {
+		t.Fatal(err)
+	}
+	envelope.PayloadKind = relayPayloadKindControlSealedFrame
 	if err := validateRelayEnvelope(envelope); err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +80,11 @@ func TestRelayEnvelopeRequiresOpaqueSealedPayload(t *testing.T) {
 	envelope.PayloadBase64 = base64.StdEncoding.EncodeToString([]byte("sealed"))
 	envelope.PayloadKind = "workspace.snapshot"
 	if err := validateRelayEnvelope(envelope); err == nil || !strings.Contains(err.Error(), "payload kind invalid") {
-		t.Fatalf("err = %v, want sealed frame payload kind requirement", err)
+		t.Fatalf("err = %v, want control transport payload kind requirement", err)
+	}
+	envelope.PayloadKind = relayPayloadKindControlSealedFrame
+	envelope.ConnectionID = ""
+	if err := validateRelayEnvelope(envelope); err == nil || !strings.Contains(err.Error(), "connection_id required") {
+		t.Fatalf("err = %v, want relay connection id requirement", err)
 	}
 }

@@ -26,12 +26,32 @@ func newRemoteControlHandlerTestApp(t *testing.T) (*app, Workspace) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &app{
+	setTestCloudMembership(t, st, true, true)
+	settings := newMeshActiveTestSettings(t, dir)
+	app := &app{
 		store:    st,
+		settings: settings,
 		hub:      newEventHub(),
 		runtimes: map[AgentKind]AgentRuntime{AgentCodex: &recordingRuntime{}},
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
-	}, workspace
+	}
+	app.ssh = newSSHManager(app)
+	return app, workspace
+}
+
+func newMeshActiveTestSettings(t *testing.T, dir string) *settingsStore {
+	t.Helper()
+	settings, err := loadSettingsStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	baseURL := "https://cloud.example.test"
+	token := "test-cloud-token"
+	if _, err := settings.patch(appSettingsPatch{Cloud: &cloudSettingsPatch{Enabled: &enabled, BaseURL: &baseURL, AccountToken: &token}}); err != nil {
+		t.Fatal(err)
+	}
+	return settings
 }
 
 func TestRemoteControlHandlerExposesOnlyRemoteSurfaceByDefault(t *testing.T) {
@@ -76,6 +96,7 @@ func TestRemoteControlDevPairingAndClientWorkspaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	grant, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead})
 	if err != nil {
 		t.Fatal(err)
@@ -106,10 +127,11 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead}); err != nil {
 		t.Fatal(err)
 	}
-	controllerApp := &app{store: controllerStore, hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
 
 	listReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts", nil)
 	listResp := httptest.NewRecorder()
@@ -121,11 +143,8 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 	if err := json.Unmarshal(listResp.Body.Bytes(), &hosts); err != nil {
 		t.Fatal(err)
 	}
-	if len(hosts.Hosts) != 1 || hosts.Hosts[0].DeviceID != hostApp.store.deviceIdentity.DeviceID || hosts.Hosts[0].Connection != remoteHostStatusOffline {
-		t.Fatalf("hosts = %#v, want one known offline Host", hosts.Hosts)
-	}
-	if !hosts.Hosts[0].KnownIdentity {
-		t.Fatalf("known host = %#v, want known_identity", hosts.Hosts[0])
+	if len(hosts.Hosts) != 0 {
+		t.Fatalf("hosts = %#v, want no non-cloud known hosts in selector", hosts.Hosts)
 	}
 
 	workspacesReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/workspaces", nil)
@@ -143,6 +162,20 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 	}
 	if workspaces[0].LocalCWD != "" || workspaces[0].LocalProjectionRoot != "" || workspaces[0].SSH != nil {
 		t.Fatalf("remote workspace leaked Host-private fields: %#v", workspaces[0])
+	}
+
+	connectionReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/workspaces/"+workspace.ID+"/connection", nil)
+	connectionResp := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(connectionResp, connectionReq)
+	if connectionResp.Code != http.StatusOK {
+		t.Fatalf("remote workspace connection status = %d body = %s", connectionResp.Code, connectionResp.Body.String())
+	}
+	var connection WorkspaceConnection
+	if err := json.Unmarshal(connectionResp.Body.Bytes(), &connection); err != nil {
+		t.Fatal(err)
+	}
+	if connection.WorkspaceID != workspace.ID || connection.Status != connectionConnected {
+		t.Fatalf("remote workspace connection = %#v, want Host state", connection)
 	}
 
 	filesReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/workspaces/"+workspace.ID+"/files", nil)
@@ -164,6 +197,37 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 	}
 }
 
+func TestRemoteHostTargetUsesCachedBaseURLBeforeDiscovery(t *testing.T) {
+	hostApp, _ := newRemoteControlHandlerTestApp(t)
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
+	defer hostServer.Close()
+
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestCloudMembership(t, controllerStore, false, true)
+	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+
+	started := time.Now()
+	target, err := controllerApp.remoteHostTarget(hostApp.store.deviceIdentity.DeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("remoteHostTarget took %s, want cached route without discovery timeout", elapsed)
+	}
+	if target.BaseURL != hostServer.URL {
+		t.Fatalf("target BaseURL = %q, want cached %q", target.BaseURL, hostServer.URL)
+	}
+	if target.Timeout != remoteHostLANTimeout {
+		t.Fatalf("target timeout = %s, want LAN timeout", target.Timeout)
+	}
+}
+
 func TestRemoteHostProxyCreatesWorkspaceAndBrowsesHostFilesystem(t *testing.T) {
 	hostApp, _ := newRemoteControlHandlerTestApp(t)
 	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
@@ -173,10 +237,11 @@ func TestRemoteHostProxyCreatesWorkspaceAndBrowsesHostFilesystem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreControl, CapabilityHostFileSystemBrowse}); err != nil {
 		t.Fatal(err)
 	}
-	controllerApp := &app{store: controllerStore, hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
 
 	hostDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(hostDir, "marker.txt"), []byte("ok"), 0o600); err != nil {
@@ -229,7 +294,8 @@ func TestRemoteHostProxyRejectsUnknownHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	controllerApp := &app{store: controllerStore, hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+	setTestCloudMembership(t, controllerStore, false, true)
+	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/dev_missing/workspaces", nil)
 	resp := httptest.NewRecorder()
@@ -252,10 +318,11 @@ func TestRemoteHostProxyApprovesPairingRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityHostManage}); err != nil {
 		t.Fatal(err)
 	}
-	controllerApp := &app{store: controllerStore, hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
 
 	listReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/pairing/requests", nil)
 	listResp := httptest.NewRecorder()
@@ -296,10 +363,11 @@ func TestRemoteHostProxyOpensWorkspacePTY(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTestCloudMembership(t, controllerStore, false, true)
 	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityTerminalOpen, CapabilityTerminalInput}); err != nil {
 		t.Fatal(err)
 	}
-	controllerApp := &app{store: controllerStore, hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
 	controllerServer := httptest.NewServer(http.HandlerFunc(controllerApp.handleRemoteHostAction))
 	defer controllerServer.Close()
 

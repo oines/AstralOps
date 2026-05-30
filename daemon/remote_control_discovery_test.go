@@ -39,6 +39,39 @@ func TestRemoteControlDiscoveryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRemoteControlDiscoverHostAtReturnsOnMatch(t *testing.T) {
+	identity := DeviceIdentity{
+		DeviceID:             "dev_host",
+		DeviceName:           "Host",
+		PublicKeyFingerprint: "sha256:HOST",
+	}
+	conn, err := startRemoteControlDiscovery(identity, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	port := conn.LocalAddr().(*net.UDPAddr).Port
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	started := time.Now()
+	candidate, ok, err := discoverRemoteControlHostAt(ctx, []net.UDPAddr{{IP: net.ParseIP("127.0.0.1"), Port: port}}, func(candidate LanHostCandidate) bool {
+		return candidate.DeviceID == "dev_host" && candidate.PublicKeyFingerprint == "sha256:HOST"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("matching candidate was not discovered")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("targeted discovery took %s, want early return before timeout", elapsed)
+	}
+	if candidate.DeviceID != "dev_host" || candidate.BaseURL == "" {
+		t.Fatalf("candidate = %#v, want matched Host", candidate)
+	}
+}
+
 func TestRemoteControlCandidateFromDiscoveryPacket(t *testing.T) {
 	body, err := json.Marshal(remoteControlDiscoveryPacket{
 		Type:    remoteControlDiscoveryResponseType,

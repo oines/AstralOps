@@ -796,7 +796,7 @@ func (a *app) prepareRemoteControlWorkspaceFileStream(ctx context.Context, ws Wo
 	}, nil
 }
 
-func (a *app) streamControlWorkspaceFile(ctx context.Context, params workspaceFilesStreamParams, result workspaceFileStreamResult, conn *controlWSConn, requestID string) {
+func (a *app) streamControlWorkspaceFile(ctx context.Context, params workspaceFilesStreamParams, result workspaceFileStreamResult, conn controlConnection, requestID string) {
 	ws, err := a.controlWorkspace(params.WorkspaceID)
 	if err != nil {
 		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "workspace_not_found", err.Error())})
@@ -809,7 +809,7 @@ func (a *app) streamControlWorkspaceFile(ctx context.Context, params workspaceFi
 	a.streamLocalControlWorkspaceFile(ctx, ws, result, conn, requestID)
 }
 
-func (a *app) streamLocalControlWorkspaceFile(ctx context.Context, ws Workspace, result workspaceFileStreamResult, conn *controlWSConn, requestID string) {
+func (a *app) streamLocalControlWorkspaceFile(ctx context.Context, ws Workspace, result workspaceFileStreamResult, conn controlConnection, requestID string) {
 	root := filepath.Clean(ws.LocalCWD)
 	target, _, err := resolveWorkspacePath(root, result.Path)
 	if err != nil {
@@ -872,7 +872,7 @@ func (a *app) streamLocalControlWorkspaceFile(ctx context.Context, ws Workspace,
 	conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameComplete, WorkspaceFile: workspaceFileCompleteFrame(result, requestID, seq+1, offset)})
 }
 
-func (a *app) streamRemoteControlWorkspaceFile(ctx context.Context, ws Workspace, result workspaceFileStreamResult, conn *controlWSConn, requestID string) {
+func (a *app) streamRemoteControlWorkspaceFile(ctx context.Context, ws Workspace, result workspaceFileStreamResult, conn controlConnection, requestID string) {
 	if a.ssh == nil {
 		conn.writePlain(controlPlainFrame{Type: workspaceFileStreamFrameError, WorkspaceFile: workspaceFileStreamErrorFrame(result, requestID, "ssh_unavailable", "ssh manager unavailable")})
 		return

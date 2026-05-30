@@ -3,6 +3,14 @@ import type {
   AppSettings,
   AppSettingsPatch,
   ClearMediaCacheResponse,
+  CloudAccountStatus,
+  CloudAuthLogoutResponse,
+  CloudAuthStartRequest,
+  CloudAuthStartResponse,
+  CloudDeviceListResponse,
+  CloudDeviceRecord,
+  CloudDeviceRemoveRequest,
+  CloudDeviceRemoveResponse,
   CloudPairingSignalResponse,
   CreateWorkspaceRequest,
   EditLastUserMessageRequest,
@@ -40,6 +48,22 @@ export type EventQuery = {
 export type EventSubscription = {
   close: () => void;
 };
+
+export class CoreRequestError extends Error {
+  readonly code?: string;
+  readonly status?: number;
+
+  constructor(message: string, options: { code?: unknown; status?: number } = {}) {
+    super(message);
+    this.name = "CoreRequestError";
+    this.code = typeof options.code === "string" ? options.code : undefined;
+    this.status = options.status;
+  }
+}
+
+export function isCoreRequestError(error: unknown, code: string): boolean {
+  return error instanceof CoreRequestError && error.code === code;
+}
 
 export type EventSubscriptionHandlers = {
   onEvent: (event: AstralEvent) => void;
@@ -82,6 +106,11 @@ export interface CoreClient {
   settings(): Promise<AppSettings>;
   patchSettings(patch: AppSettingsPatch): Promise<AppSettings>;
   clearMediaCache(): Promise<ClearMediaCacheResponse>;
+  cloudAccountStatus(): Promise<CloudAccountStatus>;
+  startCloudAuth(input: CloudAuthStartRequest): Promise<CloudAuthStartResponse>;
+  logoutCloudAuth(): Promise<CloudAuthLogoutResponse>;
+  listCloudDevices(): Promise<CloudDeviceRecord[]>;
+  removeCloudDevice(deviceId: string, options?: CloudDeviceRemoveRequest): Promise<CloudDeviceRemoveResponse>;
   listWorkspaces(): Promise<Workspace[]>;
   createWorkspace(input: CreateWorkspaceRequest): Promise<Workspace>;
   browseHostFileSystem(input: HostFileSystemBrowseParams): Promise<HostFileSystemBrowseResult>;
@@ -191,6 +220,11 @@ function requestAction(method: RequestMethod, pathname: string): string {
   if (parts[1] === "approvals" && parts[3] === "respond") return "interaction.respond";
   if (pathname === "/v1/events") return method === "GET" ? "events.read" : "events";
   if (pathname === "/v1/remote/hosts") return "remote.hosts.list";
+  if (pathname === "/v1/cloud/account") return "cloud.account.read";
+  if (pathname === "/v1/cloud/auth/start") return "cloud.auth.start";
+  if (pathname === "/v1/cloud/auth/logout") return "cloud.auth.logout";
+  if (pathname === "/v1/cloud/devices") return "cloud.devices.list";
+  if (method === "POST" && parts[1] === "cloud" && parts[2] === "devices" && parts[4] === "remove") return "cloud.device.remove";
   if (pathname === "/v1/cloud/pairing/requests") return "cloud.pairing.request";
   if (pathname === "/v1/settings") return method === "PATCH" ? "settings.patch" : "settings.read";
   if (pathname === "/v1/settings/actions/clear-media-cache") return "settings.clear_media_cache";
@@ -260,6 +294,16 @@ function numberDetail(value: unknown): number | undefined {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function httpErrorMessage(payload: { code?: unknown; error?: unknown }, remote: boolean): string | null {
+  if (payload.code === "control_action_unknown" && typeof payload.error === "string") {
+    return remote ? "远端 Host 不支持这个远控操作，通常是目标设备 AstralOps 版本过旧。请更新并重启目标设备。" : payload.error;
+  }
+  if (payload.code === "control_authorization_required") {
+    return "需要目标 Host 批准本机控制";
+  }
+  return typeof payload.error === "string" && payload.error ? payload.error : null;
 }
 
 export class LocalHttpControlChannel implements ControlChannel {
@@ -353,9 +397,10 @@ export class LocalHttpControlChannel implements ControlChannel {
     if (!res.ok) {
       const text = await res.text();
       try {
-        const payload = JSON.parse(text) as { error?: unknown };
-        if (typeof payload.error === "string" && payload.error) {
-          throw new Error(payload.error);
+        const payload = JSON.parse(text) as { code?: unknown; error?: unknown };
+        const message = httpErrorMessage(payload, false);
+        if (message) {
+          throw new CoreRequestError(message, { code: payload.code, status: res.status });
         }
       } catch (parseOrPayloadError) {
         if (parseOrPayloadError instanceof Error && parseOrPayloadError.name !== "SyntaxError") {
@@ -462,9 +507,10 @@ class RemoteDaemonControlChannel implements ControlChannel {
     if (!res.ok) {
       const text = await res.text();
       try {
-        const payload = JSON.parse(text) as { error?: unknown };
-        if (typeof payload.error === "string" && payload.error) {
-          throw new Error(payload.error);
+        const payload = JSON.parse(text) as { code?: unknown; error?: unknown };
+        const message = httpErrorMessage(payload, true);
+        if (message) {
+          throw new CoreRequestError(message, { code: payload.code, status: res.status });
         }
       } catch (parseOrPayloadError) {
         if (parseOrPayloadError instanceof Error && parseOrPayloadError.name !== "SyntaxError") {
@@ -526,6 +572,30 @@ export class LocalCoreClient implements CoreClient {
 
   clearMediaCache(): Promise<ClearMediaCacheResponse> {
     return this.channel.request("POST", "/v1/settings/actions/clear-media-cache", {});
+  }
+
+  cloudAccountStatus(): Promise<CloudAccountStatus> {
+    return this.channel.request("GET", "/v1/cloud/account");
+  }
+
+  startCloudAuth(input: CloudAuthStartRequest): Promise<CloudAuthStartResponse> {
+    return this.channel.request("POST", "/v1/cloud/auth/start", input);
+  }
+
+  logoutCloudAuth(): Promise<CloudAuthLogoutResponse> {
+    return this.channel.request("POST", "/v1/cloud/auth/logout", {});
+  }
+
+  async listCloudDevices(): Promise<CloudDeviceRecord[]> {
+    const result = await this.channel.request<CloudDeviceListResponse>("GET", "/v1/cloud/devices");
+    if (!Array.isArray(result.devices)) {
+      throw new Error("cloud device list response missing devices");
+    }
+    return result.devices;
+  }
+
+  removeCloudDevice(deviceId: string, options: CloudDeviceRemoveRequest = {}): Promise<CloudDeviceRemoveResponse> {
+    return this.channel.request("POST", `/v1/cloud/devices/${encodeURIComponent(deviceId)}/remove`, options);
   }
 
   listWorkspaces(): Promise<Workspace[]> {
@@ -667,12 +737,24 @@ class RemoteCoreClient extends LocalCoreClient {
     return Promise.reject(new Error("远端 Host 本地缓存不能由 Controller 清理"));
   }
 
-  createSession(): Promise<Session> {
-    return Promise.reject(new Error("远端创建 session 尚未进入控制协议"));
+  listCloudDevices(): Promise<CloudDeviceRecord[]> {
+    return Promise.reject(new Error("远端 Host cloud 设备列表不能由 Controller 读取"));
   }
 
-  workspaceConnection(): Promise<WorkspaceConnection> {
-    return Promise.reject(new Error("远端 workspace 连接状态由 Host 投影提供"));
+  cloudAccountStatus(): Promise<CloudAccountStatus> {
+    return Promise.reject(new Error("远端 Host cloud 账号状态不能由 Controller 读取"));
+  }
+
+  startCloudAuth(): Promise<CloudAuthStartResponse> {
+    return Promise.reject(new Error("远端 Host cloud 登录不能由 Controller 发起"));
+  }
+
+  logoutCloudAuth(): Promise<CloudAuthLogoutResponse> {
+    return Promise.reject(new Error("远端 Host cloud 登录不能由 Controller 退出"));
+  }
+
+  removeCloudDevice(): Promise<CloudDeviceRemoveResponse> {
+    return Promise.reject(new Error("远端 Host cloud 设备不能由 Controller 移除"));
   }
 
   deleteWorkspace(): Promise<{ ok: boolean }> {

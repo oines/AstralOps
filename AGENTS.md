@@ -1,5 +1,15 @@
 # AstralOps Agent Notes
 
+## Public repository secret rule
+
+This repository is public. Never commit real OAuth client secrets, database URLs, service credentials, access tokens, refresh tokens, account tokens, relay/cloud tokens, private keys, VPS credentials, `.env` files, local database files, database dumps, or production config with secret values.
+
+Only commit sanitized examples such as `.env.example` with placeholder values. If a task needs credentials, keep the values local/out-of-band and document only the required variable names, not the values.
+
+Production cloud control-plane code belongs in the private `oines/AstralOps-Cloud` repository, not this public repository. Public code may keep client contracts, protocol docs, relay-facing client code, and test-only fake brokers, but must not add a deployable production cloud account service here.
+
+Relay and cloud must remain separate services. The public `relay/` service may route only opaque encrypted envelopes. The private cloud service may return account relay configuration, but must not mount `/v1/relay/*` handlers or store relay payloads.
+
 ## Event contract memory
 
 Do not rely on chat context for the AstralOps event contract. Treat this file as the project-level source of truth.
@@ -75,6 +85,9 @@ turn.replaced is an AstralOps/Core-generated semantic event, not a Claude/Codex 
 message.user attachments and message.media are first-class transcript media surfaces. UI clients render media from AstralEvent.normalized only. Local filesystem paths in normalized media are Host-private references for Core/runtime/media serving; clients must not treat them as directly readable remote paths. Remote controllers must fetch media through Host/Core media capabilities using event_seq + media_id over the encrypted control/data channel.
 Remote control event projection must strip Host/runtime internals such as raw payloads, native session/thread IDs, local workspace paths, SSH config, and private transcript media paths before sending events to Controllers.
 Cloud device registry and relay code may store or route only account/device public metadata, presence, routing metadata, trust/revocation state, and opaque sealed envelopes. Do not add cloud fields for workspace/session/event payloads, prompts, approvals, file trees, PTY output, SSH config, attachments, or media content.
+Daemon must not send cloud account tokens to relay. Cloud may issue short-lived relay credentials containing account_id_hash, relay_id, kid, iat, and exp; relay validates those credentials locally and routes only opaque envelopes under the derived account namespace.
+Desktop UI account/mesh status must be read through the local daemon. UI-facing cloud account status may show account_id_hash, relay_id, relay_url, credential availability, and credential expiration, but must not expose the relay credential body or cloud account token.
+When Desktop UI removes a cloud mesh device and also needs local trust revoked, it must express that as a daemon/Core request such as `revoke_local_trust`; renderer code must not independently compose cloud registry state and Host trust state into a semantic outcome.
 Session input while a turn is running must be modeled as an explicit Core decision: start, queue, or steer. Controller UI must not independently decide continuation semantics for remote control. Desktop app settings, shell theme/window behavior, notifications, logs, and auto updates are local shell concerns unless a future Host management capability explicitly says otherwise.
 ```
 

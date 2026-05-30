@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 const (
@@ -22,6 +20,12 @@ const (
 	remoteHostStatusOffline = "offline"
 	remoteHostDiscoveryTTL  = 1500 * time.Millisecond
 	remoteHostLANTimeout    = 2 * time.Second
+
+	remoteHostAuthorizationNeedsPairing = "needs_pairing"
+	remoteHostAuthorizationPending      = "pending"
+	remoteHostAuthorizationApproved     = "approved"
+	remoteHostAuthorizationDenied       = "denied"
+	remoteHostAuthorizationKnown        = "known"
 )
 
 type remoteHostsResponse struct {
@@ -36,6 +40,9 @@ type remoteHostRecord struct {
 	KnownIdentity        bool     `json:"known_identity,omitempty"`
 	Status               string   `json:"status"`
 	Connection           string   `json:"connection"`
+	AuthorizationState   string   `json:"authorization_state,omitempty"`
+	PairingRequestID     string   `json:"pairing_request_id,omitempty"`
+	PairingStatus        string   `json:"pairing_status,omitempty"`
 	LastBaseURL          string   `json:"last_base_url,omitempty"`
 	LANBaseURL           string   `json:"lan_base_url,omitempty"`
 	Capabilities         []string `json:"capabilities,omitempty"`
@@ -47,8 +54,9 @@ func (a *app) handleRemoteHosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hosts := map[string]remoteHostRecord{}
-	for _, known := range a.store.listKnownHosts() {
-		hosts[known.DeviceID] = remoteHostRecordFromKnownHost(known)
+	if !a.cloudMeshActiveFor(cloudMembershipRole{CanControl: true}) {
+		writeJSON(w, http.StatusOK, remoteHostsResponse{Hosts: []remoteHostRecord{}})
+		return
 	}
 	a.mergeCloudRemoteHosts(r.Context(), hosts)
 	if truthyQuery(r.URL.Query().Get("discover")) {
@@ -83,17 +91,63 @@ func (a *app) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remote
 	if err != nil {
 		return
 	}
+	_ = a.cloudSyncApprovedPairingKnownHosts(reqCtx, client, devices)
 	selfID := a.store.hostInfo().Identity.DeviceID
+	pairingSignals := a.remoteHostPairingSignalsByHost(reqCtx, client, selfID)
 	for _, device := range devices {
+		if normalizeCloudDeviceStatus(device.Status) == cloudDeviceStatusRevoked {
+			delete(hosts, device.DeviceID)
+			continue
+		}
 		if device.DeviceID == "" || device.DeviceID == selfID || !device.CanHost {
 			continue
 		}
 		existing := hosts[device.DeviceID]
+		if known, ok := a.store.knownHost(device.DeviceID); ok {
+			existing = remoteHostRecordFromKnownHost(known)
+		}
 		if existing.PublicKeyFingerprint != "" && device.PublicKeyFingerprint != "" && existing.PublicKeyFingerprint != device.PublicKeyFingerprint {
 			continue
 		}
-		hosts[device.DeviceID] = remoteHostRecordFromCloudDevice(device, existing)
+		record := remoteHostRecordFromCloudDevice(device, existing)
+		record = remoteHostRecordWithPairingState(record, pairingSignals[device.DeviceID])
+		hosts[device.DeviceID] = record
 	}
+}
+
+func (a *app) remoteHostPairingSignalsByHost(ctx context.Context, client CloudClient, controllerDeviceID string) map[string]CloudPairingSignal {
+	controllerDeviceID = strings.TrimSpace(controllerDeviceID)
+	if controllerDeviceID == "" {
+		return nil
+	}
+	signals, err := client.ListPairingSignals(ctx, controllerDeviceID)
+	if err != nil {
+		return nil
+	}
+	out := map[string]CloudPairingSignal{}
+	for _, signal := range signals {
+		if strings.TrimSpace(signal.ControllerDeviceID) != controllerDeviceID {
+			continue
+		}
+		hostID := strings.TrimSpace(signal.HostDeviceID)
+		if hostID == "" || hostID == controllerDeviceID {
+			continue
+		}
+		if existing, ok := out[hostID]; ok && !cloudPairingSignalNewer(signal, existing) {
+			continue
+		}
+		out[hostID] = signal
+	}
+	return out
+}
+
+func cloudPairingSignalNewer(left, right CloudPairingSignal) bool {
+	leftTime := firstString(strings.TrimSpace(left.UpdatedAt), strings.TrimSpace(left.CreatedAt))
+	rightTime := firstString(strings.TrimSpace(right.UpdatedAt), strings.TrimSpace(right.CreatedAt))
+	if leftTime == "" || rightTime == "" {
+		return left.RequestID > right.RequestID
+	}
+	return leftTime > rightTime
 }
 
 func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
@@ -103,8 +157,15 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 	}
 	client := &http.Client{Timeout: remoteHostLANTimeout}
 	for _, candidate := range candidates {
+		existing, ok := hosts[candidate.DeviceID]
+		if !ok {
+			continue
+		}
 		known, ok := a.store.knownHost(candidate.DeviceID)
 		if !ok || known.PublicKeyFingerprint != candidate.PublicKeyFingerprint {
+			continue
+		}
+		if knownHostRevoked(known) {
 			continue
 		}
 		hostInfo, err := controlClientHostInfoWithClient(candidate.BaseURL, client)
@@ -114,7 +175,15 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 		if err := validateKnownLanHost(candidate, known, hostInfo); err != nil {
 			continue
 		}
-		hosts[candidate.DeviceID] = remoteHostRecordFromHostInfo(hostInfo, known, candidate.BaseURL)
+		known = a.rememberRemoteHostLANRoute(hostInfo, candidate.BaseURL, known)
+		next := remoteHostRecordFromHostInfo(hostInfo, known, candidate.BaseURL)
+		if next.Capabilities == nil {
+			next.Capabilities = existing.Capabilities
+		}
+		next.AuthorizationState = existing.AuthorizationState
+		next.PairingRequestID = existing.PairingRequestID
+		next.PairingStatus = existing.PairingStatus
+		hosts[candidate.DeviceID] = next
 	}
 }
 
@@ -134,6 +203,13 @@ func remoteHostRecordFromCloudDevice(device CloudDeviceRecord, existing remoteHo
 	}
 	if len(record.Capabilities) == 0 {
 		record.Capabilities = normalizeCapabilities(device.Capabilities)
+	}
+	if record.AuthorizationState == "" {
+		if record.KnownIdentity {
+			record.AuthorizationState = remoteHostAuthorizationKnown
+		} else {
+			record.AuthorizationState = remoteHostAuthorizationNeedsPairing
+		}
 	}
 	if record.Connection == remoteHostStatusLAN {
 		return record
@@ -157,6 +233,7 @@ func remoteHostRecordFromKnownHost(host KnownHost) remoteHostRecord {
 		Status:               remoteHostStatusOffline,
 		Connection:           remoteHostStatusOffline,
 		LastBaseURL:          host.LastBaseURL,
+		AuthorizationState:   remoteHostAuthorizationKnown,
 	}
 }
 
@@ -192,7 +269,35 @@ func remoteHostRecordFromHostInfo(info HostInfo, known KnownHost, lanBaseURL str
 		LastBaseURL:          known.LastBaseURL,
 		LANBaseURL:           strings.TrimRight(strings.TrimSpace(lanBaseURL), "/"),
 		Capabilities:         info.Capabilities,
+		AuthorizationState:   remoteHostAuthorizationKnown,
 	}
+}
+
+func remoteHostRecordWithPairingState(record remoteHostRecord, signal CloudPairingSignal) remoteHostRecord {
+	status := strings.TrimSpace(signal.Status)
+	if signal.RequestID != "" {
+		record.PairingRequestID = strings.TrimSpace(signal.RequestID)
+		record.PairingStatus = status
+	}
+	switch status {
+	case PairingStatusPending:
+		record.AuthorizationState = remoteHostAuthorizationPending
+	case PairingStatusDenied:
+		record.AuthorizationState = remoteHostAuthorizationDenied
+	case PairingStatusApproved:
+		if record.KnownIdentity {
+			record.AuthorizationState = remoteHostAuthorizationApproved
+		} else {
+			record.AuthorizationState = remoteHostAuthorizationNeedsPairing
+		}
+	default:
+		if record.KnownIdentity {
+			record.AuthorizationState = firstString(record.AuthorizationState, remoteHostAuthorizationKnown)
+		} else {
+			record.AuthorizationState = remoteHostAuthorizationNeedsPairing
+		}
+	}
+	return record
 }
 
 func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
@@ -244,6 +349,8 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 			"path":         r.URL.Query().Get("path"),
 			"mode":         "list",
 		})
+	case len(route) == 3 && route[0] == "workspaces" && route[2] == "connection" && r.Method == http.MethodGet:
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreRead, ControlActionWorkspaceConnection, map[string]any{"workspace_id": route[1]})
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "connect" && r.Method == http.MethodPost:
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreControl, ControlActionWorkspaceConnect, map[string]any{"workspace_id": route[1]})
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "disconnect" && r.Method == http.MethodPost:
@@ -269,6 +376,16 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 	case len(route) == 1 && route[0] == "sessions" && r.Method == http.MethodGet:
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreRead, ControlActionSessions, map[string]any{
 			"workspace_id": r.URL.Query().Get("workspace_id"),
+		})
+	case len(route) == 1 && route[0] == "sessions" && r.Method == http.MethodPost:
+		var req createSessionRequest
+		if err := decodeJSON(r.Body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreControl, ControlActionSessionCreate, map[string]any{
+			"workspace_id": req.WorkspaceID,
+			"agent":        req.Agent,
 		})
 	case len(route) == 2 && route[0] == "pairing" && route[1] == "requests" && r.Method == http.MethodGet:
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityHostManage, ControlActionHostPairingList, nil)
@@ -369,14 +486,14 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 		_ = local.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
-	remote, cipher, activeTarget, err := controlClientDialTarget(target, a.store)
+	remote, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, a.store)
 	if err != nil {
 		_ = local.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
 	defer remote.Close()
 
-	open, err := controlClientRoundTrip(remote, cipher, activeTarget.Timeout, a.store, ControlRequest{
+	open, err := controlClientFrameRoundTrip(remote, activeTarget.Timeout, a.store, ControlRequest{
 		RequestID:  "remote_pty_open_" + randomID(8),
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalOpen,
@@ -396,7 +513,7 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	attach, err := controlClientTerminalResponseRoundTrip(remote, cipher, activeTarget.Timeout, a.store, ControlRequest{
+	attach, err := controlClientTerminalResponseRoundTrip(remote, activeTarget.Timeout, a.store, ControlRequest{
 		RequestID:  "remote_pty_attach_" + randomID(8),
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalAttach,
@@ -404,12 +521,12 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 	})
 	if err != nil {
 		_ = local.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
-		_ = remoteTerminalClose(remote, cipher, a.store, terminalID)
+		_ = remoteTerminalClose(remote, a.store, terminalID)
 		return
 	}
 	if !attach.OK {
 		_ = local.WriteJSON(map[string]any{"type": "error", "message": controlResponseMessage(attach)})
-		_ = remoteTerminalClose(remote, cipher, a.store, terminalID)
+		_ = remoteTerminalClose(remote, a.store, terminalID)
 		return
 	}
 
@@ -424,7 +541,7 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 	go func() {
 		defer close(done)
 		for {
-			frame, err := controlClientRead(remote, cipher)
+			frame, err := remote.ReadPlain(0)
 			if err != nil {
 				localWriter.write(local, map[string]any{"type": "exit"})
 				return
@@ -474,14 +591,14 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 			return
 		case read, ok := <-clientReads:
 			if !ok {
-				_ = remoteTerminalClose(remote, cipher, a.store, terminalID)
+				_ = remoteTerminalClose(remote, a.store, terminalID)
 				return
 			}
 			if read.err != nil {
-				_ = remoteTerminalClose(remote, cipher, a.store, terminalID)
+				_ = remoteTerminalClose(remote, a.store, terminalID)
 				return
 			}
-			if err := remoteTerminalHandleClientMessage(remote, cipher, a.store, terminalID, read.message); err != nil {
+			if err := remoteTerminalHandleClientMessage(remote, a.store, terminalID, read.message); err != nil {
 				localWriter.write(local, map[string]any{"type": "error", "message": err.Error()})
 			}
 		}
@@ -503,10 +620,10 @@ func (w *remotePTYLocalWriter) write(conn interface{ WriteJSON(any) error }, pay
 	return conn.WriteJSON(payload) == nil
 }
 
-func remoteTerminalHandleClientMessage(socket *websocket.Conn, cipher *controlCipher, st *store, terminalID string, message ptyClientMessage) error {
+func remoteTerminalHandleClientMessage(conn controlClientFrameConn, st *store, terminalID string, message ptyClientMessage) error {
 	switch message.Type {
 	case "input":
-		return remoteTerminalRequest(socket, cipher, st, ControlRequest{
+		return remoteTerminalRequest(conn, st, ControlRequest{
 			RequestID:  "remote_pty_input_" + randomID(8),
 			Capability: CapabilityTerminalInput,
 			Action:     ControlActionTerminalInput,
@@ -514,7 +631,7 @@ func remoteTerminalHandleClientMessage(socket *websocket.Conn, cipher *controlCi
 		})
 	case "resize":
 		if message.Cols > 0 && message.Rows > 0 {
-			return remoteTerminalRequest(socket, cipher, st, ControlRequest{
+			return remoteTerminalRequest(conn, st, ControlRequest{
 				RequestID:  "remote_pty_resize_" + randomID(8),
 				Capability: CapabilityTerminalInput,
 				Action:     ControlActionTerminalResize,
@@ -522,21 +639,21 @@ func remoteTerminalHandleClientMessage(socket *websocket.Conn, cipher *controlCi
 			})
 		}
 	case "close":
-		return remoteTerminalClose(socket, cipher, st, terminalID)
+		return remoteTerminalClose(conn, st, terminalID)
 	}
 	return nil
 }
 
-func remoteTerminalRequest(socket *websocket.Conn, cipher *controlCipher, st *store, req ControlRequest) error {
+func remoteTerminalRequest(conn controlClientFrameConn, st *store, req ControlRequest) error {
 	req.ControllerDeviceID = st.deviceIdentity.DeviceID
-	return controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req})
+	return conn.WritePlain(controlPlainFrame{Type: "request", Request: &req})
 }
 
-func remoteTerminalClose(socket *websocket.Conn, cipher *controlCipher, st *store, terminalID string) error {
+func remoteTerminalClose(conn controlClientFrameConn, st *store, terminalID string) error {
 	if strings.TrimSpace(terminalID) == "" {
 		return nil
 	}
-	return remoteTerminalRequest(socket, cipher, st, ControlRequest{
+	return remoteTerminalRequest(conn, st, ControlRequest{
 		RequestID:  "remote_pty_close_" + randomID(8),
 		Capability: CapabilityTerminalInput,
 		Action:     ControlActionTerminalClose,
@@ -558,18 +675,27 @@ func controlResponseMessage(response ControlResponse) string {
 }
 
 func (a *app) remoteHostTarget(hostDeviceID string) (controlClientTarget, error) {
-	known, ok := a.store.knownHost(hostDeviceID)
-	if !ok {
-		return controlClientTarget{}, newActionError(http.StatusNotFound, "remote_host_unknown", "remote Host is not known; pair the Host first")
+	if !a.cloudMeshActiveFor(cloudMembershipRole{CanControl: true}) {
+		return controlClientTarget{}, cloudMeshInactiveError()
 	}
-	return controlClientResolveTarget(a.store, controlClientTargetOptions{
-		Host:             known.LastBaseURL,
-		Discover:         true,
-		HostDeviceID:     hostDeviceID,
-		DiscoveryPort:    defaultRemoteControlDiscoveryPort,
-		DiscoveryTimeout: remoteHostDiscoveryTTL,
-		LANTimeout:       remoteHostLANTimeout,
-	})
+	return a.remoteTargetResolver().ResolveKnownHost(hostDeviceID)
+}
+
+func (a *app) rememberRemoteHostLANRoute(hostInfo HostInfo, baseURL string, fallback KnownHost) KnownHost {
+	known, err := a.store.rememberKnownHost(hostInfo, baseURL)
+	if err != nil {
+		return fallback
+	}
+	return known
+}
+
+func (a *app) remoteTargetResolver() remoteTargetResolver {
+	return remoteTargetResolver{
+		store:                     a.store,
+		cloudClient:               a.cloudClientFromSettings,
+		currentDeviceCloudRevoked: a.currentDeviceCloudRevoked,
+		rememberLANRoute:          a.rememberRemoteHostLANRoute,
+	}
 }
 
 func (a *app) writeRemoteControlResult(w http.ResponseWriter, hostDeviceID, capability, action string, params map[string]any) {
@@ -611,6 +737,10 @@ func (a *app) remoteControlResponse(hostDeviceID, capability, action string, par
 		Params:     params,
 	})
 	if err != nil {
+		var actionErr *actionError
+		if errors.As(err, &actionErr) && actionErr.Code == controlAuthorizationRequiredCode {
+			return ControlResponse{}, actionErr
+		}
 		return ControlResponse{}, fmt.Errorf("remote control request failed: %w", err)
 	}
 	return response, nil
@@ -629,12 +759,12 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 		writeRemoteHostError(w, err)
 		return
 	}
-	socket, cipher, activeTarget, err := controlClientDialTarget(target, a.store)
+	remote, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, a.store)
 	if err != nil {
 		writeRemoteHostError(w, fmt.Errorf("remote event subscription failed: %w", err))
 		return
 	}
-	defer socket.Close()
+	defer remote.Close()
 
 	requestID := "remote_sse_" + randomID(12)
 	req := ControlRequest{
@@ -648,11 +778,11 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 			"replay_limit": replayLimit,
 		},
 	}
-	if err := controlClientWrite(socket, cipher, controlPlainFrame{Type: "request", Request: &req}); err != nil {
+	if err := remote.WritePlain(controlPlainFrame{Type: "request", Request: &req}); err != nil {
 		writeRemoteHostError(w, fmt.Errorf("remote event subscription failed: %w", err))
 		return
 	}
-	plain, err := controlClientReadWithTimeout(socket, cipher, activeTarget.Timeout)
+	plain, err := remote.ReadPlain(activeTarget.Timeout)
 	if err != nil {
 		writeRemoteHostError(w, fmt.Errorf("remote event subscription failed: %w", err))
 		return
@@ -686,7 +816,7 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 	errs := make(chan error, 1)
 	go func() {
 		for {
-			frame, readErr := controlClientRead(socket, cipher)
+			frame, readErr := remote.ReadPlain(0)
 			if readErr != nil {
 				errs <- readErr
 				return
@@ -696,7 +826,7 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 	}()
 	go func() {
 		<-r.Context().Done()
-		_ = socket.Close()
+		_ = remote.Close()
 	}()
 
 	ticker := time.NewTicker(10 * time.Second)
@@ -723,7 +853,7 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 func writeControlHTTPResult(w http.ResponseWriter, response ControlResponse, action string) {
 	if response.OK {
 		status := http.StatusOK
-		if action == ControlActionSessionFork || action == ControlActionWorkspaceCreate {
+		if action == ControlActionSessionCreate || action == ControlActionSessionFork || action == ControlActionWorkspaceCreate {
 			status = http.StatusCreated
 		}
 		writeJSON(w, status, response.Result)

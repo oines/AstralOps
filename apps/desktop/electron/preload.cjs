@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("astral", {
   ingestClipboardImage: (sessionId) => ipcRenderer.invoke("astral:ingest-clipboard-image", sessionId),
   getWorkspaceOpeners: () => ipcRenderer.invoke("astral:get-workspace-openers"),
   openWorkspace: (opener, workspace) => ipcRenderer.invoke("astral:open-workspace", opener, workspace),
+  openExternal: (url) => ipcRenderer.invoke("astral:open-external", url),
   openLogsDirectory: () => ipcRenderer.invoke("astral:open-logs-directory"),
   logClientEvent: (payload) => ipcRenderer.invoke("astral:log-client-event", payload),
   setDiagnosticsLoggingEnabled: (enabled) => ipcRenderer.invoke("astral:set-diagnostics-logging-enabled", enabled),
