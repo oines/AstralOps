@@ -1410,8 +1410,9 @@ function remoteHostStatusLabel(host: RemoteHostRecord, override?: RemoteAuthoriz
     case "lan":
       return "LAN";
     case "relay":
-    case "cloud":
       return "Relay";
+    case "cloud":
+      return "云端";
     case "offline":
       return "离线";
     default:
