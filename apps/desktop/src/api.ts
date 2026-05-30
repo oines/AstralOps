@@ -910,10 +910,6 @@ class RemoteCoreClient extends LocalCoreClient {
     return Promise.reject(new Error("远端 Host cloud 设备不能由 Controller 移除"));
   }
 
-  deleteWorkspace(): Promise<{ ok: boolean }> {
-    return Promise.reject(new Error("远端删除 workspace 尚未进入控制协议"));
-  }
-
   sessionCommands(): Promise<SessionCommandListResponse> {
     return Promise.resolve({ commands: [] });
   }

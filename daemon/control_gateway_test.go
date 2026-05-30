@@ -405,6 +405,41 @@ func TestControlGatewayReadsWorkspaceConnectionFromHostState(t *testing.T) {
 	}
 }
 
+func TestControlGatewayDeletesWorkspaceOnHost(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	terminal := newTerminalSession(workspace.ID, AgentCodex, "local", ".", "zsh", "device_mobile")
+	app.terminalManager().register(terminal)
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		RequestID:          "req_workspace_delete",
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionWorkspaceDelete,
+		Params:             map[string]any{"workspace_id": workspace.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := mapValue(response.Result)
+	if !response.OK || !boolValue(result["ok"]) {
+		t.Fatalf("response = %#v, want ok workspace delete", response)
+	}
+	if _, ok := app.store.getWorkspace(workspace.ID); ok {
+		t.Fatalf("workspace %s still exists after delete", workspace.ID)
+	}
+	if _, ok := app.store.getSession(session.ID); ok {
+		t.Fatalf("session %s still exists after workspace delete", session.ID)
+	}
+	if tabs := app.terminalManager().listTabs(); len(tabs) != 0 {
+		t.Fatalf("terminal tabs = %#v, want workspace terminals closed", tabs)
+	}
+	events := app.store.queryEvents(workspace.ID, "", 0)
+	if len(events) != 1 || events[0].Kind != "workspace.removed" {
+		t.Fatalf("events = %#v, want workspace.removed", events)
+	}
+}
+
 func TestControlGatewayCreatesSession(t *testing.T) {
 	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)

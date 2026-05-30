@@ -903,6 +903,7 @@ export type ControlAction =
   | "core.control.workspace.create"
   | "core.control.workspace.connect"
   | "core.control.workspace.disconnect"
+  | "core.control.workspace.delete"
   | "core.control.session.create"
   | "core.control.session.fork"
   | "core.control.session.delete"
@@ -1504,6 +1505,7 @@ export type ControlActionParamMap = {
   "core.control.workspace.create": CreateWorkspaceRequest;
   "core.control.workspace.connect": WorkspaceReferenceParams;
   "core.control.workspace.disconnect": WorkspaceReferenceParams;
+  "core.control.workspace.delete": WorkspaceReferenceParams;
   "core.control.session.create": CreateSessionRequest;
   "core.control.session.fork": SessionForkControlParams;
   "core.control.session.delete": SessionDeleteParams;
@@ -1556,6 +1558,7 @@ export type ControlActionResultMap = {
   "core.control.workspace.create": Workspace;
   "core.control.workspace.connect": WorkspaceConnection;
   "core.control.workspace.disconnect": WorkspaceConnection;
+  "core.control.workspace.delete": OkResult;
   "core.control.session.create": Session;
   "core.control.session.fork": SessionForkResponse;
   "core.control.session.delete": SessionDeleteResult;

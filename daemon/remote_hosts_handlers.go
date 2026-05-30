@@ -363,6 +363,8 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 			"local_cwd": req.LocalCWD,
 			"ssh":       req.SSH,
 		})
+	case len(route) == 2 && route[0] == "workspaces" && r.Method == http.MethodDelete:
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreControl, ControlActionWorkspaceDelete, map[string]any{"workspace_id": route[1]})
 	case len(route) == 2 && route[0] == "fs" && route[1] == "browse" && r.Method == http.MethodPost:
 		var req hostFileSystemBrowseParams
 		if err := decodeJSON(r.Body, &req); err != nil {

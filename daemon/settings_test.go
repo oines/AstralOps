@@ -136,7 +136,7 @@ func TestSettingsRemoteControlLifecycle(t *testing.T) {
 	}
 
 	listenAddr := "127.0.0.1:0"
-	enableReq := httptest.NewRequest(http.MethodPatch, "/v1/settings", strings.NewReader(`{"remote_control":{"enabled":true,"listen_addr":"`+listenAddr+`"}}`))
+	enableReq := httptest.NewRequest(http.MethodPatch, "/v1/settings", strings.NewReader(`{"remote_control":{"enabled":true,"listen_addr":"`+listenAddr+`","lan_discovery":false}}`))
 	enableRR := httptest.NewRecorder()
 	app.handleSettings(enableRR, enableReq)
 	if enableRR.Code != http.StatusOK {

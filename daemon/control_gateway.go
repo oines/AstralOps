@@ -41,6 +41,7 @@ const (
 	ControlActionWorkspaceCreate            = "core.control.workspace.create"
 	ControlActionWorkspaceConnect           = "core.control.workspace.connect"
 	ControlActionWorkspaceDisconnect        = "core.control.workspace.disconnect"
+	ControlActionWorkspaceDelete            = "core.control.workspace.delete"
 	ControlActionSessionCreate              = "core.control.session.create"
 	ControlActionSessionFork                = "core.control.session.fork"
 	ControlActionSessionDelete              = "core.control.session.delete"
@@ -145,7 +146,7 @@ func controlActionCapability(action string) string {
 	switch action {
 	case ControlActionHostSnapshot, ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionWorkspaceConnection, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
 		return CapabilityCoreRead
-	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionWorkspaceCreate, ControlActionWorkspaceConnect, ControlActionWorkspaceDisconnect, ControlActionSessionCreate, ControlActionSessionFork, ControlActionSessionDelete:
+	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionWorkspaceCreate, ControlActionWorkspaceConnect, ControlActionWorkspaceDisconnect, ControlActionWorkspaceDelete, ControlActionSessionCreate, ControlActionSessionFork, ControlActionSessionDelete:
 		return CapabilityCoreControl
 	case ControlActionInteractionRespond:
 		return CapabilityInteractionRespond
@@ -325,6 +326,12 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 			return nil, err
 		}
 		return a.ssh.disconnect(workspace), nil
+	case ControlActionWorkspaceDelete:
+		var params workspaceReferenceParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.deleteWorkspace(params.WorkspaceID)
 	case ControlActionSessionCreate:
 		var params createSessionRequest
 		if err := decodeControlParams(req.Params, &params); err != nil {

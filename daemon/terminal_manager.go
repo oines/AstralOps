@@ -371,6 +371,30 @@ func (m *terminalManager) close(ctx context.Context, controllerDeviceID string, 
 	return session.ack(), nil
 }
 
+func (m *terminalManager) closeWorkspace(ctx context.Context, workspaceID, reason string) {
+	if m == nil {
+		return
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return
+	}
+	if reason == "" {
+		reason = "workspace_deleted"
+	}
+	m.mu.Lock()
+	sessions := make([]*terminalSession, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		if session.workspaceID == workspaceID {
+			sessions = append(sessions, session)
+		}
+	}
+	m.mu.Unlock()
+	for _, session := range sessions {
+		session.close(ctx, m.app, reason)
+	}
+}
+
 func (m *terminalManager) register(session *terminalSession) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

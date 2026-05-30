@@ -83,21 +83,32 @@ func (a *app) createWorkspace(req createWorkspaceRequest) (Workspace, error) {
 	return ws, nil
 }
 
+func (a *app) deleteWorkspace(workspaceID string) (map[string]any, error) {
+	ws, ok := a.store.getWorkspace(workspaceID)
+	if !ok {
+		return nil, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found")
+	}
+	a.stopWorkspaceSessions(ws.ID, "workspace deleted")
+	if terminals := a.terminalManager(); terminals != nil {
+		terminals.closeWorkspace(context.Background(), ws.ID, "workspace_deleted")
+	}
+	if ws.Target == "ssh" {
+		a.ssh.disconnect(ws)
+	}
+	a.store.deleteWorkspace(workspaceID)
+	a.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.removed", Normalized: map[string]any{"workspace_id": ws.ID}})
+	return map[string]any{"ok": true}, nil
+}
+
 func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/workspaces/"), "/")
 	if len(parts) == 1 && r.Method == http.MethodDelete {
-		ws, ok := a.store.getWorkspace(parts[0])
-		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+		result, err := a.deleteWorkspace(parts[0])
+		if err != nil {
+			writeActionError(w, err)
 			return
 		}
-		a.stopWorkspaceSessions(ws.ID, "workspace deleted")
-		if ws.Target == "ssh" {
-			a.ssh.disconnect(ws)
-		}
-		a.store.deleteWorkspace(parts[0])
-		a.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.removed", Normalized: map[string]any{"workspace_id": ws.ID}})
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(w, http.StatusOK, result)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "files" && r.Method == http.MethodGet {
