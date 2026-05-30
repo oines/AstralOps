@@ -47,6 +47,7 @@ import type {
 
 const EVENT_WINDOW_SIZE = 1000;
 const LOCAL_HOST_ID = "local";
+const DEFAULT_CLOUD_BASE_URL = "https://cloud-astralops.oines.dev";
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   version: 1,
@@ -57,7 +58,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
   diagnostics: { logging_enabled: false },
   remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true },
-  cloud: { enabled: false },
+  cloud: { enabled: false, base_url: DEFAULT_CLOUD_BASE_URL },
   updates: { auto_check: true },
 };
 

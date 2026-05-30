@@ -70,6 +70,8 @@ type SettingOption<T extends string = string> = {
   value: T;
 };
 
+const DEFAULT_CLOUD_BASE_URL = "https://cloud-astralops.oines.dev";
+
 const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     label: "应用",
@@ -101,7 +103,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
   diagnostics: { logging_enabled: false },
   remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true },
-  cloud: { enabled: false },
+  cloud: { enabled: false, base_url: DEFAULT_CLOUD_BASE_URL },
   updates: { auto_check: true },
 };
 
@@ -903,7 +905,7 @@ function RemoteControlContent({
         <SettingRow
           title="账号服务"
           description="登录后这台设备会加入当前账号 Mesh"
-          control={<TextInputControl disabled={settings.cloud.enabled || Boolean(authenticatingProvider)} onChange={setCloudBaseURLDraft} placeholder="https://cloud-astralops.oines.dev" value={cloudBaseURLDraft} />}
+          control={<TextInputControl disabled={settings.cloud.enabled || Boolean(authenticatingProvider)} onChange={setCloudBaseURLDraft} placeholder={DEFAULT_CLOUD_BASE_URL} value={cloudBaseURLDraft} />}
         />
         <SettingRow
           title="账号"

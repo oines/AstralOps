@@ -26,11 +26,26 @@ func TestSettingsDefaultWhenFileMissing(t *testing.T) {
 	if settings.RemoteControl.Enabled || settings.RemoteControl.ListenAddr != defaultRemoteControlListenAddr || !settings.RemoteControl.LANDiscovery {
 		t.Fatalf("remote control defaults = %#v", settings.RemoteControl)
 	}
-	if settings.Cloud.Enabled || settings.Cloud.BaseURL != "" || settings.Cloud.AccountToken != "" {
+	if settings.Cloud.Enabled || settings.Cloud.BaseURL != defaultCloudBaseURL || settings.Cloud.AccountToken != "" {
 		t.Fatalf("cloud defaults = %#v", settings.Cloud)
 	}
 	if settings.Diagnostics.LoggingEnabled {
 		t.Fatalf("diagnostic logging default = true, want false")
+	}
+}
+
+func TestSettingsBackfillsDefaultCloudBaseURL(t *testing.T) {
+	dir := t.TempDir()
+	body := []byte(`{"version":1,"cloud":{"enabled":false,"base_url":""}}`)
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := loadSettingsStore(dir)
+	if err != nil {
+		t.Fatalf("load settings = %v", err)
+	}
+	if store.get().Cloud.Enabled || store.get().Cloud.BaseURL != defaultCloudBaseURL {
+		t.Fatalf("cloud settings = %#v, want disabled with default base url", store.get().Cloud)
 	}
 }
 
