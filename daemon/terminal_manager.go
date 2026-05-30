@@ -394,25 +394,23 @@ func (m *terminalManager) listTabs() []terminalTab {
 	return tabs
 }
 
-func (m *terminalManager) firstOpenTerminalForWorkspace(workspaceID string) (terminalOpenResult, bool) {
-	if m == nil || strings.TrimSpace(workspaceID) == "" {
+func (m *terminalManager) openTerminalResult(terminalID string) (terminalOpenResult, bool) {
+	if m == nil || strings.TrimSpace(terminalID) == "" {
 		return terminalOpenResult{}, false
 	}
 	m.mu.Lock()
-	sessions := make([]*terminalSession, 0, len(m.sessions))
-	for _, session := range m.sessions {
-		sessions = append(sessions, session)
-	}
+	session := m.sessions[strings.TrimSpace(terminalID)]
 	m.mu.Unlock()
-	for _, session := range sessions {
-		session.mu.Lock()
-		matches := session.workspaceID == workspaceID && session.status == terminalStatusOpen
-		session.mu.Unlock()
-		if matches {
-			return session.openResult(), true
-		}
+	if session == nil {
+		return terminalOpenResult{}, false
 	}
-	return terminalOpenResult{}, false
+	session.mu.Lock()
+	open := session.status == terminalStatusOpen
+	session.mu.Unlock()
+	if !open {
+		return terminalOpenResult{}, false
+	}
+	return session.openResult(), true
 }
 
 func (m *terminalManager) detachConnection(connectionID, reason string) {

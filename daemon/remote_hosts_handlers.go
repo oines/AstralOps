@@ -625,7 +625,13 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 		_ = local.WriteJSON(map[string]any{"type": "error", "message": "remote control manager is not initialized"})
 		return
 	}
-	terminal, err := manager.OpenTerminal(r.Context(), hostDeviceID, workspaceID)
+	terminalID := strings.TrimSpace(r.URL.Query().Get("terminal_id"))
+	var terminal *remoteManagedTerminalStream
+	if terminalID != "" {
+		terminal, err = manager.AttachTerminal(r.Context(), hostDeviceID, terminalID)
+	} else {
+		terminal, err = manager.OpenTerminal(r.Context(), hostDeviceID, workspaceID)
+	}
 	if err != nil {
 		_ = local.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
@@ -634,9 +640,10 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 
 	localWriter := &remotePTYLocalWriter{}
 	localWriter.write(local, map[string]any{
-		"type":  "ready",
-		"shell": terminal.shell,
-		"cwd":   terminal.cwd,
+		"type":        "ready",
+		"terminal_id": terminal.terminalID,
+		"shell":       terminal.shell,
+		"cwd":         terminal.cwd,
 	})
 
 	done := make(chan struct{})

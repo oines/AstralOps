@@ -19,6 +19,11 @@ type RelayClient struct {
 	HTTPClient *http.Client
 }
 
+const (
+	relayWebSocketPingInterval = 20 * time.Second
+	relayWebSocketPongWait     = 60 * time.Second
+)
+
 type relayEnvelopeListResponse struct {
 	Envelopes []RelayEnvelope `json:"envelopes"`
 }
@@ -35,8 +40,10 @@ type relayWebSocketFrame struct {
 }
 
 type RelayWebSocketConn struct {
-	conn    *websocket.Conn
-	writeMu sync.Mutex
+	conn      *websocket.Conn
+	writeMu   sync.Mutex
+	closeOnce sync.Once
+	done      chan struct{}
 }
 
 func (c RelayClient) EnqueueRelayEnvelope(ctx context.Context, envelope RelayEnvelope) (RelayEnvelope, error) {
@@ -108,14 +115,54 @@ func (c RelayClient) ConnectRelayWebSocket(ctx context.Context, deviceID string)
 		}
 		return nil, err
 	}
-	return &RelayWebSocketConn{conn: conn}, nil
+	relay := &RelayWebSocketConn{conn: conn, done: make(chan struct{})}
+	relay.configureHeartbeat()
+	return relay, nil
 }
 
 func (c *RelayWebSocketConn) Close() error {
 	if c == nil || c.conn == nil {
 		return nil
 	}
-	return c.conn.Close()
+	var err error
+	c.closeOnce.Do(func() {
+		if c.done != nil {
+			close(c.done)
+		}
+		err = c.conn.Close()
+	})
+	return err
+}
+
+func (c *RelayWebSocketConn) configureHeartbeat() {
+	if c == nil || c.conn == nil {
+		return
+	}
+	_ = c.conn.SetReadDeadline(time.Now().Add(relayWebSocketPongWait))
+	c.conn.SetPongHandler(func(string) error {
+		return c.conn.SetReadDeadline(time.Now().Add(relayWebSocketPongWait))
+	})
+	go c.pingLoop()
+}
+
+func (c *RelayWebSocketConn) pingLoop() {
+	ticker := time.NewTicker(relayWebSocketPingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-ticker.C:
+			c.writeMu.Lock()
+			_ = c.conn.SetWriteDeadline(time.Now().Add(controlRelayRoundTripTimeout))
+			err := c.conn.WriteMessage(websocket.PingMessage, nil)
+			c.writeMu.Unlock()
+			if err != nil {
+				_ = c.Close()
+				return
+			}
+		}
+	}
 }
 
 func (c *RelayWebSocketConn) EnqueueRelayEnvelope(ctx context.Context, envelope RelayEnvelope) (RelayEnvelope, error) {
@@ -146,11 +193,7 @@ func (c *RelayWebSocketConn) ReadRelayEnvelope(ctx context.Context) (RelayEnvelo
 	if c == nil || c.conn == nil {
 		return RelayEnvelope{}, fmt.Errorf("relay websocket is not connected")
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = c.conn.SetReadDeadline(deadline)
-	} else {
-		_ = c.conn.SetReadDeadline(time.Time{})
-	}
+	c.setReadDeadline(ctx)
 	for {
 		var frame relayWebSocketFrame
 		if err := c.conn.ReadJSON(&frame); err != nil {
@@ -168,6 +211,17 @@ func (c *RelayWebSocketConn) ReadRelayEnvelope(ctx context.Context) (RelayEnvelo
 			continue
 		}
 	}
+}
+
+func (c *RelayWebSocketConn) setReadDeadline(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deadline := time.Now().Add(relayWebSocketPongWait)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	_ = c.conn.SetReadDeadline(deadline)
 }
 
 func (c RelayClient) do(ctx context.Context, method, path string, body any, out any) error {

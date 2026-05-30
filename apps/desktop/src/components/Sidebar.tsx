@@ -33,6 +33,8 @@ type SidebarProps = {
 
 export type SidebarHost = {
   connection: "local" | "lan" | "relay" | "offline" | string;
+  controlLabel?: string;
+  controlTone?: "good" | "warning" | "muted";
   id: string;
   kind: "desktop" | "mobile" | string;
   name: string;
@@ -166,6 +168,7 @@ export function Sidebar({
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] font-semibold leading-4 text-[var(--ao-muted)]">
               <span className="truncate">{activeHost?.subtitle || "本机 Host"}</span>
               <HostStatusPill label={activeHost?.statusLabel || hostConnectionLabel(activeHost?.connection)} tone={activeHost?.statusTone} />
+              <HostStatusPill label={activeHost?.controlLabel} tone={activeHost?.controlTone} />
             </div>
           </div>
           <ChevronDown className={`shrink-0 text-[var(--ao-muted-strong)] transition-transform ${hostMenuOpen ? "rotate-180" : ""}`} size={15} strokeWidth={1.9} />
@@ -190,6 +193,7 @@ export function Sidebar({
                   <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] font-semibold leading-4 text-[var(--ao-muted)]">
                     <span className="truncate">{host.subtitle}</span>
                     <HostStatusPill label={host.statusLabel || hostConnectionLabel(host.connection)} tone={host.statusTone} />
+                    <HostStatusPill label={host.controlLabel} tone={host.controlTone} />
                   </div>
                 </div>
                 {host.id === activeHost?.id ? <Check size={14} strokeWidth={2.1} /> : <span className="size-[14px]" />}

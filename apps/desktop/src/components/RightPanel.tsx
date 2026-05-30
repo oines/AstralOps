@@ -11,11 +11,12 @@ import "@xterm/xterm/css/xterm.css";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CoreClient, TerminalConnection } from "../api";
-import type { FileListResponse, HealthResponse, PanelTabKind, Workspace } from "../types";
+import type { FileListResponse, HealthResponse, PanelTabKind, TerminalTab as HostTerminalTab, Workspace } from "../types";
 
 type PanelTab = {
   id: string;
   kind: PanelTabKind;
+  terminalId?: string;
   title?: string;
 };
 
@@ -23,6 +24,7 @@ type RightPanelProps = {
   api: CoreClient | null;
   health: HealthResponse | null;
   open: boolean;
+  terminalTabs?: HostTerminalTab[];
   width: number;
   workspace: Workspace | null;
   onLiveResize?: (width: number) => void;
@@ -30,7 +32,7 @@ type RightPanelProps = {
   onResizeActiveChange?: (active: boolean) => void;
 };
 
-export function RightPanel({ api, health, open, width, workspace, onLiveResize, onResize, onResizeActiveChange }: RightPanelProps): React.JSX.Element | null {
+export function RightPanel({ api, health, open, terminalTabs = [], width, workspace, onLiveResize, onResize, onResizeActiveChange }: RightPanelProps): React.JSX.Element | null {
   const [tabs, setTabs] = useState<PanelTab[]>([]);
   const contentOrderRef = useRef<string[]>([]);
   const [activeTabId, setActiveTabId] = useState("");
@@ -40,6 +42,10 @@ export function RightPanel({ api, health, open, width, workspace, onLiveResize, 
   const liveWidthRef = useRef(width);
   const resizeFrameRef = useRef<number | null>(null);
   const terminalAvailable = health?.features?.terminal?.available !== false;
+  const openTerminalTabs = useMemo(
+    () => terminalTabs.filter((tab) => tab.status === "open" && (!workspace?.id || tab.workspace_id === workspace.id)),
+    [terminalTabs, workspace?.id],
+  );
   const tabDragSensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 6 },
@@ -53,6 +59,35 @@ export function RightPanel({ api, health, open, width, workspace, onLiveResize, 
     setTabs([tab]);
     setActiveTabId(tab.id);
   }, [open, tabs.length]);
+
+  useEffect(() => {
+    if (tabs.length === 0) {
+      if (activeTabId) setActiveTabId("");
+      return;
+    }
+    if (!tabs.some((tab) => tab.id === activeTabId)) {
+      setActiveTabId(tabs.at(-1)?.id ?? "");
+    }
+  }, [activeTabId, tabs]);
+
+  useEffect(() => {
+    const hostTerminalIds = new Set(openTerminalTabs.map((tab) => tab.terminal_id));
+    setTabs((current) => {
+      const next = current.filter((tab) => tab.kind !== "terminal" || !tab.terminalId || hostTerminalIds.has(tab.terminalId));
+      for (const hostTab of openTerminalTabs) {
+        if (next.some((tab) => tab.terminalId === hostTab.terminal_id)) continue;
+        next.push(createTerminalTab(hostTab));
+      }
+      contentOrderRef.current = contentOrderRef.current.filter((id) => next.some((tab) => tab.id === id));
+      for (const tab of next) {
+        if (!contentOrderRef.current.includes(tab.id)) contentOrderRef.current.push(tab.id);
+      }
+      return next;
+    });
+    if (openTerminalTabs.length > 0 && !activeTabId) {
+      setActiveTabId(`terminal-${openTerminalTabs[0].terminal_id}`);
+    }
+  }, [activeTabId, openTerminalTabs]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -114,6 +149,14 @@ export function RightPanel({ api, health, open, width, workspace, onLiveResize, 
 
   const updateTabTitle = useCallback((id: string, title: string): void => {
     setTabs((current) => current.map((tab) => (tab.id === id && tab.title !== title ? { ...tab, title } : tab)));
+  }, []);
+
+  const updateTerminalTabReady = useCallback((id: string, terminalId: string | undefined, title: string): void => {
+    setTabs((current) => current.map((tab) => (
+      tab.id === id
+        ? { ...tab, terminalId: terminalId || tab.terminalId, title }
+        : tab
+    )));
   }, []);
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
@@ -223,7 +266,7 @@ export function RightPanel({ api, health, open, width, workspace, onLiveResize, 
             {tab.kind === "terminal" && !terminalAvailable ? (
               <PanelMessage title="终端不可用" body="Windows 当前禁用内置终端。文件浏览和 agent 任务仍可使用。" />
             ) : tab.kind === "terminal" ? (
-              <TerminalTab api={api} workspace={workspace} onTitleChange={(title) => updateTabTitle(tab.id, title)} />
+              <TerminalTab api={api} terminalId={tab.terminalId} workspace={workspace} onReady={(terminalId, title) => updateTerminalTabReady(tab.id, terminalId, title)} onTitleChange={(title) => updateTabTitle(tab.id, title)} />
             ) : (
               <FilesTab api={api} workspace={workspace} />
             )}
@@ -384,7 +427,19 @@ function FilesTab({ api, workspace }: { api: CoreClient | null; workspace: Works
   );
 }
 
-function TerminalTab({ api, onTitleChange, workspace }: { api: CoreClient | null; onTitleChange: (title: string) => void; workspace: Workspace | null }): React.JSX.Element {
+function TerminalTab({
+  api,
+  onReady,
+  onTitleChange,
+  terminalId,
+  workspace,
+}: {
+  api: CoreClient | null;
+  onReady: (terminalId: string | undefined, title: string) => void;
+  onTitleChange: (title: string) => void;
+  terminalId?: string;
+  workspace: Workspace | null;
+}): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -461,7 +516,9 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: CoreClient | null
       onReady: (message) => {
         if (!isCurrent()) return;
         const nextShell = message.shell || "shell";
-        onTitleChangeRef.current(`${nextShell} · ${basename(message.cwd || workspaceRoot)}`);
+        const title = `${nextShell} · ${basename(message.cwd || workspaceRoot)}`;
+        onReady(message.terminal_id, title);
+        onTitleChangeRef.current(title);
       },
       onOutput: (data) => {
         if (isCurrent()) term.write(data);
@@ -474,7 +531,7 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: CoreClient | null
           term.writeln("\r\n\x1b[31mPTY 连接失败\x1b[0m");
         }
       },
-    });
+    }, { terminalId });
 
     return () => {
       disposed = true;
@@ -485,7 +542,7 @@ function TerminalTab({ api, onTitleChange, workspace }: { api: CoreClient | null
       if (termRef.current === term) termRef.current = null;
       if (fitRef.current === fit) fitRef.current = null;
     };
-  }, [api, workspaceId, workspaceRoot]);
+  }, [api, onReady, terminalId, workspaceId, workspaceRoot]);
 
   if (!workspace) {
     return <PanelMessage title="没有工作区" body="创建或选择一个本地工作区后可以运行命令。" />;
@@ -517,6 +574,15 @@ function createTab(kind: PanelTabKind): PanelTab {
   };
 }
 
+function createTerminalTab(tab: HostTerminalTab): PanelTab {
+  return {
+    id: `terminal-${tab.terminal_id}`,
+    kind: "terminal",
+    terminalId: tab.terminal_id,
+    title: tabTitleFromHostTerminal(tab),
+  };
+}
+
 function clampRightPanelWidth(width: number): number {
   return Math.min(720, Math.max(320, width));
 }
@@ -537,6 +603,12 @@ function tabTitle(tab: PanelTab, workspace: Workspace | null): string {
   if (tab.title) return tab.title;
   if (tab.kind === "terminal") return `shell · ${basename(workspace?.local_cwd || "") || "workspace"}`;
   return "文件";
+}
+
+function tabTitleFromHostTerminal(tab: HostTerminalTab): string {
+  const shell = tab.shell || "shell";
+  const cwd = tab.cwd ? basename(tab.cwd) : "";
+  return cwd ? `${shell} · ${cwd}` : shell;
 }
 
 function basename(path: string): string {

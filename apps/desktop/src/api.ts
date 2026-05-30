@@ -90,6 +90,7 @@ export type WorkbenchSubscriptionHandlers = {
 };
 
 export type TerminalReadyPayload = {
+  terminal_id?: string;
   shell?: string;
   cwd?: string;
 };
@@ -108,8 +109,12 @@ export type TerminalConnection = {
   close: () => void;
 };
 
+export type TerminalOpenOptions = {
+  terminalId?: string;
+};
+
 export interface TerminalClient {
-  openWorkspaceTerminal(workspaceId: string, handlers: TerminalHandlers): TerminalConnection;
+  openWorkspaceTerminal(workspaceId: string, handlers: TerminalHandlers, options?: TerminalOpenOptions): TerminalConnection;
 }
 
 export interface CoreClient {
@@ -915,9 +920,10 @@ class RemoteCoreClient extends LocalCoreClient {
 class LocalTerminalClient implements TerminalClient {
   constructor(private readonly channel: ControlChannel) {}
 
-  openWorkspaceTerminal(workspaceId: string, handlers: TerminalHandlers): TerminalConnection {
-    logClientEvent("terminal.open.start", { workspace_id: workspaceId });
-    return new WebSocketTerminalConnection(this.channel.openSocket(`/v1/workspaces/${workspaceId}/pty`), handlers);
+  openWorkspaceTerminal(workspaceId: string, handlers: TerminalHandlers, options: TerminalOpenOptions = {}): TerminalConnection {
+    logClientEvent("terminal.open.start", { workspace_id: workspaceId, terminal_id: options.terminalId });
+    const query = options.terminalId ? `?terminal_id=${encodeURIComponent(options.terminalId)}` : "";
+    return new WebSocketTerminalConnection(this.channel.openSocket(`/v1/workspaces/${workspaceId}/pty${query}`), handlers);
   }
 }
 
@@ -929,10 +935,10 @@ class WebSocketTerminalConnection implements TerminalConnection {
     };
     socket.onmessage = (event) => {
       try {
-        const message = JSON.parse(event.data as string) as { type: string; data?: string; message?: string; shell?: string; cwd?: string };
+        const message = JSON.parse(event.data as string) as { type: string; terminal_id?: string; data?: string; message?: string; shell?: string; cwd?: string };
         if (message.type === "ready") {
-          logClientEvent("terminal.ready", { shell: message.shell, cwd: message.cwd });
-          handlers.onReady?.({ shell: message.shell, cwd: message.cwd });
+          logClientEvent("terminal.ready", { terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd });
+          handlers.onReady?.({ terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd });
         }
         if (message.type === "output" && message.data) handlers.onOutput?.(message.data);
         if (message.type === "exit") {

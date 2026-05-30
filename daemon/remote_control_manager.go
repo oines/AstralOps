@@ -119,12 +119,16 @@ func (m *remoteControlManager) setControlState(hostDeviceID, state string, targe
 	}
 	m.mu.Lock()
 	current := m.states[hostDeviceID]
-	if current.State != next.State || current.Transport != next.Transport || current.LastError != next.LastError || current.LastErrorCode != next.LastErrorCode {
+	changed := current.State != next.State || current.Transport != next.Transport || current.LastError != next.LastError || current.LastErrorCode != next.LastErrorCode
+	if changed {
 		m.routeGen++
 	}
 	next.RouteGeneration = m.routeGen
 	m.states[hostDeviceID] = next
 	m.mu.Unlock()
+	if changed && m.app != nil {
+		m.app.refreshMeshStateAsync(false)
+	}
 }
 
 func (m *remoteControlManager) setAllControlStates(state string, err error) {
@@ -325,10 +329,26 @@ func (m *remoteControlManager) OpenTerminal(ctx context.Context, hostDeviceID, w
 	if err != nil {
 		return nil, err
 	}
-	terminalID, shell, cwd, err := session.remoteTerminalForWorkspace(ctx, workspaceID)
+	terminalID, shell, cwd, created, err := session.remoteTerminalForWorkspace(ctx, workspaceID)
 	if err != nil {
 		return nil, err
 	}
+	return m.attachTerminal(ctx, session, terminalID, shell, cwd, created)
+}
+
+func (m *remoteControlManager) AttachTerminal(ctx context.Context, hostDeviceID, terminalID string) (*remoteManagedTerminalStream, error) {
+	session, err := m.getSession(ctx, hostDeviceID)
+	if err != nil {
+		return nil, err
+	}
+	terminalID, shell, cwd, err := session.remoteTerminalByID(ctx, terminalID)
+	if err != nil {
+		return nil, err
+	}
+	return m.attachTerminal(ctx, session, terminalID, shell, cwd, false)
+}
+
+func (m *remoteControlManager) attachTerminal(ctx context.Context, session *remoteControlManagedSession, terminalID, shell, cwd string, closeOnAttachFailure bool) (*remoteManagedTerminalStream, error) {
 	frames, unregister := session.registerStream(terminalID)
 	attach, err := session.request(ctx, ControlRequest{
 		RequestID:  remoteControlManagedRequestPrefix + "pty_attach_" + randomID(12),
@@ -338,14 +358,18 @@ func (m *remoteControlManager) OpenTerminal(ctx context.Context, hostDeviceID, w
 	})
 	if err != nil {
 		unregister()
-		_ = session.remoteTerminalClose(terminalID)
+		if closeOnAttachFailure {
+			_ = session.remoteTerminalClose(terminalID)
+		}
 		return nil, fmt.Errorf("remote terminal attach failed: %w", err)
 	}
 	if !attach.OK {
 		unregister()
-		_ = session.remoteTerminalClose(terminalID)
+		if closeOnAttachFailure {
+			_ = session.remoteTerminalClose(terminalID)
+		}
 		if attach.Error != nil && attach.Error.Code == controlAuthorizationRequiredCode {
-			m.Invalidate(hostDeviceID, controlAuthorizationRequiredCode)
+			m.Invalidate(session.hostDeviceID, controlAuthorizationRequiredCode)
 		}
 		return nil, controlResponseActionError(attach, ControlActionTerminalAttach)
 	}
@@ -359,7 +383,35 @@ func (m *remoteControlManager) OpenTerminal(ctx context.Context, hostDeviceID, w
 	}, nil
 }
 
-func (s *remoteControlManagedSession) remoteTerminalForWorkspace(ctx context.Context, workspaceID string) (string, string, string, error) {
+func (s *remoteControlManagedSession) remoteTerminalForWorkspace(ctx context.Context, workspaceID string) (string, string, string, bool, error) {
+	open, err := s.request(ctx, ControlRequest{
+		RequestID:  remoteControlManagedRequestPrefix + "pty_open_" + randomID(12),
+		Capability: CapabilityTerminalOpen,
+		Action:     ControlActionTerminalOpen,
+		Params:     map[string]any{"workspace_id": workspaceID, "cols": defaultTerminalCols, "rows": defaultTerminalRows},
+	})
+	if err != nil {
+		return "", "", "", false, fmt.Errorf("remote terminal open failed: %w", err)
+	}
+	if !open.OK {
+		if open.Error != nil && open.Error.Code == controlAuthorizationRequiredCode && s.manager != nil {
+			s.manager.Invalidate(s.hostDeviceID, controlAuthorizationRequiredCode)
+		}
+		return "", "", "", false, controlResponseActionError(open, ControlActionTerminalOpen)
+	}
+	openResult := mapValue(open.Result)
+	terminalID := stringValue(openResult["terminal_id"])
+	if terminalID == "" {
+		return "", "", "", false, errors.New("remote terminal response missing terminal_id")
+	}
+	return terminalID, stringValue(openResult["shell"]), stringValue(openResult["cwd"]), true, nil
+}
+
+func (s *remoteControlManagedSession) remoteTerminalByID(ctx context.Context, terminalID string) (string, string, string, error) {
+	terminalID = strings.TrimSpace(terminalID)
+	if terminalID == "" {
+		return "", "", "", errors.New("terminal_id is required")
+	}
 	list, err := s.request(ctx, ControlRequest{
 		RequestID:  remoteControlManagedRequestPrefix + "pty_list_" + randomID(12),
 		Capability: CapabilityTerminalOpen,
@@ -372,31 +424,11 @@ func (s *remoteControlManagedSession) remoteTerminalForWorkspace(ctx context.Con
 		return "", "", "", controlResponseActionError(list, ControlActionTerminalList)
 	}
 	for _, tab := range terminalTabsFromControlResult(list.Result) {
-		if tab.WorkspaceID == workspaceID && tab.Status == terminalStatusOpen {
+		if tab.TerminalID == terminalID && tab.Status == terminalStatusOpen {
 			return tab.TerminalID, tab.Shell, tab.CWD, nil
 		}
 	}
-	open, err := s.request(ctx, ControlRequest{
-		RequestID:  remoteControlManagedRequestPrefix + "pty_open_" + randomID(12),
-		Capability: CapabilityTerminalOpen,
-		Action:     ControlActionTerminalOpen,
-		Params:     map[string]any{"workspace_id": workspaceID, "cols": defaultTerminalCols, "rows": defaultTerminalRows},
-	})
-	if err != nil {
-		return "", "", "", fmt.Errorf("remote terminal open failed: %w", err)
-	}
-	if !open.OK {
-		if open.Error != nil && open.Error.Code == controlAuthorizationRequiredCode && s.manager != nil {
-			s.manager.Invalidate(s.hostDeviceID, controlAuthorizationRequiredCode)
-		}
-		return "", "", "", controlResponseActionError(open, ControlActionTerminalOpen)
-	}
-	openResult := mapValue(open.Result)
-	terminalID := stringValue(openResult["terminal_id"])
-	if terminalID == "" {
-		return "", "", "", errors.New("remote terminal response missing terminal_id")
-	}
-	return terminalID, stringValue(openResult["shell"]), stringValue(openResult["cwd"]), nil
+	return "", "", "", newActionError(http.StatusNotFound, "terminal_not_found", "terminal not found")
 }
 
 func terminalTabsFromControlResult(result any) []terminalTab {

@@ -42,6 +42,7 @@ import type {
   Session,
   SessionInputAttachment,
   SessionView,
+  TerminalTab,
   WorkbenchPatch,
   WorkbenchState,
   Workspace,
@@ -110,6 +111,7 @@ export function App(): React.JSX.Element {
   const [workspaceConnections, setWorkspaceConnections] = useState<Record<string, WorkspaceConnection>>({});
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionViews, setSessionViews] = useState<Record<string, SessionView>>({});
+  const [terminalTabs, setTerminalTabs] = useState<Record<string, TerminalTab>>({});
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>("");
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [pendingOpenSessionId, setPendingOpenSessionId] = useState("");
@@ -228,6 +230,10 @@ export function App(): React.JSX.Element {
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null,
     [activeWorkspaceId, workspaces],
+  );
+  const activeWorkspaceTerminalTabs = useMemo(
+    () => workbenchValues(terminalTabs).filter((tab) => !activeWorkspace?.id || tab.workspace_id === activeWorkspace.id),
+    [activeWorkspace?.id, terminalTabs],
   );
   const activeAgent = activeSession?.agent ?? activeWorkspace?.agent;
   const activeSessionId = activeSession?.id ?? "";
@@ -365,6 +371,7 @@ export function App(): React.JSX.Element {
               return next;
             });
             setSessions((current) => current.filter((session) => session.workspace_id !== workspaceID));
+            setTerminalTabs((current) => Object.fromEntries(Object.entries(current).filter(([, tab]) => tab.workspace_id !== workspaceID)));
             setSessionViews((current) => Object.fromEntries(Object.entries(current).filter(([, view]) => view.session.workspace_id !== workspaceID)));
             setEventIndex((current) => removeWorkspaceEvents(current, workspaceID));
             setActiveWorkspaceId((current) => (current === workspaceID ? "" : current));
@@ -439,6 +446,22 @@ export function App(): React.JSX.Element {
           }
           break;
         }
+        case "terminal_tabs": {
+          if (op.op === "remove") {
+            setTerminalTabs((current) => {
+              const next = { ...current };
+              delete next[op.id];
+              return next;
+            });
+            continue;
+          }
+          const tab = op.value as TerminalTab;
+          if (tab?.terminal_id) {
+            setTerminalTabs((current) => ({ ...current, [tab.terminal_id]: tab }));
+            if (tab.status === "open") setRightPanelOpen(true);
+          }
+          break;
+        }
         default:
           break;
       }
@@ -499,6 +522,7 @@ export function App(): React.JSX.Element {
     setLastSessionAgent(sessionResponse[0]?.agent ?? "claude");
     setWorkspaces(workspaceResponse);
     setWorkspaceConnections(connectionMap);
+    setTerminalTabs(workbench?.terminal_tabs ?? {});
     setSessions(sortSessionsByUpdated(sessionResponse.map((session) => {
       const view = viewMap[session.id];
       return view ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session;
@@ -992,6 +1016,8 @@ export function App(): React.JSX.Element {
         connection: "local" as const,
         statusLabel: "本机",
         statusTone: "good" as const,
+        controlLabel: "",
+        controlTone: "muted" as const,
       },
       ...remoteHosts.map((host) => ({
         id: host.device_id,
@@ -1001,6 +1027,8 @@ export function App(): React.JSX.Element {
         connection: host.connection,
         statusLabel: remoteHostStatusLabel(host, hostAuthorizationOverrides[host.device_id]),
         statusTone: remoteHostStatusTone(host, hostAuthorizationOverrides[host.device_id]),
+        controlLabel: remoteHostControlLabel(host, hostAuthorizationOverrides[host.device_id]),
+        controlTone: remoteHostControlTone(host, hostAuthorizationOverrides[host.device_id]),
       })),
     ],
     [daemonInfo?.remote_control?.listen_addr, hostAuthorizationOverrides, localHostInfo, remoteHosts],
@@ -1310,6 +1338,7 @@ export function App(): React.JSX.Element {
         api={api}
         health={health}
         open={rightPanelOpen}
+        terminalTabs={activeWorkspaceTerminalTabs}
         width={rightPanelWidth}
         workspace={activeWorkspace}
         onLiveResize={setRightPanelLiveWidth}
@@ -1560,6 +1589,36 @@ function remoteHostStatusTone(host: RemoteHostRecord, override?: RemoteAuthoriza
   if (remoteHostNeedsPairing(host, override)) return "warning";
   if (host.connection === "local" || host.connection === "lan" || host.connection === "relay") return "good";
   return "muted";
+}
+
+function remoteHostControlLabel(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): string {
+  if (remoteHostNeedsPairing(host, override)) return "";
+  switch (host.control?.state) {
+    case "connecting":
+      return "连接中";
+    case "connected":
+      return "已连接";
+    case "reconnecting":
+      return "重连中";
+    case "failed":
+      return "失败";
+    default:
+      return "";
+  }
+}
+
+function remoteHostControlTone(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): "good" | "warning" | "muted" {
+  if (remoteHostNeedsPairing(host, override)) return "muted";
+  switch (host.control?.state) {
+    case "connected":
+      return "good";
+    case "connecting":
+    case "reconnecting":
+    case "failed":
+      return "warning";
+    default:
+      return "muted";
+  }
 }
 
 function pairingStatusLabel(status: string): string {

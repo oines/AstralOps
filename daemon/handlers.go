@@ -418,7 +418,15 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 
 	controllerID := a.store.hostInfo().Identity.DeviceID
 	terminals := a.terminalManager()
-	open, ok := terminals.firstOpenTerminalForWorkspace(ws.ID)
+	terminalID := strings.TrimSpace(r.URL.Query().Get("terminal_id"))
+	open, ok := terminalOpenResult{}, false
+	if terminalID != "" {
+		open, ok = terminals.openTerminalResult(terminalID)
+		if !ok || open.WorkspaceID != ws.ID {
+			_ = conn.WriteJSON(map[string]any{"type": "error", "message": "terminal not found"})
+			return
+		}
+	}
 	if !ok {
 		var err error
 		open, err = terminals.open(r.Context(), controllerID, terminalOpenParams{WorkspaceID: ws.ID, Cols: defaultTerminalCols, Rows: defaultTerminalRows})
@@ -428,9 +436,10 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 		}
 	}
 	_ = conn.WriteJSON(map[string]any{
-		"type":  "ready",
-		"shell": open.Shell,
-		"cwd":   open.CWD,
+		"type":        "ready",
+		"terminal_id": open.TerminalID,
+		"shell":       open.Shell,
+		"cwd":         open.CWD,
 	})
 
 	ctx, cancel := context.WithCancel(r.Context())
