@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "AstralOps",
+    "slug": "astralops",
+    "scheme": "astralops",
+    "version": "0.3.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "bundleIdentifier": "dev.oines.astralops",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "dev.oines.astralops",
+      "permissions": ["INTERNET", "ACCESS_NETWORK_STATE", "ACCESS_WIFI_STATE", "CHANGE_WIFI_MULTICAST_STATE"]
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-web-browser"
+    ]
+  }
+}

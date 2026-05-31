@@ -13,6 +13,7 @@
     "check:i18n:update": "node scripts/check-i18n-literals.mjs --update-baseline"
   },
   "dependencies": {
+    "@astralops/transcript": "file:../../packages/transcript",
     "@astralops/protocol": "file:../../protocol",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",

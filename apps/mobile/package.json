@@ -1,0 +1,41 @@
+{
+  "name": "@astralops/mobile",
+  "version": "0.3.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "main": "expo/AppEntry.js",
+  "scripts": {
+    "dev": "expo start --dev-client",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "build": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@astralops/controller-client": "file:../../packages/controller-client",
+    "@astralops/i18n": "file:../../packages/i18n",
+    "@astralops/protocol": "file:../../protocol",
+    "@astralops/transcript": "file:../../packages/transcript",
+    "@astralops/workbench-state": "file:../../packages/workbench-state",
+    "@expo/metro-runtime": "~56.0.13",
+    "expo": "~56.0.8",
+    "expo-auth-session": "~56.0.13",
+    "expo-linking": "~56.0.13",
+    "expo-localization": "~56.0.6",
+    "expo-secure-store": "~56.0.4",
+    "expo-status-bar": "~56.0.4",
+    "expo-web-browser": "~56.0.5",
+    "lucide-react-native": "^0.554.0",
+    "react": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-gesture-handler": "^3.0.0",
+    "react-native-reanimated": "^4.4.0",
+    "react-native-safe-area-context": "^5.8.0",
+    "react-native-screens": "^4.25.2",
+    "react-native-webview": "^13.16.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.6",
+    "typescript": "^5.9.3"
+  }
+}
