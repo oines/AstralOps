@@ -6,12 +6,10 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import WebView, { type WebViewMessageEvent } from "react-native-webview";
 import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, LogOut, Menu, Plus, RefreshCw, Settings, TerminalSquare, X } from "lucide-react-native";
 import { getLocales } from "expo-localization";
-import type { AstralEvent, CloudAccountStatus, CloudAuthProvider, CloudRelayListResponse, DeviceIdentity, HostSnapshotResponse, Session, TerminalTab, WorkbenchState, Workspace } from "@astralops/protocol";
+import type { AstralEvent, CloudAccountStatus, CloudAuthProvider, CloudRelayListResponse, DeviceIdentity, Session, TerminalTab, WorkbenchState, Workspace } from "@astralops/protocol";
 import { mobileResources, resolveAppLanguage, type AppLanguage, type ResolvedLanguage } from "@astralops/i18n";
 import {
   EMPTY_EVENT_INDEX,
-  maxEventSeq,
-  mergeEventIndex,
   selectSessionEvents,
   type EventIndex,
 } from "@astralops/transcript";
@@ -19,18 +17,29 @@ import { buildTranscriptWebPayload, createTranscriptWebViewHtml, postTranscriptW
 import { createEmptyWorkbenchState, selectSessions, selectTerminalTabs, selectWorkspaces } from "@astralops/workbench-state";
 import { DEFAULT_CLOUD_BASE_URL, clearStoredCloudSession, loadCloudMeshSnapshot, loadStoredCloudSession, removeSelfFromCloud, requestCloudPairing, startCloudOAuth, type MobileHostRecord, type StoredCloudSession } from "./src/mobileCloud";
 import { loadOrCreateStoredMobileIdentity, resetStoredMobileIdentity, type StoredMobileIdentity } from "./src/mobileIdentity";
-import { MobileHostRemoteSession, type MobileRemoteSessionStatus, type MobileTerminalHandle, type MobileTerminalStatus } from "./src/mobileRemote";
 import { createTerminalWebViewHtml, postWebViewMessage } from "./src/webSurfaces";
 
 type Page = "navigator" | "transcript" | "terminal";
 
 const initialWorkbench = createEmptyWorkbenchState();
 const mobileDebugForceRelayKey = "astralops.mobile.debug.force-relay.v1";
-const mobileEventWindowSize = 1000;
 const emptyInputAccessoryID = "astralops-empty-input-accessory";
 
 type TerminalRuntime = MobileTerminalStatus & {
   output: string;
+};
+
+type MobileRemoteSessionStatus = {
+  state: "idle" | "connecting" | "live" | "reconnecting" | "failed" | "needs_pairing" | "revoked";
+  transport?: "lan" | "relay";
+  message?: string;
+};
+
+type MobileTerminalStatus = {
+  state: "attaching" | "live" | "resyncing" | "paused" | "failed" | "closed";
+  canInput: boolean;
+  outputSeq?: number;
+  message?: string;
 };
 
 function AppShell(): React.JSX.Element {
@@ -59,17 +68,11 @@ function AppShell(): React.JSX.Element {
   const [activeTerminalId, setActiveTerminalId] = useState("");
   const [composerText, setComposerText] = useState("");
   const scrollRef = useRef<ScrollView | null>(null);
-  const eventIndexRef = useRef<EventIndex>(EMPTY_EVENT_INDEX);
-  const activeSessionIdRef = useRef("");
-  const loadedSessionEventsRef = useRef(new Set<string>());
-  const pollTickRef = useRef(0);
   const [workbench, setWorkbench] = useState<WorkbenchState>(initialWorkbench);
   const [eventIndex, setEventIndex] = useState<EventIndex>(EMPTY_EVENT_INDEX);
-  const [remoteSession, setRemoteSession] = useState<MobileHostRemoteSession | undefined>();
   const [remoteStatus, setRemoteStatus] = useState<MobileRemoteSessionStatus>({ state: "idle" });
   const [forceRelayOnly, setForceRelayOnly] = useState(false);
   const [terminalRuntime, setTerminalRuntime] = useState<Record<string, TerminalRuntime>>({});
-  const terminalHandleRef = useRef<MobileTerminalHandle | undefined>(undefined);
   const workspaces = selectWorkspaces(workbench);
   const sessions = selectSessions(workbench, activeWorkspaceId);
   const terminals = selectTerminalTabs(workbench, activeWorkspaceId);
@@ -138,14 +141,6 @@ function AppShell(): React.JSX.Element {
   }, [cloudSession?.account_token, identity?.device_id]);
 
   useEffect(() => {
-    eventIndexRef.current = eventIndex;
-  }, [eventIndex]);
-
-  useEffect(() => {
-    activeSessionIdRef.current = activeSessionId;
-  }, [activeSessionId]);
-
-  useEffect(() => {
     setActiveWorkspaceId((current) => current && workspaces.some((workspace) => workspace.id === current) ? current : workspaces[0]?.id ?? "");
   }, [workspaces]);
 
@@ -158,23 +153,13 @@ function AppShell(): React.JSX.Element {
   }, [terminals]);
 
   useEffect(() => {
-    if (cloudSession) remoteSession?.updateCloudSession(cloudSession);
-  }, [remoteSession, cloudSession]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | undefined;
     const host = activeHost;
     const hostID = host?.device_id ?? "";
     const hostChanged = previousRemoteHostIdRef.current !== hostID;
     previousRemoteHostIdRef.current = hostID;
-    setRemoteSession(undefined);
     setRemoteStatus({ state: "idle" });
     setHostError("");
-    terminalHandleRef.current = undefined;
-    pollTickRef.current = 0;
     if (hostChanged) {
-      loadedSessionEventsRef.current.clear();
       setWorkbench(createEmptyWorkbenchState());
       setEventIndex(EMPTY_EVENT_INDEX);
       setTerminalRuntime({});
@@ -184,7 +169,6 @@ function AppShell(): React.JSX.Element {
     }
     if (!host || !cloudSession || !storedIdentity) {
       if (!host) {
-        loadedSessionEventsRef.current.clear();
         setWorkbench(createEmptyWorkbenchState());
         setEventIndex(EMPTY_EVENT_INDEX);
         setTerminalRuntime({});
@@ -198,81 +182,14 @@ function AppShell(): React.JSX.Element {
       setRemoteStatus({ state: "needs_pairing", message: host.authorization_state === "pending" ? t("status.pending") : t("status.needs_pairing") });
       return () => undefined;
     }
-    const session = new MobileHostRemoteSession(cloudSession, storedIdentity, host, { forceRelay: forceRelayOnly });
-    setRemoteSession(session);
-    async function loadSnapshot(): Promise<void> {
-      setHostLoading(true);
-      setHostError("");
-      try {
-        const snapshot = await session.snapshot(mobileEventWindowSize);
-        if (cancelled) return;
-        applyHostSnapshot(snapshot);
-        setRemoteStatus(session.currentStatus());
-        setHosts((current) => current.map((item) => item.device_id === host.device_id ? {
-          ...item,
-          authorization_state: "approved",
-          connection: session.currentStatus().transport ?? item.connection,
-          control: { ...(item.control ?? { route_generation: 0 }), state: "live", transport: session.currentStatus().transport, route_generation: item.control?.route_generation ?? 0, updated_at: new Date().toISOString() },
-        } : item));
-      } catch (error) {
-        if (cancelled) return;
-        const message = errorMessage(error);
-        setHostError(message);
-        setRemoteStatus(session.currentStatus());
-        if (session.currentStatus().state === "needs_pairing") {
-          setHosts((current) => current.map((item) => item.device_id === host.device_id ? { ...item, authorization_state: "needs_pairing" } : item));
-        }
-      } finally {
-        if (!cancelled) setHostLoading(false);
-      }
-    }
-    void loadSnapshot();
-    timer = setInterval(() => {
-      void (async () => {
-        if (cancelled) return;
-        try {
-          pollTickRef.current += 1;
-          const events = await session.events(maxEventSeq(eventIndexRef.current), activeSessionIdRef.current || undefined);
-          if (events.length > 0 && !cancelled) setEventIndex((current) => mergeEventIndex(current, events));
-          if (pollTickRef.current % 3 === 0) {
-            const snapshot = await session.snapshot(20);
-            if (!cancelled) applyHostSnapshot(snapshot);
-          }
-          setRemoteStatus(session.currentStatus());
-        } catch (error) {
-          if (!cancelled) {
-            setHostError(errorMessage(error));
-            setRemoteStatus(session.currentStatus());
-          }
-        }
-      })();
-    }, 3000);
-    return () => {
-      cancelled = true;
-      if (timer) clearInterval(timer);
-      session.close();
-    };
+    setRemoteStatus({ state: "failed", message: t("mobile.controllerCoreUnavailable") });
+    setHostLoading(false);
+    return () => undefined;
   }, [activeHostId, activeHostIdentityKey, activeHostCanControl, cloudSession?.account_token, storedIdentity?.seed_hex, forceRelayOnly]);
 
   useEffect(() => {
-    if (!remoteSession || remoteStatus.state !== "live" || !activeSessionId) return () => undefined;
-    if (loadedSessionEventsRef.current.has(activeSessionId)) return () => undefined;
-    let cancelled = false;
-    loadedSessionEventsRef.current.add(activeSessionId);
-    void remoteSession.events(0, activeSessionId, mobileEventWindowSize).then((events) => {
-      if (cancelled) return;
-      setEventIndex((current) => mergeEventIndex(current, events));
-      setRemoteStatus(remoteSession.currentStatus());
-    }).catch((error) => {
-      if (cancelled) return;
-      loadedSessionEventsRef.current.delete(activeSessionId);
-      setHostError(errorMessage(error));
-      setRemoteStatus(remoteSession.currentStatus());
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [remoteSession, remoteStatus.state, activeSessionId]);
+    return () => undefined;
+  }, [remoteStatus.state, activeSessionId]);
 
   async function refreshCloud(sessionArg = cloudSession, identityArg = identity, silent = false): Promise<void> {
     if (!sessionArg || !identityArg) {
@@ -373,130 +290,39 @@ function AppShell(): React.JSX.Element {
     scrollRef.current?.scrollTo({ x: width * index, animated });
   }
 
-  function applyHostSnapshot(snapshot: HostSnapshotResponse): void {
-    const nextWorkbench = snapshot.workbench ?? workbenchFromSnapshot(snapshot);
-    setWorkbench(nextWorkbench);
-    setEventIndex((current) => mergeEventIndex(current, [...(snapshot.events ?? []), ...(snapshot.initial_session_events ?? [])]));
-  }
-
   async function sendPrompt(): Promise<void> {
-    const input = composerText.trim();
-    if (!input || !remoteSession || !activeWorkspace) return;
-    setHostError("");
-    try {
-      let session = activeSession;
-      if (!session) {
-        session = await remoteSession.createSession(activeWorkspace.id, activeWorkspace.agent);
-        setActiveSessionId(session.id);
-      }
-      await remoteSession.sendInput(session.id, input);
-      setComposerText("");
-      const snapshot = await remoteSession.snapshot();
-      applyHostSnapshot(snapshot);
-      const events = await remoteSession.events(maxEventSeq(eventIndex), session.id);
-      setEventIndex((current) => mergeEventIndex(current, events));
-    } catch (error) {
-      setHostError(errorMessage(error));
-      setRemoteStatus(remoteSession.currentStatus());
-    }
+    if (!composerText.trim()) return;
+    setHostError(t("mobile.controllerCoreUnavailable"));
   }
 
   useEffect(() => {
-    terminalHandleRef.current = undefined;
-    if (!remoteSession || !activeTerminal || remoteStatus.state !== "live") return () => undefined;
-    let closed = false;
-    const terminalID = activeTerminal.terminal_id;
-    const afterSeq = terminalRuntime[terminalID]?.outputSeq ?? 0;
+    if (!activeTerminal) return () => undefined;
     setTerminalRuntime((current) => ({
       ...current,
-      [terminalID]: current[terminalID] ?? { state: "attaching", canInput: false, outputSeq: afterSeq, output: "" },
+      [activeTerminal.terminal_id]: current[activeTerminal.terminal_id] ?? emptyTerminalRuntime(t("mobile.controllerCoreUnavailable")),
     }));
-    void remoteSession.attachTerminal(terminalID, {
-      onReady: (ready) => {
-        setTerminalRuntime((current) => ({ ...current, [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime()), state: "live", canInput: true, outputSeq: ready.output_seq ?? 0 } }));
-      },
-      onStatus: (status) => {
-        setTerminalRuntime((current) => ({
-          ...current,
-          [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime()), ...status, outputSeq: status.outputSeq },
-        }));
-      },
-      onOutput: (data, outputSeq) => {
-        setTerminalRuntime((current) => {
-          const previous = current[terminalID] ?? emptyTerminalRuntime();
-          return { ...current, [terminalID]: { ...previous, outputSeq, output: appendTerminalOutput(previous.output, data) } };
-        });
-      },
-      onClosed: () => {
-        setTerminalRuntime((current) => ({ ...current, [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime()), state: "closed", canInput: false } }));
-      },
-      onError: (message) => {
-        setTerminalRuntime((current) => ({ ...current, [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime()), state: "failed", canInput: false, message } }));
-      },
-    }, afterSeq).then((handle) => {
-      if (closed) {
-        void handle.detach();
-        return;
-      }
-      terminalHandleRef.current = handle;
-    }).catch((error) => setHostError(errorMessage(error)));
-    return () => {
-      closed = true;
-      const handle = terminalHandleRef.current;
-      terminalHandleRef.current = undefined;
-      void handle?.detach();
-    };
-  }, [remoteSession, remoteStatus.state, activeTerminal?.terminal_id]);
+    return () => undefined;
+  }, [activeTerminal?.terminal_id, t]);
 
   async function openTerminalForWorkspace(): Promise<void> {
-    if (!remoteSession || !activeWorkspace || remoteStatus.state !== "live") return;
-    setHostError("");
-    try {
-      const terminal = await remoteSession.createTerminal(activeWorkspace.id);
-      setActiveTerminalId(terminal.terminal_id);
-      const snapshot = await remoteSession.snapshot(20);
-      applyHostSnapshot(snapshot);
-      scrollToPage("terminal");
-    } catch (error) {
-      setHostError(errorMessage(error));
-      setRemoteStatus(remoteSession.currentStatus());
-    }
+    setHostError(t("mobile.controllerCoreUnavailable"));
+    scrollToPage("terminal");
   }
 
   async function sendTerminalInput(data: string): Promise<void> {
     if (!data || !activeTerminalRuntime?.canInput) return;
-    try {
-      await terminalHandleRef.current?.input(data);
-    } catch (error) {
-      setHostError(errorMessage(error));
-      if (activeTerminal) {
-        setTerminalRuntime((current) => ({
-          ...current,
-          [activeTerminal.terminal_id]: { ...(current[activeTerminal.terminal_id] ?? emptyTerminalRuntime()), state: "paused", canInput: false, message: errorMessage(error) },
-        }));
-      }
-    }
+    setHostError(t("mobile.controllerCoreUnavailable"));
   }
 
   async function closeActiveTerminal(): Promise<void> {
-    if (!remoteSession || !activeTerminal || remoteStatus.state !== "live") return;
+    if (!activeTerminal) return;
     const terminalID = activeTerminal.terminal_id;
     setHostError("");
-    try {
-      if (terminalHandleRef.current?.terminalId === terminalID) await terminalHandleRef.current.close();
-      else await remoteSession.closeTerminal(terminalID);
-      terminalHandleRef.current = undefined;
-      setTerminalRuntime((current) => ({
-        ...current,
-        [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime()), state: "closed", canInput: false },
-      }));
-      setActiveTerminalId("");
-      const snapshot = await remoteSession.snapshot(20);
-      applyHostSnapshot(snapshot);
-    } catch (error) {
-      setHostError(errorMessage(error));
-      setRemoteStatus(remoteSession.currentStatus());
-    }
+    setTerminalRuntime((current) => ({
+      ...current,
+      [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime(t("mobile.controllerCoreUnavailable"))), state: "closed", canInput: false },
+    }));
+    setActiveTerminalId("");
   }
 
   return (
@@ -836,7 +662,7 @@ function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoad
       <View style={styles.transcriptBody}>
         {hostLoading || hostError || remoteStatus.state === "connecting" || remoteStatus.state === "failed" || remoteStatus.state === "needs_pairing" ? (
           <View style={[styles.inlineStatus, { backgroundColor: colors.panelSoft, borderColor: colors.border }]}>
-            <Text style={[styles.inlineStatusText, { color: hostError ? colors.orange : colors.textSoft }]}>{hostError || t(`status.${remoteStatus.state}`)}</Text>
+            <Text style={[styles.inlineStatusText, { color: hostError ? colors.orange : colors.textSoft }]}>{hostError || remoteStatus.message || t(`status.${remoteStatus.state}`)}</Text>
           </View>
         ) : null}
         <WebView
@@ -1077,18 +903,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function workbenchFromSnapshot(snapshot: HostSnapshotResponse): WorkbenchState {
-  const state = createEmptyWorkbenchState();
-  for (const workspace of snapshot.workspaces ?? []) state.workspaces[workspace.id] = workspace;
-  for (const session of snapshot.sessions ?? []) state.sessions[session.id] = session;
-  for (const view of snapshot.session_views ?? []) {
-    state.session_views[view.session.id] = view;
-    state.sessions[view.session.id] = view.session;
-  }
-  for (const connection of snapshot.workspace_connections ?? []) state.workspace_connections[connection.workspace_id] = connection;
-  return { ...state, version: snapshot.workbench?.version ?? 1, updated_at: new Date().toISOString() };
-}
-
 function hostCanControl(host?: MobileHostRecord): boolean {
   return host?.authorization_state === "approved";
 }
@@ -1106,13 +920,8 @@ function mergeCloudHostsWithLocalControl(cloudHosts: MobileHostRecord[], localHo
   });
 }
 
-function emptyTerminalRuntime(): TerminalRuntime {
-  return { state: "attaching", canInput: false, outputSeq: 0, output: "" };
-}
-
-function appendTerminalOutput(current: string, data: string): string {
-  const next = `${current}${data}`;
-  return next.length > 120000 ? next.slice(next.length - 120000) : next;
+function emptyTerminalRuntime(message = ""): TerminalRuntime {
+  return { state: "paused", canInput: false, outputSeq: 0, output: "", message };
 }
 
 const styles = StyleSheet.create({

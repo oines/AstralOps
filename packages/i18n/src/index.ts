@@ -60,6 +60,7 @@ export const mobileResources = {
       workbenchPendingDetail: "Select a workspace or session.",
       noTerminal: "No terminal",
       closeTerminal: "Close terminal",
+      controllerCoreUnavailable: "Remote control is paused until the shared Go Controller Core is enabled.",
     },
     status: {
       local: "Local",
@@ -143,6 +144,7 @@ export const mobileResources = {
       workbenchPendingDetail: "选择工作区或会话",
       noTerminal: "暂无终端",
       closeTerminal: "关闭终端",
+      controllerCoreUnavailable: "远控已暂停，等待接入共享 Go Controller Core。",
     },
     status: {
       local: "本机",
