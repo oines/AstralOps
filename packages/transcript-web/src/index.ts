@@ -93,7 +93,7 @@ export function createTranscriptWebViewHtml(colors: TranscriptWebPalette): strin
 <html>
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <style>
     :root {
       color-scheme: ${colors.bg === "#18191a" ? "dark" : "light"};
@@ -118,6 +118,7 @@ export function createTranscriptWebViewHtml(colors: TranscriptWebPalette): strin
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
       overflow: hidden;
       -webkit-text-size-adjust: 100%;
+      touch-action: pan-y;
     }
     * { box-sizing: border-box; }
     #root {
@@ -403,6 +404,10 @@ export function createTranscriptWebViewHtml(colors: TranscriptWebPalette): strin
         if (!message || message.type !== "transcript.render") return;
         renderTranscript(message.payload);
       };
+
+      document.addEventListener("gesturestart", function (event) { event.preventDefault(); }, { passive: false });
+      document.addEventListener("gesturechange", function (event) { event.preventDefault(); }, { passive: false });
+      document.addEventListener("gestureend", function (event) { event.preventDefault(); }, { passive: false });
     })();
   </script>
 </body>

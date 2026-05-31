@@ -824,7 +824,10 @@ function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoad
           containerStyle={styles.webViewContainer}
           scrollEnabled
           javaScriptEnabled
+          bounces={false}
+          scalesPageToFit={false}
           setSupportMultipleWindows={false}
+          textZoom={100}
           onLoadEnd={() => setWebViewReady(true)}
         />
       </View>
