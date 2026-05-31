@@ -212,7 +212,7 @@ A 通过账号 relay 的 WebSocket 转发 opaque envelope 给 B
 
 MVP 不做 previous relay grace、双 relay 投递、relay-to-relay 转发或跨 relay 查找。用户在设置里切换账号 relay 时，daemon 只调用本机 daemon 的 `PATCH /v1/cloud/account/relay`，daemon 再调用 Cloud 的 `PATCH /v1/account/relay`。Cloud 持久化账号当前 `relay_id` 后立即对后续 `GET /v1/account` 签发新 relay credential。其他设备在下一次 Cloud sync 后切到新 relay；切换窗口内 relay fallback 可能短暂不可用，但不会破坏 LAN 直连和设备 E2EE 信任边界。
 
-默认 daemon relay 传输是 WebSocket：Host daemon 登录 Mesh 后连接账号 relay，并用自己的 `device_id` 挂在线转发通道；Controller 需要控制 Host 时也连接同一个账号 relay，发送 `control.hello`，随后同一条 WebSocket 承载 `control.hello_ack` 与 `control.sealed_frame`。Relay 不解析 payload。HTTP envelope queue 保留为兼容和移动端开发传输；broker 必须按账号和设备统一路由 opaque envelope，让 HTTP 客户端与 WebSocket 客户端互通，但 HTTP queue 不改变 daemon 默认 WebSocket 路线。
+默认 relay 传输是 WebSocket：Host daemon 登录 Mesh 后连接账号 relay，并用自己的 `device_id` 挂在线转发通道；Controller 需要控制 Host 时也连接同一个账号 relay，发送 `control.hello`，随后同一条 WebSocket 承载 `control.hello_ack` 与 `control.sealed_frame`。Relay 不持久化 WebSocket 消息，也不解析 payload。HTTP envelope queue 仍保留为旧接口和测试夹具，不作为 daemon 或 mobile 的默认交互路径。
 
 开发默认账号 relay 是 `cn-nanjing`：
 

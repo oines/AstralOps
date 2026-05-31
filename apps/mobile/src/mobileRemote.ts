@@ -37,8 +37,11 @@ const controlDirectionControllerToHost = "controller-to-host";
 const controlDirectionHostToController = "host-to-controller";
 const requestTimeoutMs = 15000;
 
-type RelayListResponse = {
-  envelopes?: RelayEnvelope[];
+type RelayWebSocketFrame = {
+  type: "send" | "envelope" | "error" | string;
+  envelope?: RelayEnvelope;
+  code?: string;
+  error?: string;
 };
 
 type ControlCipher = {
@@ -51,6 +54,13 @@ type ControlCipher = {
 
 type PendingRequest = {
   resolve: (response: ControlResponse) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
+type PendingHelloAck = {
+  clientNonce: string;
+  resolve: (ack: ControlHelloAckFrame) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
 };
@@ -96,6 +106,8 @@ type TerminalAttachment = {
 export class MobileHostRemoteSession {
   private cipher?: ControlCipher;
   private openedAt = 0;
+  private relaySocket?: WebSocket;
+  private pendingHello?: PendingHelloAck;
   private status: MobileRemoteSessionStatus = { state: "idle" };
   private pending = new Map<string, PendingRequest>();
   private terminals = new Map<string, TerminalAttachment>();
@@ -264,39 +276,17 @@ export class MobileHostRemoteSession {
   }
 
   private async ensureConnected(): Promise<void> {
-    if (this.cipher) return;
+    if (this.cipher && this.relaySocket?.readyState === WebSocket.OPEN) return;
     if (this.closed) throw new Error("Mobile Host session is closed.");
     this.status = { state: "connecting" };
     try {
       this.cipher = await this.openRelayControlCipher();
       this.status = { state: "live" };
-      this.startReadLoop(this.cipher);
     } catch (error) {
+      this.closeRelaySocket();
       const message = errorMessage(error);
       this.status = { state: isPairingError(message) ? "needs_pairing" : "failed", message };
       throw error;
-    }
-  }
-
-  private startReadLoop(cipher: ControlCipher): void {
-    void this.readLoop(cipher);
-  }
-
-  private async readLoop(cipher: ControlCipher): Promise<void> {
-    try {
-      while (!this.closed && this.cipher === cipher) {
-        const envelopes = await this.listEnvelopes("10s");
-        for (const envelope of envelopes) {
-          await this.ackEnvelope(envelope);
-          if (this.cipher !== cipher) break;
-          if (envelope.payload_kind !== "control.sealed_frame" || envelope.from_device_id !== this.host.device_id) continue;
-          if (envelope.connection_id && envelope.connection_id !== cipher.connectionID) continue;
-          const sealed = parseJSON(bytesToUtf8(base64ToBytes(envelope.payload_base64))) as ControlSealedFrame;
-          this.dispatchFrame(openFrame(cipher, sealed));
-        }
-      }
-    } catch (error) {
-      if (!this.closed && this.cipher === cipher) this.invalidate(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
@@ -358,7 +348,9 @@ export class MobileHostRemoteSession {
   }
 
   private invalidate(error: Error): void {
+    this.closeRelaySocket();
     this.cipher = undefined;
+    this.rejectPendingHello(error);
     this.status = { state: isPairingError(error.message) ? "needs_pairing" : "failed", message: error.message };
     for (const [requestID, pending] of this.pending) {
       clearTimeout(pending.timeout);
@@ -376,6 +368,7 @@ export class MobileHostRemoteSession {
     if (!this.host.public_key) throw new Error("Host public key is missing.");
 
     this.openedAt = Date.now();
+    await this.openRelayWebSocket();
     const ephemeralSecret = Crypto.getRandomBytes(32);
     const ephemeralPublic = x25519.getPublicKey(ephemeralSecret);
     const clientNonce = bytesToBase64(Crypto.getRandomBytes(32));
@@ -391,87 +384,169 @@ export class MobileHostRemoteSession {
     };
     hello.signature = bytesToBase64(ed25519.sign(controlClientSignaturePayload(this.host.device_id, hello), hexToBytes(this.identity.seed_hex)));
 
-    await this.enqueueEnvelope("control.hello", bytesToBase64(utf8ToBytes(JSON.stringify(hello))));
-    const ack = await this.waitForHelloAck(hello);
+    const ackPromise = this.waitForHelloAck(hello);
+    try {
+      this.sendRelayEnvelope("control.hello", bytesToBase64(utf8ToBytes(JSON.stringify(hello))));
+    } catch (error) {
+      this.rejectPendingHello(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+    const ack = await ackPromise;
     validateHelloAck(this.cloud, this.host, hello, ack);
     const sharedSecret = x25519.getSharedSecret(ephemeralSecret, base64ToBytes(ack.host_ephemeral_key));
     return newControllerCipher(sharedSecret, hello, ack);
   }
 
-  private async waitForHelloAck(hello: ControlHelloFrame): Promise<ControlHelloAckFrame> {
-    const started = Date.now();
-    for (;;) {
-      if (Date.now() - started > 18000) throw new Error("Host did not answer the control handshake.");
-      const envelopes = await this.listEnvelopes("10s");
-      for (const envelope of envelopes) {
-        await this.ackEnvelope(envelope);
-        if (envelope.payload_kind !== "control.hello_ack" || envelope.from_device_id !== this.host.device_id) continue;
-        const payload = bytesToUtf8(base64ToBytes(envelope.payload_base64));
-        const closeFrame = parseJSON(payload) as Partial<ControlPlainFrame>;
-        if (closeFrame.type === "close") {
-          throw new Error(closeFrame.reason || "Host rejected control request.");
-        }
-        const ack = closeFrame as unknown as ControlHelloAckFrame;
-        if (ack.client_nonce && ack.client_nonce !== hello.client_nonce) continue;
-        return ack;
-      }
-    }
+  private waitForHelloAck(hello: ControlHelloFrame): Promise<ControlHelloAckFrame> {
+    this.rejectPendingHello(new Error("Control handshake superseded."));
+    return new Promise<ControlHelloAckFrame>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (this.pendingHello?.clientNonce === hello.client_nonce) this.pendingHello = undefined;
+        reject(new Error("Host did not answer the control handshake."));
+      }, 18000);
+      this.pendingHello = {
+        clientNonce: hello.client_nonce,
+        resolve: (ack) => {
+          clearTimeout(timeout);
+          this.pendingHello = undefined;
+          resolve(ack);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          this.pendingHello = undefined;
+          reject(error);
+        },
+        timeout,
+      };
+    });
   }
 
   private async writePlain(frame: ControlPlainFrame): Promise<void> {
     if (!this.cipher) throw new Error("Control channel is not connected.");
     const sealed = sealFrame(this.cipher, frame);
-    await this.enqueueEnvelope("control.sealed_frame", bytesToBase64(utf8ToBytes(JSON.stringify(sealed))), this.cipher.connectionID);
+    this.sendRelayEnvelope("control.sealed_frame", bytesToBase64(utf8ToBytes(JSON.stringify(sealed))), this.cipher.connectionID);
   }
 
-  private async enqueueEnvelope(payloadKind: RelayEnvelope["payload_kind"], payloadBase64: string, connectionID = ""): Promise<void> {
-    await this.relayFetch("/v1/relay/envelopes", {
-      method: "POST",
-      body: JSON.stringify({
+  private async openRelayWebSocket(): Promise<void> {
+    if (this.relaySocket?.readyState === WebSocket.OPEN) return;
+    this.closeRelaySocket();
+    if (!this.cloud.relay_url || !this.cloud.relay_credential) throw new Error("Relay credential is missing.");
+    const RelayWebSocket = WebSocket as unknown as new (url: string, protocols?: string | string[], options?: { headers?: Record<string, string> }) => WebSocket;
+    const socket = new RelayWebSocket(relayWebSocketURL(this.cloud.relay_url, this.identity.identity.device_id), [], {
+      headers: { Authorization: `Bearer ${this.cloud.relay_credential}` },
+    });
+    this.relaySocket = socket;
+    await new Promise<void>((resolve, reject) => {
+      let opened = false;
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error("Relay websocket connect timed out."));
+        this.closeRelaySocket(socket);
+      }, 12000);
+      socket.onopen = () => {
+        if (settled) return;
+        opened = true;
+        settled = true;
+        clearTimeout(timeout);
+        resolve();
+      };
+      socket.onerror = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(new Error("Relay websocket error."));
+      };
+      socket.onclose = () => {
+        clearTimeout(timeout);
+        if (!opened && !settled) {
+          settled = true;
+          reject(new Error("Relay websocket closed before connecting."));
+        }
+        if (this.relaySocket === socket) {
+          this.relaySocket = undefined;
+          if (!this.closed) this.invalidate(new Error("Relay websocket closed."));
+        }
+      };
+      socket.onmessage = (event) => {
+        this.handleRelayWebSocketMessage(event.data);
+      };
+    });
+  }
+
+  private sendRelayEnvelope(payloadKind: RelayEnvelope["payload_kind"], payloadBase64: string, connectionID = ""): void {
+    const socket = this.relaySocket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error("Relay websocket is not connected.");
+    socket.send(JSON.stringify({
+      type: "send",
+      envelope: {
         version: relayEnvelopeVersion,
         connection_id: connectionID || undefined,
         from_device_id: this.identity.identity.device_id,
         to_device_id: this.host.device_id,
         payload_kind: payloadKind,
         payload_base64: payloadBase64,
-      } satisfies RelayEnvelope),
-    });
-  }
-
-  private async listEnvelopes(wait: string): Promise<RelayEnvelope[]> {
-    const params = new URLSearchParams({
-      device_id: this.identity.identity.device_id,
-      limit: "50",
-      wait,
-    });
-    const response = await this.relayFetch(`/v1/relay/envelopes?${params.toString()}`);
-    const body = await response.json() as RelayListResponse;
-    return Array.isArray(body.envelopes) ? body.envelopes : [];
-  }
-
-  private async ackEnvelope(envelope: RelayEnvelope): Promise<void> {
-    if (!envelope.envelope_id) return;
-    await this.relayFetch(`/v1/relay/envelopes/${encodeURIComponent(envelope.envelope_id)}/ack`, {
-      method: "POST",
-      body: JSON.stringify({ device_id: this.identity.identity.device_id }),
-    }).catch(() => undefined);
-  }
-
-  private async relayFetch(path: string, init: RequestInit = {}): Promise<Response> {
-    if (!this.cloud.relay_url || !this.cloud.relay_credential) throw new Error("Relay credential is missing.");
-    const response = await fetch(`${this.cloud.relay_url.replace(/\/+$/g, "")}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${this.cloud.relay_credential}`,
-        ...(init.body ? { "Content-Type": "application/json" } : {}),
-        ...(init.headers ?? {}),
       },
-    });
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(text || `${response.status} ${response.statusText}`);
+    } satisfies RelayWebSocketFrame));
+  }
+
+  private handleRelayWebSocketMessage(data: unknown): void {
+    try {
+      if (typeof data !== "string") throw new Error("Relay websocket frame must be text.");
+      const frame = parseJSON(data) as RelayWebSocketFrame;
+      if (frame.type === "error") {
+        this.invalidate(new Error(frame.error || frame.code || "Relay websocket error."));
+        return;
+      }
+      if (frame.type !== "envelope" || !frame.envelope) return;
+      this.handleRelayEnvelope(frame.envelope);
+    } catch (error) {
+      this.invalidate(error instanceof Error ? error : new Error(String(error)));
     }
-    return response;
+  }
+
+  private handleRelayEnvelope(envelope: RelayEnvelope): void {
+    if (envelope.from_device_id !== this.host.device_id) return;
+    if (envelope.payload_kind === "control.hello_ack") {
+      const payload = bytesToUtf8(base64ToBytes(envelope.payload_base64));
+      const closeFrame = parseJSON(payload) as Partial<ControlPlainFrame>;
+      if (closeFrame.type === "close") {
+        this.rejectPendingHello(new Error(closeFrame.reason || "Host rejected control request."));
+        return;
+      }
+      const ack = closeFrame as unknown as ControlHelloAckFrame;
+      if (!this.pendingHello || (ack.client_nonce && ack.client_nonce !== this.pendingHello.clientNonce)) return;
+      this.pendingHello.resolve(ack);
+      return;
+    }
+    const cipher = this.cipher;
+    if (!cipher || envelope.payload_kind !== "control.sealed_frame") return;
+    if (envelope.connection_id && envelope.connection_id !== cipher.connectionID) return;
+    const sealed = parseJSON(bytesToUtf8(base64ToBytes(envelope.payload_base64))) as ControlSealedFrame;
+    this.dispatchFrame(openFrame(cipher, sealed));
+  }
+
+  private rejectPendingHello(error: Error): void {
+    if (!this.pendingHello) return;
+    clearTimeout(this.pendingHello.timeout);
+    const pending = this.pendingHello;
+    this.pendingHello = undefined;
+    pending.reject(error);
+  }
+
+  private closeRelaySocket(socket = this.relaySocket): void {
+    if (!socket) return;
+    if (this.relaySocket === socket) this.relaySocket = undefined;
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+    try {
+      socket.close();
+    } catch {
+      // Ignore close races from React Native's websocket bridge.
+    }
   }
 }
 
@@ -525,6 +600,20 @@ function controlFrameAAD(connectionID: string, direction: string, seq: number): 
     direction,
     String(seq),
   ].join("\n"));
+}
+
+function relayWebSocketURL(baseURL: string, deviceID: string): string {
+  const url = new URL(baseURL);
+  if (url.protocol === "http:") {
+    url.protocol = "ws:";
+  } else if (url.protocol === "https:") {
+    url.protocol = "wss:";
+  } else if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+    throw new Error(`Relay websocket url scheme ${url.protocol.replace(/:$/, "")} is not supported.`);
+  }
+  url.pathname = `${url.pathname.replace(/\/+$/g, "")}/v1/relay/connect`;
+  url.searchParams.set("device_id", deviceID);
+  return url.toString();
 }
 
 function controlClientSignaturePayload(hostDeviceID: string, hello: ControlHelloFrame): Uint8Array {
