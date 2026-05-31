@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { AlertTriangle, KeyRound, LoaderCircle, PanelLeft, PanelRight, RefreshCw, X } from "lucide-react";
 import { createLocalCoreClient, createRemoteCoreClient, isCoreRequestError, readMeshState, requestRemoteHostPairing, subscribeMeshState, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
@@ -21,6 +23,7 @@ import {
 import { useContextUsage } from "./hooks/useContextUsage";
 import { useSessionCommands } from "./hooks/useSessionCommands";
 import { useSessionEventWindow } from "./hooks/useSessionEventWindow";
+import i18n, { resolveAppLanguage } from "./i18n";
 import type {
   AgentKind,
   AppSettings,
@@ -57,7 +60,7 @@ type RemoteAuthorizationOverride = "revoked" | "pending";
 const DEFAULT_APP_SETTINGS: AppSettings = {
   version: 1,
   general: { restore_on_launch: true },
-  appearance: { theme: "system", mac_sidebar_effect: true, preview_theme: "light" },
+  appearance: { theme: "system", language: "system", mac_sidebar_effect: true, preview_theme: "light" },
   session: { default_agent: "remember", default_permission_mode: "default", default_reasoning_effort: "high" },
   workspace: { default_opener: "vscode", ssh_auto_reconnect: true },
   notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
@@ -90,6 +93,7 @@ function workbenchValues<T>(values: Record<string, T> | undefined): T[] {
 }
 
 export function App(): React.JSX.Element {
+  const { t } = useTranslation(["common", "desktop"]);
   const [connection, setConnection] = useState<ConnectionState>("booting");
   const [api, setApi] = useState<CoreClient | null>(null);
   const [localApi, setLocalApi] = useState<CoreClient | null>(null);
@@ -268,18 +272,18 @@ export function App(): React.JSX.Element {
   const queuedCount = queuedInputs.length;
   const runningInputMode = activeAgent === "claude" || activeAgent === "codex" ? "interject" : "queue";
   const composerPlaceholder = !activeWorkspace
-    ? "创建 workspace 后开始"
+    ? t("desktop:composer.createWorkspaceFirst")
     : !activeSession
-      ? "点项目旁边 + 新建 session"
+      ? t("desktop:composer.createSessionFirst")
       : !workspaceInteractive
-        ? "SSH 已断开，先连接工作区"
+        ? t("desktop:composer.connectWorkspaceFirst")
         : sessionRunning
           ? queuedCount > 0
-            ? `继续输入；前面还有 ${queuedCount} 条已排队`
+            ? t("desktop:composer.continueQueued", { count: queuedCount })
             : runningInputMode === "interject"
-              ? "继续输入；会打断当前任务并接上"
-              : "继续输入；会在当前任务后接上"
-          : "要求后续变更";
+              ? t("desktop:composer.continueInterject")
+              : t("desktop:composer.continueAfterCurrent")
+          : t("desktop:composer.defaultPlaceholder");
   const activeAgentInfo = activeAgent ? health?.agents[activeAgent] : undefined;
   const modelOptions = useMemo(() => activeAgentInfo?.models ?? [], [activeAgentInfo]);
   const currentModel = activeAgentInfo?.current_model;
@@ -315,6 +319,11 @@ export function App(): React.JSX.Element {
     document.documentElement.dataset.theme = theme;
     void window.astral.setThemeSource(theme);
   }, [appSettings.appearance.theme]);
+
+  useEffect(() => {
+    const next = resolveAppLanguage(appSettings.appearance.language);
+    if (i18n.language !== next) void i18n.changeLanguage(next);
+  }, [appSettings.appearance.language]);
 
   useEffect(() => {
     setPermissionMode(appSettings.session.default_permission_mode);
@@ -688,8 +697,8 @@ export function App(): React.JSX.Element {
 
   const openLogsDirectory = useCallback(async (): Promise<void> => {
     const result = await window.astral.openLogsDirectory();
-    if (!result.ok) throw new Error(result.error || "无法打开日志目录");
-  }, []);
+    if (!result.ok) throw new Error(result.error || t("desktop:errors.openLogsFailed"));
+  }, [t]);
 
   useEffect(() => {
     if (activeWorkspaceId && !workspaces.some((workspace) => workspace.id === activeWorkspaceId)) {
@@ -767,7 +776,7 @@ export function App(): React.JSX.Element {
       try {
         const workspace = workspaces.find((item) => item.id === workspaceId);
         if (workspace?.target === "ssh" && workspaceConnections[workspaceId]?.status !== "connected") {
-          setError("SSH 工作区未连接，先连接工作区再创建 session");
+          setError(t("desktop:errors.sshWorkspaceDisconnected"));
           return;
         }
         const session = await api.createSession(workspaceId, agent);
@@ -782,7 +791,7 @@ export function App(): React.JSX.Element {
         setError(sessionError instanceof Error ? sessionError.message : String(sessionError));
       }
     },
-    [api, storeSessionView, workspaces, workspaceConnections],
+    [api, storeSessionView, t, workspaces, workspaceConnections],
   );
 
   const handleSelectSession = useCallback(
@@ -1031,11 +1040,11 @@ export function App(): React.JSX.Element {
     () => [
       {
         id: localHostInfo?.identity.device_id || LOCAL_HOST_ID,
-        name: localHostInfo?.identity.device_name || "本机",
+        name: localHostInfo?.identity.device_name || t("desktop:host.local"),
         kind: localHostInfo?.identity.device_kind || "desktop",
-        subtitle: daemonInfo?.remote_control?.listen_addr ? "本机 Host" : "本机可用",
+        subtitle: daemonInfo?.remote_control?.listen_addr ? t("desktop:host.localHost") : t("desktop:host.localAvailable"),
         connection: "local" as const,
-        statusLabel: "本机",
+        statusLabel: t("desktop:host.local"),
         statusTone: "good" as const,
         controlLabel: "",
         controlTone: "muted" as const,
@@ -1044,15 +1053,15 @@ export function App(): React.JSX.Element {
         id: host.device_id,
         name: host.device_name || host.device_id,
         kind: host.device_kind || "desktop",
-        subtitle: remoteHostSubtitle(host, hostAuthorizationOverrides[host.device_id]),
+        subtitle: remoteHostSubtitle(host, hostAuthorizationOverrides[host.device_id], t),
         connection: host.connection,
-        statusLabel: remoteHostStatusLabel(host, hostAuthorizationOverrides[host.device_id]),
+        statusLabel: remoteHostStatusLabel(host, hostAuthorizationOverrides[host.device_id], t),
         statusTone: remoteHostStatusTone(host, hostAuthorizationOverrides[host.device_id]),
-        controlLabel: remoteHostControlLabel(host, hostAuthorizationOverrides[host.device_id]),
+        controlLabel: remoteHostControlLabel(host, hostAuthorizationOverrides[host.device_id], t),
         controlTone: remoteHostControlTone(host, hostAuthorizationOverrides[host.device_id]),
       })),
     ],
-    [daemonInfo?.remote_control?.listen_addr, hostAuthorizationOverrides, localHostInfo, remoteHosts],
+    [daemonInfo?.remote_control?.listen_addr, hostAuthorizationOverrides, localHostInfo, remoteHosts, t],
   );
   const activeHostId = hostOptions.some((host) => host.id === selectedHostId) ? selectedHostId : hostOptions[0]?.id || LOCAL_HOST_ID;
   const activeHostOption = hostOptions.find((host) => host.id === activeHostId) ?? hostOptions[0] ?? null;
@@ -1074,7 +1083,7 @@ export function App(): React.JSX.Element {
   }, [activeHostId, clearDisplayedWorkbenchState]);
 
   const handleBrowseHostFileSystem = useCallback(async (input: HostFileSystemBrowseParams): Promise<HostFileSystemBrowseResult> => {
-    if (!api) throw new Error("Core 未连接");
+    if (!api) throw new Error(t("desktop:errors.coreDisconnected"));
     return api.browseHostFileSystem(input);
   }, [api]);
 
@@ -1086,7 +1095,7 @@ export function App(): React.JSX.Element {
       const result = await requestRemoteHostPairing(daemonInfo, host.device_id);
       setHostPairingStatus((current) => ({
         ...current,
-        [host.device_id]: result.request.status === "pending" ? "请求已发送，等待目标 Host 批准" : pairingStatusLabel(result.request.status),
+        [host.device_id]: result.request.status === "pending" ? t("desktop:pairing.requestSent") : pairingStatusLabel(result.request.status, t),
       }));
       setHostAuthorizationOverrides((current) => {
         if (result.request.status === "pending") return { ...current, [host.device_id]: "pending" };
@@ -1102,7 +1111,7 @@ export function App(): React.JSX.Element {
     } finally {
       setRequestingPairingHostId("");
     }
-  }, [daemonInfo, refreshRemoteHosts]);
+  }, [daemonInfo, refreshRemoteHosts, t]);
 
   useEffect(() => {
     if (!daemonInfo || !localApi || !activeHostId) return;
@@ -1188,7 +1197,7 @@ export function App(): React.JSX.Element {
         if (isCurrentHost()) {
           if (!activeHostIsLocal && isCoreRequestError(hostError, "control_authorization_required")) {
             setHostAuthorizationOverrides((current) => ({ ...current, [activeHostId]: "revoked" }));
-            setHostPairingStatus((current) => ({ ...current, [activeHostId]: "目标 Host 已撤销本机控制权，需要重新请求授权" }));
+            setHostPairingStatus((current) => ({ ...current, [activeHostId]: t("desktop:pairing.revokedDescription") }));
             setError("");
           } else {
             setError(hostError instanceof Error ? hostError.message : String(hostError));
@@ -1367,7 +1376,7 @@ export function App(): React.JSX.Element {
       />
 
       <WorkspaceModal
-        hostName={activeHostOption?.name || "本机"}
+        hostName={activeHostOption?.name || t("desktop:host.local")}
         open={workspaceOpen}
         onBrowseFileSystem={handleBrowseHostFileSystem}
         onClose={() => setWorkspaceOpen(false)}
@@ -1385,8 +1394,8 @@ export function App(): React.JSX.Element {
       <button
         className={`[-webkit-app-region:no-drag] absolute top-[10px] z-[var(--ao-z-chrome)] grid size-8 place-items-center rounded-lg text-[#8f9296] transition-[background-color,color,transform] duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438] active:scale-95 ${sidebarToggleLeftClass}`}
         type="button"
-        aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-        title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+        aria-label={sidebarCollapsed ? t("desktop:app.expandSidebar") : t("desktop:app.collapseSidebar")}
+        title={sidebarCollapsed ? t("desktop:app.expandSidebar") : t("desktop:app.collapseSidebar")}
         onMouseDown={(event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -1404,8 +1413,8 @@ export function App(): React.JSX.Element {
           rightPanelOpen ? "bg-black/[0.055] text-[#343438]" : "text-[#8f9296]"
         }`}
         type="button"
-        aria-label={rightPanelOpen ? "关闭右侧面板" : "打开右侧面板"}
-        title={rightPanelOpen ? "关闭右侧面板" : "打开右侧面板"}
+        aria-label={rightPanelOpen ? t("desktop:app.closeRightPanel") : t("desktop:app.openRightPanel")}
+        title={rightPanelOpen ? t("desktop:app.closeRightPanel") : t("desktop:app.openRightPanel")}
         onMouseDown={(event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -1434,8 +1443,8 @@ function AppErrorBanner({ message, onDismiss }: { message: string; onDismiss: ()
         <button
           className="grid size-6 shrink-0 place-items-center rounded-md text-[#a66a3f] transition-colors hover:bg-[#f3dfcc]"
           type="button"
-          aria-label="关闭错误"
-          title="关闭错误"
+          aria-label="Dismiss error"
+          title="Dismiss error"
           onClick={onDismiss}
         >
           <X size={14} strokeWidth={2} />
@@ -1472,13 +1481,14 @@ function HostPairingPanel({
   onRefresh: () => void;
   onRequest: () => void;
 }): React.JSX.Element {
-  const fingerprint = host.public_key_fingerprint || "未声明";
+  const { t } = useTranslation(["common", "desktop", "remote"]);
+  const fingerprint = host.public_key_fingerprint || t("remote:labels.unreportedFingerprint");
   const pending = authorizationState === "pending";
   const revoked = authorizationState === "revoked";
   const denied = authorizationState === "denied";
-  const title = pending ? "等待目标 Host 批准" : revoked ? "控制权已被撤销" : denied ? "上次请求已被拒绝" : "需要目标 Host 批准";
-  const description = status || pairingPanelDescription(authorizationState);
-  const requestLabel = requesting ? "发送中" : pending ? "重新发送请求" : revoked ? "重新请求控制" : "请求控制";
+  const title = pending ? t("desktop:pairing.waitingApproval") : revoked ? t("desktop:pairing.revokedTitle") : denied ? t("desktop:pairing.deniedTitle") : t("desktop:pairing.needsApproval");
+  const description = status || pairingPanelDescription(authorizationState, t);
+  const requestLabel = requesting ? t("common:states.sending") : pending ? t("desktop:pairing.resendRequest") : revoked ? t("desktop:pairing.requestAgain") : t("desktop:pairing.requestControl");
   return (
     <section className="flex min-h-0 flex-1 items-center justify-center bg-white px-8 py-10">
       <div className="w-full max-w-[560px] rounded-lg border border-[var(--ao-border)] bg-[var(--ao-panel-soft)]">
@@ -1494,9 +1504,9 @@ function HostPairingPanel({
           </div>
         </div>
         <div className="grid border-b border-[var(--ao-border)]">
-          <HostPairingInfoRow label="设备 ID" value={host.device_id} />
-          <HostPairingInfoRow label="设备类型" value={deviceKindLabel(host.device_kind)} />
-          <HostPairingInfoRow label="公钥指纹" value={fingerprint} mono />
+          <HostPairingInfoRow label={t("remote:labels.deviceId")} value={host.device_id} />
+          <HostPairingInfoRow label={t("remote:labels.deviceType")} value={deviceKindLabel(host.device_kind, t)} />
+          <HostPairingInfoRow label={t("remote:labels.fingerprint")} value={fingerprint} mono />
         </div>
         <div className="grid gap-3 px-4 py-4">
           <p className="m-0 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
@@ -1518,14 +1528,14 @@ function HostPairingPanel({
               onClick={onRefresh}
             >
               <RefreshCw size={15} strokeWidth={1.9} />
-              刷新设备
+              {t("desktop:pairing.refreshDevices")}
             </button>
             <button
               className="flex h-8 items-center rounded-lg bg-black/[0.055] px-3 text-[13px] font-semibold text-[var(--ao-text)] transition-colors hover:bg-black/[0.08]"
               type="button"
               onClick={onOpenSettings}
             >
-              打开远控设置
+              {t("desktop:pairing.openRemoteSettings")}
             </button>
           </div>
         </div>
@@ -1534,11 +1544,11 @@ function HostPairingPanel({
   );
 }
 
-function pairingPanelDescription(state: string): string {
-  if (state === "pending") return "请求已经发送到账号 Mesh。目标 Host 同步到待批准请求后，需要在远控设置中允许本机控制。";
-  if (state === "revoked") return "目标 Host 已撤销本机控制权。重新请求后，状态会回到待授权；批准前不会读取它的工作区、session 或终端。";
-  if (state === "denied") return "目标 Host 拒绝了上次控制请求。可以重新发送请求，仍然必须由目标 Host 明确批准。";
-  return "这台设备已经在当前账号 Mesh 中，但还没有允许本机控制。发送请求后，对方会在远控设置中看到待批准设备；批准前不会显示它的工作区和 session。";
+function pairingPanelDescription(state: string, t: TFunction): string {
+  if (state === "pending") return t("desktop:pairing.pendingDescription");
+  if (state === "revoked") return t("desktop:pairing.revokedDescription");
+  if (state === "denied") return t("desktop:pairing.deniedDescription");
+  return t("desktop:pairing.needsApprovalDescription");
 }
 
 function HostPairingInfoRow({ label, mono = false, value }: { label: string; mono?: boolean; value: string }): React.JSX.Element {
@@ -1577,31 +1587,31 @@ function remoteHostNeedsPairing(host: RemoteHostRecord, override?: RemoteAuthori
   return state === "needs_pairing" || state === "pending" || state === "denied" || state === "revoked";
 }
 
-function remoteHostSubtitle(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): string {
+function remoteHostSubtitle(host: RemoteHostRecord, override: RemoteAuthorizationOverride | undefined, t: TFunction): string {
   const state = remoteHostEffectiveAuthorizationState(host, override);
-  if (state === "pending") return "等待目标 Host 批准";
-  if (state === "revoked") return "控制权已撤销";
-  if (state === "denied") return "请求被拒绝";
-  if (state === "needs_pairing") return "需要目标 Host 批准";
-  return "远端 Host";
+  if (state === "pending") return t("desktop:pairing.waitingApproval");
+  if (state === "revoked") return t("desktop:pairing.revokedShort");
+  if (state === "denied") return t("desktop:pairing.deniedShort");
+  if (state === "needs_pairing") return t("desktop:pairing.needsApproval");
+  return t("desktop:host.remoteHost");
 }
 
-function remoteHostStatusLabel(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): string {
+function remoteHostStatusLabel(host: RemoteHostRecord, override: RemoteAuthorizationOverride | undefined, t: TFunction): string {
   const state = remoteHostEffectiveAuthorizationState(host, override);
-  if (state === "pending") return "等待批准";
-  if (state === "revoked" || state === "denied") return "已撤销";
-  if (state === "needs_pairing") return "待授权";
+  if (state === "pending") return t("desktop:host.pending");
+  if (state === "revoked" || state === "denied") return t("desktop:host.revoked");
+  if (state === "needs_pairing") return t("desktop:host.needsPairing");
   switch (host.connection) {
     case "local":
-      return "本机";
+      return t("desktop:host.local");
     case "lan":
       return "LAN";
     case "relay":
-      return "中继";
+      return t("desktop:host.relay");
     case "offline":
-      return "离线";
+      return t("desktop:host.offline");
     default:
-      return host.status === "offline" ? "离线" : "可用";
+      return host.status === "offline" ? t("desktop:host.offline") : t("common:states.available");
   }
 }
 
@@ -1611,17 +1621,17 @@ function remoteHostStatusTone(host: RemoteHostRecord, override?: RemoteAuthoriza
   return "muted";
 }
 
-function remoteHostControlLabel(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): string {
+function remoteHostControlLabel(host: RemoteHostRecord, override: RemoteAuthorizationOverride | undefined, t: TFunction): string {
   if (remoteHostNeedsPairing(host, override)) return "";
   switch (host.control?.state) {
     case "connecting":
-      return "连接中";
+      return t("common:states.connecting");
     case "connected":
-      return "已连接";
+      return t("common:states.connected");
     case "reconnecting":
-      return "重连中";
+      return t("common:states.reconnecting");
     case "failed":
-      return "失败";
+      return t("common:states.failed");
     default:
       return "";
   }
@@ -1641,30 +1651,30 @@ function remoteHostControlTone(host: RemoteHostRecord, override?: RemoteAuthoriz
   }
 }
 
-function pairingStatusLabel(status: string): string {
-  if (status === "pending") return "等待目标 Host 批准";
-  if (status === "approved") return "已批准";
-  if (status === "denied") return "已拒绝";
-  return status || "请求已发送";
+function pairingStatusLabel(status: string, t: TFunction): string {
+  if (status === "pending") return t("desktop:pairing.waitingApproval");
+  if (status === "approved") return t("common:states.approved");
+  if (status === "denied") return t("common:states.denied");
+  return status || t("desktop:pairing.requestSent");
 }
 
-function hostConnectionLabel(connection?: string): string {
+function hostConnectionLabel(connection: string | undefined, t: TFunction): string {
   switch (connection) {
     case "local":
-      return "本机";
+      return t("desktop:host.local");
     case "lan":
       return "LAN";
     case "relay":
-      return "中继";
+      return t("desktop:host.relay");
     case "offline":
-      return "离线";
+      return t("desktop:host.offline");
     default:
-      return "远端";
+      return t("desktop:host.remote");
   }
 }
 
-function deviceKindLabel(kind?: string): string {
-  if (kind === "desktop") return "桌面端";
-  if (kind === "mobile") return "手机端";
-  return kind || "未知";
+function deviceKindLabel(kind: string | undefined, t: TFunction): string {
+  if (kind === "desktop") return t("desktop:host.desktop");
+  if (kind === "mobile") return t("desktop:host.mobile");
+  return kind || t("common:states.unknown");
 }

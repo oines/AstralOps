@@ -372,10 +372,10 @@ function errorMessage(error: unknown): string {
 
 function httpErrorMessage(payload: { code?: unknown; error?: unknown }, remote: boolean): string | null {
   if (payload.code === "control_action_unknown" && typeof payload.error === "string") {
-    return remote ? "远端 Host 不支持这个远控操作，通常是目标设备 AstralOps 版本过旧。请更新并重启目标设备。" : payload.error;
+    return remote ? "The target Host does not support this remote operation. It is usually running an older AstralOps version. Update and restart the target device." : payload.error;
   }
   if (payload.code === "control_authorization_required") {
-    return "需要目标 Host 批准本机控制";
+    return "Target Host approval is required to control this device.";
   }
   return typeof payload.error === "string" && payload.error ? payload.error : null;
 }
@@ -879,47 +879,47 @@ export class LocalCoreClient implements CoreClient {
 
 class RemoteCoreClient extends LocalCoreClient {
   health(): Promise<HealthResponse> {
-    return Promise.reject(new Error("远端 Host health 尚未进入控制协议"));
+    return Promise.reject(new Error("Remote Host health is not available through the control protocol."));
   }
 
   settings(): Promise<AppSettings> {
-    return Promise.reject(new Error("远端 Host settings 尚未进入控制协议"));
+    return Promise.reject(new Error("Remote Host settings are not available through the control protocol."));
   }
 
   patchSettings(): Promise<AppSettings> {
-    return Promise.reject(new Error("远端 Host settings 尚未进入控制协议"));
+    return Promise.reject(new Error("Remote Host settings are not available through the control protocol."));
   }
 
   clearMediaCache(): Promise<ClearMediaCacheResponse> {
-    return Promise.reject(new Error("远端 Host 本地缓存不能由 Controller 清理"));
+    return Promise.reject(new Error("Controller cannot clear a remote Host cache."));
   }
 
   listCloudDevices(): Promise<CloudDeviceRecord[]> {
-    return Promise.reject(new Error("远端 Host cloud 设备列表不能由 Controller 读取"));
+    return Promise.reject(new Error("Controller cannot read remote Host cloud devices."));
   }
 
   cloudAccountStatus(): Promise<CloudAccountStatus> {
-    return Promise.reject(new Error("远端 Host cloud 账号状态不能由 Controller 读取"));
+    return Promise.reject(new Error("Controller cannot read remote Host cloud account status."));
   }
 
   startCloudAuth(): Promise<CloudAuthStartResponse> {
-    return Promise.reject(new Error("远端 Host cloud 登录不能由 Controller 发起"));
+    return Promise.reject(new Error("Controller cannot start cloud login on a remote Host."));
   }
 
   logoutCloudAuth(): Promise<CloudAuthLogoutResponse> {
-    return Promise.reject(new Error("远端 Host cloud 登录不能由 Controller 退出"));
+    return Promise.reject(new Error("Controller cannot log out cloud account on a remote Host."));
   }
 
   listCloudRelays(): Promise<CloudRelayListResponse> {
-    return Promise.reject(new Error("远端 Host cloud 中继列表不能由 Controller 读取"));
+    return Promise.reject(new Error("Controller cannot read remote Host cloud relays."));
   }
 
   setCloudAccountRelay(): Promise<CloudAccountStatus> {
-    return Promise.reject(new Error("远端 Host cloud 中继不能由 Controller 切换"));
+    return Promise.reject(new Error("Controller cannot switch cloud relay on a remote Host."));
   }
 
   removeCloudDevice(): Promise<CloudDeviceRemoveResponse> {
-    return Promise.reject(new Error("远端 Host cloud 设备不能由 Controller 移除"));
+    return Promise.reject(new Error("Controller cannot remove cloud devices from a remote Host."));
   }
 
   sessionCommands(): Promise<SessionCommandListResponse> {
@@ -927,7 +927,7 @@ class RemoteCoreClient extends LocalCoreClient {
   }
 
   runSessionCommand(): Promise<SessionCommandResponse> {
-    return Promise.reject(new Error("远端 session command 尚未进入控制协议"));
+    return Promise.reject(new Error("Remote session commands are not available through the control protocol."));
   }
 
   mediaUrl(): string {
@@ -1021,7 +1021,7 @@ class WebSocketTerminalConnection implements TerminalConnection {
     };
     socket.onerror = () => {
       logClientEvent("terminal.connection_failed", {}, "error");
-      handlers.onConnectionError?.("PTY 连接失败");
+      handlers.onConnectionError?.("PTY connection failed");
     };
     socket.onclose = (event) => {
       logClientEvent("terminal.closed", { code: event.code, reason: event.reason, was_clean: event.wasClean });

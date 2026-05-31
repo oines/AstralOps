@@ -20,7 +20,7 @@ func TestSettingsDefaultWhenFileMissing(t *testing.T) {
 	if settings.Version != appSettingsVersion {
 		t.Fatalf("version = %d, want %d", settings.Version, appSettingsVersion)
 	}
-	if !settings.General.RestoreOnLaunch || settings.Appearance.Theme != "system" || settings.Session.DefaultAgent != "remember" {
+	if !settings.General.RestoreOnLaunch || settings.Appearance.Theme != "system" || settings.Appearance.Language != "system" || settings.Session.DefaultAgent != "remember" {
 		t.Fatalf("default settings = %#v", settings)
 	}
 	if settings.RemoteControl.Enabled || settings.RemoteControl.ListenAddr != defaultRemoteControlListenAddr || !settings.RemoteControl.LANDiscovery {
@@ -56,6 +56,7 @@ func TestSettingsPatchPersistsAndReloads(t *testing.T) {
 		t.Fatalf("load settings = %v", err)
 	}
 	theme := "dark"
+	language := "zh-CN"
 	permission := "auto"
 	reconnect := false
 	remoteEnabled := true
@@ -65,7 +66,7 @@ func TestSettingsPatchPersistsAndReloads(t *testing.T) {
 	cloudToken := "account-token"
 	diagnosticLogging := true
 	updated, err := store.patch(appSettingsPatch{
-		Appearance:    &appearanceSettingsPatch{Theme: &theme},
+		Appearance:    &appearanceSettingsPatch{Theme: &theme, Language: &language},
 		Session:       &sessionSettingsPatch{DefaultPermissionMode: &permission},
 		Workspace:     &workspaceSettingsPatch{SSHAutoReconnect: &reconnect},
 		Diagnostics:   &diagnosticSettingsPatch{LoggingEnabled: &diagnosticLogging},
@@ -75,14 +76,14 @@ func TestSettingsPatchPersistsAndReloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("patch settings = %v", err)
 	}
-	if updated.Appearance.Theme != "dark" || updated.Session.DefaultPermissionMode != "auto" || updated.Workspace.SSHAutoReconnect || !updated.Diagnostics.LoggingEnabled || !updated.RemoteControl.Enabled || updated.RemoteControl.ListenAddr != remoteAddr || !updated.Cloud.Enabled || updated.Cloud.BaseURL != "https://cloud.example.test" || updated.Cloud.AccountToken != cloudToken {
+	if updated.Appearance.Theme != "dark" || updated.Appearance.Language != "zh-CN" || updated.Session.DefaultPermissionMode != "auto" || updated.Workspace.SSHAutoReconnect || !updated.Diagnostics.LoggingEnabled || !updated.RemoteControl.Enabled || updated.RemoteControl.ListenAddr != remoteAddr || !updated.Cloud.Enabled || updated.Cloud.BaseURL != "https://cloud.example.test" || updated.Cloud.AccountToken != cloudToken {
 		t.Fatalf("patched settings = %#v", updated)
 	}
 	reloaded, err := loadSettingsStore(dir)
 	if err != nil {
 		t.Fatalf("reload settings = %v", err)
 	}
-	if reloaded.get().Appearance.Theme != "dark" || reloaded.get().Session.DefaultPermissionMode != "auto" || reloaded.get().Workspace.SSHAutoReconnect || !reloaded.get().Diagnostics.LoggingEnabled || !reloaded.get().RemoteControl.Enabled || reloaded.get().RemoteControl.ListenAddr != remoteAddr || !reloaded.get().Cloud.Enabled || reloaded.get().Cloud.BaseURL != "https://cloud.example.test" || reloaded.get().Cloud.AccountToken != cloudToken {
+	if reloaded.get().Appearance.Theme != "dark" || reloaded.get().Appearance.Language != "zh-CN" || reloaded.get().Session.DefaultPermissionMode != "auto" || reloaded.get().Workspace.SSHAutoReconnect || !reloaded.get().Diagnostics.LoggingEnabled || !reloaded.get().RemoteControl.Enabled || reloaded.get().RemoteControl.ListenAddr != remoteAddr || !reloaded.get().Cloud.Enabled || reloaded.get().Cloud.BaseURL != "https://cloud.example.test" || reloaded.get().Cloud.AccountToken != cloudToken {
 		t.Fatalf("reloaded settings = %#v", reloaded.get())
 	}
 }
@@ -98,6 +99,13 @@ func TestSettingsInvalidPatchDoesNotPolluteCurrentValue(t *testing.T) {
 	}
 	if got := store.get().Appearance.Theme; got != "system" {
 		t.Fatalf("theme after invalid patch = %q, want system", got)
+	}
+	badLanguage := "fr"
+	if _, err := store.patch(appSettingsPatch{Appearance: &appearanceSettingsPatch{Language: &badLanguage}}); err == nil {
+		t.Fatal("patch invalid language succeeded")
+	}
+	if got := store.get().Appearance.Language; got != "system" {
+		t.Fatalf("language after invalid patch = %q, want system", got)
 	}
 	badAddr := "not a listen address"
 	if _, err := store.patch(appSettingsPatch{RemoteControl: &remoteControlSettingsPatch{ListenAddr: &badAddr}}); err == nil {

@@ -21,7 +21,10 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import type { CoreClient } from "../api";
+import { LANGUAGE_OPTIONS as I18N_LANGUAGE_OPTIONS } from "../i18n";
 import type { AppSettings, AppSettingsPatch, ClearMediaCacheResponse, CloudAccountStatus, CloudAuthProvider, CloudDeviceRecord, CloudRelayListResponse, CloudRelayOption, DaemonInfo, HealthResponse, HostInfo, PairingRequest, TrustGrant } from "../types";
 
 type SettingsCategoryId =
@@ -43,8 +46,8 @@ type SettingsCategory = {
 };
 
 type SettingsGroup = {
-  items: SettingsCategory[];
-  label: string;
+  id: "app" | "system";
+  items: Array<{ icon: LucideIcon; id: SettingsCategoryId }>;
 };
 
 type SettingsViewProps = {
@@ -74,22 +77,22 @@ const DEFAULT_CLOUD_BASE_URL = "https://cloud-astralops.oines.dev";
 
 const SETTINGS_GROUPS: SettingsGroup[] = [
   {
-    label: "应用",
+    id: "app",
     items: [
-      { id: "general", title: "通用", description: "启动和语言", icon: Settings },
-      { id: "appearance", title: "外观", description: "主题和窗口表现", icon: Brush },
-      { id: "session", title: "会话", description: "新会话默认行为", icon: TerminalSquare },
-      { id: "workspace", title: "工作区", description: "本地和远程工作区偏好", icon: FolderKanban },
-      { id: "notifications", title: "通知", description: "任务和确认提醒", icon: Bell },
+      { id: "general", icon: Settings },
+      { id: "appearance", icon: Brush },
+      { id: "session", icon: TerminalSquare },
+      { id: "workspace", icon: FolderKanban },
+      { id: "notifications", icon: Bell },
     ],
   },
   {
-    label: "系统",
+    id: "system",
     items: [
-      { id: "remote", title: "远控", description: "设备、信任和传输边界", icon: MonitorCog },
-      { id: "data", title: "数据", description: "缓存和日志", icon: Database },
-      { id: "advanced", title: "高级", description: "运行时路径和诊断入口", icon: SlidersHorizontal },
-      { id: "about", title: "关于", description: "版本和更新", icon: Info },
+      { id: "remote", icon: MonitorCog },
+      { id: "data", icon: Database },
+      { id: "advanced", icon: SlidersHorizontal },
+      { id: "about", icon: Info },
     ],
   },
 ];
@@ -97,7 +100,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
 const FALLBACK_SETTINGS: AppSettings = {
   version: 1,
   general: { restore_on_launch: true },
-  appearance: { theme: "system", mac_sidebar_effect: true, preview_theme: "light" },
+  appearance: { theme: "system", language: "system", mac_sidebar_effect: true, preview_theme: "light" },
   session: { default_agent: "remember", default_permission_mode: "default", default_reasoning_effort: "high" },
   workspace: { default_opener: "vscode", ssh_auto_reconnect: true },
   notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
@@ -107,42 +110,60 @@ const FALLBACK_SETTINGS: AppSettings = {
   updates: { auto_check: true },
 };
 
-const THEME_OPTIONS: SettingOption<AppSettings["appearance"]["theme"]>[] = [
-  { value: "system", label: "跟随系统" },
-  { value: "light", label: "浅色" },
-  { value: "dark", label: "深色" },
-];
-
-const AGENT_OPTIONS: SettingOption<AppSettings["session"]["default_agent"]>[] = [
-  { value: "remember", label: "记住上次选择" },
-  { value: "claude", label: "Claude Code" },
-  { value: "codex", label: "Codex" },
-];
-
-const PERMISSION_OPTIONS: SettingOption<AppSettings["session"]["default_permission_mode"]>[] = [
-  { value: "default", label: "默认权限" },
-  { value: "auto", label: "自动审核" },
-  { value: "bypassPermissions", label: "完全访问权限" },
-];
-
-const EFFORT_OPTIONS: SettingOption<AppSettings["session"]["default_reasoning_effort"]>[] = [
-  { value: "default", label: "默认" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-  { value: "xhigh", label: "超高" },
-];
-
 const OPENER_OPTIONS: SettingOption<AppSettings["workspace"]["default_opener"]>[] = [
   { value: "vscode", label: "VS Code" },
   { value: "finder", label: "Finder" },
   { value: "terminal", label: "Terminal" },
 ];
 
-const LANGUAGE_OPTIONS: SettingOption[] = [
-  { value: "system", label: "跟随系统" },
-  { value: "zh-CN", label: "中文" },
-  { value: "en", label: "English" },
-];
+function settingsGroups(t: TFunction): Array<{ id: "app" | "system"; items: SettingsCategory[]; label: string }> {
+  return SETTINGS_GROUPS.map((group) => ({
+    id: group.id,
+    label: t(`settings:groups.${group.id}`),
+    items: group.items.map((item) => ({
+      ...item,
+      title: t(`settings:categories.${item.id}.title`),
+      description: t(`settings:categories.${item.id}.description`),
+    })),
+  }));
+}
+
+function themeOptions(t: TFunction): SettingOption<AppSettings["appearance"]["theme"]>[] {
+  return [
+    { value: "system", label: t("settings:appearance.themeSystem") },
+    { value: "light", label: t("settings:appearance.themeLight") },
+    { value: "dark", label: t("settings:appearance.themeDark") },
+  ];
+}
+
+function languageOptions(t: TFunction): SettingOption<AppSettings["appearance"]["language"]>[] {
+  return I18N_LANGUAGE_OPTIONS.map((option) => ({ value: option.value, label: t(option.labelKey) }));
+}
+
+function agentOptions(t: TFunction): SettingOption<AppSettings["session"]["default_agent"]>[] {
+  return [
+    { value: "remember", label: t("common:agents.remember") },
+    { value: "claude", label: "Claude Code" },
+    { value: "codex", label: "Codex" },
+  ];
+}
+
+function permissionOptions(t: TFunction): SettingOption<AppSettings["session"]["default_permission_mode"]>[] {
+  return [
+    { value: "default", label: t("settings:session.defaultPermission") },
+    { value: "auto", label: "Auto review" },
+    { value: "bypassPermissions", label: t("desktop:composer.fullAccess") },
+  ];
+}
+
+function effortOptions(t: TFunction): SettingOption<AppSettings["session"]["default_reasoning_effort"]>[] {
+  return [
+    { value: "default", label: t("desktop:composer.defaultModel") },
+    { value: "medium", label: "Medium" },
+    { value: "high", label: "High" },
+    { value: "xhigh", label: "XHigh" },
+  ];
+}
 
 function updateCheckingStatus(current: AppUpdateStatus | null): AppUpdateStatus {
   return {
@@ -173,51 +194,51 @@ function updateErrorStatus(current: AppUpdateStatus | null, error: unknown): App
   };
 }
 
-function updateActionLabel(status: AppUpdateStatus | null): string {
+function updateActionLabel(status: AppUpdateStatus | null, t: TFunction): string {
   switch (status?.status) {
     case "checking":
-      return "检查中";
+      return "Checking";
     case "available":
     case "downloading":
-      return "下载中";
+      return "Downloading";
     case "downloaded":
-      return "重启安装";
+      return "Restart to install";
     case "installing":
-      return "正在重启";
+      return "Restarting";
     case "not-available":
-      return "再次检查";
+      return t("common:actions.refresh");
     case "error":
     case "cancelled":
-      return "重试";
+      return t("common:actions.retry");
     case "dev":
-      return "开发模式";
+      return "Dev mode";
     default:
-      return "检查更新";
+      return t("settings:about.checkUpdates");
   }
 }
 
-function updateStatusDescription(status: AppUpdateStatus | null): string {
+function updateStatusDescription(status: AppUpdateStatus | null, t: TFunction): string {
   switch (status?.status) {
     case "checking":
-      return "正在检查 GitHub Release 中的新版本";
+      return "Checking GitHub Releases for a new version";
     case "available":
-      return status.available_version ? `发现 ${status.available_version}，正在下载` : "发现新版本，正在下载";
+      return status.available_version ? `Found ${status.available_version}, downloading` : "New version found, downloading";
     case "downloading":
-      return `正在下载${updateProgressLabel(status)}`;
+      return `Downloading${updateProgressLabel(status)}`;
     case "downloaded":
-      return status.available_version ? `${status.available_version} 已下载，重启后安装` : "更新已下载，重启后安装";
+      return status.available_version ? `${status.available_version} downloaded. Restart to install.` : "Update downloaded. Restart to install.";
     case "installing":
-      return "正在重启并安装更新";
+      return "Restarting and installing update";
     case "not-available":
-      return status.checked_at ? "已是最新版本" : "当前已是最新版本";
+      return status.checked_at ? "Already up to date" : "Current version is up to date";
     case "cancelled":
-      return "更新下载已取消";
+      return "Update download cancelled";
     case "error":
-      return status.error || "检查更新失败";
+      return status.error || "Failed to check for updates";
     case "dev":
-      return status.message || "开发模式不支持自动更新";
+      return status.message || "Auto updates are not available in development mode";
     default:
-      return "从 GitHub Release 检查并自动下载新版本";
+      return "Check GitHub Releases and automatically download new versions";
   }
 }
 
@@ -249,31 +270,32 @@ export function SettingsView({
   settings,
   settingsError,
 }: SettingsViewProps): React.JSX.Element {
+  const { t } = useTranslation(["common", "desktop", "settings", "remote"]);
   const [activeId, setActiveId] = useState<SettingsCategoryId>("general");
   const [actionStatus, setActionStatus] = useState<ActionStatus>({});
   const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null);
-  const [language, setLanguage] = useState("system");
-  const categories = useMemo(() => SETTINGS_GROUPS.flatMap((group) => group.items), []);
+  const groups = useMemo(() => settingsGroups(t), [t]);
+  const categories = useMemo(() => groups.flatMap((group) => group.items), [groups]);
   const active = categories.find((category) => category.id === activeId) ?? categories[0];
   const resolvedSettings = settings ?? FALLBACK_SETTINGS;
 
   async function clearMediaCache(): Promise<void> {
-    setActionStatus((current) => ({ ...current, cache: "清理中" }));
+    setActionStatus((current) => ({ ...current, cache: t("settings:data.clearing") }));
     try {
       const result = await onClearMediaCache();
-      setActionStatus((current) => ({ ...current, cache: result.removed_bytes > 0 ? "已清理" : "无需清理" }));
+      setActionStatus((current) => ({ ...current, cache: result.removed_bytes > 0 ? t("settings:data.cleared") : t("settings:data.nothingToClear") }));
     } catch {
-      setActionStatus((current) => ({ ...current, cache: "清理失败" }));
+      setActionStatus((current) => ({ ...current, cache: t("settings:data.clearFailed") }));
     }
   }
 
   async function openLogs(): Promise<void> {
-    setActionStatus((current) => ({ ...current, logs: "正在打开" }));
+    setActionStatus((current) => ({ ...current, logs: t("settings:data.opening") }));
     try {
       await onOpenLogs();
-      setActionStatus((current) => ({ ...current, logs: "已打开" }));
+      setActionStatus((current) => ({ ...current, logs: t("settings:data.opened") }));
     } catch {
-      setActionStatus((current) => ({ ...current, logs: "打开失败" }));
+      setActionStatus((current) => ({ ...current, logs: t("settings:data.openFailed") }));
     }
   }
 
@@ -289,7 +311,7 @@ export function SettingsView({
   async function installUpdate(): Promise<void> {
     try {
       const result = await window.astral.installUpdate();
-      if (!result.ok) throw new Error(result.error || "安装更新失败");
+      if (!result.ok) throw new Error(result.error || t("settings:about.installFailed"));
       setUpdateStatus((current) => updateInstallingStatus(current));
     } catch (error) {
       setUpdateStatus((current) => updateErrorStatus(current, error));
@@ -324,12 +346,12 @@ export function SettingsView({
             onClick={onBack}
           >
             <ArrowLeft size={16} strokeWidth={2} />
-            <span>返回应用</span>
+            <span>{t("desktop:app.backToApp")}</span>
           </button>
         </div>
         <nav className="min-h-0 flex-1 overflow-auto px-3 pb-5">
           <div className="grid gap-6">
-            {SETTINGS_GROUPS.map((group) => (
+            {groups.map((group) => (
               <div className="grid gap-1" key={group.label}>
                 <div className="px-2 pb-1 text-[12px] font-semibold leading-5 text-[var(--ao-subtle)]">{group.label}</div>
                 {group.items.map((item) => {
@@ -372,9 +394,9 @@ export function SettingsView({
             core={core}
             daemonInfo={daemonInfo}
             health={health}
-            language={language}
+            language={resolvedSettings.appearance.language}
             onClearMediaCache={clearMediaCache}
-            onLanguageChange={setLanguage}
+            onLanguageChange={(language) => onPatchSettings({ appearance: { language } }, "appearance.language")}
             onOpenLogs={openLogs}
             onPatchSettings={onPatchSettings}
             onPairingRequestsChanged={onPairingRequestsChanged}
@@ -415,11 +437,11 @@ function SettingsContent({
   core: CoreClient | null;
   daemonInfo: DaemonInfo | null;
   health: HealthResponse | null;
-  language: string;
+  language: AppSettings["appearance"]["language"];
   onClearMediaCache: () => Promise<void>;
   onCheckForUpdates: () => Promise<void>;
   onInstallUpdate: () => Promise<void>;
-  onLanguageChange: (value: string) => void;
+  onLanguageChange: (value: AppSettings["appearance"]["language"]) => void;
   onOpenLogs: () => Promise<void>;
   onPatchSettings: (patch: AppSettingsPatch, key: string) => Promise<void>;
   onPairingRequestsChanged?: () => void;
@@ -428,28 +450,34 @@ function SettingsContent({
   settings: AppSettings;
   updateStatus: AppUpdateStatus | null;
 }): React.JSX.Element {
+  const { t } = useTranslation(["common", "desktop", "settings"]);
+  const themes = useMemo(() => themeOptions(t), [t]);
+  const languages = useMemo(() => languageOptions(t), [t]);
+  const agents = useMemo(() => agentOptions(t), [t]);
+  const permissions = useMemo(() => permissionOptions(t), [t]);
+  const efforts = useMemo(() => effortOptions(t), [t]);
   switch (activeId) {
     case "remote":
       return <RemoteControlContent core={core} daemonInfo={daemonInfo} onPairingRequestsChanged={onPairingRequestsChanged} onPatchSettings={onPatchSettings} onReloadSettings={onReloadSettings} savingKeys={savingKeys} settings={settings} />;
     case "appearance":
       return (
         <div className="grid gap-8">
-          <SettingsSection title="界面">
+          <SettingsSection title={t("settings:appearance.interface")}>
             <SettingRow
-              title="主题"
-              description="控制应用明暗外观"
+              title={t("settings:appearance.theme")}
+              description={t("settings:appearance.themeDescription")}
               control={
                 <SegmentedControl
                   disabled={savingKeys.has("appearance.theme")}
-                  options={THEME_OPTIONS}
+                  options={themes}
                   value={settings.appearance.theme}
                   onChange={(value) => onPatchSettings({ appearance: { theme: value } }, "appearance.theme")}
                 />
               }
             />
             <SettingRow
-              title="macOS 侧边栏效果"
-              description="在支持的平台使用系统材质"
+              title={t("settings:appearance.macSidebarEffect")}
+              description={t("settings:appearance.macSidebarEffectDescription")}
               control={
                 <ToggleControl
                   disabled={savingKeys.has("appearance.mac_sidebar_effect")}
@@ -459,7 +487,7 @@ function SettingsContent({
               }
             />
           </SettingsSection>
-          <SettingsSection title="预览">
+          <SettingsSection title={t("settings:appearance.preview")}>
             <PreviewSwatches
               disabled={savingKeys.has("appearance.preview_theme")}
               selected={settings.appearance.preview_theme}
@@ -471,38 +499,38 @@ function SettingsContent({
     case "session":
       return (
         <div className="grid gap-8">
-          <SettingsSection title="新会话">
+          <SettingsSection title={t("settings:session.section")}>
             <SettingRow
-              title="默认 Agent"
-              description="创建会话时的默认选择"
+              title={t("settings:session.defaultAgent")}
+              description={t("settings:session.defaultAgentDescription")}
               control={
                 <SelectControl
                   disabled={savingKeys.has("session.default_agent")}
-                  options={AGENT_OPTIONS}
+                  options={agents}
                   value={settings.session.default_agent}
                   onChange={(value) => onPatchSettings({ session: { default_agent: value } }, "session.default_agent")}
                 />
               }
             />
             <SettingRow
-              title="默认权限"
-              description="新会话的访问权限起点"
+              title={t("settings:session.defaultPermission")}
+              description={t("settings:session.defaultPermissionDescription")}
               control={
                 <SelectControl
                   disabled={savingKeys.has("session.default_permission_mode")}
-                  options={PERMISSION_OPTIONS}
+                  options={permissions}
                   value={settings.session.default_permission_mode}
                   onChange={(value) => onPatchSettings({ session: { default_permission_mode: value } }, "session.default_permission_mode")}
                 />
               }
             />
             <SettingRow
-              title="默认推理强度"
-              description="影响新任务的思考深度"
+              title={t("settings:session.defaultEffort")}
+              description={t("settings:session.defaultEffortDescription")}
               control={
                 <SelectControl
                   disabled={savingKeys.has("session.default_reasoning_effort")}
-                  options={EFFORT_OPTIONS}
+                  options={efforts}
                   value={settings.session.default_reasoning_effort}
                   onChange={(value) => onPatchSettings({ session: { default_reasoning_effort: value } }, "session.default_reasoning_effort")}
                 />
@@ -514,10 +542,10 @@ function SettingsContent({
     case "workspace":
       return (
         <div className="grid gap-8">
-          <SettingsSection title="工作区">
+          <SettingsSection title={t("settings:workspace.section")}>
             <SettingRow
-              title="默认打开器"
-              description="打开文件和目录时使用的应用"
+              title={t("settings:workspace.defaultOpener")}
+              description={t("settings:workspace.defaultOpenerDescription")}
               control={
                 <SelectControl
                   disabled={savingKeys.has("workspace.default_opener")}
@@ -528,8 +556,8 @@ function SettingsContent({
               }
             />
             <SettingRow
-              title="SSH 自动重连"
-              description="远程工作区断开后尝试恢复连接"
+              title={t("settings:workspace.sshAutoReconnect")}
+              description={t("settings:workspace.sshAutoReconnectDescription")}
               control={
                 <ToggleControl
                   disabled={savingKeys.has("workspace.ssh_auto_reconnect")}
@@ -544,10 +572,10 @@ function SettingsContent({
     case "notifications":
       return (
         <div className="grid gap-8">
-          <SettingsSection title="通知">
+          <SettingsSection title={t("settings:notifications.section")}>
             <SettingRow
-              title="任务完成"
-              description="后台任务完成时提醒"
+              title={t("settings:notifications.taskComplete")}
+              description={t("settings:notifications.taskCompleteDescription")}
               control={
                 <ToggleControl
                   disabled={savingKeys.has("notifications.task_complete")}
@@ -557,8 +585,8 @@ function SettingsContent({
               }
             />
             <SettingRow
-              title="需要确认"
-              description="权限、Ask、计划或配对请求需要处理时提醒"
+              title={t("settings:notifications.requiresAction")}
+              description={t("settings:notifications.requiresActionDescription")}
               control={
                 <ToggleControl
                   disabled={savingKeys.has("notifications.requires_action")}
@@ -568,8 +596,8 @@ function SettingsContent({
               }
             />
             <SettingRow
-              title="窗口聚焦时静默"
-              description="正在使用应用时不发送系统通知"
+              title={t("settings:notifications.quietWhenFocused")}
+              description={t("settings:notifications.quietWhenFocusedDescription")}
               control={
                 <ToggleControl
                   disabled={savingKeys.has("notifications.quiet_when_focused")}
@@ -584,11 +612,11 @@ function SettingsContent({
     case "data":
       return (
         <div className="grid gap-8">
-          <SettingsSection title="本地数据">
-            <SettingRow title="媒体缓存" description="图片预览和附件的本地缓存" control={<ButtonControl label={actionStatus.cache || "清理缓存"} onClick={onClearMediaCache} />} />
+          <SettingsSection title={t("settings:data.section")}>
+            <SettingRow title={t("settings:data.mediaCache")} description={t("settings:data.mediaCacheDescription")} control={<ButtonControl label={actionStatus.cache || t("settings:data.clearCache")} onClick={onClearMediaCache} />} />
             <SettingRow
-              title="诊断日志记录"
-              description="记录客户端、SSH 和远控事务，默认关闭"
+              title={t("settings:data.diagnosticsLogging")}
+              description={t("settings:data.diagnosticsLoggingDescription")}
               control={
                 <ToggleControl
                   disabled={savingKeys.has("diagnostics.logging_enabled")}
@@ -597,16 +625,16 @@ function SettingsContent({
                 />
               }
             />
-            <SettingRow title="诊断日志" description="用于排查 daemon 和桌面端问题" control={<ButtonControl label={actionStatus.logs || "打开日志目录"} onClick={onOpenLogs} />} />
+            <SettingRow title={t("settings:data.diagnosticLogs")} description={t("settings:data.diagnosticLogsDescription")} control={<ButtonControl label={actionStatus.logs || t("settings:data.openLogs")} onClick={onOpenLogs} />} />
           </SettingsSection>
         </div>
       );
     case "advanced":
       return (
         <div className="grid gap-8">
-          <SettingsSection title="运行时">
-            <SettingRow title="Claude Code 路径" description="本机 Claude Code 命令位置" control={<PathValue label={health?.agents.claude?.path || "未检测到"} />} />
-            <SettingRow title="Codex CLI 路径" description="本机 Codex 命令位置" control={<PathValue label={health?.agents.codex?.path || "未检测到"} />} />
+          <SettingsSection title={t("settings:advanced.runtime")}>
+            <SettingRow title={t("settings:advanced.claudePath")} description={t("settings:advanced.claudePathDescription")} control={<PathValue label={health?.agents.claude?.path || t("settings:advanced.notDetected")} />} />
+            <SettingRow title={t("settings:advanced.codexPath")} description={t("settings:advanced.codexPathDescription")} control={<PathValue label={health?.agents.codex?.path || t("settings:advanced.notDetected")} />} />
           </SettingsSection>
         </div>
       );
@@ -616,10 +644,10 @@ function SettingsContent({
     default:
       return (
         <div className="grid gap-8">
-          <SettingsSection title="默认行为">
+          <SettingsSection title={t("settings:general.section")}>
             <SettingRow
-              title="启动后恢复"
-              description="打开应用时回到上次工作位置"
+              title={t("settings:general.restoreOnLaunch")}
+              description={t("settings:general.restoreOnLaunchDescription")}
               control={
                 <ToggleControl
                   disabled={savingKeys.has("general.restore_on_launch")}
@@ -628,7 +656,7 @@ function SettingsContent({
                 />
               }
             />
-            <SettingRow title="语言" description="应用界面显示语言" control={<SelectControl options={LANGUAGE_OPTIONS} value={language} onChange={onLanguageChange} />} />
+            <SettingRow title={t("settings:language.label")} description={t("settings:language.description")} control={<SelectControl options={languages} value={language} onChange={onLanguageChange} />} />
           </SettingsSection>
         </div>
       );
@@ -652,6 +680,7 @@ function RemoteControlContent({
   savingKeys: ReadonlySet<string>;
   settings: AppSettings;
 }): React.JSX.Element {
+  const { t } = useTranslation(["common", "remote", "desktop"]);
   const [host, setHost] = useState<HostInfo | null>(null);
   const [grants, setGrants] = useState<TrustGrant[]>([]);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
@@ -693,7 +722,7 @@ function RemoteControlContent({
       setCloudAccount(null);
       setCloudRelays({ relays: [] });
       setCloudDevices([]);
-      setError("Core 未连接");
+      setError(t("remote:statuses.coreDisconnected"));
       setStatus("");
       return;
     }
@@ -708,7 +737,7 @@ function RemoteControlContent({
         setCloudRelays({ relays: [] });
         setCloudDevices([]);
         setError("");
-        setStatus("已刷新");
+        setStatus(t("remote:statuses.refreshed"));
         return;
       }
 
@@ -725,7 +754,7 @@ function RemoteControlContent({
       setCloudRelays(nextCloudRelays);
       setCloudDevices(sortCloudDevices(nextCloudDevices, hostInfo.identity.device_id));
       setError(cloudError);
-      setStatus(cloudError ? "账号设备读取失败" : "已刷新");
+      setStatus(cloudError ? t("remote:statuses.accountReadFailed") : t("remote:statuses.refreshed"));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
@@ -741,14 +770,14 @@ function RemoteControlContent({
     if (!core || grant.status !== "trusted") return;
     if (confirmRevokeId !== grant.controller_device_id) {
       setConfirmRevokeId(grant.controller_device_id);
-      setStatus("再次点击确认撤销");
+      setStatus(t("remote:statuses.confirmRevoke"));
       return;
     }
     setRevokingId(grant.controller_device_id);
     setError("");
     try {
       const result = await core.revokeTrustedDevice(grant.controller_device_id);
-      setStatus(`已撤销，关闭 ${result.closed_control_sessions} 个控制连接`);
+      setStatus(t("remote:statuses.revokedClosed", { count: result.closed_control_sessions }));
       setConfirmRevokeId("");
       await loadRemoteControl();
     } catch (revokeError) {
@@ -764,7 +793,7 @@ function RemoteControlContent({
     setError("");
     try {
       await core.approvePairingRequest(request.request_id);
-      setStatus("已允许设备控制本机");
+      setStatus(t("remote:statuses.approvedControl"));
       await loadRemoteControl();
       onPairingRequestsChanged?.();
     } catch (approveError) {
@@ -780,7 +809,7 @@ function RemoteControlContent({
     setError("");
     try {
       await core.denyPairingRequest(request.request_id);
-      setStatus("已拒绝设备加入");
+      setStatus(t("remote:statuses.deniedDevice"));
       await loadRemoteControl();
       onPairingRequestsChanged?.();
     } catch (denyError) {
@@ -796,7 +825,7 @@ function RemoteControlContent({
     const revokeLocalTrust = trustedGrantByDeviceId.has(device.device_id);
     if (confirmCloudRemoveId !== device.device_id) {
       setConfirmCloudRemoveId(device.device_id);
-      setStatus(currentDevice ? "再次点击确认本机退出 Mesh" : revokeLocalTrust ? "再次点击确认从 Mesh 删除并撤销本机信任" : "再次点击确认从 Mesh 删除设备");
+      setStatus(currentDevice ? t("remote:statuses.confirmExitMesh") : revokeLocalTrust ? t("remote:statuses.confirmRemoveAndRevoke") : t("remote:statuses.confirmRemove"));
       return;
     }
     setRemovingCloudDeviceId(device.device_id);
@@ -807,14 +836,14 @@ function RemoteControlContent({
         setCloudAccount(null);
         setCloudRelays({ relays: [] });
         setCloudDevices([]);
-        setStatus(result.local_mesh_logout.cloud_removed ? "本机已退出 Mesh，远控身份和信任已重置" : "本机已退出 Mesh，Cloud 删除稍后可重试");
+        setStatus(result.local_mesh_logout.cloud_removed ? t("remote:statuses.exitedMesh") : t("remote:statuses.exitedMeshRetry"));
         await onReloadSettings();
         await loadRemoteControl();
         onPairingRequestsChanged?.();
       } else if (result.local_trust_revoked && result.trust_revoke) {
-        setStatus(`已移除并撤销本机信任，关闭 ${result.trust_revoke.closed_control_sessions} 个控制连接`);
+        setStatus(t("remote:statuses.removedAndRevoked", { count: result.trust_revoke.closed_control_sessions }));
       } else {
-        setStatus("已从 Mesh 删除设备");
+        setStatus(t("remote:statuses.removedDevice"));
       }
       setConfirmCloudRemoveId("");
       if (!result.local_mesh_logout) {
@@ -829,12 +858,12 @@ function RemoteControlContent({
 
   async function beginCloudAuth(provider: CloudAuthProvider): Promise<void> {
     if (!core) {
-      setError("Core 未连接");
+      setError(t("remote:statuses.coreDisconnected"));
       return;
     }
     const baseURL = normalizeCloudBaseURLDraft(cloudBaseURLDraft || settings.cloud.base_url || "");
     if (!baseURL) {
-      setError("先填写 Cloud 服务地址");
+      setError(t("remote:statuses.fillCloudURL"));
       return;
     }
     setAuthenticatingProvider(provider);
@@ -842,8 +871,8 @@ function RemoteControlContent({
     try {
       const result = await core.startCloudAuth({ provider, base_url: baseURL });
       const opened = await window.astral.openExternal(result.auth_url);
-      if (!opened.ok) throw new Error(opened.error || "无法打开浏览器");
-      setStatus("已打开浏览器登录，完成后会自动连接账号");
+      if (!opened.ok) throw new Error(opened.error || "Failed to open browser");
+      setStatus(t("remote:statuses.browserLoginOpened"));
       await waitForCloudAuthCompletion(core, onReloadSettings, baseURL, (message) => setStatus(message));
     } catch (authError) {
       setError(authError instanceof Error ? authError.message : String(authError));
@@ -861,7 +890,7 @@ function RemoteControlContent({
       setCloudAccount(null);
       setCloudRelays({ relays: [] });
       setCloudDevices([]);
-      setStatus("已退出 Mesh，远控身份和信任已重置");
+      setStatus(t("remote:statuses.exitedMesh"));
       await onReloadSettings();
       await loadRemoteControl();
       onPairingRequestsChanged?.();
@@ -879,7 +908,7 @@ function RemoteControlContent({
     try {
       const account = await core.setCloudAccountRelay({ relay_id: relayId });
       setCloudAccount(account);
-      setStatus("已切换账号中继，其他设备会在 Cloud 同步后跟随切换");
+      setStatus(t("remote:statuses.relaySwitched"));
       await loadRemoteControl();
     } catch (switchError) {
       setError(switchError instanceof Error ? switchError.message : String(switchError));
@@ -890,19 +919,19 @@ function RemoteControlContent({
 
   return (
     <div className="grid gap-8">
-      <SettingsSection title="本机 Host">
-        <InfoRow label="设备名" value={host?.identity.device_name || "未加载"} />
-        <InfoRow label="设备类型" value={deviceKindLabel(host?.identity.device_kind)} />
-        <InfoRow label="设备 ID" value={host?.identity.device_id || "未加载"} />
-        <InfoRow label="公钥指纹" value={host?.identity.public_key_fingerprint || "未加载"} mono wrap />
-        <InfoRow label="平台" value={host ? `${host.platform.os}/${host.platform.arch}` : "未加载"} />
-        <SettingRow title="可开放能力" description="批准后的控制设备可以请求这些能力" control={<CapabilityList capabilities={host?.capabilities ?? []} align="right" />} />
+      <SettingsSection title={t("remote:sections.host")}>
+        <InfoRow label={t("remote:labels.deviceName")} value={host?.identity.device_name || t("remote:statuses.notLoaded")} />
+        <InfoRow label={t("remote:labels.deviceType")} value={deviceKindLabel(host?.identity.device_kind, t)} />
+        <InfoRow label={t("remote:labels.deviceId")} value={host?.identity.device_id || t("remote:statuses.notLoaded")} />
+        <InfoRow label={t("remote:labels.fingerprint")} value={host?.identity.public_key_fingerprint || t("remote:statuses.notLoaded")} mono wrap />
+        <InfoRow label={t("remote:labels.platform")} value={host ? `${host.platform.os}/${host.platform.arch}` : t("remote:statuses.notLoaded")} />
+        <SettingRow title={t("remote:labels.capabilities")} description={t("remote:descriptions.capabilities")} control={<CapabilityList capabilities={host?.capabilities ?? []} align="right" />} />
       </SettingsSection>
 
-      <SettingsSection title="连接">
+      <SettingsSection title={t("remote:sections.connection")}>
         <SettingRow
-          title="允许被远控"
-          description={settings.cloud.enabled ? "开启后本机可以接受已批准设备控制" : "登录 Cloud 后才能加入 Mesh 并接受远控"}
+          title={t("remote:labels.allowRemote")}
+          description={settings.cloud.enabled ? t("remote:descriptions.allowRemoteEnabled") : t("remote:descriptions.allowRemoteNeedsCloud")}
           control={
             <ToggleControl
               disabled={savingKeys.has("remote_control.enabled")}
@@ -912,16 +941,16 @@ function RemoteControlContent({
           }
         />
         <SettingRow
-          title="监听地址"
-          description="只开放 Host 身份和加密控制通道"
-          control={<StatusPill label={daemonInfo?.remote_control?.listen_addr ? `实际 ${daemonInfo.remote_control.listen_addr}` : `配置 ${settings.remote_control.listen_addr}`} tone={daemonInfo?.remote_control?.listen_addr ? "good" : "muted"} />}
+          title={t("remote:labels.listenAddress")}
+          description={t("remote:descriptions.listenAddress")}
+          control={<StatusPill label={daemonInfo?.remote_control?.listen_addr ? t("remote:statuses.actualAddress", { addr: daemonInfo.remote_control.listen_addr }) : t("remote:statuses.configuredAddress", { addr: settings.remote_control.listen_addr })} tone={daemonInfo?.remote_control?.listen_addr ? "good" : "muted"} />}
         />
         <SettingRow
-          title="局域网发现"
-          description="同一局域网内优先直连；仍需要 Host 身份校验和授权"
+          title={t("remote:labels.lanDiscovery")}
+          description={t("remote:descriptions.lanDiscovery")}
           control={
             <div className="flex items-center gap-2">
-              <StatusPill label={!settings.cloud.enabled ? "登录后生效" : settings.remote_control.enabled && settings.remote_control.lan_discovery ? "跟随监听端口" : "未开启"} tone={settings.cloud.enabled && settings.remote_control.enabled && settings.remote_control.lan_discovery ? "good" : "muted"} icon={Wifi} />
+              <StatusPill label={!settings.cloud.enabled ? t("remote:statuses.loginEffective") : settings.remote_control.enabled && settings.remote_control.lan_discovery ? t("remote:statuses.followListenPort") : t("remote:statuses.notEnabled")} tone={settings.cloud.enabled && settings.remote_control.enabled && settings.remote_control.lan_discovery ? "good" : "muted"} icon={Wifi} />
               <ToggleControl
                 disabled={!settings.remote_control.enabled || savingKeys.has("remote_control.lan_discovery")}
                 enabled={settings.remote_control.enabled && settings.remote_control.lan_discovery}
@@ -930,49 +959,49 @@ function RemoteControlContent({
             </div>
           }
         />
-        <SettingRow title="远程终端" description="工作区终端可以在控制端渲染，输入和 resize 走加密控制通道" control={<StatusPill label={terminalFeatureLabel(host)} tone={terminalFeatureAvailable(host) ? "good" : "muted"} icon={TerminalSquare} />} />
+        <SettingRow title={t("remote:labels.remoteTerminal")} description={t("remote:descriptions.remoteTerminal")} control={<StatusPill label={terminalFeatureLabel(host, t)} tone={terminalFeatureAvailable(host) ? "good" : "muted"} icon={TerminalSquare} />} />
       </SettingsSection>
 
-      <SettingsSection title="账号 Mesh">
+      <SettingsSection title={t("remote:sections.mesh")}>
         <SettingRow
-          title="账号服务"
-          description="登录后这台设备会加入当前账号 Mesh"
+          title={t("remote:labels.accountService")}
+          description={t("remote:descriptions.accountService")}
           control={<TextInputControl disabled={settings.cloud.enabled || Boolean(authenticatingProvider)} onChange={setCloudBaseURLDraft} placeholder={DEFAULT_CLOUD_BASE_URL} value={cloudBaseURLDraft} />}
         />
         <SettingRow
-          title="账号"
-          description={settings.cloud.enabled ? `${cloudBaseURLLabel(settings)}；退出会断开 Mesh 并重置远控身份，本地数据保留` : "未登录时本机仍可使用，但不能远控别人或被别人远控"}
+          title={t("remote:labels.account")}
+          description={settings.cloud.enabled ? t("remote:descriptions.accountConnected", { url: settings.cloud.base_url || DEFAULT_CLOUD_BASE_URL }) : t("remote:descriptions.accountDisconnected")}
           control={
             settings.cloud.enabled ? (
               <div className="flex items-center gap-2">
-                <StatusPill label={cloudConnectionLabel(settings, cloudAccount, error)} tone={cloudConnectionTone(settings, cloudAccount, error)} />
-                <ButtonControl disabled={loggingOutCloud} icon={LogOut} label={loggingOutCloud ? "退出中" : "退出登录"} onClick={logoutCloud} />
+                <StatusPill label={cloudConnectionLabel(settings, cloudAccount, error, t)} tone={cloudConnectionTone(settings, cloudAccount, error)} />
+                <ButtonControl disabled={loggingOutCloud} icon={LogOut} label={loggingOutCloud ? t("remote:statuses.loggingOut") : t("remote:statuses.logout")} onClick={logoutCloud} />
               </div>
             ) : (
               <div className="flex items-center gap-2">
-                <ButtonControl disabled={Boolean(authenticatingProvider)} icon={LogIn} label={authenticatingProvider === "google" ? "等待登录" : "Google 登录"} onClick={() => beginCloudAuth("google")} />
-                <ButtonControl disabled={Boolean(authenticatingProvider)} icon={LogIn} label={authenticatingProvider === "github" ? "等待登录" : "GitHub 登录"} onClick={() => beginCloudAuth("github")} />
+                <ButtonControl disabled={Boolean(authenticatingProvider)} icon={LogIn} label={authenticatingProvider === "google" ? t("remote:statuses.waitingLogin") : t("remote:statuses.googleLogin")} onClick={() => beginCloudAuth("google")} />
+                <ButtonControl disabled={Boolean(authenticatingProvider)} icon={LogIn} label={authenticatingProvider === "github" ? t("remote:statuses.waitingLogin") : t("remote:statuses.githubLogin")} onClick={() => beginCloudAuth("github")} />
               </div>
             )
           }
         />
         {settings.cloud.enabled ? (
           <>
-            <InfoRow label="账号" value={cloudAccount?.account_id_hash || (error ? "读取失败" : "未加载")} />
+            <InfoRow label={t("remote:labels.account")} value={cloudAccount?.account_id_hash || (error ? t("remote:statuses.readFailed") : t("remote:statuses.notLoaded"))} />
             <SettingRow
-              title="中继节点"
-              description={cloudRelayDescription(cloudAccount, cloudRelays)}
+              title={t("remote:labels.relay")}
+              description={cloudRelayDescription(cloudAccount, cloudRelays, t)}
               control={
                 <SelectControl
                   disabled={switchingRelayId !== "" || cloudRelays.relays.length === 0}
-                  options={cloudRelayOptions(cloudRelays)}
+                  options={cloudRelayOptions(cloudRelays, t)}
                   value={cloudRelaySelection(cloudAccount, cloudRelays)}
                   onChange={switchCloudRelay}
                 />
               }
             />
-            <SettingRow title="中继凭证" description="由账号服务签发给本机使用，短期有效" control={<StatusPill label={cloudRelayCredentialLabel(cloudAccount)} tone={cloudRelayCredentialTone(cloudAccount)} />} />
-            <SettingRow title="我的设备" description="账号服务只保存设备公开身份、在线状态、撤销状态和路由元数据" control={<StatusPill label={`${activeCloudDevices.length} 台`} tone={activeCloudDevices.length > 0 ? "good" : "muted"} />} />
+            <SettingRow title={t("remote:labels.relayCredential")} description={t("remote:descriptions.relayCredential")} control={<StatusPill label={cloudRelayCredentialLabel(cloudAccount, t)} tone={cloudRelayCredentialTone(cloudAccount)} />} />
+            <SettingRow title={t("remote:labels.myDevices")} description={t("remote:descriptions.myDevices")} control={<StatusPill label={`${activeCloudDevices.length}`} tone={activeCloudDevices.length > 0 ? "good" : "muted"} />} />
             {activeCloudDevices.length > 0 ? (
               activeCloudDevices.map((device) => (
                 <CloudDeviceRow
@@ -986,17 +1015,17 @@ function RemoteControlContent({
                 />
               ))
             ) : (
-              <EmptySettingsRow title="暂无设备" description="本机注册到账号后会显示在这里" />
+              <EmptySettingsRow title={t("remote:empty.noDevicesTitle")} description={t("remote:descriptions.noDevices")} />
             )}
           </>
         ) : (
-          <EmptySettingsRow title="未加入 Mesh" description="登录 Cloud 后，本机和其他设备会出现在这里" />
+          <EmptySettingsRow title={t("remote:empty.noMeshTitle")} description={t("remote:descriptions.noMesh")} />
         )}
       </SettingsSection>
 
-      <SettingsSection title="可控制本机的设备">
+      <SettingsSection title={t("remote:sections.trustedDevices")}>
         {pendingPairingRequests.length > 0 ? (
-          <SettingRow title="待批准请求" description="批准前，对方不能读取本机工作区、session 或终端" control={<StatusPill label={`${pendingPairingRequests.length} 个`} tone="warning" icon={KeyRound} />} />
+          <SettingRow title={t("remote:labels.pendingRequests")} description={t("remote:descriptions.pendingRequests")} control={<StatusPill label={`${pendingPairingRequests.length}`} tone="warning" icon={KeyRound} />} />
         ) : null}
         {pendingPairingRequests.map((request) => (
           <PairingRequestRow
@@ -1018,12 +1047,12 @@ function RemoteControlContent({
             />
           ))
         ) : pendingPairingRequests.length === 0 ? (
-          <EmptySettingsRow title="暂无已批准设备" description="其他设备请求控制本机后，需要在这里允许" />
+          <EmptySettingsRow title={t("remote:empty.noTrustedTitle")} description={t("remote:descriptions.noTrustedDevices")} />
         ) : null}
       </SettingsSection>
 
       {revokedGrants.length > 0 ? (
-        <SettingsSection title="已撤销">
+        <SettingsSection title={t("remote:sections.revoked")}>
           {revokedGrants.map((grant) => (
             <TrustGrantRow
               confirmRevokeId={confirmRevokeId}
@@ -1036,8 +1065,8 @@ function RemoteControlContent({
         </SettingsSection>
       ) : null}
 
-      <SettingsSection title="操作">
-        <SettingRow title="刷新远控状态" description={error || status || "重新读取 Host identity 和信任列表"} control={<ButtonControl disabled={loading} icon={RefreshCw} label={loading ? "刷新中" : "刷新"} onClick={loadRemoteControl} />} />
+      <SettingsSection title={t("remote:sections.actions")}>
+        <SettingRow title={t("remote:labels.refreshStatus")} description={error || status || t("remote:descriptions.refreshStatus")} control={<ButtonControl disabled={loading} icon={RefreshCw} label={loading ? t("common:states.loading") : t("common:actions.refresh")} onClick={loadRemoteControl} />} />
       </SettingsSection>
     </div>
   );
@@ -1060,35 +1089,36 @@ function AboutContent({
   settings: AppSettings;
   updateStatus: AppUpdateStatus | null;
 }): React.JSX.Element {
+  const { t } = useTranslation(["common", "settings"]);
   const version = healthValue(health, "version") || "0.1.0";
   const updateAction = updateStatus?.status === "downloaded" ? onInstallUpdate : onCheckForUpdates;
   const updateBusy = updateStatus?.status === "checking" || updateStatus?.status === "available" || updateStatus?.status === "downloading" || updateStatus?.status === "installing";
   return (
     <div className="grid gap-8">
-      <SettingsSection title="版本">
+      <SettingsSection title={t("settings:about.version")}>
         <InfoRow label="AstralOps" value={version} />
-        <InfoRow label="Core" value={health ? "已连接" : "未连接"} />
-        <InfoRow label="Claude Code 版本" value={agentVersion(health, "claude")} />
-        <InfoRow label="Claude Code 路径" value={agentPath(health, "claude")} />
-        <InfoRow label="Codex CLI 版本" value={agentVersion(health, "codex")} />
-        <InfoRow label="Codex CLI 路径" value={agentPath(health, "codex")} />
+        <InfoRow label={t("settings:about.core")} value={health ? t("settings:about.connected") : t("settings:about.disconnected")} />
+        <InfoRow label={t("settings:about.claudeVersion")} value={agentVersion(health, "claude", t)} />
+        <InfoRow label={t("settings:advanced.claudePath")} value={agentPath(health, "claude", t)} />
+        <InfoRow label={t("settings:about.codexVersion")} value={agentVersion(health, "codex", t)} />
+        <InfoRow label={t("settings:advanced.codexPath")} value={agentPath(health, "codex", t)} />
       </SettingsSection>
-      <SettingsSection title="更新">
+      <SettingsSection title={t("settings:about.updates")}>
         <SettingRow
-          title="检查更新"
-          description={updateStatusDescription(updateStatus)}
+          title={t("settings:about.checkUpdates")}
+          description={updateStatusDescription(updateStatus, t)}
           control={
             <ButtonControl
               disabled={updateStatus?.status === "dev" || updateBusy}
               icon={RefreshCw}
-              label={updateActionLabel(updateStatus)}
+              label={updateActionLabel(updateStatus, t)}
               onClick={updateAction}
             />
           }
         />
         <SettingRow
-          title="自动检查"
-          description="启动后定期检查新版本"
+          title={t("settings:about.autoCheck")}
+          description={t("settings:about.autoCheckDescription")}
           control={
             <ToggleControl
               disabled={savingKeys.has("updates.auto_check")}
@@ -1155,30 +1185,31 @@ function TrustGrantRow({
   revokingId: string;
   onRevoke: (grant: TrustGrant) => Promise<void>;
 }): React.JSX.Element {
+  const { t } = useTranslation(["common", "remote"]);
   const trusted = grant.status === "trusted";
   const confirming = confirmRevokeId === grant.controller_device_id;
   const revoking = revokingId === grant.controller_device_id;
-  const name = grant.controller_device_name || "未命名设备";
-  const fingerprint = grant.controller_public_key_fingerprint || "未声明指纹";
+  const name = grant.controller_device_name || t("remote:labels.unnamedDevice");
+  const fingerprint = grant.controller_public_key_fingerprint || t("remote:labels.unreportedFingerprint");
   return (
     <div className="grid min-h-[84px] grid-cols-[minmax(0,1fr)_auto] items-center gap-5 border-b border-[var(--ao-border)] px-4 py-3 last:border-b-0">
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">
           <ShieldCheck size={15} strokeWidth={1.9} className={trusted ? "text-[var(--ao-green)]" : "text-[var(--ao-muted)]"} />
           <span className="truncate text-[13px] font-bold leading-5 text-[var(--ao-text)]">{name}</span>
-          <StatusPill label={trustStatusLabel(grant.status)} tone={trusted ? "good" : "muted"} />
+          <StatusPill label={trustStatusLabel(grant.status, t)} tone={trusted ? "good" : "muted"} />
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
           <span className="truncate">ID {grant.controller_device_id}</span>
           <FingerprintInline value={fingerprint} />
-          <span>{policyLabel(grant.workspace_exec_policy)}</span>
-          <span>{trusted ? `更新于 ${formatTimestamp(grant.updated_at)}` : `撤销于 ${formatTimestamp(grant.revoked_at || grant.updated_at)}`}</span>
+          <span>{policyLabel(grant.workspace_exec_policy, t)}</span>
+          <span>{trusted ? t("remote:labels.updatedAt", { time: formatTimestamp(grant.updated_at) }) : t("remote:labels.revokedAt", { time: formatTimestamp(grant.revoked_at || grant.updated_at) })}</span>
         </div>
         <CapabilityList capabilities={grant.capabilities} align="left" />
       </div>
       <ButtonControl
         disabled={!trusted || revoking}
-        label={!trusted ? "已撤销" : revoking ? "撤销中" : confirming ? "确认撤销" : "撤销控制权"}
+        label={!trusted ? t("common:states.revoked") : revoking ? t("remote:actions.revoking") : confirming ? t("remote:actions.confirmRevoke") : t("remote:actions.revokeControl")}
         onClick={() => onRevoke(grant)}
       />
     </div>
@@ -1196,28 +1227,29 @@ function PairingRequestRow({
   onApprove: (request: PairingRequest) => Promise<void>;
   onDeny: (request: PairingRequest) => Promise<void>;
 }): React.JSX.Element {
+  const { t } = useTranslation(["common", "remote"]);
   const resolving = resolvingId === request.request_id;
-  const name = request.controller_device_name || "未命名设备";
+  const name = request.controller_device_name || t("remote:labels.unnamedDevice");
   return (
     <div className="grid min-h-[92px] grid-cols-[minmax(0,1fr)_auto] items-center gap-5 border-b border-[var(--ao-border)] px-4 py-3 last:border-b-0">
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">
           <KeyRound size={15} strokeWidth={1.9} className="text-[var(--ao-warning)]" />
           <span className="truncate text-[13px] font-bold leading-5 text-[var(--ao-text)]">{name}</span>
-          <StatusPill label="等待批准" tone="warning" />
+          <StatusPill label={t("common:states.pending")} tone="warning" />
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
           <span className="truncate">ID {request.controller_device_id}</span>
-          <span>{deviceKindLabel(request.controller_device_kind)}</span>
+          <span>{deviceKindLabel(request.controller_device_kind, t)}</span>
           <FingerprintInline value={request.controller_public_key_fingerprint} />
-          <span>{policyLabel(request.workspace_exec_policy)}</span>
-          <span>{`请求于 ${formatTimestamp(request.created_at)}`}</span>
+          <span>{policyLabel(request.workspace_exec_policy, t)}</span>
+          <span>{t("remote:labels.requestedAt", { time: formatTimestamp(request.created_at) })}</span>
         </div>
         <CapabilityList capabilities={request.capabilities} align="left" />
       </div>
       <div className="flex items-center gap-2">
-        <ButtonControl disabled={resolving} icon={Check} label={resolving ? "处理中" : "允许"} onClick={() => onApprove(request)} />
-        <ButtonControl disabled={resolving} icon={X} label="拒绝" onClick={() => onDeny(request)} />
+        <ButtonControl disabled={resolving} icon={Check} label={resolving ? t("common:states.loading") : t("common:actions.approve")} onClick={() => onApprove(request)} />
+        <ButtonControl disabled={resolving} icon={X} label={t("common:actions.deny")} onClick={() => onDeny(request)} />
       </div>
     </div>
   );
@@ -1238,27 +1270,40 @@ function CloudDeviceRow({
   removingId: string;
   onRemove: (device: CloudDeviceRecord) => Promise<void>;
 }): React.JSX.Element {
+  const { t } = useTranslation(["common", "remote", "desktop"]);
   const current = device.device_id === currentDeviceId;
   const revoked = device.status === "revoked";
   const removing = removingId === device.device_id;
   const confirming = confirmRemoveId === device.device_id;
   const name = device.device_name || device.device_id;
-  const removeLabel = revoked ? "已删除" : removing ? "处理中" : confirming ? (current ? "确认退出" : "确认删除") : current ? "退出 Mesh" : localTrustGrant ? "删除并撤销" : "删除";
+  const removeLabel = revoked
+    ? t("remote:actions.deleted")
+    : removing
+      ? t("common:states.loading")
+      : confirming
+        ? current
+          ? t("remote:actions.confirmExit")
+          : t("remote:actions.confirmDelete")
+        : current
+          ? t("remote:actions.exitMesh")
+          : localTrustGrant
+            ? t("remote:actions.deleteAndRevoke")
+            : t("common:actions.delete");
   return (
     <div className="grid min-h-[92px] grid-cols-[minmax(0,1fr)_auto] items-center gap-5 border-b border-[var(--ao-border)] px-4 py-3 last:border-b-0">
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">
           <MonitorCog size={15} strokeWidth={1.9} className={revoked ? "text-[var(--ao-muted)]" : "text-[var(--ao-text-soft)]"} />
           <span className="truncate text-[13px] font-bold leading-5 text-[var(--ao-text)]">{name}</span>
-          <StatusPill label={current ? "本机" : cloudDeviceStatusLabel(device.status)} tone={device.status === "online" ? "good" : revoked ? "muted" : "warning"} />
+          <StatusPill label={current ? t("desktop:host.local") : cloudDeviceStatusLabel(device.status, t)} tone={device.status === "online" ? "good" : revoked ? "muted" : "warning"} />
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">
           <span className="truncate">ID {device.device_id}</span>
-          <span>{deviceKindLabel(device.device_kind)}</span>
-          <span>{cloudDeviceRoleLabel(device)}</span>
-          {localTrustGrant ? <span>本机已信任</span> : null}
+          <span>{deviceKindLabel(device.device_kind, t)}</span>
+          <span>{cloudDeviceRoleLabel(device, t)}</span>
+          {localTrustGrant ? <span>{t("remote:labels.localTrusted")}</span> : null}
           <FingerprintInline value={device.public_key_fingerprint} />
-          <span>{`更新于 ${formatTimestamp(device.updated_at || device.last_seen)}`}</span>
+          <span>{t("remote:labels.updatedAt", { time: formatTimestamp(device.updated_at || device.last_seen) })}</span>
         </div>
       </div>
       <ButtonControl
@@ -1290,8 +1335,9 @@ function FingerprintInline({ value }: { value: string }): React.JSX.Element {
 }
 
 function CapabilityList({ align, capabilities }: { align: "left" | "right"; capabilities: readonly string[] }): React.JSX.Element {
+  const { t } = useTranslation(["common", "remote"]);
   if (capabilities.length === 0) {
-    return <span className="text-[12px] font-semibold text-[var(--ao-muted)]">未声明</span>;
+    return <span className="text-[12px] font-semibold text-[var(--ao-muted)]">{t("remote:labels.notDeclared")}</span>;
   }
   return (
     <div className={`flex max-w-[520px] flex-wrap gap-1.5 ${align === "right" ? "justify-end" : "mt-2 justify-start"}`}>
@@ -1301,7 +1347,7 @@ function CapabilityList({ align, capabilities }: { align: "left" | "right"; capa
           key={capability}
           title={capability}
         >
-          {capabilityLabel(capability)}
+          {capabilityLabel(capability, t)}
         </span>
       ))}
     </div>
@@ -1460,10 +1506,11 @@ function PreviewSwatches({
   selected: AppSettings["appearance"]["preview_theme"];
   onChange: (value: AppSettings["appearance"]["preview_theme"]) => void | Promise<void>;
 }): React.JSX.Element {
+  const { t } = useTranslation(["settings"]);
   const options: SettingOption<AppSettings["appearance"]["preview_theme"]>[] = [
-    { value: "light", label: "浅色" },
-    { value: "dark", label: "深色" },
-    { value: "system", label: "系统" },
+    { value: "light", label: t("settings:appearance.themeLight") },
+    { value: "dark", label: t("settings:appearance.themeDark") },
+    { value: "system", label: t("settings:appearance.themeSystem") },
   ];
   return (
     <div className={`grid grid-cols-3 gap-3 p-3 ${disabled ? "opacity-60" : ""}`}>
@@ -1515,10 +1562,6 @@ function cloudDeviceStatusRank(status: string): number {
   return 3;
 }
 
-function cloudBaseURLLabel(settings: AppSettings): string {
-  return settings.cloud.base_url ? `服务地址 ${settings.cloud.base_url}` : "服务地址未配置";
-}
-
 function normalizeCloudBaseURLDraft(value: string): string {
   return value.trim().replace(/\/+$/, "");
 }
@@ -1535,22 +1578,22 @@ async function waitForCloudAuthCompletion(
     const next = await core.settings();
     if (next.cloud.enabled && normalizeCloudBaseURLDraft(next.cloud.base_url || "") === expectedBaseURL && Boolean(next.cloud.account_token)) {
       await onReloadSettings();
-      onStatus("已登录云账号");
+      onStatus("Cloud account connected");
       return;
     }
   }
-  onStatus("浏览器登录仍在等待中，完成后可刷新远控状态");
+  onStatus("Browser login is still waiting. Refresh remote status after completion.");
 }
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function cloudConnectionLabel(settings: AppSettings, account: CloudAccountStatus | null, error: string): string {
-  if (!settings.cloud.enabled) return "未开启";
-  if (error) return "读取失败";
-  if (account?.account_id_hash) return "已连接";
-  return "未加载";
+function cloudConnectionLabel(settings: AppSettings, account: CloudAccountStatus | null, error: string, t: TFunction): string {
+  if (!settings.cloud.enabled) return t("remote:statuses.notEnabled");
+  if (error) return t("remote:statuses.readFailed");
+  if (account?.account_id_hash) return t("common:states.connected");
+  return t("remote:statuses.notLoaded");
 }
 
 function cloudConnectionTone(settings: AppSettings, account: CloudAccountStatus | null, error: string): "good" | "muted" | "warning" {
@@ -1564,8 +1607,8 @@ function cloudRelaySelection(account: CloudAccountStatus | null, relays: CloudRe
   return account?.relay?.relay_id || relays.current_relay_id || relays.relays[0]?.relay_id || "";
 }
 
-function cloudRelayOptions(relays: CloudRelayListResponse): SettingOption[] {
-  if (relays.relays.length === 0) return [{ label: "未配置", value: "" }];
+function cloudRelayOptions(relays: CloudRelayListResponse, t: TFunction): SettingOption[] {
+  if (relays.relays.length === 0) return [{ label: t("remote:statuses.unavailable"), value: "" }];
   return relays.relays.map((relay) => ({
     label: cloudRelayOptionLabel(relay),
     value: relay.relay_id,
@@ -1578,22 +1621,22 @@ function cloudRelayOptionLabel(relay: CloudRelayOption): string {
   return relay.relay_id;
 }
 
-function cloudRelayDescription(account: CloudAccountStatus | null, relays: CloudRelayListResponse): string {
+function cloudRelayDescription(account: CloudAccountStatus | null, relays: CloudRelayListResponse, t: TFunction): string {
   const selectedID = cloudRelaySelection(account, relays);
   const selected = relays.relays.find((relay) => relay.relay_id === selectedID);
   const url = account?.relay?.relay_url || selected?.relay_url;
-  if (!url) return "账号内所有设备使用同一个中继；切换后其他设备会在同步后跟随";
-  return `${url}；账号内所有设备使用同一个中继`;
+  if (!url) return "All devices in the account use the same relay. Other devices follow after sync.";
+  return t("remote:descriptions.accountRelay", { url, defaultValue: `${url}; all devices in the account use the same relay` });
 }
 
-function cloudRelayCredentialLabel(account: CloudAccountStatus | null): string {
+function cloudRelayCredentialLabel(account: CloudAccountStatus | null, t: TFunction): string {
   const relay = account?.relay;
-  if (!relay) return "未配置";
-  if (!relay.credential_available) return "未下发";
-  if (!relay.credential_expires_at) return "已下发";
+  if (!relay) return t("remote:statuses.unavailable");
+  if (!relay.credential_available) return t("remote:statuses.notIssued");
+  if (!relay.credential_expires_at) return t("remote:statuses.issued");
   const parsed = Date.parse(relay.credential_expires_at);
-  if (Number.isFinite(parsed) && parsed <= Date.now()) return "已过期";
-  return `有效到 ${formatTimestamp(relay.credential_expires_at)}`;
+  if (Number.isFinite(parsed) && parsed <= Date.now()) return t("remote:statuses.expired");
+  return t("remote:statuses.validUntil", { time: formatTimestamp(relay.credential_expires_at) });
 }
 
 function cloudRelayCredentialTone(account: CloudAccountStatus | null): "good" | "muted" | "warning" {
@@ -1611,10 +1654,10 @@ function timestampValue(value?: string): number {
 }
 
 function formatTimestamp(value?: string): string {
-  if (!value) return "未知";
+  if (!value) return "Unknown";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("zh-CN", {
+  return new Intl.DateTimeFormat(undefined, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -1626,62 +1669,62 @@ function terminalFeatureAvailable(host: HostInfo | null): boolean {
   return Boolean(host?.features.terminal?.available);
 }
 
-function terminalFeatureLabel(host: HostInfo | null): string {
+function terminalFeatureLabel(host: HostInfo | null, t: TFunction): string {
   const terminal = host?.features.terminal;
-  if (!terminal) return "未声明";
-  if (terminal.available) return "可用";
-  return terminal.reason ? `不可用：${terminal.reason}` : "不可用";
+  if (!terminal) return t("common:states.unknown");
+  if (terminal.available) return t("common:states.available");
+  return terminal.reason ? `${t("common:states.unavailable")}: ${terminal.reason}` : t("common:states.unavailable");
 }
 
-function deviceKindLabel(kind?: string): string {
-  if (kind === "desktop") return "桌面端";
-  if (kind === "mobile") return "手机端";
-  return kind || "未加载";
+function deviceKindLabel(kind: string | undefined, t: TFunction): string {
+  if (kind === "desktop") return t("desktop:host.desktop");
+  if (kind === "mobile") return t("desktop:host.mobile");
+  return kind || t("remote:statuses.notLoaded");
 }
 
-function cloudDeviceStatusLabel(status: string): string {
-  if (status === "online") return "在线";
-  if (status === "offline") return "离线";
-  if (status === "revoked") return "已移除";
-  return status || "未知";
+function cloudDeviceStatusLabel(status: string, t: TFunction): string {
+  if (status === "online") return t("common:states.online");
+  if (status === "offline") return t("common:states.offline");
+  if (status === "revoked") return t("remote:actions.removed");
+  return status || t("common:states.unknown");
 }
 
-function cloudDeviceRoleLabel(device: CloudDeviceRecord): string {
+function cloudDeviceRoleLabel(device: CloudDeviceRecord, t: TFunction): string {
   if (device.can_host && device.can_control) return "Host / Controller";
   if (device.can_host) return "Host";
   if (device.can_control) return "Controller";
-  return "未声明角色";
+  return t("remote:labels.noRoleDeclared");
 }
 
-function trustStatusLabel(status: string): string {
-  if (status === "trusted") return "可信";
-  if (status === "revoked") return "已撤销";
-  return status || "未知";
+function trustStatusLabel(status: string, t: TFunction): string {
+  if (status === "trusted") return t("remote:labels.trusted");
+  if (status === "revoked") return t("common:states.revoked");
+  return status || t("common:states.unknown");
 }
 
-function policyLabel(policy?: string): string {
-  if (policy === "trusted") return "命令可执行";
-  if (policy === "require_approval") return "命令需确认";
-  if (policy === "disabled") return "命令禁用";
-  return policy || "默认策略";
+function policyLabel(policy: string | undefined, t: TFunction): string {
+  if (policy === "trusted") return t("remote:policy.trusted");
+  if (policy === "require_approval") return t("remote:policy.requireApproval");
+  if (policy === "disabled") return t("remote:policy.disabled");
+  return policy || t("remote:policy.default");
 }
 
-function capabilityLabel(capability: string): string {
+function capabilityLabel(capability: string, t: TFunction): string {
   const labels: Record<string, string> = {
-    "core.read": "读状态",
-    "core.control": "控会话",
-    "interaction.respond": "回应确认",
-    "session.edit": "编辑会话",
-    "attachment.ingest": "上传附件",
-    "media.read": "读媒体",
-    "media.download": "下载媒体",
-    "media.stream": "媒体流",
-    "workspace.files.read": "读文件",
-    "workspace.files.write": "写文件",
-    "workspace.exec": "执行命令",
-    "terminal.open": "打开终端",
-    "terminal.input": "终端输入",
-    "host.manage": "管理 Host",
+    "core.read": t("remote:capabilities.coreRead"),
+    "core.control": t("remote:capabilities.coreControl"),
+    "interaction.respond": t("remote:capabilities.interactionRespond"),
+    "session.edit": t("remote:capabilities.sessionEdit"),
+    "attachment.ingest": t("remote:capabilities.attachmentIngest"),
+    "media.read": t("remote:capabilities.mediaRead"),
+    "media.download": t("remote:capabilities.mediaDownload"),
+    "media.stream": t("remote:capabilities.mediaStream"),
+    "workspace.files.read": t("remote:capabilities.filesRead"),
+    "workspace.files.write": t("remote:capabilities.filesWrite"),
+    "workspace.exec": t("remote:capabilities.exec"),
+    "terminal.open": t("remote:capabilities.terminalOpen"),
+    "terminal.input": t("remote:capabilities.terminalInput"),
+    "host.manage": t("remote:capabilities.hostManage"),
   };
   return labels[capability] ?? capability;
 }
@@ -1692,14 +1735,14 @@ function healthValue(health: HealthResponse | null, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
-function agentVersion(health: HealthResponse | null, agent: "claude" | "codex"): string {
+function agentVersion(health: HealthResponse | null, agent: "claude" | "codex", t: TFunction): string {
   const info = health?.agents[agent];
-  if (!info?.available) return "未检测到";
-  return info.version || "已检测到";
+  if (!info?.available) return t("settings:advanced.notDetected");
+  return info.version || t("settings:advanced.detected");
 }
 
-function agentPath(health: HealthResponse | null, agent: "claude" | "codex"): string {
+function agentPath(health: HealthResponse | null, agent: "claude" | "codex", t: TFunction): string {
   const info = health?.agents[agent];
-  if (!info?.available) return "未检测到";
-  return info.path || "未检测到";
+  if (!info?.available) return t("settings:advanced.notDetected");
+  return info.path || t("settings:advanced.notDetected");
 }

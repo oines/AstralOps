@@ -1687,6 +1687,7 @@ export type AppSettings = {
   };
   appearance: {
     theme: "system" | "light" | "dark";
+    language: "system" | "en" | "zh-CN";
     mac_sidebar_effect: boolean;
     preview_theme: "light" | "dark" | "system";
   };

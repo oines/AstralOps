@@ -7,6 +7,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import type { ITheme } from "@xterm/xterm";
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 import "@xterm/xterm/css/xterm.css";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -35,6 +36,7 @@ type RightPanelProps = {
 };
 
 export function RightPanel({ api, health, open, terminalTabs = [], width, workspace, onLiveResize, onResize, onResizeActiveChange }: RightPanelProps): React.JSX.Element | null {
+  const { t } = useTranslation(["common", "desktop"]);
   const [tabs, setTabs] = useState<PanelTab[]>([]);
   const contentOrderRef = useRef<string[]>([]);
   const [activeTabId, setActiveTabId] = useState("");
@@ -278,7 +280,7 @@ export function RightPanel({ api, health, open, terminalTabs = [], width, worksp
                   active={tab.id === activeTabId}
                   key={tab.id}
                   tab={tab}
-                  title={panelTabTitle(tab, workspace)}
+                  title={panelTabTitle(tab, workspace, t("desktop:panels.files"))}
                   onClose={() => closeTab(tab.id)}
                   onSelect={() => setActiveTabId(tab.id)}
                 />
@@ -290,8 +292,8 @@ export function RightPanel({ api, health, open, terminalTabs = [], width, worksp
           <button
             className="grid size-8 place-items-center rounded-lg text-[#8f9296] transition-colors duration-150 ease-out hover:bg-black/[0.045] hover:text-[#343438]"
             type="button"
-            aria-label="新增右侧标签"
-            title="新增标签"
+            aria-label={t("desktop:panels.addTab")}
+            title={t("desktop:panels.addTab")}
             onClick={() => setMenuOpen((current) => !current)}
           >
             <Plus size={17} strokeWidth={2} />
@@ -302,11 +304,11 @@ export function RightPanel({ api, health, open, terminalTabs = [], width, worksp
                 <PanelMenuButton
                   disabled={creatingTerminalForWorkspace}
                   icon={<TerminalSquare size={16} strokeWidth={1.8} />}
-                  label={creatingTerminalForWorkspace ? "正在打开" : "终端"}
+                  label={creatingTerminalForWorkspace ? t("desktop:panels.openingTerminal") : t("desktop:panels.terminal")}
                   onClick={() => addTab("terminal")}
                 />
               ) : null}
-              <PanelMenuButton icon={<Folder size={16} strokeWidth={1.8} />} label="文件浏览" onClick={() => addTab("files")} />
+              <PanelMenuButton icon={<Folder size={16} strokeWidth={1.8} />} label={t("desktop:panels.fileBrowser")} onClick={() => addTab("files")} />
             </div>
           ) : null}
         </div>
@@ -314,7 +316,7 @@ export function RightPanel({ api, health, open, terminalTabs = [], width, worksp
 
       <div className="min-h-0 flex-1 overflow-hidden">
         {tabs.length === 0 ? (
-          <PanelMessage title="没有标签页" body="点右上角 + 新建终端或文件浏览。" />
+          <PanelMessage title={t("desktop:panels.noTabs")} body={t("desktop:panels.addTerminalOrFile")} />
         ) : null}
         {contentTabs.length > 0 ? (
           <div className="relative h-full overflow-hidden">
@@ -327,7 +329,7 @@ export function RightPanel({ api, health, open, terminalTabs = [], width, worksp
                   key={tab.id}
                 >
                   {tab.kind === "terminal" && !terminalAvailable ? (
-                    <PanelMessage title="终端不可用" body="Windows 当前禁用内置终端。文件浏览和 agent 任务仍可使用。" />
+                    <PanelMessage title={t("desktop:panels.terminalUnavailable")} body={t("desktop:panels.terminalUnavailableDescription")} />
                   ) : tab.kind === "terminal" ? (
                     <TerminalTab
                       active={active}
@@ -380,6 +382,7 @@ function SortablePanelTab({
   tab: PanelTab;
   title: string;
 }): React.JSX.Element {
+  const { t } = useTranslation(["desktop"]);
   const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({ id: tab.id });
   const horizontalTransform = transform ? { ...transform, y: 0 } : null;
   const style: React.CSSProperties = {
@@ -412,8 +415,8 @@ function SortablePanelTab({
         className="grid size-5 shrink-0 place-items-center rounded-md opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] group-hover:opacity-100"
         data-tab-close
         type="button"
-        aria-label="关闭标签"
-        title="关闭标签"
+        aria-label={t("desktop:panels.closeTab")}
+        title={t("desktop:panels.closeTab")}
         onClick={(event) => {
           event.stopPropagation();
           onClose();
@@ -426,6 +429,7 @@ function SortablePanelTab({
 }
 
 function FilesTab({ api, workspace }: { api: CoreClient | null; workspace: Workspace | null }): React.JSX.Element {
+  const { t } = useTranslation(["common", "desktop"]);
   const [path, setPath] = useState("");
   const [data, setData] = useState<FileListResponse | null>(null);
   const [error, setError] = useState("");
@@ -466,7 +470,7 @@ function FilesTab({ api, workspace }: { api: CoreClient | null; workspace: Works
   }, [path]);
 
   if (!workspace) {
-    return <PanelMessage title="没有工作区" body="创建或选择一个本地工作区后可以浏览文件。" />;
+    return <PanelMessage title={t("desktop:panels.noWorkspaceFiles")} body={t("desktop:panels.noWorkspaceFilesDescription")} />;
   }
 
   return (
@@ -483,7 +487,7 @@ function FilesTab({ api, workspace }: { api: CoreClient | null; workspace: Works
             <ChevronLeft size={17} strokeWidth={2} />
           </button>
           <div className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[#202124]">{path || "/"}</div>
-          {loading ? <div className="text-[12px] font-semibold text-[#a0a3a7]">读取中</div> : null}
+          {loading ? <div className="text-[12px] font-semibold text-[#a0a3a7]">{t("common:states.loading")}</div> : null}
         </div>
       </div>
       {error ? <div className="px-3 py-2 text-[13px] font-semibold text-[#b45309]">{error}</div> : null}
@@ -522,6 +526,7 @@ function TerminalTab({
   terminalId?: string;
   workspace: Workspace | null;
 }): React.JSX.Element {
+  const { t } = useTranslation(["common", "desktop"]);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -624,14 +629,14 @@ function TerminalTab({
       },
       onExit: () => {
         if (!isCurrent()) return;
-        term.writeln("\r\n\x1b[2m终端已关闭\x1b[0m");
+        term.writeln(`\r\n\x1b[2m${t("desktop:panels.terminalClosed")}\x1b[0m`);
       },
       onError: (text) => {
         if (!isCurrent()) return;
-        if (opened || text !== "PTY 连接失败") {
+        if (opened || text !== "PTY connection failed") {
           term.writeln(`\r\n\x1b[31m${text}\x1b[0m`);
         } else {
-          term.writeln("\r\n\x1b[31mPTY 连接失败\x1b[0m");
+          term.writeln(`\r\n\x1b[31m${t("desktop:panels.ptyConnectionFailed")}\x1b[0m`);
         }
       },
       onHealthChange: (health) => {
@@ -655,13 +660,13 @@ function TerminalTab({
       if (termRef.current === term) termRef.current = null;
       if (fitRef.current === fit) fitRef.current = null;
     };
-  }, [api, terminalId, workspaceId, workspaceRoot]);
+  }, [api, terminalId, workspaceId, workspaceRoot, t]);
 
   if (!workspace) {
-    return <PanelMessage title="没有工作区" body="创建或选择一个本地工作区后可以运行命令。" />;
+    return <PanelMessage title={t("desktop:panels.noWorkspaceTerminal")} body={t("desktop:panels.noWorkspaceTerminalDescription")} />;
   }
   if (!terminalId) {
-    return <PanelMessage title="等待终端" body="Host 正在返回终端标签页。" />;
+    return <PanelMessage title={t("desktop:panels.waitingTerminal")} body={t("desktop:panels.waitingTerminalDescription")} />;
   }
 
   return (
@@ -669,7 +674,7 @@ function TerminalTab({
       <div className="relative min-h-0 flex-1 p-3">
         {viewerHealth === "degraded" || viewerHealth === "reconnecting" || blockedNotice ? (
           <div className="absolute left-5 right-5 top-5 z-10 rounded-lg border border-[#f0d6a7] bg-[#fff8ec] px-3 py-2 text-[12px] font-semibold text-[#9a5b14] shadow-[0_8px_24px_rgba(0,0,0,0.12)]">
-            {viewerHealth === "reconnecting" ? "终端正在重连，输入已暂停" : "终端画面未同步，输入已暂停"}
+            {viewerHealth === "reconnecting" ? t("desktop:panels.terminalReconnectingPaused") : t("desktop:panels.terminalUnsynced")}
           </div>
         ) : null}
         <div ref={hostRef} className="h-full overflow-hidden select-text" style={{ backgroundColor: theme.background }} />
