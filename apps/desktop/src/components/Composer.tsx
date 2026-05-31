@@ -1,6 +1,8 @@
 import { ArrowUp, Brain, Box, Check, ChevronDown, ChevronLeft, CornerDownRight, Eraser, FilePlus, GitFork, ListChecks, ListTodo, Paperclip, Plus, Radio, RotateCcw, Shield, ShieldCheck, Square, Target, Terminal, Undo2, X } from "lucide-react";
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import type { ModelInfo, PendingInteraction, PermissionMode, ReasoningEffort, RunMode, SessionCommand, SessionInputAttachment } from "../types";
 import { PendingInteractionPanel } from "./PendingInteractionPanel";
 
@@ -91,6 +93,7 @@ export function Composer({
   onSend,
   onSteerQueuedInput,
 }: ComposerProps): React.JSX.Element {
+  const { t } = useTranslation(["common", "desktop"]);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<SessionInputAttachment[]>([]);
   const [openMenu, setOpenMenu] = useState<"actions" | "model" | "permission" | null>(null);
@@ -99,7 +102,7 @@ export function Composer({
   const footerRef = useRef<HTMLElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedModel = selectedModelInfo(modelOptions, modelOverride, modelSlotOverride);
-  const effectiveModel = selectedModel?.label || selectedModel?.id || "默认";
+  const effectiveModel = selectedModel?.label || selectedModel?.id || t("desktop:composer.defaultModel");
   const effectiveEffort = effortOverride || normalizeEffort(currentEffort);
   const effectivePermissionMode: PermissionMode = permissionLocked ? "bypassPermissions" : permissionMode;
   const slashQuery = input.startsWith("/") && !input.includes("\n") ? input.slice(1).trim().toLowerCase() : "";
@@ -279,7 +282,7 @@ export function Composer({
                 <button
                   className="grid size-5 place-items-center rounded-full transition-colors duration-150 ease-out hover:bg-black/[0.06] hover:text-[#202124]"
                   type="button"
-                  aria-label="移除附件"
+                  aria-label={t("desktop:composer.removeAttachment")}
                   onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
                 >
                   <X size={12} strokeWidth={2} />
@@ -339,8 +342,8 @@ export function Composer({
                 }`}
                 type="button"
                 disabled={disabled}
-                aria-label="更多输入选项"
-                title="更多输入选项"
+                aria-label={t("desktop:composer.moreInputOptions")}
+                title={t("desktop:composer.moreInputOptions")}
                 onClick={() => setOpenMenu((current) => (current === "actions" ? null : "actions"))}
               >
                 <Plus className={`transition-transform duration-150 ease-out ${openMenu === "actions" ? "rotate-45" : ""}`} size={17} strokeWidth={2.1} />
@@ -360,17 +363,17 @@ export function Composer({
               <button
                 className="flex h-7 shrink-0 items-center gap-1 rounded-lg bg-[#eef1ff] px-2 text-[12px] font-semibold text-[#5164d8] transition-colors duration-150 ease-out hover:bg-[#e4e8ff]"
                 type="button"
-                title="关闭当前输入模式"
+                title={t("desktop:composer.closeInputMode")}
                 onClick={() => onRunModeChange("normal")}
               >
-                <span>{runModeLabel(runMode)}</span>
+                <span>{runModeLabel(runMode, t)}</span>
                 <X size={12} strokeWidth={2.1} />
               </button>
             ) : null}
             <div className="relative" data-composer-menu>
               <MenuButton
                 icon={<Shield size={14} strokeWidth={1.9} />}
-                label={permissionLabel(effectivePermissionMode)}
+                label={permissionLabel(effectivePermissionMode, t)}
                 open={openMenu === "permission"}
                 tone={effectivePermissionMode === "bypassPermissions" ? "danger" : "normal"}
                 disabled={disabled}
@@ -403,7 +406,7 @@ export function Composer({
                 onClick={() => setOpenMenu((current) => (current === "model" ? null : "model"))}
               >
                 <span className="truncate">{compactModelLabel(effectiveModel)}</span>
-                <span className="shrink-0 text-[#8a8d91]">{effortLabel(effectiveEffort)}</span>
+                <span className="shrink-0 text-[#8a8d91]">{effortLabel(effectiveEffort, t)}</span>
                 <ChevronDown className={`shrink-0 transition-transform duration-150 ease-out ${openMenu === "model" ? "rotate-180" : ""}`} size={13} strokeWidth={2} />
               </button>
               {openMenu === "model" ? (
@@ -429,7 +432,7 @@ export function Composer({
               <button
                 className="grid size-7 place-items-center rounded-full bg-[#202124] text-white shadow-[0_5px_14px_rgba(32,33,36,0.18)] transition-all duration-150 ease-out hover:scale-[1.03] hover:bg-[#343438]"
                 type="button"
-                aria-label="中断"
+                aria-label={t("desktop:composer.interrupt")}
                 onClick={() => void onInterrupt()}
               >
                 <Square size={13} fill="currentColor" strokeWidth={2} />
@@ -440,8 +443,8 @@ export function Composer({
               type="button"
               disabled={disabled || sending || (!input.trim() && attachments.length === 0)}
               onClick={() => void submit()}
-              aria-label={running ? (runningInputMode === "interject" ? "插入当前任务" : "排队发送") : "发送"}
-              title={running ? (runningInputMode === "interject" ? "打断当前任务并发送" : "当前任务结束后发送") : "发送"}
+              aria-label={running ? (runningInputMode === "interject" ? t("desktop:composer.interjectCurrentTask") : t("desktop:composer.queueSend")) : t("common:actions.send")}
+              title={running ? (runningInputMode === "interject" ? t("desktop:composer.interjectTitle") : t("desktop:composer.queueAfterCurrent")) : t("common:actions.send")}
             >
               <ArrowUp size={18} />
             </button>
@@ -453,6 +456,7 @@ export function Composer({
 }
 
 function ContextUsageRing({ usage }: { usage?: ContextUsage }): React.JSX.Element | null {
+  const { t } = useTranslation(["desktop"]);
   if (!usage) return null;
   const percent = contextUsagePercent(usage);
   const label = contextUsageLabel(usage, percent);
@@ -462,7 +466,7 @@ function ContextUsageRing({ usage }: { usage?: ContextUsage }): React.JSX.Elemen
       <div
         className="grid size-4 place-items-center rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
         style={{ "--context-progress": `${degrees}deg`, background: "conic-gradient(var(--ao-context-ring) var(--context-progress), var(--ao-context-track) 0deg)" } as React.CSSProperties}
-        aria-label={`上下文 ${label}`}
+        aria-label={t("desktop:composer.contextUsage", { label })}
       >
         <span className="size-2 rounded-full" style={{ backgroundColor: "var(--ao-context-center)" }} />
       </div>
@@ -516,27 +520,28 @@ function QueuedInputShelf({
   onSteer: (sessionId: string, queueId: string) => Promise<void>;
   running: boolean;
 }): React.JSX.Element {
+  const { t } = useTranslation(["desktop"]);
   return (
     <div className="grid max-h-24 gap-1 overflow-y-auto rounded-lg bg-[#f7f6f3] p-1">
       {inputs.map((item) => (
         <div className="flex min-h-7 min-w-0 items-center gap-2 rounded-lg px-2 text-[12px] font-semibold text-[#5f6368]" key={item.id}>
-          <span className="min-w-0 flex-1 truncate">{item.text || "等待发送"}</span>
+          <span className="min-w-0 flex-1 truncate">{item.text || t("desktop:composer.waitingToSend")}</span>
           {running ? (
             <button
               className="flex h-6 shrink-0 items-center gap-1 rounded-lg px-2 text-[#5164d8] transition-colors duration-150 ease-out hover:bg-[#eceffd]"
               type="button"
-              title="插入当前任务"
+              title={t("desktop:composer.interjectCurrentTask")}
               onClick={() => void onSteer(item.sessionId, item.id)}
             >
               <CornerDownRight size={14} strokeWidth={2} />
-              <span>插入</span>
+              <span>{t("desktop:composer.steerQueued")}</span>
             </button>
           ) : null}
           <button
             className="grid size-6 shrink-0 place-items-center rounded-full text-[#8f9296] transition-colors duration-150 ease-out hover:bg-[#eeece8] hover:text-[#343438]"
             type="button"
-            title="取消排队"
-            aria-label="取消排队"
+            title={t("desktop:composer.cancelQueued")}
+            aria-label={t("desktop:composer.cancelQueued")}
             onClick={() => void onCancel(item.sessionId, item.id)}
           >
             <X size={14} strokeWidth={2} />
@@ -564,17 +569,18 @@ function CommandPalette({
   query: string;
   selectedIndex: number;
 }): React.JSX.Element {
+  const { t } = useTranslation(["desktop"]);
   return (
     <div className="pointer-events-auto mx-auto max-h-[320px] w-[720px] max-w-[calc(100%-72px)] overflow-y-auto rounded-lg border border-black/10 bg-white/96 p-1.5 shadow-[0_16px_48px_rgba(0,0,0,0.10),0_2px_8px_rgba(0,0,0,0.06)] backdrop-blur-xl">
       {error ? (
         <div className="grid min-h-10 gap-1 px-3 py-2 text-[13px] font-semibold text-[#b45309]">
-          <span>命令加载失败</span>
+          <span>{t("desktop:composer.commandLoadFailed")}</span>
           <span className="truncate text-[12px] font-medium text-[#a0a3a7]">{error}</span>
         </div>
       ) : !loaded ? (
-        <div className="flex h-10 items-center px-3 text-[13px] font-semibold text-[#a0a3a7]">正在加载命令</div>
+        <div className="flex h-10 items-center px-3 text-[13px] font-semibold text-[#a0a3a7]">{t("desktop:composer.loadingCommands")}</div>
       ) : commands.length === 0 ? (
-        <div className="flex h-10 items-center px-3 text-[13px] font-semibold text-[#a0a3a7]">{query ? "没有匹配的命令" : "暂无可用命令"}</div>
+        <div className="flex h-10 items-center px-3 text-[13px] font-semibold text-[#a0a3a7]">{query ? t("desktop:composer.noMatchingCommands") : t("desktop:composer.noCommands")}</div>
       ) : (
         commands.map((command, index) => {
           const selected = index === selectedIndex;
@@ -646,21 +652,22 @@ function ActionMenu({
   onRunModeChange: (mode: RunMode) => void;
   runMode: RunMode;
 }): React.JSX.Element {
+  const { t } = useTranslation(["desktop"]);
   return (
     <div className="absolute bottom-10 left-0 z-30 w-48 origin-bottom-left rounded-lg border border-[#dedbd3] bg-white p-1 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
-      <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-semibold text-[#96949a]">输入</div>
-      <ActionMenuButton icon={<Paperclip size={16} strokeWidth={1.9} />} label="添加附件" onClick={onAttach} />
+      <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-semibold text-[#96949a]">{t("desktop:composer.inputSection")}</div>
+      <ActionMenuButton icon={<Paperclip size={16} strokeWidth={1.9} />} label={t("desktop:composer.addAttachment")} onClick={onAttach} />
       <div className="my-1 h-px bg-[#ebe8e1]" />
       <ActionMenuButton
         active={runMode === "plan"}
         icon={<ListTodo size={16} strokeWidth={1.9} />}
-        label="计划模式"
+        label={t("desktop:composer.planMode")}
         onClick={() => onRunModeChange("plan")}
       />
       <ActionMenuButton
         active={runMode === "goal"}
         icon={<Target size={16} strokeWidth={1.9} />}
-        label="Goal 模式"
+        label={t("desktop:composer.goalMode")}
         onClick={() => onRunModeChange("goal")}
       />
     </div>
@@ -747,14 +754,15 @@ function ModelEffortMenu({
   onEffortChange: (effort: ReasoningEffort | "") => void;
   onModelChange: (model: ModelInfo) => void;
 }): React.JSX.Element {
+  const { t } = useTranslation(["desktop"]);
   const [modelsOpen, setModelsOpen] = useState(false);
   const effectiveEffort = effort || currentEffort;
   const modelRows = models.length > 0 ? models : fallbackClaudeModels();
   const activeModel = modelRows.find((model) => model.id === (modelValue || currentModel)) ?? modelRows[0];
-  const effortRows = effortOptionsForModel(activeModel);
+  const effortRows = effortOptionsForModel(activeModel, t);
   return (
     <div className="absolute bottom-10 right-0 z-30 w-52 origin-bottom-right rounded-lg border border-[#dedbd3] bg-white p-1 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
-      <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-semibold text-[#96949a]">智能</div>
+      <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-semibold text-[#96949a]">{t("desktop:composer.intelligenceSection")}</div>
       {effortRows.map((option) => (
         <button
           className="flex h-7 w-full items-center rounded-lg px-2.5 text-left text-[12px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
@@ -769,12 +777,12 @@ function ModelEffortMenu({
       <div className="my-1 h-px bg-[#ebe8e1]" />
       <div className="relative">
         <button className="flex h-7 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]" type="button" onClick={() => setModelsOpen((current) => !current)}>
-          <span className="min-w-0 flex-1 truncate">{compactModelLabel(selectedModelInfo(modelRows, modelValue, modelSlotValue)?.label || selectedModelInfo(modelRows, modelValue, modelSlotValue)?.id || "默认")}</span>
+          <span className="min-w-0 flex-1 truncate">{compactModelLabel(selectedModelInfo(modelRows, modelValue, modelSlotValue)?.label || selectedModelInfo(modelRows, modelValue, modelSlotValue)?.id || t("desktop:composer.defaultModel"))}</span>
           <ChevronLeft className="shrink-0" size={17} strokeWidth={2} />
         </button>
         {modelsOpen ? (
           <div className="absolute bottom-[-6px] right-[calc(100%+6px)] w-56 origin-bottom-right rounded-lg border border-[#dedbd3] bg-white p-1 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
-            <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-semibold text-[#96949a]">模型</div>
+            <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-semibold text-[#96949a]">{t("desktop:composer.modelSection")}</div>
             {modelRows.map((model, index) => {
               const selected = modelSlotValue ? model.slot === modelSlotValue : modelValue ? model.id === modelValue && !model.slot : false;
               return (
@@ -803,10 +811,12 @@ function PermissionMenu({
   onChange: (mode: PermissionMode) => void;
   value: PermissionMode;
 }): React.JSX.Element {
+  const { t } = useTranslation(["desktop"]);
+  const options = permissionOptions(t);
   return (
     <div className="absolute bottom-10 left-0 z-30 w-44 origin-bottom-left rounded-lg border border-[#dedbd3] bg-white p-1 shadow-[0_18px_55px_rgba(37,34,29,0.18),0_2px_8px_rgba(37,34,29,0.08)] transition-all duration-150 ease-out">
-      <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-semibold text-[#96949a]">权限</div>
-      {permissionOptions.map((option) => (
+      <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-semibold text-[#96949a]">{t("desktop:composer.permissionSection")}</div>
+      {options.map((option) => (
         <button
           className="flex h-7 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-[#202124] transition-colors duration-150 ease-out hover:bg-[#f1f0ec]"
           type="button"
@@ -821,24 +831,29 @@ function PermissionMenu({
   );
 }
 
-const effortOptions: Array<{ value: ReasoningEffort; label: string }> = [
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-  { value: "xhigh", label: "超高" },
-  { value: "max", label: "最高" },
-];
+function effortOptions(t: TFunction): Array<{ value: ReasoningEffort; label: string }> {
+  return [
+    { value: "low", label: t("desktop:composer.effortLow") },
+    { value: "medium", label: t("desktop:composer.effortMedium") },
+    { value: "high", label: t("desktop:composer.effortHigh") },
+    { value: "xhigh", label: t("desktop:composer.effortXHigh") },
+    { value: "max", label: t("desktop:composer.effortMax") },
+  ];
+}
 
-const permissionOptions: Array<{ value: PermissionMode; label: string }> = [
-  { value: "default", label: "默认权限" },
-  { value: "auto", label: "自动" },
-  { value: "bypassPermissions", label: "完全访问" },
-];
+function permissionOptions(t: TFunction): Array<{ value: PermissionMode; label: string }> {
+  return [
+    { value: "default", label: t("desktop:composer.permissionDefault") },
+    { value: "auto", label: t("desktop:composer.permissionAuto") },
+    { value: "bypassPermissions", label: t("desktop:composer.permissionBypass") },
+  ];
+}
 
-function effortOptionsForModel(model?: ModelInfo): Array<{ value: ReasoningEffort; label: string }> {
+function effortOptionsForModel(model: ModelInfo | undefined, t: TFunction): Array<{ value: ReasoningEffort; label: string }> {
+  const options = effortOptions(t);
   const supported = model?.supported_reasoning_efforts?.filter(isReasoningEffort) ?? [];
-  if (supported.length === 0) return effortOptions.filter((option) => option.value !== "max");
-  return effortOptions.filter((option) => supported.includes(option.value));
+  if (supported.length === 0) return options.filter((option) => option.value !== "max");
+  return options.filter((option) => supported.includes(option.value));
 }
 
 function selectedModelInfo(models: ModelInfo[], modelValue: string, slotValue: string): ModelInfo | undefined {
@@ -863,18 +878,18 @@ function normalizeEffort(value?: string): ReasoningEffort | "" {
   return value && isReasoningEffort(value) ? value : "";
 }
 
-function effortLabel(value: ReasoningEffort | ""): string {
+function effortLabel(value: ReasoningEffort | "", t: TFunction): string {
   switch (value) {
     case "low":
-      return "低";
+      return t("desktop:composer.effortLow");
     case "medium":
-      return "中";
+      return t("desktop:composer.effortMedium");
     case "high":
-      return "高";
+      return t("desktop:composer.effortHigh");
     case "xhigh":
-      return "超高";
+      return t("desktop:composer.effortXHigh");
     case "max":
-      return "最高";
+      return t("desktop:composer.effortMax");
     default:
       return "";
   }
@@ -884,19 +899,19 @@ function compactModelLabel(model: string): string {
   return model;
 }
 
-function permissionLabel(mode: PermissionMode): string {
+function permissionLabel(mode: PermissionMode, t: TFunction): string {
   switch (mode) {
     case "auto":
-      return "自动权限";
+      return t("desktop:composer.permissionAuto");
     case "bypassPermissions":
-      return "完全访问权限";
+      return t("desktop:composer.permissionBypass");
     default:
-      return "默认权限";
+      return t("desktop:composer.permissionDefault");
   }
 }
 
-function runModeLabel(mode: RunMode): string {
-  if (mode === "plan") return "计划";
+function runModeLabel(mode: RunMode, t: TFunction): string {
+  if (mode === "plan") return t("desktop:composer.runModePlan");
   if (mode === "goal") return "Goal";
   return "";
 }
