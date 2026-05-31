@@ -434,3 +434,67 @@ func TestRemoteHostProxyOpensWorkspacePTY(t *testing.T) {
 	}
 	t.Fatalf("remote PTY output did not contain marker %q", marker)
 }
+
+func TestRemoteHostProxyReportsTerminalStreamDisconnectAsError(t *testing.T) {
+	if !terminalAvailableOnHost() {
+		t.Skip("terminal is not available on this Host")
+	}
+	t.Setenv("SHELL", terminalManagerTestShell(t))
+
+	hostApp, workspace := newRemoteControlHandlerTestApp(t)
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
+	defer hostServer.Close()
+
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestCloudMembership(t, controllerStore, false, true)
+	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityTerminalOpen, CapabilityTerminalInput}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+	controllerServer := httptest.NewServer(http.HandlerFunc(controllerApp.handleRemoteHostAction))
+	defer controllerServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(controllerServer.URL, "http") + "/v1/remote/hosts/" + hostApp.store.deviceIdentity.DeviceID + "/workspaces/" + workspace.ID + "/pty"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var ready map[string]any
+	if err := conn.ReadJSON(&ready); err != nil {
+		t.Fatal(err)
+	}
+	if ready["type"] != "ready" {
+		t.Fatalf("first PTY message = %#v, want ready", ready)
+	}
+
+	controllerApp.remoteControlManager().Invalidate(hostApp.store.deviceIdentity.DeviceID, "test_disconnect")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			t.Fatal(err)
+		}
+		var message map[string]any
+		if err := conn.ReadJSON(&message); err != nil {
+			t.Fatal(err)
+		}
+		switch message["type"] {
+		case "error":
+			if !strings.Contains(stringValue(message["message"]), "terminal output stream disconnected") {
+				t.Fatalf("remote PTY stream error = %#v", message)
+			}
+			return
+		case "exit":
+			t.Fatalf("remote PTY stream disconnect was reported as terminal exit: %#v", message)
+		}
+	}
+	t.Fatal("remote PTY stream disconnect did not report an error")
+}

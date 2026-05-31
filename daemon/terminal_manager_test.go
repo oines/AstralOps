@@ -309,6 +309,39 @@ func TestTerminalDetachKeepsHostTerminalOpen(t *testing.T) {
 	}
 }
 
+func TestTerminalViewerBackpressureTerminatesOutputConnection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	conn := &terminalBackpressureTestConnection{ctx: ctx, id: "conn_backpressure", controllerIDValue: "device_mobile"}
+	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh")
+	viewer := &terminalViewer{
+		connectionID:       conn.id,
+		controllerDeviceID: conn.controllerIDValue,
+		conn:               conn,
+		frames:             make(chan terminalStreamFrame),
+	}
+	session.viewers[viewer.connectionID] = viewer
+
+	session.sendToViewers(terminalStreamFrame{
+		frameType:   terminalFrameOutput,
+		TerminalID:  session.id,
+		WorkspaceID: session.workspaceID,
+		Status:      terminalStatusOpen,
+		OutputSeq:   1,
+		Data:        "blocked",
+	}, []*terminalViewer{viewer})
+
+	if len(session.viewers) != 0 {
+		t.Fatalf("viewers = %d, want detached backpressure viewer", len(session.viewers))
+	}
+	if conn.terminatedCode != terminalOutputDisconnectedCode {
+		t.Fatalf("terminated code = %q, want %q", conn.terminatedCode, terminalOutputDisconnectedCode)
+	}
+	if len(conn.frames) != 1 || conn.frames[0].Response == nil || conn.frames[0].Response.Error == nil || conn.frames[0].Response.Error.Code != terminalOutputDisconnectedCode {
+		t.Fatalf("written frames = %#v, want terminal output disconnected error", conn.frames)
+	}
+}
+
 func TestTerminalManagerAllowsSharedInput(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 
@@ -466,4 +499,39 @@ func waitForFileContent(t *testing.T, path, want string) {
 
 func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+type terminalBackpressureTestConnection struct {
+	ctx               context.Context
+	id                string
+	controllerIDValue string
+	frames            []controlPlainFrame
+	terminatedCode    string
+	terminatedReason  string
+}
+
+func (c *terminalBackpressureTestConnection) connectionID() string {
+	return c.id
+}
+
+func (c *terminalBackpressureTestConnection) controllerID() string {
+	return c.controllerIDValue
+}
+
+func (c *terminalBackpressureTestConnection) requestContext() context.Context {
+	return c.ctx
+}
+
+func (c *terminalBackpressureTestConnection) writePlain(frame controlPlainFrame) {
+	c.frames = append(c.frames, frame)
+}
+
+func (c *terminalBackpressureTestConnection) registerControlStream(string, context.CancelFunc) {}
+func (c *terminalBackpressureTestConnection) unregisterControlStream(string)                   {}
+func (c *terminalBackpressureTestConnection) cancelControlStream(string) bool                  { return false }
+func (c *terminalBackpressureTestConnection) cancelAllControlStreams()                         {}
+
+func (c *terminalBackpressureTestConnection) terminateControlConnection(code, reason string) {
+	c.terminatedCode = code
+	c.terminatedReason = reason
 }

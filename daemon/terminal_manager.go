@@ -18,6 +18,8 @@ const (
 	terminalStatusClosed            = "closed"
 	terminalFrameOutput             = "terminal.output"
 	terminalFrameClosed             = "terminal.closed"
+	terminalOutputDisconnectedCode  = "terminal_output_disconnected"
+	terminalOutputDisconnectedText  = "terminal output stream disconnected"
 	terminalOutputCoalesceWindow    = 25 * time.Millisecond
 	defaultTerminalCols             = 100
 	defaultTerminalRows             = 28
@@ -158,6 +160,10 @@ type terminalViewer struct {
 	conn               controlConnection
 	frames             chan terminalStreamFrame
 	closed             bool
+}
+
+type terminalControlTerminator interface {
+	terminateControlConnection(code, reason string)
 }
 
 func (a *app) terminalManager() *terminalManager {
@@ -599,7 +605,7 @@ func (s *terminalSession) sendToViewers(frame terminalStreamFrame, viewers []*te
 			continue
 		}
 		if _, removed := s.detachViewer(viewer.connectionID); removed != nil {
-			removed.close()
+			removed.fail(terminalOutputDisconnectedCode, terminalOutputDisconnectedText)
 		}
 	}
 }
@@ -967,6 +973,29 @@ func (v *terminalViewer) close() {
 		v.closed = true
 		close(v.frames)
 	})
+}
+
+func (v *terminalViewer) fail(code, message string) {
+	if v == nil {
+		return
+	}
+	if v.conn != nil {
+		v.conn.writePlain(controlPlainFrame{
+			Type: "response",
+			Response: &ControlResponse{
+				OK: false,
+				Error: &ControlError{
+					Status:  http.StatusServiceUnavailable,
+					Code:    code,
+					Message: message,
+				},
+			},
+		})
+		if terminator, ok := v.conn.(terminalControlTerminator); ok {
+			terminator.terminateControlConnection(code, message)
+		}
+	}
+	v.close()
 }
 
 func closeViewersAfterFrame(frame terminalStreamFrame, viewers []*terminalViewer) {

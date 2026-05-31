@@ -472,6 +472,14 @@ func (c *controlWSConn) cancelControlSession() {
 	c.cancel()
 }
 
+func (c *controlWSConn) terminateControlConnection(code, reason string) {
+	if c == nil {
+		return
+	}
+	c.writeEncryptedClose(code, reason)
+	c.shutdown()
+}
+
 func (c *controlWSConn) unregisterMediaStream(streamID string) {
 	c.unregisterControlStream(streamID)
 }

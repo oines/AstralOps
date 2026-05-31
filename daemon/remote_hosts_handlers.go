@@ -673,7 +673,7 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 				return
 			}
 		}
-		localWriter.write(local, map[string]any{"type": "exit"})
+		localWriter.write(local, map[string]any{"type": "error", "message": terminalOutputDisconnectedText})
 	}()
 
 	clientReads := make(chan remotePTYClientRead, 1)

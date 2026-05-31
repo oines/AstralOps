@@ -587,6 +587,18 @@ func (c *localPTYControlConnection) unregisterControlStream(string)             
 func (c *localPTYControlConnection) cancelControlStream(string) bool                  { return false }
 func (c *localPTYControlConnection) cancelAllControlStreams()                         {}
 
+func (c *localPTYControlConnection) terminateControlConnection(code, reason string) {
+	if c == nil {
+		return
+	}
+	if c.cancel != nil {
+		c.cancel()
+	}
+	if c.socket != nil {
+		_ = c.socket.Close()
+	}
+}
+
 func resolveWorkspacePath(root, queryPath string) (string, string, error) {
 	if root == "" {
 		return "", "", errors.New("workspace local cwd is empty")

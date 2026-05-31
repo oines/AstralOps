@@ -451,6 +451,14 @@ func (s *controlRelaySession) cancelControlSession() {
 	s.cancel()
 }
 
+func (s *controlRelaySession) terminateControlConnection(code, reason string) {
+	if s == nil {
+		return
+	}
+	s.writePlain(controlPlainFrame{Type: "close", Code: code, Reason: reason})
+	s.close(reason)
+}
+
 func (s *controlRelaySession) close(reason string) {
 	if s == nil {
 		return

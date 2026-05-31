@@ -316,21 +316,33 @@ export function RightPanel({ api, health, open, terminalTabs = [], width, worksp
         {tabs.length === 0 ? (
           <PanelMessage title="没有标签页" body="点右上角 + 新建终端或文件浏览。" />
         ) : null}
-        {activeContentTab ? (
-          <div className="h-full" key={activeContentTab.id}>
-            {activeContentTab.kind === "terminal" && !terminalAvailable ? (
-              <PanelMessage title="终端不可用" body="Windows 当前禁用内置终端。文件浏览和 agent 任务仍可使用。" />
-            ) : activeContentTab.kind === "terminal" ? (
-              <TerminalTab
-                api={api}
-                terminalId={activeContentTab.terminalId}
-                workspace={workspace}
-                onReady={(terminalId, title) => updateTerminalTabReady(activeContentTab.id, terminalId, title)}
-                onTitleChange={(title) => updateTabTitle(activeContentTab.id, title)}
-              />
-            ) : (
-              <FilesTab api={api} workspace={workspace} />
-            )}
+        {contentTabs.length > 0 ? (
+          <div className="relative h-full overflow-hidden">
+            {contentTabs.map((tab) => {
+              const active = tab.id === activeContentTab?.id;
+              return (
+                <div
+                  aria-hidden={!active}
+                  className={`absolute inset-0 h-full ${active ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"}`}
+                  key={tab.id}
+                >
+                  {tab.kind === "terminal" && !terminalAvailable ? (
+                    <PanelMessage title="终端不可用" body="Windows 当前禁用内置终端。文件浏览和 agent 任务仍可使用。" />
+                  ) : tab.kind === "terminal" ? (
+                    <TerminalTab
+                      active={active}
+                      api={api}
+                      terminalId={tab.terminalId}
+                      workspace={workspace}
+                      onReady={(terminalId, title) => updateTerminalTabReady(tab.id, terminalId, title)}
+                      onTitleChange={(title) => updateTabTitle(tab.id, title)}
+                    />
+                  ) : (
+                    <FilesTab api={api} workspace={workspace} />
+                  )}
+                </div>
+              );
+            })}
           </div>
         ) : null}
       </div>
@@ -496,12 +508,14 @@ function FilesTab({ api, workspace }: { api: CoreClient | null; workspace: Works
 }
 
 function TerminalTab({
+  active,
   api,
   onReady,
   onTitleChange,
   terminalId,
   workspace,
 }: {
+  active: boolean;
   api: CoreClient | null;
   onReady: (terminalId: string | undefined, title: string) => void;
   onTitleChange: (title: string) => void;
@@ -533,6 +547,11 @@ function TerminalTab({
     if (!term) return;
     term.options.theme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    if (!active) return;
+    fitRef.current?.fit();
+  }, [active]);
 
   useEffect(() => {
     localStorage.setItem("astralops-terminal-font", fontId);
