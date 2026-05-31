@@ -51,6 +51,9 @@ const (
 	TerminalPaused               = "paused"
 	TerminalFailed               = "failed"
 	TerminalClosed               = "closed"
+	TerminalFrameOutput          = "terminal.output"
+	TerminalFrameHeartbeat       = "terminal.heartbeat"
+	TerminalFrameClosed          = "terminal.closed"
 	TransportLAN                 = "lan"
 	TransportRelay               = "relay"
 )

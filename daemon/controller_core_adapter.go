@@ -33,7 +33,7 @@ func (a *app) controllerCoreRequest(ctx context.Context, hostDeviceID, capabilit
 		return ControlResponse{}, errors.New("controller core is not initialized")
 	}
 	response, err := core.Request(ctx, hostDeviceID, capability, action, params)
-	return fromCoreControlResponse(response), err
+	return fromCoreControlResponse(response), fromCoreError(err)
 }
 
 func (a *app) controllerCoreSubscribeEvents(ctx context.Context, hostDeviceID string, params eventSubscriptionParams) (remoteControlEventStream, error) {
@@ -52,7 +52,7 @@ func (a *app) controllerCoreSubscribeEvents(ctx context.Context, hostDeviceID st
 		ReplayLimit: params.ReplayLimit,
 	})
 	if err != nil {
-		return remoteControlEventStream{}, err
+		return remoteControlEventStream{}, fromCoreError(err)
 	}
 	out := make(chan AstralEvent, remoteControlStreamBufferSize)
 	go func() {
@@ -71,6 +71,38 @@ func (a *app) controllerCoreSubscribeEvents(ctx context.Context, hostDeviceID st
 		}
 	}()
 	return remoteControlEventStream{Events: out, Close: stream.Close}, nil
+}
+
+func (a *app) controllerCoreOpenTerminal(ctx context.Context, hostDeviceID, workspaceID string, afterSeq int64) (remoteHostTerminalStream, error) {
+	core := a.controllerCoreManager()
+	if core == nil {
+		return nil, errors.New("controller core is not initialized")
+	}
+	session := core.OpenHostSession(hostDeviceID)
+	if session == nil {
+		return nil, errors.New("remote Host device id is required")
+	}
+	stream, err := session.OpenTerminal(ctx, workspaceID, afterSeq)
+	if err != nil {
+		return nil, fromCoreError(err)
+	}
+	return coreTerminalStreamAdapter{stream: stream}, nil
+}
+
+func (a *app) controllerCoreAttachTerminal(ctx context.Context, hostDeviceID, terminalID string, afterSeq int64) (remoteHostTerminalStream, error) {
+	core := a.controllerCoreManager()
+	if core == nil {
+		return nil, errors.New("controller core is not initialized")
+	}
+	session := core.OpenHostSession(hostDeviceID)
+	if session == nil {
+		return nil, errors.New("remote Host device id is required")
+	}
+	stream, err := session.AttachTerminal(ctx, terminalID, afterSeq)
+	if err != nil {
+		return nil, fromCoreError(err)
+	}
+	return coreTerminalStreamAdapter{stream: stream}, nil
 }
 
 func (t daemonControllerTransport) ControlState(hostDeviceID string) controllercore.ControlState {
@@ -207,6 +239,102 @@ func (d daemonTerminalStreamAdapter) Detach() error {
 	return d.stream.Detach()
 }
 
+type coreTerminalStreamAdapter struct {
+	stream controllercore.TerminalStream
+}
+
+func (c coreTerminalStreamAdapter) TerminalID() string {
+	if c.stream == nil {
+		return ""
+	}
+	return c.stream.TerminalID()
+}
+
+func (c coreTerminalStreamAdapter) ViewerID() string {
+	if c.stream == nil {
+		return ""
+	}
+	return c.stream.ViewerID()
+}
+
+func (c coreTerminalStreamAdapter) InputLeaseID() string {
+	if c.stream == nil {
+		return ""
+	}
+	return c.stream.InputLeaseID()
+}
+
+func (c coreTerminalStreamAdapter) Shell() string {
+	if c.stream == nil {
+		return ""
+	}
+	return c.stream.Shell()
+}
+
+func (c coreTerminalStreamAdapter) CWD() string {
+	if c.stream == nil {
+		return ""
+	}
+	return c.stream.CWD()
+}
+
+func (c coreTerminalStreamAdapter) OutputSeq() int64 {
+	if c.stream == nil {
+		return 0
+	}
+	return c.stream.OutputSeq()
+}
+
+func (c coreTerminalStreamAdapter) Frames() <-chan controlPlainFrame {
+	out := make(chan controlPlainFrame, remoteControlStreamBufferSize)
+	if c.stream == nil {
+		close(out)
+		return out
+	}
+	go func() {
+		defer close(out)
+		for frame := range c.stream.Frames() {
+			out <- fromCoreTerminalFrame(frame)
+		}
+	}()
+	return out
+}
+
+func (c coreTerminalStreamAdapter) Input(data string) error {
+	if c.stream == nil {
+		return errors.New("remote terminal is closed")
+	}
+	return fromCoreError(c.stream.Input(data))
+}
+
+func (c coreTerminalStreamAdapter) Resize(cols, rows int) error {
+	if c.stream == nil {
+		return errors.New("remote terminal is closed")
+	}
+	return fromCoreError(c.stream.Resize(cols, rows))
+}
+
+func (c coreTerminalStreamAdapter) AckHeartbeat(seq int64) error {
+	if c.stream == nil {
+		return errors.New("remote terminal is closed")
+	}
+	return fromCoreError(c.stream.AckHeartbeat(seq))
+}
+
+func (c coreTerminalStreamAdapter) Close() error {
+	if c.stream == nil {
+		return nil
+	}
+	return fromCoreError(c.stream.Close())
+}
+
+func (c coreTerminalStreamAdapter) Detach() error {
+	if c.stream == nil {
+		return nil
+	}
+	return fromCoreError(c.stream.Detach())
+}
+
 func toCoreControlState(state remoteHostControlState) controllercore.ControlState {
 	return controllercore.ControlState{
 		State:           state.State,
@@ -248,6 +376,56 @@ func fromCoreControlError(err *controllercore.ControlError) *ControlError {
 		return nil
 	}
 	return &ControlError{Status: err.Status, Code: err.Code, Message: err.Message}
+}
+
+func fromCoreError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var coreErr *controllercore.ActionError
+	if !errors.As(err, &coreErr) {
+		return err
+	}
+	code := coreErr.Code
+	if code == controllercore.TerminalViewerNotReadyCode {
+		code = terminalViewerNotReadyCode
+	}
+	return newActionError(coreErr.Status, code, coreErr.Message)
+}
+
+func fromCoreTerminalFrame(frame controllercore.TerminalFrame) controlPlainFrame {
+	return controlPlainFrame{
+		Type:     frame.Type,
+		Response: fromCoreControlResponsePtr(frame.Response),
+		Terminal: fromCoreTerminalPayload(frame.Type, frame.Terminal),
+	}
+}
+
+func fromCoreControlResponsePtr(response *controllercore.ControlResponse) *ControlResponse {
+	if response == nil {
+		return nil
+	}
+	next := fromCoreControlResponse(*response)
+	return &next
+}
+
+func fromCoreTerminalPayload(frameType string, payload *controllercore.TerminalPayload) *terminalStreamFrame {
+	if payload == nil {
+		return nil
+	}
+	return &terminalStreamFrame{
+		frameType:    frameType,
+		TerminalID:   payload.TerminalID,
+		WorkspaceID:  payload.WorkspaceID,
+		Target:       payload.Target,
+		Status:       payload.Status,
+		OutputSeq:    payload.OutputSeq,
+		ViewerID:     payload.ViewerID,
+		InputLeaseID: payload.InputLeaseID,
+		HeartbeatSeq: payload.HeartbeatSeq,
+		Data:         payload.Data,
+		Reason:       payload.Reason,
+	}
 }
 
 func toCoreTerminalFrame(frame controlPlainFrame) controllercore.TerminalFrame {

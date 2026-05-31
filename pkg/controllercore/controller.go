@@ -122,7 +122,7 @@ func (s *HostSession) OpenTerminal(ctx context.Context, workspaceID string, afte
 	}
 	s.setHostState(StateLive, "", nil)
 	s.setTerminalState(stream.TerminalID(), TerminalLive, true, stream.OutputSeq(), nil)
-	return stream, nil
+	return &hostSessionTerminalStream{session: s, inner: stream, terminalID: stream.TerminalID()}, nil
 }
 
 func (s *HostSession) AttachTerminal(ctx context.Context, terminalID string, afterSeq int64) (TerminalStream, error) {
@@ -137,7 +137,201 @@ func (s *HostSession) AttachTerminal(ctx context.Context, terminalID string, aft
 	}
 	s.setHostState(StateLive, "", nil)
 	s.setTerminalState(stream.TerminalID(), TerminalLive, true, stream.OutputSeq(), nil)
-	return stream, nil
+	return &hostSessionTerminalStream{session: s, inner: stream, terminalID: stream.TerminalID()}, nil
+}
+
+type hostSessionTerminalStream struct {
+	session    *HostSession
+	inner      TerminalStream
+	terminalID string
+
+	mu       sync.Mutex
+	closed   bool
+	detached bool
+}
+
+func (t *hostSessionTerminalStream) TerminalID() string {
+	if t == nil || t.inner == nil {
+		return ""
+	}
+	return t.inner.TerminalID()
+}
+
+func (t *hostSessionTerminalStream) ViewerID() string {
+	if t == nil || t.inner == nil {
+		return ""
+	}
+	return t.inner.ViewerID()
+}
+
+func (t *hostSessionTerminalStream) InputLeaseID() string {
+	if t == nil || t.inner == nil {
+		return ""
+	}
+	return t.inner.InputLeaseID()
+}
+
+func (t *hostSessionTerminalStream) Shell() string {
+	if t == nil || t.inner == nil {
+		return ""
+	}
+	return t.inner.Shell()
+}
+
+func (t *hostSessionTerminalStream) CWD() string {
+	if t == nil || t.inner == nil {
+		return ""
+	}
+	return t.inner.CWD()
+}
+
+func (t *hostSessionTerminalStream) OutputSeq() int64 {
+	if t == nil || t.inner == nil {
+		return 0
+	}
+	return t.inner.OutputSeq()
+}
+
+func (t *hostSessionTerminalStream) Frames() <-chan TerminalFrame {
+	out := make(chan TerminalFrame)
+	if t == nil || t.inner == nil {
+		close(out)
+		return out
+	}
+	go func() {
+		defer close(out)
+		for frame := range t.inner.Frames() {
+			t.observeFrame(frame)
+			out <- frame
+		}
+		if !t.isClosedOrDetached() {
+			err := errors.New("terminal output stream disconnected")
+			t.session.setTerminalState(t.TerminalID(), TerminalResyncing, false, t.OutputSeq(), err)
+			t.session.setHostState(StateReconnecting, "", err)
+			if t.session.controller != nil && t.session.controller.transport != nil {
+				t.session.controller.transport.Invalidate(t.session.hostDeviceID, "terminal_stream_closed")
+			}
+		}
+	}()
+	return out
+}
+
+func (t *hostSessionTerminalStream) Input(data string) error {
+	if err := t.requireLive(); err != nil {
+		return err
+	}
+	if err := t.inner.Input(data); err != nil {
+		t.markStreamFailure(err)
+		return err
+	}
+	return nil
+}
+
+func (t *hostSessionTerminalStream) Resize(cols, rows int) error {
+	if err := t.requireLive(); err != nil {
+		return err
+	}
+	if err := t.inner.Resize(cols, rows); err != nil {
+		t.markStreamFailure(err)
+		return err
+	}
+	return nil
+}
+
+func (t *hostSessionTerminalStream) AckHeartbeat(seq int64) error {
+	if err := t.requireLive(); err != nil {
+		return err
+	}
+	if err := t.inner.AckHeartbeat(seq); err != nil {
+		t.markStreamFailure(err)
+		return err
+	}
+	return nil
+}
+
+func (t *hostSessionTerminalStream) Close() error {
+	if t == nil || t.inner == nil {
+		return nil
+	}
+	t.mu.Lock()
+	t.closed = true
+	t.mu.Unlock()
+	err := t.inner.Close()
+	if err != nil {
+		t.markStreamFailure(err)
+		return err
+	}
+	t.session.setTerminalState(t.TerminalID(), TerminalClosed, false, t.OutputSeq(), nil)
+	return nil
+}
+
+func (t *hostSessionTerminalStream) Detach() error {
+	if t == nil || t.inner == nil {
+		return nil
+	}
+	t.mu.Lock()
+	t.detached = true
+	t.mu.Unlock()
+	err := t.inner.Detach()
+	if err != nil {
+		t.markStreamFailure(err)
+		return err
+	}
+	t.session.setTerminalState(t.TerminalID(), TerminalPaused, false, t.OutputSeq(), nil)
+	return nil
+}
+
+func (t *hostSessionTerminalStream) observeFrame(frame TerminalFrame) {
+	if t == nil || t.session == nil || frame.Terminal == nil {
+		return
+	}
+	terminalID := t.TerminalID()
+	if terminalID == "" || frame.Terminal.TerminalID != terminalID {
+		return
+	}
+	switch frame.Type {
+	case TerminalFrameClosed:
+		t.mu.Lock()
+		t.closed = true
+		t.mu.Unlock()
+		t.session.setTerminalState(terminalID, TerminalClosed, false, frame.Terminal.OutputSeq, nil)
+	case TerminalFrameOutput, TerminalFrameHeartbeat:
+		t.session.setTerminalState(terminalID, TerminalLive, true, frame.Terminal.OutputSeq, nil)
+	}
+}
+
+func (t *hostSessionTerminalStream) requireLive() error {
+	if t == nil || t.session == nil || t.inner == nil {
+		return NewActionError(409, TerminalViewerNotReadyCode, "terminal viewer is not live")
+	}
+	t.session.mu.Lock()
+	hostState := t.session.state.State
+	terminal := t.session.terminals[t.TerminalID()]
+	t.session.mu.Unlock()
+	if hostState != StateLive || terminal.State != TerminalLive || !terminal.CanInput {
+		return NewActionError(409, TerminalViewerNotReadyCode, "terminal viewer is not live")
+	}
+	return nil
+}
+
+func (t *hostSessionTerminalStream) markStreamFailure(err error) {
+	if t == nil || t.session == nil || err == nil {
+		return
+	}
+	t.session.setTerminalState(t.TerminalID(), TerminalResyncing, false, t.OutputSeq(), err)
+	t.session.setHostState(StateReconnecting, "", err)
+	if t.session.controller != nil && t.session.controller.transport != nil {
+		t.session.controller.transport.Invalidate(t.session.hostDeviceID, "terminal_stream_error")
+	}
+}
+
+func (t *hostSessionTerminalStream) isClosedOrDetached() bool {
+	if t == nil {
+		return true
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closed || t.detached
 }
 
 func (s *HostSession) setConnectingIfNotLive() {

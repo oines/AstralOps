@@ -595,13 +595,28 @@ type remoteHostTerminalViewer struct {
 	shell          string
 	cwd            string
 	outputSeq      int64
-	stream         *remoteManagedTerminalStream
+	stream         remoteHostTerminalStream
 	state          string
 	lastFrameAt    time.Time
 	messages       chan map[string]any
 	done           chan struct{}
 	closeOnce      sync.Once
 	explicitClosed bool
+}
+
+type remoteHostTerminalStream interface {
+	TerminalID() string
+	ViewerID() string
+	InputLeaseID() string
+	Shell() string
+	CWD() string
+	OutputSeq() int64
+	Frames() <-chan controlPlainFrame
+	Input(data string) error
+	Resize(cols, rows int) error
+	AckHeartbeat(seq int64) error
+	Close() error
+	Detach() error
 }
 
 func (s *hostRemoteSession) OpenTerminalViewer(ctx context.Context, workspaceID, terminalID string, afterSeq int64) (*remoteHostTerminalViewer, error) {
@@ -629,7 +644,7 @@ func (v *remoteHostTerminalViewer) ReadyPayload() map[string]any {
 	if v.stream == nil {
 		return map[string]any{"type": "status", "state": hostTerminalStateAttaching, "can_input": false}
 	}
-	return terminalReadySocketPayload(v.terminalID, v.shell, v.cwd, v.outputSeq, v.stream.viewerID, v.stream.inputLeaseID)
+	return terminalReadySocketPayload(v.terminalID, v.shell, v.cwd, v.outputSeq, v.stream.ViewerID(), v.stream.InputLeaseID())
 }
 
 func (v *remoteHostTerminalViewer) Messages() <-chan map[string]any {
@@ -714,7 +729,7 @@ func (v *remoteHostTerminalViewer) Detach() error {
 	return nil
 }
 
-func (v *remoteHostTerminalViewer) liveStream() (*remoteManagedTerminalStream, error) {
+func (v *remoteHostTerminalViewer) liveStream() (remoteHostTerminalStream, error) {
 	if v == nil {
 		return nil, newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not live")
 	}
@@ -727,16 +742,16 @@ func (v *remoteHostTerminalViewer) liveStream() (*remoteManagedTerminalStream, e
 }
 
 func (v *remoteHostTerminalViewer) attach(ctx context.Context) error {
-	if v == nil || v.session == nil || v.session.manager == nil || v.session.manager.lower == nil {
+	if v == nil || v.session == nil || v.session.manager == nil || v.session.manager.app == nil {
 		return errors.New("remote control manager is not initialized")
 	}
 	v.setState(hostTerminalStateAttaching, false, nil)
-	var stream *remoteManagedTerminalStream
+	var stream remoteHostTerminalStream
 	var err error
 	if strings.TrimSpace(v.terminalID) != "" {
-		stream, err = v.session.manager.lower.AttachTerminal(ctx, v.session.hostDeviceID, v.terminalID, v.outputSeq)
+		stream, err = v.session.manager.app.controllerCoreAttachTerminal(ctx, v.session.hostDeviceID, v.terminalID, v.outputSeq)
 	} else {
-		stream, err = v.session.manager.lower.OpenTerminal(ctx, v.session.hostDeviceID, v.workspaceID, v.outputSeq)
+		stream, err = v.session.manager.app.controllerCoreOpenTerminal(ctx, v.session.hostDeviceID, v.workspaceID, v.outputSeq)
 	}
 	if err != nil {
 		v.setState(hostTerminalStateFailed, false, err)
@@ -744,15 +759,15 @@ func (v *remoteHostTerminalViewer) attach(ctx context.Context) error {
 	}
 	v.mu.Lock()
 	v.stream = stream
-	v.terminalID = stream.terminalID
-	v.shell = stream.shell
-	v.cwd = stream.cwd
-	v.outputSeq = stream.outputSeq
+	v.terminalID = stream.TerminalID()
+	v.shell = stream.Shell()
+	v.cwd = stream.CWD()
+	v.outputSeq = stream.OutputSeq()
 	v.state = hostTerminalStateLive
 	v.lastFrameAt = time.Now()
 	v.mu.Unlock()
 	v.session.setHostState(hostRemoteStateLive, "", nil)
-	v.session.setTerminalState(stream.terminalID, hostTerminalStateLive, true, stream.outputSeq, nil)
+	v.session.setTerminalState(stream.TerminalID(), hostTerminalStateLive, true, stream.OutputSeq(), nil)
 	return nil
 }
 
@@ -849,7 +864,7 @@ func (v *remoteHostTerminalViewer) reattach(ctx context.Context, cause error) bo
 	}
 }
 
-func (v *remoteHostTerminalViewer) currentStream() *remoteManagedTerminalStream {
+func (v *remoteHostTerminalViewer) currentStream() remoteHostTerminalStream {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return v.stream

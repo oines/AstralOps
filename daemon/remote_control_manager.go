@@ -882,6 +882,48 @@ func (t *remoteManagedTerminalStream) Frames() <-chan controlPlainFrame {
 	return t.frames
 }
 
+func (t *remoteManagedTerminalStream) TerminalID() string {
+	if t == nil {
+		return ""
+	}
+	return t.terminalID
+}
+
+func (t *remoteManagedTerminalStream) ViewerID() string {
+	if t == nil {
+		return ""
+	}
+	return t.viewerID
+}
+
+func (t *remoteManagedTerminalStream) InputLeaseID() string {
+	if t == nil {
+		return ""
+	}
+	return t.inputLeaseID
+}
+
+func (t *remoteManagedTerminalStream) Shell() string {
+	if t == nil {
+		return ""
+	}
+	return t.shell
+}
+
+func (t *remoteManagedTerminalStream) CWD() string {
+	if t == nil {
+		return ""
+	}
+	return t.cwd
+}
+
+func (t *remoteManagedTerminalStream) OutputSeq() int64 {
+	if t == nil {
+		return 0
+	}
+	return t.outputSeq
+}
+
 func (t *remoteManagedTerminalStream) Input(data string) error {
 	if t == nil || t.session == nil {
 		return errors.New("remote terminal is closed")
