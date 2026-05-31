@@ -1,10 +1,10 @@
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Dimensions, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, useColorScheme, View } from "react-native";
+import { Dimensions, InputAccessoryView, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, useColorScheme, View } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import WebView, { type WebViewMessageEvent } from "react-native-webview";
-import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, LogOut, Menu, Plus, RefreshCw, Settings, TerminalSquare } from "lucide-react-native";
+import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, LogOut, Menu, Plus, RefreshCw, Settings, TerminalSquare, X } from "lucide-react-native";
 import { getLocales } from "expo-localization";
 import type { AstralEvent, CloudAccountStatus, CloudAuthProvider, CloudRelayListResponse, DeviceIdentity, HostSnapshotResponse, Session, TerminalTab, WorkbenchState, Workspace } from "@astralops/protocol";
 import { mobileResources, resolveAppLanguage, type AppLanguage, type ResolvedLanguage } from "@astralops/i18n";
@@ -27,6 +27,7 @@ type Page = "navigator" | "transcript" | "terminal";
 const initialWorkbench = createEmptyWorkbenchState();
 const mobileDebugForceRelayKey = "astralops.mobile.debug.force-relay.v1";
 const mobileEventWindowSize = 1000;
+const emptyInputAccessoryID = "astralops-empty-input-accessory";
 
 type TerminalRuntime = MobileTerminalStatus & {
   output: string;
@@ -68,7 +69,6 @@ function AppShell(): React.JSX.Element {
   const [remoteStatus, setRemoteStatus] = useState<MobileRemoteSessionStatus>({ state: "idle" });
   const [forceRelayOnly, setForceRelayOnly] = useState(false);
   const [terminalRuntime, setTerminalRuntime] = useState<Record<string, TerminalRuntime>>({});
-  const [terminalInput, setTerminalInput] = useState("");
   const terminalHandleRef = useRef<MobileTerminalHandle | undefined>(undefined);
   const workspaces = selectWorkspaces(workbench);
   const sessions = selectSessions(workbench, activeWorkspaceId);
@@ -463,12 +463,10 @@ function AppShell(): React.JSX.Element {
     }
   }
 
-  async function sendTerminalInput(data?: string): Promise<void> {
-    const value = data ?? `${terminalInput}\r`;
-    if (!value || !activeTerminalRuntime?.canInput) return;
+  async function sendTerminalInput(data: string): Promise<void> {
+    if (!data || !activeTerminalRuntime?.canInput) return;
     try {
-      await terminalHandleRef.current?.input(value);
-      if (!data) setTerminalInput("");
+      await terminalHandleRef.current?.input(data);
     } catch (error) {
       setHostError(errorMessage(error));
       if (activeTerminal) {
@@ -480,9 +478,35 @@ function AppShell(): React.JSX.Element {
     }
   }
 
+  async function closeActiveTerminal(): Promise<void> {
+    if (!remoteSession || !activeTerminal || remoteStatus.state !== "live") return;
+    const terminalID = activeTerminal.terminal_id;
+    setHostError("");
+    try {
+      if (terminalHandleRef.current?.terminalId === terminalID) await terminalHandleRef.current.close();
+      else await remoteSession.closeTerminal(terminalID);
+      terminalHandleRef.current = undefined;
+      setTerminalRuntime((current) => ({
+        ...current,
+        [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime()), state: "closed", canInput: false },
+      }));
+      setActiveTerminalId("");
+      const snapshot = await remoteSession.snapshot(20);
+      applyHostSnapshot(snapshot);
+    } catch (error) {
+      setHostError(errorMessage(error));
+      setRemoteStatus(remoteSession.currentStatus());
+    }
+  }
+
   return (
     <SafeAreaView style={[styles.app, { backgroundColor: colors.bg }]}>
       <StatusBar style={colorScheme === "dark" ? "light" : "dark"} />
+      {Platform.OS === "ios" ? (
+        <InputAccessoryView nativeID={emptyInputAccessoryID}>
+          <View style={styles.emptyInputAccessory} />
+        </InputAccessoryView>
+      ) : null}
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={0}
@@ -559,12 +583,10 @@ function AppShell(): React.JSX.Element {
             activeTerminal={activeTerminal}
             runtime={activeTerminalRuntime}
             remoteStatus={remoteStatus}
-            terminalInput={terminalInput}
             onBack={() => scrollToPage("transcript")}
             onSelectTerminal={setActiveTerminalId}
             onNewTerminal={openTerminalForWorkspace}
-            onTerminalInputChange={setTerminalInput}
-            onSendTerminalInput={() => sendTerminalInput()}
+            onCloseTerminal={() => closeActiveTerminal()}
             onSendTerminalKey={(data) => sendTerminalInput(data)}
           />
         </ScrollView>
@@ -776,6 +798,7 @@ function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoad
   const [webViewReady, setWebViewReady] = useState(false);
   const transcriptHtml = useMemo(() => createTranscriptWebViewHtml(colors), [colors]);
   const transcriptPayload = useMemo(() => buildTranscriptWebPayload(events, {
+    sessionKey: activeSession?.id ?? "",
     empty: {
       title: activeSession?.title || (activeHost ? t("mobile.selectSession") : t("mobile.selectHost")),
       subtitle: activeHost ? t("mobile.workbenchPendingDetail") : t("mobile.signInToSeeHosts"),
@@ -790,7 +813,7 @@ function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoad
       processing: t("transcript.processing"),
       userMessage: t("mobile.userMessage"),
     },
-  }), [activeHost, activeSession?.title, events, t]);
+  }), [activeHost, activeSession?.id, activeSession?.title, events, t]);
   const canSend = remoteStatus.state === "live" && Boolean(activeWorkspace) && composerText.trim().length > 0;
   useEffect(() => {
     setWebViewReady(false);
@@ -826,6 +849,7 @@ function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoad
           javaScriptEnabled
           bounces={false}
           scalesPageToFit={false}
+          hideKeyboardAccessoryView
           setSupportMultipleWindows={false}
           textZoom={100}
           onLoadEnd={() => setWebViewReady(true)}
@@ -837,6 +861,8 @@ function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoad
           placeholderTextColor={colors.muted}
           style={[styles.composerInput, { color: colors.text }]}
           multiline
+          inputAccessoryViewID={Platform.OS === "ios" ? emptyInputAccessoryID : undefined}
+          inputAccessoryViewButtonLabel=""
           value={composerText}
           editable={remoteStatus.state === "live" && Boolean(activeWorkspace)}
           onChangeText={onComposerTextChange}
@@ -849,7 +875,7 @@ function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoad
   );
 }
 
-function TerminalScreen({ width, colors, t, terminals, activeTerminal, runtime, remoteStatus, terminalInput, onBack, onSelectTerminal, onNewTerminal, onTerminalInputChange, onSendTerminalInput, onSendTerminalKey }: {
+function TerminalScreen({ width, colors, t, terminals, activeTerminal, runtime, remoteStatus, onBack, onSelectTerminal, onNewTerminal, onCloseTerminal, onSendTerminalKey }: {
   width: number;
   colors: AppPalette;
   t: Translator;
@@ -857,12 +883,10 @@ function TerminalScreen({ width, colors, t, terminals, activeTerminal, runtime, 
   activeTerminal?: TerminalTab;
   runtime?: TerminalRuntime;
   remoteStatus: MobileRemoteSessionStatus;
-  terminalInput: string;
   onBack: () => void;
   onSelectTerminal: (terminalId: string) => void;
   onNewTerminal: () => void;
-  onTerminalInputChange: (value: string) => void;
-  onSendTerminalInput: () => void;
+  onCloseTerminal: () => void;
   onSendTerminalKey: (data: string) => void;
 }): React.JSX.Element {
   const webViewRef = useRef<WebView | null>(null);
@@ -876,7 +900,6 @@ function TerminalScreen({ width, colors, t, terminals, activeTerminal, runtime, 
     canInput: remoteStatus.state === "live" && runtime?.canInput === true,
     message: runtime?.message ?? "",
   }), [activeTerminal?.terminal_id, activeTerminal?.shell, activeTerminal?.cwd, remoteStatus.state, runtime?.canInput, runtime?.message, runtime?.output, runtime?.state]);
-  const canInput = remoteStatus.state === "live" && Boolean(activeTerminal) && runtime?.canInput === true && terminalInput.trim().length > 0;
   useEffect(() => {
     setWebViewReady(false);
   }, [terminalHtml]);
@@ -899,10 +922,17 @@ function TerminalScreen({ width, colors, t, terminals, activeTerminal, runtime, 
       <Header colors={colors} title={t("common.terminal")} subtitle={activeTerminal ? `${activeTerminal.shell ?? "shell"} · ${activeTerminal.cwd ?? "/"}` : t("mobile.terminalInputPaused")} leftIcon={<ChevronLeft size={18} color={colors.text} />} rightIcon={<Plus size={18} color={colors.text} />} onLeftPress={onBack} onRightPress={onNewTerminal} />
       <View style={[styles.terminalTabs, { borderBottomColor: colors.border }]}>
         {terminals.map((terminal) => (
-          <Pressable key={terminal.terminal_id} style={({ pressed }) => [styles.terminalTab, { backgroundColor: terminal.terminal_id === activeTerminal?.terminal_id ? colors.panelStrong : colors.panelSoft }, pressed && styles.pressed]} onPress={() => onSelectTerminal(terminal.terminal_id)}>
-            <TerminalSquare size={14} color={colors.textSoft} />
-            <Text style={[styles.terminalTabText, { color: colors.text }]} numberOfLines={1}>{terminal.shell ?? "shell"} · {terminal.cwd ?? "/"}</Text>
-          </Pressable>
+          <View key={terminal.terminal_id} style={[styles.terminalTab, { backgroundColor: terminal.terminal_id === activeTerminal?.terminal_id ? colors.panelStrong : colors.panelSoft }]}>
+            <Pressable style={({ pressed }) => [styles.terminalTabSelect, pressed && styles.pressed]} onPress={() => onSelectTerminal(terminal.terminal_id)}>
+              <TerminalSquare size={14} color={colors.textSoft} />
+              <Text style={[styles.terminalTabText, { color: colors.text }]} numberOfLines={1}>{terminal.shell ?? "shell"} · {terminal.cwd ?? "/"}</Text>
+            </Pressable>
+            {terminal.terminal_id === activeTerminal?.terminal_id ? (
+              <Pressable accessibilityLabel={t("mobile.closeTerminal")} hitSlop={8} style={({ pressed }) => [styles.terminalClose, pressed && styles.pressed]} onPress={onCloseTerminal}>
+                <X size={14} color={colors.textSoft} />
+              </Pressable>
+            ) : null}
+          </View>
         ))}
         <Pressable style={({ pressed }) => [styles.terminalAdd, { backgroundColor: colors.panelSoft }, pressed && styles.pressed]} onPress={onNewTerminal}>
           <Plus size={18} color={colors.text} />
@@ -923,28 +953,14 @@ function TerminalScreen({ width, colors, t, terminals, activeTerminal, runtime, 
               style={[styles.terminalWebView, { backgroundColor: colors.terminalBg }]}
               containerStyle={styles.webViewContainer}
               javaScriptEnabled
-              scrollEnabled={false}
+              scrollEnabled
+              bounces={false}
+              hideKeyboardAccessoryView
               keyboardDisplayRequiresUserAction={false}
               setSupportMultipleWindows={false}
               onLoadEnd={() => setWebViewReady(true)}
               onMessage={handleTerminalMessage}
             />
-          </View>
-          <View style={[styles.terminalComposer, { backgroundColor: colors.panelSoft, borderColor: colors.border }]}>
-            <TextInput
-              autoCapitalize="none"
-              autoCorrect={false}
-              editable={runtime?.canInput === true}
-              placeholder={runtime?.canInput ? t("mobile.terminalCommandPlaceholder") : t("mobile.terminalInputPaused")}
-              placeholderTextColor={colors.muted}
-              style={[styles.terminalInput, { color: colors.text }]}
-              value={terminalInput}
-              onChangeText={onTerminalInputChange}
-              onSubmitEditing={onSendTerminalInput}
-            />
-            <Pressable disabled={!canInput} style={({ pressed }) => [styles.sendButton, { backgroundColor: canInput ? colors.panelStrong : colors.panel }, pressed && canInput && styles.pressed]} onPress={onSendTerminalInput}>
-              <ChevronRight size={20} color={canInput ? colors.text : colors.muted} />
-            </Pressable>
           </View>
         </View>
       ) : (
@@ -1101,6 +1117,7 @@ function appendTerminalOutput(current: string, data: string): string {
 
 const styles = StyleSheet.create({
   app: { flex: 1 },
+  emptyInputAccessory: { height: 0 },
   keyboardAvoider: { flex: 1 },
   pager: { flex: 1 },
   page: { flex: 1 },
@@ -1153,14 +1170,14 @@ const styles = StyleSheet.create({
   composerInput: { minHeight: 34, maxHeight: 120, flex: 1, fontSize: 15, fontWeight: "600" },
   sendButton: { width: 36, height: 36, borderRadius: 8, alignItems: "center", justifyContent: "center" },
   terminalTabs: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, borderBottomWidth: StyleSheet.hairlineWidth },
-  terminalTab: { maxWidth: 168, height: 36, flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 10, borderRadius: 8 },
-  terminalTabText: { fontSize: 13, fontWeight: "700" },
+  terminalTab: { maxWidth: 190, height: 36, flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, borderRadius: 8 },
+  terminalTabSelect: { flex: 1, minWidth: 0, height: "100%", flexDirection: "row", alignItems: "center", gap: 7 },
+  terminalTabText: { flex: 1, minWidth: 0, fontSize: 13, fontWeight: "700" },
+  terminalClose: { width: 24, height: 24, alignItems: "center", justifyContent: "center", borderRadius: 8 },
   terminalAdd: { width: 36, height: 36, borderRadius: 8, alignItems: "center", justifyContent: "center" },
   terminalBody: { flex: 1 },
   terminalOutput: { flex: 1, margin: 12, marginBottom: 8, borderRadius: 8, overflow: "hidden" },
   terminalWebView: { flex: 1, backgroundColor: "transparent" },
-  terminalComposer: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: 8, marginHorizontal: 12, marginBottom: 10, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, padding: 8 },
-  terminalInput: { flex: 1, minHeight: 34, fontSize: 14, fontWeight: "600" },
   keybar: { minHeight: 54, flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 10, borderTopWidth: StyleSheet.hairlineWidth },
   keyButton: { height: 34, minWidth: 42, alignItems: "center", justifyContent: "center", borderRadius: 8, paddingHorizontal: 8 },
   keyText: { fontSize: 12, fontWeight: "800" },

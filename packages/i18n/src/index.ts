@@ -59,6 +59,7 @@ export const mobileResources = {
       workbenchPending: "No workspaces",
       workbenchPendingDetail: "Select a workspace or session.",
       noTerminal: "No terminal",
+      closeTerminal: "Close terminal",
     },
     status: {
       local: "Local",
@@ -141,6 +142,7 @@ export const mobileResources = {
       workbenchPending: "暂无工作区",
       workbenchPendingDetail: "选择工作区或会话",
       noTerminal: "暂无终端",
+      closeTerminal: "关闭终端",
     },
     status: {
       local: "本机",

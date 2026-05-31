@@ -55,6 +55,7 @@ export type TranscriptWebGroup = {
 };
 
 export type TranscriptWebPayload = {
+  sessionKey?: string;
   empty: TranscriptWebEmptyState;
   groups: TranscriptWebGroup[];
   labels: Pick<TranscriptWebLabels, "operationProcessed" | "operationRunning">;
@@ -62,11 +63,12 @@ export type TranscriptWebPayload = {
 
 export function buildTranscriptWebPayload(
   events: AstralEvent[],
-  options: { empty: TranscriptWebEmptyState; labels: TranscriptWebLabels },
+  options: { sessionKey?: string; empty: TranscriptWebEmptyState; labels: TranscriptWebLabels },
 ): TranscriptWebPayload {
   const renderedEvents = compactStreamingEvents(events.filter(shouldRenderEvent));
   const groups = groupTranscriptEvents(renderedEvents);
   return {
+    sessionKey: options.sessionKey,
     empty: options.empty,
     groups: groups.map((group) => buildTranscriptWebGroup(group, options.labels)),
     labels: {
@@ -285,6 +287,11 @@ export function createTranscriptWebViewHtml(colors: TranscriptWebPalette): strin
     (function () {
       var root = document.getElementById("root");
       var labels = { operationProcessed: "Processed", operationRunning: "Running" };
+      var lastSessionKey = "";
+
+      function isNearBottom() {
+        return root.scrollHeight - root.scrollTop - root.clientHeight < 96;
+      }
 
       function appendText(parent, className, text) {
         if (!text || !String(text).trim()) return;
@@ -377,8 +384,11 @@ export function createTranscriptWebViewHtml(colors: TranscriptWebPalette): strin
       function renderTranscript(payload) {
         labels = payload && payload.labels ? payload.labels : labels;
         var groups = payload && Array.isArray(payload.groups) ? payload.groups : [];
+        var nextSessionKey = payload && typeof payload.sessionKey === "string" ? payload.sessionKey : "";
+        var shouldStickToBottom = nextSessionKey !== lastSessionKey || isNearBottom();
         if (!groups.length) {
           renderEmpty(payload || {});
+          lastSessionKey = nextSessionKey;
           return;
         }
         root.innerHTML = "";
@@ -397,7 +407,8 @@ export function createTranscriptWebViewHtml(colors: TranscriptWebPalette): strin
           inner.appendChild(turn);
         });
         root.appendChild(inner);
-        root.scrollTop = root.scrollHeight;
+        if (shouldStickToBottom) root.scrollTop = root.scrollHeight;
+        lastSessionKey = nextSessionKey;
       }
 
       window.__ASTRAL_RECEIVE__ = function (message) {

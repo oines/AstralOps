@@ -188,6 +188,13 @@ export class MobileHostRemoteSession {
     return this.request<WorkbenchState["terminal_tabs"][string][]>("terminal.open", "terminal.list");
   }
 
+  async closeTerminal(terminalId: string): Promise<TerminalAckResult> {
+    const terminalID = terminalId.trim();
+    if (!terminalID) throw new Error("Terminal id is required.");
+    this.terminals.delete(terminalID);
+    return this.request<TerminalAckResult>("terminal.input", "terminal.close", { terminal_id: terminalID });
+  }
+
   async attachTerminal(terminalId: string, handlers: MobileTerminalHandlers = {}, afterSeq = 0): Promise<MobileTerminalHandle> {
     const terminalID = terminalId.trim();
     if (!terminalID) throw new Error("Terminal id is required.");
@@ -247,8 +254,7 @@ export class MobileHostRemoteSession {
         await this.request<TerminalAckResult>("terminal.open", "terminal.detach", { terminal_id: terminalID }).catch(() => undefined);
       },
       close: async () => {
-        this.terminals.delete(terminalID);
-        await this.request<TerminalAckResult>("terminal.input", "terminal.close", { terminal_id: terminalID });
+        await this.closeTerminal(terminalID);
       },
     };
   }

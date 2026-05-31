@@ -44,13 +44,18 @@ export function createTerminalWebViewHtml(colors: WebSurfacePalette): string {
       background: var(--bg);
       color: var(--text);
       overflow: hidden;
+      overscroll-behavior: contain;
+      touch-action: pan-y;
     }
     * { box-sizing: border-box; }
     #terminal, #fallback {
       width: 100%;
-      height: 100vh;
+      height: 100%;
       padding: 10px;
       background: var(--bg);
+    }
+    #terminal {
+      overflow: hidden;
     }
     #fallback {
       display: none;
@@ -80,9 +85,12 @@ export function createTerminalWebViewHtml(colors: WebSurfacePalette): string {
     }
     .xterm {
       padding: 2px;
+      height: 100%;
     }
     .xterm-viewport {
       background: var(--bg) !important;
+      -webkit-overflow-scrolling: touch;
+      overflow-y: auto !important;
     }
   </style>
 </head>
@@ -174,6 +182,12 @@ export function createTerminalWebViewHtml(colors: WebSurfacePalette): string {
         term.onData(function (data) {
           if (!canInput) return;
           post({ type: "terminal.input", data: data });
+        });
+        terminalEl.addEventListener("touchstart", function () {
+          term.focus();
+        }, { passive: true });
+        terminalEl.addEventListener("click", function () {
+          term.focus();
         });
         term.focus();
         if (pendingPayload) {
