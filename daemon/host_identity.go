@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/oines/astralops/pkg/cloudmesh"
 )
 
 const (
@@ -31,16 +33,7 @@ const (
 	defaultHostFileMode                = 0o600
 )
 
-type DeviceIdentity struct {
-	DeviceID             string   `json:"device_id"`
-	DeviceName           string   `json:"device_name"`
-	DeviceKind           string   `json:"device_kind"`
-	PublicKey            string   `json:"public_key"`
-	PublicKeyFingerprint string   `json:"public_key_fingerprint"`
-	Capabilities         []string `json:"capabilities"`
-	CreatedAt            string   `json:"created_at"`
-	UpdatedAt            string   `json:"updated_at"`
-}
+type DeviceIdentity = cloudmesh.DeviceIdentity
 
 type storedDeviceIdentity struct {
 	DeviceIdentity
@@ -402,18 +395,7 @@ func normalizeTrustGrant(grant TrustGrant) TrustGrant {
 }
 
 func normalizeCapabilities(capabilities []string) []string {
-	seen := map[string]bool{}
-	out := []string{}
-	for _, capability := range capabilities {
-		capability = strings.TrimSpace(capability)
-		if capability == "" || seen[capability] {
-			continue
-		}
-		seen[capability] = true
-		out = append(out, capability)
-	}
-	sort.Strings(out)
-	return out
+	return cloudmesh.NormalizeCapabilities(capabilities)
 }
 
 func validateCapabilities(capabilities []string) error {

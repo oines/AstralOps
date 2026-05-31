@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/oines/astralops/pkg/cloudmesh"
 )
 
 const (
-	cloudDeviceStatusOnline  = "online"
-	cloudDeviceStatusOffline = "offline"
-	cloudDeviceStatusRevoked = "revoked"
+	cloudDeviceStatusOnline  = cloudmesh.DeviceStatusOnline
+	cloudDeviceStatusOffline = cloudmesh.DeviceStatusOffline
+	cloudDeviceStatusRevoked = cloudmesh.DeviceStatusRevoked
 
 	relayEnvelopeVersion               = "astralops-relay-envelope-v1"
 	relayPayloadKindControlHello       = "control.hello"
@@ -18,55 +20,12 @@ const (
 	relayPayloadKindControlSealedFrame = "control.sealed_frame"
 )
 
-type CloudDeviceRecord struct {
-	AccountIDHash        string                `json:"account_id_hash"`
-	DeviceID             string                `json:"device_id"`
-	DeviceName           string                `json:"device_name,omitempty"`
-	DeviceKind           string                `json:"device_kind"`
-	PublicKey            string                `json:"public_key"`
-	PublicKeyFingerprint string                `json:"public_key_fingerprint"`
-	Capabilities         []string              `json:"capabilities,omitempty"`
-	CanHost              bool                  `json:"can_host"`
-	CanControl           bool                  `json:"can_control"`
-	Status               string                `json:"status"`
-	RelayURL             string                `json:"relay_url,omitempty"`
-	LastSeen             string                `json:"last_seen,omitempty"`
-	UpdatedAt            string                `json:"updated_at"`
-	MembershipLease      *CloudMembershipLease `json:"membership_lease,omitempty"`
-}
-
-type CloudAccount struct {
-	AccountIDHash              string            `json:"account_id_hash"`
-	Relay                      *CloudRelayConfig `json:"relay,omitempty"`
-	MembershipKeyID            string            `json:"membership_key_id,omitempty"`
-	MembershipSigningPublicKey string            `json:"membership_signing_public_key,omitempty"`
-}
-
-type CloudMembershipLease struct {
-	Version       string `json:"version"`
-	Algorithm     string `json:"alg"`
-	KeyID         string `json:"kid"`
-	PayloadBase64 string `json:"payload_base64"`
-	Signature     string `json:"signature"`
-}
-
-type CloudRelayConfig struct {
-	RelayID             string `json:"relay_id,omitempty"`
-	RelayURL            string `json:"relay_url,omitempty"`
-	Region              string `json:"region,omitempty"`
-	Name                string `json:"name,omitempty"`
-	Credential          string `json:"credential,omitempty"`
-	CredentialExpiresAt string `json:"credential_expires_at,omitempty"`
-}
-
-type CloudRelayListResponse struct {
-	Relays         []CloudRelayConfig `json:"relays"`
-	CurrentRelayID string             `json:"current_relay_id,omitempty"`
-}
-
-type CloudRelayUpdateRequest struct {
-	RelayID string `json:"relay_id"`
-}
+type CloudDeviceRecord = cloudmesh.DeviceRecord
+type CloudAccount = cloudmesh.Account
+type CloudMembershipLease = cloudmesh.MembershipLease
+type CloudRelayConfig = cloudmesh.RelayConfig
+type CloudRelayListResponse = cloudmesh.RelayListResponse
+type CloudRelayUpdateRequest = cloudmesh.RelayUpdateRequest
 
 type RelayEnvelope struct {
 	Version       string `json:"version"`
