@@ -35,12 +35,22 @@ export type StoredMobileIdentity = {
 };
 
 export async function loadOrCreateMobileIdentity(): Promise<DeviceIdentity> {
+  const stored = await loadOrCreateStoredMobileIdentity();
+  return stored.identity;
+}
+
+export async function loadOrCreateStoredMobileIdentity(): Promise<StoredMobileIdentity> {
   const existing = await loadStoredMobileIdentity();
-  if (existing) return existing.identity;
+  if (existing) return existing;
   return createAndStoreMobileIdentity();
 }
 
 export async function resetMobileIdentity(): Promise<DeviceIdentity> {
+  const stored = await resetStoredMobileIdentity();
+  return stored.identity;
+}
+
+export async function resetStoredMobileIdentity(): Promise<StoredMobileIdentity> {
   await SecureStore.deleteItemAsync(IDENTITY_KEY);
   return createAndStoreMobileIdentity();
 }
@@ -57,7 +67,7 @@ export async function loadStoredMobileIdentity(): Promise<StoredMobileIdentity |
   }
 }
 
-async function createAndStoreMobileIdentity(): Promise<DeviceIdentity> {
+async function createAndStoreMobileIdentity(): Promise<StoredMobileIdentity> {
   const seed = Crypto.getRandomBytes(32);
   const publicKey = ed25519.getPublicKey(seed);
   const now = new Date().toISOString();
@@ -79,7 +89,7 @@ async function createAndStoreMobileIdentity(): Promise<DeviceIdentity> {
   await SecureStore.setItemAsync(IDENTITY_KEY, JSON.stringify(stored), {
     keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
   });
-  return identity;
+  return stored;
 }
 
 function defaultMobileDeviceName(): string {

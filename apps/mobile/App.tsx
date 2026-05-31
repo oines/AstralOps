@@ -5,12 +5,13 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, LogOut, Menu, Plus, RefreshCw, Settings, TerminalSquare } from "lucide-react-native";
 import { WebView } from "react-native-webview";
 import { getLocales } from "expo-localization";
-import type { CloudAccountStatus, CloudAuthProvider, CloudRelayListResponse, DeviceIdentity, RemoteHostRecord, Session, TerminalTab, WorkbenchState, Workspace } from "@astralops/protocol";
+import type { AstralEvent, CloudAccountStatus, CloudAuthProvider, CloudRelayListResponse, DeviceIdentity, HostSnapshotResponse, Session, TerminalTab, WorkbenchState, Workspace } from "@astralops/protocol";
 import { mobileResources, resolveAppLanguage, type AppLanguage, type ResolvedLanguage } from "@astralops/i18n";
-import { groupTranscriptEvents } from "@astralops/transcript";
+import { EMPTY_EVENT_INDEX, groupTranscriptEvents, maxEventSeq, mergeEventIndex, selectSessionEvents, type EventIndex } from "@astralops/transcript";
 import { createEmptyWorkbenchState, selectSessions, selectTerminalTabs, selectWorkspaces } from "@astralops/workbench-state";
-import { DEFAULT_CLOUD_BASE_URL, clearStoredCloudSession, loadCloudMeshSnapshot, loadStoredCloudSession, removeSelfFromCloud, requestCloudPairing, startCloudOAuth, type StoredCloudSession } from "./src/mobileCloud";
-import { loadOrCreateMobileIdentity, resetMobileIdentity } from "./src/mobileIdentity";
+import { DEFAULT_CLOUD_BASE_URL, clearStoredCloudSession, loadCloudMeshSnapshot, loadStoredCloudSession, removeSelfFromCloud, requestCloudPairing, startCloudOAuth, type MobileHostRecord, type StoredCloudSession } from "./src/mobileCloud";
+import { loadOrCreateStoredMobileIdentity, resetStoredMobileIdentity, type StoredMobileIdentity } from "./src/mobileIdentity";
+import { MobileHostRemoteSession, type MobileRemoteSessionStatus } from "./src/mobileRemote";
 
 type Page = "navigator" | "transcript" | "terminal";
 
@@ -25,20 +26,30 @@ function AppShell(): React.JSX.Element {
   const t = useMemo(() => translator(resolvedLanguage), [resolvedLanguage]);
   const [width, setWidth] = useState(Dimensions.get("window").width);
   const [identity, setIdentity] = useState<DeviceIdentity | undefined>();
+  const [storedIdentity, setStoredIdentity] = useState<StoredMobileIdentity | undefined>();
   const [cloudSession, setCloudSession] = useState<StoredCloudSession | undefined>();
   const [cloudAccount, setCloudAccount] = useState<CloudAccountStatus | undefined>();
   const [cloudRelays, setCloudRelays] = useState<CloudRelayListResponse | undefined>();
-  const [hosts, setHosts] = useState<RemoteHostRecord[]>([]);
+  const [hosts, setHosts] = useState<MobileHostRecord[]>([]);
   const [cloudLoading, setCloudLoading] = useState(true);
+  const [hostLoading, setHostLoading] = useState(false);
   const [authLoading, setAuthLoading] = useState<CloudAuthProvider | undefined>();
   const [pairingHostId, setPairingHostId] = useState<string | undefined>();
   const [cloudError, setCloudError] = useState("");
+  const [hostError, setHostError] = useState("");
   const [activeHostId, setActiveHostId] = useState("");
   const [activeWorkspaceId, setActiveWorkspaceId] = useState("");
   const [activeSessionId, setActiveSessionId] = useState("");
   const [activeTerminalId, setActiveTerminalId] = useState("");
+  const [composerText, setComposerText] = useState("");
   const scrollRef = useRef<ScrollView | null>(null);
-  const [workbench] = useState<WorkbenchState>(initialWorkbench);
+  const eventIndexRef = useRef<EventIndex>(EMPTY_EVENT_INDEX);
+  const activeSessionIdRef = useRef("");
+  const pollTickRef = useRef(0);
+  const [workbench, setWorkbench] = useState<WorkbenchState>(initialWorkbench);
+  const [eventIndex, setEventIndex] = useState<EventIndex>(EMPTY_EVENT_INDEX);
+  const [remoteSession, setRemoteSession] = useState<MobileHostRemoteSession | undefined>();
+  const [remoteStatus, setRemoteStatus] = useState<MobileRemoteSessionStatus>({ state: "idle" });
   const workspaces = selectWorkspaces(workbench);
   const sessions = selectSessions(workbench, activeWorkspaceId);
   const terminals = selectTerminalTabs(workbench, activeWorkspaceId);
@@ -46,6 +57,7 @@ function AppShell(): React.JSX.Element {
   const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
   const activeSession = sessions.find((session) => session.id === activeSessionId);
   const activeTerminal = terminals.find((terminal) => terminal.terminal_id === activeTerminalId) ?? terminals[0];
+  const activeSessionEvents = activeSession ? selectSessionEvents(eventIndex, activeSession.id) : [];
 
   useEffect(() => {
     const subscription = Dimensions.addEventListener("change", ({ window }) => setWidth(window.width));
@@ -56,14 +68,15 @@ function AppShell(): React.JSX.Element {
     let cancelled = false;
     (async () => {
       try {
-        const nextIdentity = await loadOrCreateMobileIdentity();
+        const nextStoredIdentity = await loadOrCreateStoredMobileIdentity();
         if (cancelled) return;
-        setIdentity(nextIdentity);
+        setStoredIdentity(nextStoredIdentity);
+        setIdentity(nextStoredIdentity.identity);
         const stored = await loadStoredCloudSession();
         if (cancelled) return;
         setCloudSession(stored);
         if (stored) {
-          await refreshCloud(stored, nextIdentity);
+          await refreshCloud(stored, nextStoredIdentity.identity);
         }
       } catch (error) {
         if (!cancelled) setCloudError(errorMessage(error));
@@ -79,6 +92,96 @@ function AppShell(): React.JSX.Element {
   useEffect(() => {
     requestAnimationFrame(() => scrollToPage("transcript", false));
   }, [width]);
+
+  useEffect(() => {
+    eventIndexRef.current = eventIndex;
+  }, [eventIndex]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    setActiveWorkspaceId((current) => current && workspaces.some((workspace) => workspace.id === current) ? current : workspaces[0]?.id ?? "");
+  }, [workspaces]);
+
+  useEffect(() => {
+    setActiveSessionId((current) => current && sessions.some((session) => session.id === current) ? current : sessions[0]?.id ?? "");
+  }, [sessions]);
+
+  useEffect(() => {
+    setActiveTerminalId((current) => current && terminals.some((terminal) => terminal.terminal_id === current) ? current : terminals[0]?.terminal_id ?? "");
+  }, [terminals]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const host = activeHost;
+    setRemoteSession(undefined);
+    setRemoteStatus({ state: "idle" });
+    setHostError("");
+    setWorkbench(createEmptyWorkbenchState());
+    setEventIndex(EMPTY_EVENT_INDEX);
+    pollTickRef.current = 0;
+    setActiveWorkspaceId("");
+    setActiveSessionId("");
+    setActiveTerminalId("");
+    if (!host || !cloudSession || !storedIdentity) {
+      return () => undefined;
+    }
+    const session = new MobileHostRemoteSession(cloudSession, storedIdentity, host);
+    setRemoteSession(session);
+    async function loadSnapshot(): Promise<void> {
+      setHostLoading(true);
+      setHostError("");
+      try {
+        const snapshot = await session.snapshot();
+        if (cancelled) return;
+        applyHostSnapshot(snapshot);
+        setRemoteStatus(session.currentStatus());
+        setHosts((current) => current.map((item) => item.device_id === host.device_id ? {
+          ...item,
+          authorization_state: "approved",
+          control: { ...(item.control ?? { route_generation: 0 }), state: "live", transport: "relay", route_generation: item.control?.route_generation ?? 0, updated_at: new Date().toISOString() },
+        } : item));
+      } catch (error) {
+        if (cancelled) return;
+        const message = errorMessage(error);
+        setHostError(message);
+        setRemoteStatus(session.currentStatus());
+        if (session.currentStatus().state === "needs_pairing") {
+          setHosts((current) => current.map((item) => item.device_id === host.device_id ? { ...item, authorization_state: "needs_pairing" } : item));
+        }
+      } finally {
+        if (!cancelled) setHostLoading(false);
+      }
+    }
+    void loadSnapshot();
+    timer = setInterval(() => {
+      void (async () => {
+        if (cancelled) return;
+        try {
+          pollTickRef.current += 1;
+          const events = await session.events(maxEventSeq(eventIndexRef.current), activeSessionIdRef.current || undefined);
+          if (events.length > 0 && !cancelled) setEventIndex((current) => mergeEventIndex(current, events));
+          if (pollTickRef.current % 3 === 0) {
+            const snapshot = await session.snapshot(20);
+            if (!cancelled) applyHostSnapshot(snapshot);
+          }
+          setRemoteStatus(session.currentStatus());
+        } catch (error) {
+          if (!cancelled) {
+            setHostError(errorMessage(error));
+            setRemoteStatus(session.currentStatus());
+          }
+        }
+      })();
+    }, 3000);
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [activeHostId, cloudSession?.account_token, cloudSession?.updated_at, storedIdentity?.seed_hex]);
 
   async function refreshCloud(sessionArg = cloudSession, identityArg = identity): Promise<void> {
     if (!sessionArg || !identityArg) {
@@ -102,17 +205,18 @@ function AppShell(): React.JSX.Element {
   }
 
   async function loginCloud(provider: CloudAuthProvider): Promise<void> {
-    let currentIdentity = identity;
-    if (!currentIdentity) {
-      currentIdentity = await loadOrCreateMobileIdentity();
-      setIdentity(currentIdentity);
+    let currentStoredIdentity = storedIdentity;
+    if (!currentStoredIdentity) {
+      currentStoredIdentity = await loadOrCreateStoredMobileIdentity();
+      setStoredIdentity(currentStoredIdentity);
+      setIdentity(currentStoredIdentity.identity);
     }
     setAuthLoading(provider);
     setCloudError("");
     try {
-      const session = await startCloudOAuth(provider, currentIdentity);
+      const session = await startCloudOAuth(provider, currentStoredIdentity.identity);
       setCloudSession(session);
-      await refreshCloud(session, currentIdentity);
+      await refreshCloud(session, currentStoredIdentity.identity);
     } catch (error) {
       setCloudError(errorMessage(error));
     } finally {
@@ -130,13 +234,16 @@ function AppShell(): React.JSX.Element {
         await removeSelfFromCloud(previousSession, previousIdentity).catch(() => undefined);
       }
       await clearStoredCloudSession();
-      const nextIdentity = await resetMobileIdentity();
-      setIdentity(nextIdentity);
+      const nextStoredIdentity = await resetStoredMobileIdentity();
+      setStoredIdentity(nextStoredIdentity);
+      setIdentity(nextStoredIdentity.identity);
       setCloudSession(undefined);
       setCloudAccount(undefined);
       setCloudRelays(undefined);
       setHosts([]);
       setActiveHostId("");
+      setWorkbench(createEmptyWorkbenchState());
+      setEventIndex(EMPTY_EVENT_INDEX);
     } catch (error) {
       setCloudError(errorMessage(error));
     } finally {
@@ -144,7 +251,7 @@ function AppShell(): React.JSX.Element {
     }
   }
 
-  async function requestPairingForHost(host: RemoteHostRecord): Promise<void> {
+  async function requestPairingForHost(host: MobileHostRecord): Promise<void> {
     if (!cloudSession || !identity) return;
     setPairingHostId(host.device_id);
     setCloudError("");
@@ -161,6 +268,34 @@ function AppShell(): React.JSX.Element {
   function scrollToPage(next: Page, animated = true): void {
     const index = next === "navigator" ? 0 : next === "transcript" ? 1 : 2;
     scrollRef.current?.scrollTo({ x: width * index, animated });
+  }
+
+  function applyHostSnapshot(snapshot: HostSnapshotResponse): void {
+    const nextWorkbench = snapshot.workbench ?? workbenchFromSnapshot(snapshot);
+    setWorkbench(nextWorkbench);
+    setEventIndex((current) => mergeEventIndex(current, [...(snapshot.events ?? []), ...(snapshot.initial_session_events ?? [])]));
+  }
+
+  async function sendPrompt(): Promise<void> {
+    const input = composerText.trim();
+    if (!input || !remoteSession || !activeWorkspace) return;
+    setHostError("");
+    try {
+      let session = activeSession;
+      if (!session) {
+        session = await remoteSession.createSession(activeWorkspace.id, activeWorkspace.agent);
+        setActiveSessionId(session.id);
+      }
+      await remoteSession.sendInput(session.id, input);
+      setComposerText("");
+      const snapshot = await remoteSession.snapshot();
+      applyHostSnapshot(snapshot);
+      const events = await remoteSession.events(maxEventSeq(eventIndex), session.id);
+      setEventIndex((current) => mergeEventIndex(current, events));
+    } catch (error) {
+      setHostError(errorMessage(error));
+      setRemoteStatus(remoteSession.currentStatus());
+    }
   }
 
   return (
@@ -191,10 +326,12 @@ function AppShell(): React.JSX.Element {
             cloudLoading={cloudLoading}
             authLoading={authLoading}
             cloudError={cloudError}
+            hostError={hostError}
             hosts={hosts}
             workspaces={workspaces}
             sessions={sessions}
             activeHost={activeHost}
+            remoteStatus={remoteStatus}
             activeWorkspaceId={activeWorkspaceId}
             activeSessionId={activeSessionId}
             onBack={() => scrollToPage("transcript")}
@@ -218,8 +355,15 @@ function AppShell(): React.JSX.Element {
             colors={colors}
             t={t}
             activeHost={activeHost}
+            remoteStatus={remoteStatus}
+            hostLoading={hostLoading}
+            hostError={hostError}
             activeWorkspace={activeWorkspace}
             activeSession={activeSession}
+            events={activeSessionEvents}
+            composerText={composerText}
+            onComposerTextChange={setComposerText}
+            onSendPrompt={sendPrompt}
             onOpenNavigator={() => scrollToPage("navigator")}
             onOpenTerminal={() => scrollToPage("terminal")}
           />
@@ -229,6 +373,7 @@ function AppShell(): React.JSX.Element {
             t={t}
             terminals={terminals}
             activeTerminal={activeTerminal}
+            remoteStatus={remoteStatus}
             onBack={() => scrollToPage("transcript")}
             onSelectTerminal={setActiveTerminalId}
           />
@@ -257,10 +402,12 @@ function NavigatorScreen({
   cloudLoading,
   authLoading,
   cloudError,
+  hostError,
   hosts,
   workspaces,
   sessions,
   activeHost,
+  remoteStatus,
   activeWorkspaceId,
   activeSessionId,
   onBack,
@@ -283,17 +430,19 @@ function NavigatorScreen({
   cloudLoading: boolean;
   authLoading?: CloudAuthProvider;
   cloudError: string;
-  hosts: RemoteHostRecord[];
+  hostError: string;
+  hosts: MobileHostRecord[];
   workspaces: Workspace[];
   sessions: Session[];
-  activeHost?: RemoteHostRecord;
+  activeHost?: MobileHostRecord;
+  remoteStatus: MobileRemoteSessionStatus;
   activeWorkspaceId: string;
   activeSessionId: string;
   onBack: () => void;
   onLoginCloud: (provider: CloudAuthProvider) => void;
   onLogoutCloud: () => void;
   onRefreshCloud: () => void;
-  onRequestPairing: (host: RemoteHostRecord) => void;
+  onRequestPairing: (host: MobileHostRecord) => void;
   pairingHostId?: string;
   onSelectHost: (hostId: string) => void;
   onSelectWorkspace: (workspaceId: string) => void;
@@ -342,6 +491,7 @@ function NavigatorScreen({
             </View>
           )}
           {cloudError ? <Text style={[styles.errorText, { color: colors.orange }]}>{cloudError}</Text> : null}
+          {hostError ? <Text style={[styles.errorText, { color: colors.orange }]}>{hostError}</Text> : null}
         </View>
 
         <SectionTitle colors={colors} label={t("mobile.hosts")} />
@@ -355,7 +505,7 @@ function NavigatorScreen({
             <View style={styles.rowText}>
               <Text style={[styles.rowTitle, { color: colors.text }]} numberOfLines={1}>{host.device_name ?? host.device_id}</Text>
               <View style={styles.rowMeta}>
-                <Text style={[styles.rowSubtitle, { color: colors.muted }]}>{host.connection === "relay" ? t("status.relay") : t(`status.${host.connection || "offline"}`)}</Text>
+                <Text style={[styles.rowSubtitle, { color: colors.muted }]}>{host.device_id === activeHost?.device_id && remoteStatus.state !== "idle" ? t(`status.${remoteStatus.state}`) : host.connection === "relay" ? t("status.relay") : t(`status.${host.connection || "offline"}`)}</Text>
                 <StatusPill colors={colors} label={host.authorization_state === "pending" ? t("status.pending") : host.authorization_state === "needs_pairing" ? t("status.needs_pairing") : t(`status.${host.status || "offline"}`)} tone={host.status === "online" ? "good" : "muted"} />
               </View>
             </View>
@@ -399,17 +549,25 @@ function NavigatorScreen({
   );
 }
 
-function TranscriptScreen({ width, colors, t, activeHost, activeWorkspace, activeSession, onOpenNavigator, onOpenTerminal }: {
+function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoading, hostError, activeWorkspace, activeSession, events, composerText, onComposerTextChange, onSendPrompt, onOpenNavigator, onOpenTerminal }: {
   width: number;
   colors: AppPalette;
   t: Translator;
-  activeHost?: RemoteHostRecord;
+  activeHost?: MobileHostRecord;
+  remoteStatus: MobileRemoteSessionStatus;
+  hostLoading: boolean;
+  hostError: string;
   activeWorkspace?: Workspace;
   activeSession?: Session;
+  events: AstralEvent[];
+  composerText: string;
+  onComposerTextChange: (value: string) => void;
+  onSendPrompt: () => void;
   onOpenNavigator: () => void;
   onOpenTerminal: () => void;
 }): React.JSX.Element {
-  const groups = groupTranscriptEvents([]);
+  const groups = groupTranscriptEvents(events);
+  const canSend = remoteStatus.state === "live" && Boolean(activeWorkspace) && composerText.trim().length > 0;
   return (
     <View style={[styles.page, { width, backgroundColor: colors.bg }]}>
       <Header
@@ -422,12 +580,27 @@ function TranscriptScreen({ width, colors, t, activeHost, activeWorkspace, activ
         onRightPress={onOpenTerminal}
       />
       <View style={styles.transcriptBody}>
+        {hostLoading || hostError || remoteStatus.state === "connecting" || remoteStatus.state === "failed" || remoteStatus.state === "needs_pairing" ? (
+          <View style={[styles.inlineStatus, { backgroundColor: colors.panelSoft, borderColor: colors.border }]}>
+            <Text style={[styles.inlineStatusText, { color: hostError ? colors.orange : colors.textSoft }]}>{hostError || t(`status.${remoteStatus.state}`)}</Text>
+          </View>
+        ) : null}
         {groups.length === 0 ? (
           <View style={styles.emptyTranscript}>
             <Text style={[styles.emptyTitle, { color: colors.text }]}>{activeSession?.title || (activeHost ? t("mobile.selectSession") : t("mobile.selectHost"))}</Text>
             <Text style={[styles.emptySubtitle, { color: colors.muted }]}>{activeHost ? t("mobile.workbenchPendingDetail") : t("mobile.signInToSeeHosts")}</Text>
           </View>
-        ) : null}
+        ) : (
+          <ScrollView style={styles.transcriptList} contentContainerStyle={styles.transcriptContent}>
+            {groups.map((group) => (
+              <View key={group.id} style={styles.turnGroup}>
+                {group.user ? <Bubble colors={colors} role="user" text={eventText(group.user) || t("mobile.userMessage")} /> : null}
+                {group.assistant.map((event) => <Bubble key={event.seq} colors={colors} role="assistant" text={eventText(event)} />)}
+                {group.details.filter((event) => event.kind === "turn.failed").map((event) => <Text key={event.seq} style={[styles.eventDetail, { color: colors.orange }]}>{eventText(event) || t("status.failed")}</Text>)}
+              </View>
+            ))}
+          </ScrollView>
+        )}
       </View>
       <View style={[styles.composer, { backgroundColor: colors.panelSoft, borderColor: colors.border }]}>
         <TextInput
@@ -435,21 +608,25 @@ function TranscriptScreen({ width, colors, t, activeHost, activeWorkspace, activ
           placeholderTextColor={colors.muted}
           style={[styles.composerInput, { color: colors.text }]}
           multiline
+          value={composerText}
+          editable={remoteStatus.state === "live" && Boolean(activeWorkspace)}
+          onChangeText={onComposerTextChange}
         />
-        <Pressable style={({ pressed }) => [styles.sendButton, { backgroundColor: colors.panelStrong }, pressed && styles.pressed]}>
-          <ChevronRight size={20} color={colors.text} />
+        <Pressable disabled={!canSend} style={({ pressed }) => [styles.sendButton, { backgroundColor: canSend ? colors.panelStrong : colors.panel }, pressed && canSend && styles.pressed]} onPress={onSendPrompt}>
+          <ChevronRight size={20} color={canSend ? colors.text : colors.muted} />
         </Pressable>
       </View>
     </View>
   );
 }
 
-function TerminalScreen({ width, colors, t, terminals, activeTerminal, onBack, onSelectTerminal }: {
+function TerminalScreen({ width, colors, t, terminals, activeTerminal, remoteStatus, onBack, onSelectTerminal }: {
   width: number;
   colors: AppPalette;
   t: Translator;
   terminals: TerminalTab[];
   activeTerminal?: TerminalTab;
+  remoteStatus: MobileRemoteSessionStatus;
   onBack: () => void;
   onSelectTerminal: (terminalId: string) => void;
 }): React.JSX.Element {
@@ -467,12 +644,19 @@ function TerminalScreen({ width, colors, t, terminals, activeTerminal, onBack, o
           <Plus size={18} color={colors.text} />
         </Pressable>
       </View>
-      <WebView
-        style={styles.terminalWebView}
-        originWhitelist={["*"]}
-        source={{ html: terminalHtml(colors) }}
-        scrollEnabled={false}
-      />
+      {activeTerminal ? (
+        <WebView
+          style={styles.terminalWebView}
+          originWhitelist={["*"]}
+          source={{ html: terminalHtml(colors, activeTerminal, remoteStatus) }}
+          scrollEnabled={false}
+        />
+      ) : (
+        <View style={styles.emptyTranscript}>
+          <Text style={[styles.emptyTitle, { color: colors.text }]}>{t("mobile.noTerminal")}</Text>
+          <Text style={[styles.emptySubtitle, { color: colors.muted }]}>{t("mobile.terminalStreamPending")}</Text>
+        </View>
+      )}
       <View style={[styles.keybar, { borderTopColor: colors.border }]}>
         {["ESC", "TAB", "CTRL", "↑", "↓", "←", "→"].map((key) => (
           <Pressable key={key} style={({ pressed }) => [styles.keyButton, { backgroundColor: colors.panelSoft }, pressed && styles.pressed]}>
@@ -522,6 +706,16 @@ function StatusPill({ colors, label, tone = "muted" }: { colors: AppPalette; lab
   return <Text style={[styles.statusPill, { color: tone === "good" ? colors.green : colors.muted, backgroundColor: colors.panelStrong }]}>{label}</Text>;
 }
 
+function Bubble({ colors, role, text }: { colors: AppPalette; role: "user" | "assistant"; text: string }): React.JSX.Element | null {
+  if (!text.trim()) return null;
+  const isUser = role === "user";
+  return (
+    <View style={[styles.bubble, isUser ? styles.userBubble : styles.assistantBubble, { backgroundColor: isUser ? colors.panelStrong : "transparent" }]}>
+      <Text style={[styles.bubbleText, { color: colors.text }]}>{text}</Text>
+    </View>
+  );
+}
+
 type Translator = (key: string) => string;
 
 function translator(language: ResolvedLanguage): Translator {
@@ -564,8 +758,38 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function terminalHtml(colors: AppPalette): string {
-  return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;background:${colors.bg};color:${colors.text};font:13px ui-monospace,SFMono-Regular,Menlo,monospace}.term{padding:14px;white-space:pre-wrap}.cursor{display:inline-block;width:7px;height:14px;background:${colors.green};vertical-align:-2px}</style></head><body><div class="term">% zsh /\n\nHost-owned terminal viewer\n<span class="cursor"></span></div></body></html>`;
+function eventText(event: AstralEvent): string {
+  const normalized = event.normalized as Record<string, unknown>;
+  const text = normalized.text ?? normalized.message ?? normalized.output;
+  if (typeof text === "string") return text;
+  if (event.kind === "message.user" && typeof normalized.input === "string") return normalized.input;
+  return "";
+}
+
+function workbenchFromSnapshot(snapshot: HostSnapshotResponse): WorkbenchState {
+  const state = createEmptyWorkbenchState();
+  for (const workspace of snapshot.workspaces ?? []) state.workspaces[workspace.id] = workspace;
+  for (const session of snapshot.sessions ?? []) state.sessions[session.id] = session;
+  for (const view of snapshot.session_views ?? []) {
+    state.session_views[view.session.id] = view;
+    state.sessions[view.session.id] = view.session;
+  }
+  for (const connection of snapshot.workspace_connections ?? []) state.workspace_connections[connection.workspace_id] = connection;
+  return { ...state, version: snapshot.workbench?.version ?? 1, updated_at: new Date().toISOString() };
+}
+
+function terminalHtml(colors: AppPalette, terminal: TerminalTab, status: MobileRemoteSessionStatus): string {
+  const lines = [
+    `${terminal.shell ?? "shell"} · ${terminal.cwd ?? "/"}`,
+    "",
+    `status: ${status.state}`,
+    "Terminal output streaming is gated until the mobile terminal viewer is attached.",
+  ];
+  return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;background:${colors.bg};color:${colors.text};font:13px ui-monospace,SFMono-Regular,Menlo,monospace}.term{padding:14px;white-space:pre-wrap}.cursor{display:inline-block;width:7px;height:14px;background:${colors.green};vertical-align:-2px}</style></head><body><div class="term">${escapeHTML(lines.join("\n"))}\n<span class="cursor"></span></div></body></html>`;
+}
+
+function escapeHTML(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 const styles = StyleSheet.create({
@@ -610,6 +834,16 @@ const styles = StyleSheet.create({
   sessionRow: { height: 34, flexDirection: "row", alignItems: "center", gap: 8, marginLeft: 20, paddingHorizontal: 10, borderRadius: 8 },
   sessionTitle: { flex: 1, fontSize: 14, fontWeight: "600" },
   transcriptBody: { flex: 1 },
+  inlineStatus: { margin: 12, marginBottom: 0, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 10, paddingVertical: 8 },
+  inlineStatusText: { fontSize: 12, fontWeight: "800" },
+  transcriptList: { flex: 1 },
+  transcriptContent: { padding: 12, paddingBottom: 20 },
+  turnGroup: { marginBottom: 16, gap: 8 },
+  bubble: { maxWidth: "86%", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9 },
+  userBubble: { alignSelf: "flex-end" },
+  assistantBubble: { alignSelf: "stretch", paddingHorizontal: 0 },
+  bubbleText: { fontSize: 15, lineHeight: 21, fontWeight: "600" },
+  eventDetail: { fontSize: 12, lineHeight: 18, fontWeight: "700" },
   emptyTranscript: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
   emptyTitle: { fontSize: 18, fontWeight: "800" },
   emptySubtitle: { marginTop: 6, fontSize: 13, fontWeight: "600" },

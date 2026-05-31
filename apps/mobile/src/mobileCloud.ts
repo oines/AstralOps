@@ -2,7 +2,7 @@ import * as Crypto from "expo-crypto";
 import * as Linking from "expo-linking";
 import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
-import type { CloudAccountStatus, CloudAuthProvider, CloudDeviceRecord, CloudRelayListResponse, DeviceIdentity, RemoteHostRecord } from "@astralops/protocol";
+import type { CloudAccount, CloudAccountStatus, CloudAuthProvider, CloudDeviceRecord, CloudMembershipLease, CloudRelayListResponse, DeviceIdentity, RemoteHostRecord } from "@astralops/protocol";
 import { CloudHttpClient } from "@astralops/controller-client";
 import { bytesToBase64URL, mobileControllerCapabilities } from "./mobileIdentity";
 
@@ -20,8 +20,15 @@ export type StoredCloudSession = {
   account_id_hash?: string;
   relay_id?: string;
   relay_url?: string;
+  relay_credential?: string;
+  membership_signing_public_key?: string;
+  membership_lease?: CloudMembershipLease;
   expires_at?: string;
   updated_at: string;
+};
+
+export type MobileHostRecord = RemoteHostRecord & {
+  public_key: string;
 };
 
 export type CloudMeshSnapshot = {
@@ -29,7 +36,7 @@ export type CloudMeshSnapshot = {
   account: CloudAccountStatus;
   relays: CloudRelayListResponse;
   devices: CloudDeviceRecord[];
-  hosts: RemoteHostRecord[];
+  hosts: MobileHostRecord[];
 };
 
 export async function loadStoredCloudSession(): Promise<StoredCloudSession | undefined> {
@@ -80,6 +87,9 @@ export async function startCloudOAuth(provider: CloudAuthProvider, identity: Dev
     account_id_hash: exchanged.account.account_id_hash,
     relay_id: relay?.relay_id,
     relay_url: relay?.relay_url,
+    relay_credential: relay?.credential,
+    membership_signing_public_key: exchanged.account.membership_signing_public_key,
+    membership_lease: exchanged.device?.membership_lease,
     expires_at: exchanged.expires_at,
     updated_at: new Date().toISOString(),
   };
@@ -89,21 +99,22 @@ export async function startCloudOAuth(provider: CloudAuthProvider, identity: Dev
 
 export async function loadCloudMeshSnapshot(session: StoredCloudSession, identity: DeviceIdentity): Promise<CloudMeshSnapshot> {
   const client = cloudClient(session);
-  const account = await client.accountStatus();
+  const account = await client.account();
+  const accountStatus = cloudAccountStatus(account);
   const relayUrl = account.relay?.relay_url ?? session.relay_url ?? "";
-  await client.heartbeat(identity.device_id, relayUrl);
+  const heartbeat = await client.heartbeat(identity.device_id, relayUrl);
   const [relays, devices] = await Promise.all([
     client.relays().catch(() => ({ relays: [], current_relay_id: account.relay?.relay_id })),
     client.devices(),
   ]);
-  const nextSession = mergeSessionCloudFacts(session, account);
+  const nextSession = mergeSessionCloudFacts(session, account, heartbeat);
   await saveCloudSession(nextSession);
   return {
     session: nextSession,
-    account,
+    account: accountStatus,
     relays,
     devices,
-    hosts: cloudDevicesToRemoteHosts(devices, identity.device_id, account),
+    hosts: cloudDevicesToRemoteHosts(devices, identity.device_id, accountStatus),
   };
 }
 
@@ -125,17 +136,20 @@ function cloudClient(session: StoredCloudSession): CloudHttpClient {
   return new CloudHttpClient({ baseUrl: session.base_url, accountToken: session.account_token });
 }
 
-function mergeSessionCloudFacts(session: StoredCloudSession, account: CloudAccountStatus): StoredCloudSession {
+function mergeSessionCloudFacts(session: StoredCloudSession, account: CloudAccount, selfDevice?: CloudDeviceRecord): StoredCloudSession {
   return {
     ...session,
     account_id_hash: account.account_id_hash,
     relay_id: account.relay?.relay_id,
     relay_url: account.relay?.relay_url,
+    relay_credential: account.relay?.credential ?? session.relay_credential,
+    membership_signing_public_key: account.membership_signing_public_key ?? session.membership_signing_public_key,
+    membership_lease: selfDevice?.membership_lease ?? session.membership_lease,
     updated_at: new Date().toISOString(),
   };
 }
 
-function cloudDevicesToRemoteHosts(devices: CloudDeviceRecord[], selfDeviceId: string, account: CloudAccountStatus): RemoteHostRecord[] {
+function cloudDevicesToRemoteHosts(devices: CloudDeviceRecord[], selfDeviceId: string, account: CloudAccountStatus): MobileHostRecord[] {
   return devices
     .filter((device) => device.device_id !== selfDeviceId && device.can_host && device.status !== "revoked")
     .map((device) => {
@@ -147,6 +161,7 @@ function cloudDevicesToRemoteHosts(devices: CloudDeviceRecord[], selfDeviceId: s
         device_id: device.device_id,
         device_name: device.device_name,
         device_kind: device.device_kind,
+        public_key: device.public_key,
         public_key_fingerprint: device.public_key_fingerprint,
         known_identity: true,
         status: online ? "online" : "offline",
@@ -159,8 +174,22 @@ function cloudDevicesToRemoteHosts(devices: CloudDeviceRecord[], selfDeviceId: s
           route_generation: 0,
           updated_at: device.updated_at,
         },
-      } satisfies RemoteHostRecord;
+      } satisfies MobileHostRecord;
     });
+}
+
+function cloudAccountStatus(account: CloudAccount): CloudAccountStatus {
+  return {
+    account_id_hash: account.account_id_hash,
+    relay: account.relay ? {
+      relay_id: account.relay.relay_id,
+      relay_url: account.relay.relay_url,
+      region: account.relay.region,
+      name: account.relay.name,
+      credential_available: Boolean(account.relay.credential),
+      credential_expires_at: account.relay.credential_expires_at,
+    } : undefined,
+  };
 }
 
 function stringParam(value: string | string[] | undefined): string {

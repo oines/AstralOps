@@ -1341,6 +1341,7 @@ export type ControlHelloFrame = {
   controller_ephemeral_key: string;
   client_nonce: string;
   signature: string;
+  membership_lease?: CloudMembershipLease;
 };
 
 export type ControlHelloAckFrame = {
@@ -1350,10 +1351,12 @@ export type ControlHelloAckFrame = {
   host_device_id: string;
   host_public_key: string;
   host_ephemeral_key: string;
+  client_nonce?: string;
   server_nonce: string;
   signature: string;
   encryption: "x25519-aes-256-gcm" | string;
   signature_algorithm: "ed25519" | string;
+  membership_lease?: CloudMembershipLease;
 };
 
 export type ControlPlainFrame =

@@ -18,6 +18,8 @@
     "@astralops/transcript": "file:../../packages/transcript",
     "@astralops/workbench-state": "file:../../packages/workbench-state",
     "@expo/metro-runtime": "~6.1.2",
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
     "@noble/ed25519": "^3.1.0",
     "@noble/hashes": "^2.2.0",
     "babel-preset-expo": "~54.0.11",
