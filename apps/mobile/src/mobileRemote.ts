@@ -128,7 +128,7 @@ export class MobileHostRemoteSession {
   private closed = false;
 
   constructor(
-    private readonly cloud: StoredCloudSession,
+    private cloud: StoredCloudSession,
     private readonly identity: StoredMobileIdentity,
     private readonly host: MobileHostRecord,
     private readonly routeOptions: MobileRemoteRouteOptions = {},
@@ -136,6 +136,10 @@ export class MobileHostRemoteSession {
 
   currentStatus(): MobileRemoteSessionStatus {
     return this.status;
+  }
+
+  updateCloudSession(cloud: StoredCloudSession): void {
+    this.cloud = cloud;
   }
 
   close(): void {

@@ -68,6 +68,9 @@ function AppShell(): React.JSX.Element {
   const activeTerminal = terminals.find((terminal) => terminal.terminal_id === activeTerminalId) ?? terminals[0];
   const activeTerminalRuntime = activeTerminal ? terminalRuntime[activeTerminal.terminal_id] : undefined;
   const activeSessionEvents = activeSession ? selectSessionEvents(eventIndex, activeSession.id) : [];
+  const activeHostCanControl = hostCanControl(activeHost);
+  const activeHostIdentityKey = activeHost ? `${activeHost.device_id}:${activeHost.public_key}:${activeHost.public_key_fingerprint}` : "";
+  const previousRemoteHostIdRef = useRef("");
 
   useEffect(() => {
     const subscription = Dimensions.addEventListener("change", ({ window }) => setWidth(window.width));
@@ -144,21 +147,38 @@ function AppShell(): React.JSX.Element {
   }, [terminals]);
 
   useEffect(() => {
+    if (cloudSession) remoteSession?.updateCloudSession(cloudSession);
+  }, [remoteSession, cloudSession]);
+
+  useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setInterval> | undefined;
     const host = activeHost;
+    const hostID = host?.device_id ?? "";
+    const hostChanged = previousRemoteHostIdRef.current !== hostID;
+    previousRemoteHostIdRef.current = hostID;
     setRemoteSession(undefined);
     setRemoteStatus({ state: "idle" });
     setHostError("");
-    setWorkbench(createEmptyWorkbenchState());
-    setEventIndex(EMPTY_EVENT_INDEX);
-    setTerminalRuntime({});
     terminalHandleRef.current = undefined;
     pollTickRef.current = 0;
-    setActiveWorkspaceId("");
-    setActiveSessionId("");
-    setActiveTerminalId("");
+    if (hostChanged) {
+      setWorkbench(createEmptyWorkbenchState());
+      setEventIndex(EMPTY_EVENT_INDEX);
+      setTerminalRuntime({});
+      setActiveWorkspaceId("");
+      setActiveSessionId("");
+      setActiveTerminalId("");
+    }
     if (!host || !cloudSession || !storedIdentity) {
+      if (!host) {
+        setWorkbench(createEmptyWorkbenchState());
+        setEventIndex(EMPTY_EVENT_INDEX);
+        setTerminalRuntime({});
+        setActiveWorkspaceId("");
+        setActiveSessionId("");
+        setActiveTerminalId("");
+      }
       return () => undefined;
     }
     if (!hostCanControl(host)) {
@@ -219,7 +239,7 @@ function AppShell(): React.JSX.Element {
       if (timer) clearInterval(timer);
       session.close();
     };
-  }, [activeHostId, activeHost?.authorization_state, cloudSession?.account_token, cloudSession?.updated_at, storedIdentity?.seed_hex, forceRelayOnly]);
+  }, [activeHostId, activeHostIdentityKey, activeHostCanControl, cloudSession?.account_token, storedIdentity?.seed_hex, forceRelayOnly]);
 
   async function refreshCloud(sessionArg = cloudSession, identityArg = identity, silent = false): Promise<void> {
     if (!sessionArg || !identityArg) {
@@ -233,7 +253,7 @@ function AppShell(): React.JSX.Element {
       setCloudSession(snapshot.session);
       setCloudAccount(snapshot.account);
       setCloudRelays(snapshot.relays);
-      setHosts(snapshot.hosts);
+      setHosts((current) => mergeCloudHostsWithLocalControl(snapshot.hosts, current));
       setActiveHostId((current) => snapshot.hosts.some((host) => host.device_id === current) ? current : snapshot.hosts[0]?.device_id ?? "");
     } catch (error) {
       setCloudError(errorMessage(error));
@@ -977,6 +997,19 @@ function workbenchFromSnapshot(snapshot: HostSnapshotResponse): WorkbenchState {
 
 function hostCanControl(host?: MobileHostRecord): boolean {
   return host?.authorization_state === "approved";
+}
+
+function mergeCloudHostsWithLocalControl(cloudHosts: MobileHostRecord[], localHosts: MobileHostRecord[]): MobileHostRecord[] {
+  const localByID = new Map(localHosts.map((host) => [host.device_id, host]));
+  return cloudHosts.map((host) => {
+    const local = localByID.get(host.device_id);
+    if (!local?.control || local.control.state === "idle" || local.control.state === "needs_pairing") return host;
+    return {
+      ...host,
+      connection: local.connection,
+      control: local.control,
+    };
+  });
 }
 
 function emptyTerminalRuntime(): TerminalRuntime {
