@@ -238,11 +238,18 @@ func (s *Server) enqueue(accountIDHash string, envelope Envelope) (Envelope, err
 	if err := validateEnvelope(envelope); err != nil {
 		return Envelope{}, err
 	}
+	if s.deliverWebSocketEnvelope(accountIDHash, envelope) {
+		return envelope, nil
+	}
+	s.queueEnvelope(accountIDHash, envelope)
+	return envelope, nil
+}
+
+func (s *Server) queueEnvelope(accountIDHash string, envelope Envelope) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.queues[accountIDHash] = append(s.queues[accountIDHash], envelope)
 	s.notifyWaitersLocked(accountIDHash, envelope.ToDeviceID)
-	return envelope, nil
 }
 
 func (s *Server) forwardWebSocketEnvelope(accountIDHash, fromDeviceID string, envelope Envelope) (Envelope, error) {
@@ -262,7 +269,9 @@ func (s *Server) forwardWebSocketEnvelope(accountIDHash, fromDeviceID string, en
 	if err := validateEnvelope(envelope); err != nil {
 		return Envelope{}, err
 	}
-	s.deliverWebSocketEnvelope(accountIDHash, envelope)
+	if !s.deliverWebSocketEnvelope(accountIDHash, envelope) {
+		s.queueEnvelope(accountIDHash, envelope)
+	}
 	return envelope, nil
 }
 
@@ -353,12 +362,39 @@ func (s *Server) registerWebSocketClient(client *webSocketClient) {
 		return
 	}
 	key := envelopeWaiterKey(client.accountIDHash, client.deviceID)
+	var queued []Envelope
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.webSocketClients[key] == nil {
 		s.webSocketClients[key] = map[*webSocketClient]struct{}{}
 	}
 	s.webSocketClients[key][client] = struct{}{}
+	queue := s.queues[client.accountIDHash]
+	if len(queue) > 0 {
+		remaining := queue[:0]
+		for _, envelope := range queue {
+			if envelope.ToDeviceID == client.deviceID {
+				queued = append(queued, envelope)
+				continue
+			}
+			remaining = append(remaining, envelope)
+		}
+		if len(remaining) == 0 {
+			delete(s.queues, client.accountIDHash)
+		} else {
+			s.queues[client.accountIDHash] = remaining
+		}
+	}
+	s.mu.Unlock()
+
+	for _, envelope := range queued {
+		if client.sendFrame(WebSocketFrame{Type: "envelope", Envelope: &envelope}) {
+			continue
+		}
+		s.queueEnvelope(client.accountIDHash, envelope)
+		s.unregisterWebSocketClient(client)
+		client.close()
+		return
+	}
 }
 
 func (s *Server) unregisterWebSocketClient(client *webSocketClient) {
@@ -378,7 +414,7 @@ func (s *Server) unregisterWebSocketClient(client *webSocketClient) {
 	}
 }
 
-func (s *Server) deliverWebSocketEnvelope(accountIDHash string, envelope Envelope) {
+func (s *Server) deliverWebSocketEnvelope(accountIDHash string, envelope Envelope) bool {
 	key := envelopeWaiterKey(accountIDHash, envelope.ToDeviceID)
 	s.mu.Lock()
 	clients := make([]*webSocketClient, 0, len(s.webSocketClients[key]))
@@ -388,13 +424,16 @@ func (s *Server) deliverWebSocketEnvelope(accountIDHash string, envelope Envelop
 	s.mu.Unlock()
 
 	frame := WebSocketFrame{Type: "envelope", Envelope: &envelope}
+	delivered := false
 	for _, client := range clients {
 		if client.sendFrame(frame) {
+			delivered = true
 			continue
 		}
 		s.unregisterWebSocketClient(client)
 		client.close()
 	}
+	return delivered
 }
 
 func (c *webSocketClient) sendFrame(frame WebSocketFrame) bool {
