@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"strings"
 
 	"github.com/oines/astralops/pkg/controllercore"
 )
@@ -105,6 +107,59 @@ func (a *app) controllerCoreAttachTerminal(ctx context.Context, hostDeviceID, te
 	return coreTerminalStreamAdapter{stream: stream}, nil
 }
 
+func (t daemonControllerTransport) MeshState(ctx context.Context, discover bool) (controllercore.MeshState, error) {
+	if t.app == nil {
+		return controllercore.MeshState{}, controllercore.NewActionError(http.StatusServiceUnavailable, "daemon_unavailable", "daemon is not initialized")
+	}
+	var state meshStateResponse
+	var err error
+	if t.app.mesh != nil {
+		state, err = t.app.mesh.refresh(ctx, discover)
+	} else {
+		state = newMeshStateManager(t.app).build(ctx, discover)
+	}
+	if err != nil {
+		return controllercore.MeshState{}, toCoreError(err)
+	}
+	return toCoreMeshState(state), nil
+}
+
+func (t daemonControllerTransport) RequestPairing(ctx context.Context, hostDeviceID string) (controllercore.PairingSignal, error) {
+	if t.app == nil || t.app.store == nil {
+		return controllercore.PairingSignal{}, controllercore.NewActionError(http.StatusServiceUnavailable, "daemon_unavailable", "daemon is not initialized")
+	}
+	hostDeviceID = strings.TrimSpace(hostDeviceID)
+	if hostDeviceID == "" {
+		return controllercore.PairingSignal{}, controllercore.NewActionError(http.StatusBadRequest, "remote_host_required", "remote Host device id is required")
+	}
+	client, err := t.app.cloudClientFromSettings()
+	if err != nil {
+		return controllercore.PairingSignal{}, toCoreError(err)
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, cloudSyncTimeout)
+	defer cancel()
+	_, relayURL, _, err := cloudRelayClientFromCloud(reqCtx, client)
+	if err != nil {
+		return controllercore.PairingSignal{}, controllercore.NewActionError(http.StatusBadGateway, "cloud_request_failed", err.Error())
+	}
+	self := t.app.store.hostInfo().Identity
+	settings := t.app.currentSettings()
+	if _, err := client.RegisterDevice(reqCtx, self, settings.RemoteControl.Enabled, true, relayURL); err != nil {
+		return controllercore.PairingSignal{}, controllercore.NewActionError(http.StatusBadGateway, "cloud_request_failed", err.Error())
+	}
+	signal, err := client.SubmitPairingSignal(reqCtx, cloudPairingSignalInput{
+		HostDeviceID:        hostDeviceID,
+		ControllerDeviceID:  self.DeviceID,
+		Scope:               TrustScopeFull,
+		Capabilities:        normalizeCapabilities(self.Capabilities),
+		WorkspaceExecPolicy: WorkspaceExecPolicyTrusted,
+	})
+	if err != nil {
+		return controllercore.PairingSignal{}, controllercore.NewActionError(http.StatusBadGateway, "cloud_request_failed", err.Error())
+	}
+	return toCorePairingSignal(signal), nil
+}
+
 func (t daemonControllerTransport) ControlState(hostDeviceID string) controllercore.ControlState {
 	manager := t.app.remoteControlManager()
 	if manager == nil {
@@ -115,7 +170,7 @@ func (t daemonControllerTransport) ControlState(hostDeviceID string) controllerc
 
 func (t daemonControllerTransport) Request(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (controllercore.ControlResponse, error) {
 	response, err := t.app.remoteControlManager().Request(ctx, hostDeviceID, capability, action, params)
-	return toCoreControlResponse(response), err
+	return toCoreControlResponse(response), toCoreError(err)
 }
 
 func (t daemonControllerTransport) SubscribeEvents(ctx context.Context, hostDeviceID string, params controllercore.EventSubscriptionParams) (controllercore.EventStream, error) {
@@ -126,7 +181,7 @@ func (t daemonControllerTransport) SubscribeEvents(ctx context.Context, hostDevi
 		ReplayLimit: params.ReplayLimit,
 	})
 	if err != nil {
-		return controllercore.EventStream{}, err
+		return controllercore.EventStream{}, toCoreError(err)
 	}
 	out := make(chan controllercore.EventEnvelope, remoteControlStreamBufferSize)
 	go func() {
@@ -141,7 +196,7 @@ func (t daemonControllerTransport) SubscribeEvents(ctx context.Context, hostDevi
 func (t daemonControllerTransport) OpenTerminal(ctx context.Context, hostDeviceID, workspaceID string, afterSeq int64) (controllercore.TerminalStream, error) {
 	stream, err := t.app.remoteControlManager().OpenTerminal(ctx, hostDeviceID, workspaceID, afterSeq)
 	if err != nil {
-		return nil, err
+		return nil, toCoreError(err)
 	}
 	return daemonTerminalStreamAdapter{stream: stream}, nil
 }
@@ -149,7 +204,7 @@ func (t daemonControllerTransport) OpenTerminal(ctx context.Context, hostDeviceI
 func (t daemonControllerTransport) AttachTerminal(ctx context.Context, hostDeviceID, terminalID string, afterSeq int64) (controllercore.TerminalStream, error) {
 	stream, err := t.app.remoteControlManager().AttachTerminal(ctx, hostDeviceID, terminalID, afterSeq)
 	if err != nil {
-		return nil, err
+		return nil, toCoreError(err)
 	}
 	return daemonTerminalStreamAdapter{stream: stream}, nil
 }
@@ -362,6 +417,21 @@ func toCoreControlError(err *ControlError) *controllercore.ControlError {
 	return &controllercore.ControlError{Status: err.Status, Code: err.Code, Message: err.Message}
 }
 
+func toCoreError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var actionErr *actionError
+	if !errors.As(err, &actionErr) {
+		return err
+	}
+	code := actionErr.Code
+	if code == terminalViewerNotReadyCode {
+		code = controllercore.TerminalViewerNotReadyCode
+	}
+	return controllercore.NewActionError(actionErr.Status, code, actionErr.Message)
+}
+
 func fromCoreControlResponse(response controllercore.ControlResponse) ControlResponse {
 	return ControlResponse{
 		RequestID: response.RequestID,
@@ -391,6 +461,90 @@ func fromCoreError(err error) error {
 		code = terminalViewerNotReadyCode
 	}
 	return newActionError(coreErr.Status, code, coreErr.Message)
+}
+
+func toCoreMeshState(state meshStateResponse) controllercore.MeshState {
+	return controllercore.MeshState{
+		Self:                toCoreMeshSelfState(state.Self),
+		Cloud:               toCoreMeshCloudState(state.Cloud),
+		Hosts:               toCoreRemoteHostRecords(state.Hosts),
+		PendingPairingCount: state.PendingPairingCount,
+		UpdatedAt:           state.UpdatedAt,
+	}
+}
+
+func toCoreMeshSelfState(state meshSelfState) controllercore.MeshSelfState {
+	return controllercore.MeshSelfState{
+		DeviceID:       state.DeviceID,
+		DeviceName:     state.DeviceName,
+		CanHost:        state.CanHost,
+		CanControl:     state.CanControl,
+		CloudActive:    state.CloudActive,
+		RelayConnected: state.RelayConnected,
+	}
+}
+
+func toCoreMeshCloudState(state *meshCloudState) *controllercore.MeshCloudState {
+	if state == nil {
+		return nil
+	}
+	return &controllercore.MeshCloudState{
+		Enabled:             state.Enabled,
+		AccountIDHash:       state.AccountIDHash,
+		RelayID:             state.RelayID,
+		RelayURL:            state.RelayURL,
+		CredentialExpiresAt: state.CredentialExpiresAt,
+	}
+}
+
+func toCoreRemoteHostRecords(hosts []remoteHostRecord) []controllercore.RemoteHostRecord {
+	out := make([]controllercore.RemoteHostRecord, 0, len(hosts))
+	for _, host := range hosts {
+		out = append(out, toCoreRemoteHostRecord(host))
+	}
+	return out
+}
+
+func toCoreRemoteHostRecord(host remoteHostRecord) controllercore.RemoteHostRecord {
+	return controllercore.RemoteHostRecord{
+		DeviceID:             host.DeviceID,
+		DeviceName:           host.DeviceName,
+		DeviceKind:           host.DeviceKind,
+		PublicKeyFingerprint: host.PublicKeyFingerprint,
+		KnownIdentity:        host.KnownIdentity,
+		Status:               host.Status,
+		Connection:           host.Connection,
+		AuthorizationState:   host.AuthorizationState,
+		PairingRequestID:     host.PairingRequestID,
+		PairingStatus:        host.PairingStatus,
+		LastBaseURL:          host.LastBaseURL,
+		LANBaseURL:           host.LANBaseURL,
+		Capabilities:         append([]string(nil), host.Capabilities...),
+		Control:              toCoreControlState(host.Control),
+	}
+}
+
+func toCorePairingSignal(signal CloudPairingSignal) controllercore.PairingSignal {
+	return controllercore.PairingSignal{
+		RequestID:                      signal.RequestID,
+		AccountIDHash:                  signal.AccountIDHash,
+		HostDeviceID:                   signal.HostDeviceID,
+		HostDeviceName:                 signal.HostDeviceName,
+		HostDeviceKind:                 signal.HostDeviceKind,
+		HostPublicKeyFingerprint:       signal.HostPublicKeyFingerprint,
+		ControllerDeviceID:             signal.ControllerDeviceID,
+		ControllerDeviceName:           signal.ControllerDeviceName,
+		ControllerDeviceKind:           signal.ControllerDeviceKind,
+		ControllerPublicKeyFingerprint: signal.ControllerPublicKeyFingerprint,
+		Scope:                          signal.Scope,
+		Status:                         signal.Status,
+		Capabilities:                   append([]string(nil), signal.Capabilities...),
+		WorkspaceExecPolicy:            signal.WorkspaceExecPolicy,
+		ResolverDeviceID:               signal.ResolverDeviceID,
+		CreatedAt:                      signal.CreatedAt,
+		UpdatedAt:                      signal.UpdatedAt,
+		ResolvedAt:                     signal.ResolvedAt,
+	}
 }
 
 func fromCoreTerminalFrame(frame controllercore.TerminalFrame) controlPlainFrame {
