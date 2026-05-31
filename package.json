@@ -20,6 +20,7 @@
     "package:desktop": "node scripts/package-desktop.mjs"
   },
   "devDependencies": {
-    "electron-builder": "^26.8.1"
+    "electron-builder": "^26.8.1",
+    "react-native": "^0.81.5"
   }
 }
