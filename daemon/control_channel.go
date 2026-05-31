@@ -268,16 +268,21 @@ func (c *controlWSConn) serve() {
 				c.writePlain(controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_request", "missing request")})
 				continue
 			}
-			response, after := c.handleRequest(*frame.plain.Request)
-			c.writePlain(controlPlainFrame{Type: "response", Response: response})
-			if after != nil {
-				go after()
-			}
+			req := *frame.plain.Request
+			go c.handleRequestAsync(req)
 		case "close":
 			return
 		default:
 			c.writePlain(controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_frame", "unsupported control frame type")})
 		}
+	}
+}
+
+func (c *controlWSConn) handleRequestAsync(req ControlRequest) {
+	response, after := c.handleRequest(req)
+	c.writePlain(controlPlainFrame{Type: "response", Response: response})
+	if after != nil {
+		go after()
 	}
 }
 

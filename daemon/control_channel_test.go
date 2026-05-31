@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -205,7 +206,18 @@ func readEncryptedControlFrame(t *testing.T, client *websocket.Conn, cipher *con
 
 func readEncryptedControlFrameWithBody(t *testing.T, client *websocket.Conn, cipher *controlCipher) (controlPlainFrame, []byte) {
 	t.Helper()
-	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	return readEncryptedControlFrameWithBodyWithin(t, client, cipher, 3*time.Second)
+}
+
+func readEncryptedControlFrameWithin(t *testing.T, client *websocket.Conn, cipher *controlCipher, timeout time.Duration) controlPlainFrame {
+	t.Helper()
+	plain, _ := readEncryptedControlFrameWithBodyWithin(t, client, cipher, timeout)
+	return plain
+}
+
+func readEncryptedControlFrameWithBodyWithin(t *testing.T, client *websocket.Conn, cipher *controlCipher, timeout time.Duration) (controlPlainFrame, []byte) {
+	t.Helper()
+	_ = client.SetReadDeadline(time.Now().Add(timeout))
 	defer client.SetReadDeadline(time.Time{})
 	_, body, err := client.ReadMessage()
 	if err != nil {
@@ -1027,6 +1039,69 @@ func TestControlWebSocketSessionInputIsEncrypted(t *testing.T) {
 	}
 	if runtime.options[0].Model != "gpt-test" || runtime.options[0].ReasoningEffort != "low" || runtime.options[0].PermissionMode != "auto" {
 		t.Fatalf("runtime options = %#v", runtime.options[0])
+	}
+}
+
+type blockingRuntime struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingRuntime) StartTurn(Session, Workspace, string, TurnOptions) error {
+	r.once.Do(func() {
+		close(r.started)
+	})
+	<-r.release
+	return nil
+}
+
+func (r *blockingRuntime) Interrupt(string) error {
+	return nil
+}
+
+func TestControlWebSocketHandlesRequestsConcurrently(t *testing.T) {
+	app, _, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead, CapabilityCoreControl)
+	blocking := &blockingRuntime{started: make(chan struct{}), release: make(chan struct{})}
+	app.runtimes[AgentCodex] = blocking
+	defer close(blocking.release)
+
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "blocked_session_input",
+			Capability: CapabilityCoreControl,
+			Action:     ControlActionSessionInput,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"input":      "block the first request",
+			},
+		},
+	})
+
+	select {
+	case <-blocking.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocking runtime did not receive the first request")
+	}
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "snapshot_while_blocked",
+			Capability: CapabilityCoreRead,
+			Action:     ControlActionHostSnapshot,
+			Params:     map[string]any{"event_limit": 1},
+		},
+	})
+
+	plain := readEncryptedControlFrameWithin(t, client, cipher, 500*time.Millisecond)
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "snapshot_while_blocked" {
+		t.Fatalf("concurrent snapshot response = %#v, want ok response while first request is still blocked", plain)
 	}
 }
 
