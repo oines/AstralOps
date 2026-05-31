@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Dimensions, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, useColorScheme, View } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import WebView, { type WebViewMessageEvent } from "react-native-webview";
 import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, LogOut, Menu, Plus, RefreshCw, Settings, TerminalSquare } from "lucide-react-native";
 import { getLocales } from "expo-localization";
 import type { AstralEvent, CloudAccountStatus, CloudAuthProvider, CloudRelayListResponse, DeviceIdentity, HostSnapshotResponse, Session, TerminalTab, WorkbenchState, Workspace } from "@astralops/protocol";
@@ -12,6 +13,7 @@ import { createEmptyWorkbenchState, selectSessions, selectTerminalTabs, selectWo
 import { DEFAULT_CLOUD_BASE_URL, clearStoredCloudSession, loadCloudMeshSnapshot, loadStoredCloudSession, removeSelfFromCloud, requestCloudPairing, startCloudOAuth, type MobileHostRecord, type StoredCloudSession } from "./src/mobileCloud";
 import { loadOrCreateStoredMobileIdentity, resetStoredMobileIdentity, type StoredMobileIdentity } from "./src/mobileIdentity";
 import { MobileHostRemoteSession, type MobileRemoteSessionStatus, type MobileTerminalHandle, type MobileTerminalStatus } from "./src/mobileRemote";
+import { createTerminalWebViewHtml, createTranscriptWebViewHtml, postWebViewMessage } from "./src/webSurfaces";
 
 type Page = "navigator" | "transcript" | "terminal";
 
@@ -763,8 +765,30 @@ function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoad
   onOpenNavigator: () => void;
   onOpenTerminal: () => void;
 }): React.JSX.Element {
-  const groups = groupTranscriptEvents(events);
+  const webViewRef = useRef<WebView | null>(null);
+  const [webViewReady, setWebViewReady] = useState(false);
+  const groups = useMemo(() => groupTranscriptEvents(events), [events]);
+  const transcriptHtml = useMemo(() => createTranscriptWebViewHtml(colors), [colors]);
+  const transcriptPayload = useMemo(() => ({
+    empty: {
+      title: activeSession?.title || (activeHost ? t("mobile.selectSession") : t("mobile.selectHost")),
+      subtitle: activeHost ? t("mobile.workbenchPendingDetail") : t("mobile.signInToSeeHosts"),
+    },
+    groups: groups.map((group) => ({
+      id: group.id,
+      user: group.user ? eventText(group.user) || t("mobile.userMessage") : "",
+      assistant: group.assistant.map((event) => eventText(event)).filter((text) => text.trim().length > 0),
+      details: group.details.filter((event) => event.kind === "turn.failed").map((event) => eventText(event) || t("status.failed")),
+    })),
+  }), [activeHost, activeSession?.title, groups, t]);
   const canSend = remoteStatus.state === "live" && Boolean(activeWorkspace) && composerText.trim().length > 0;
+  useEffect(() => {
+    setWebViewReady(false);
+  }, [transcriptHtml]);
+  useEffect(() => {
+    if (!webViewReady) return;
+    webViewRef.current?.injectJavaScript(postWebViewMessage("transcript.render", transcriptPayload));
+  }, [transcriptPayload, webViewReady]);
   return (
     <View style={[styles.page, { width, backgroundColor: colors.bg }]}>
       <Header
@@ -782,22 +806,17 @@ function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoad
             <Text style={[styles.inlineStatusText, { color: hostError ? colors.orange : colors.textSoft }]}>{hostError || t(`status.${remoteStatus.state}`)}</Text>
           </View>
         ) : null}
-        {groups.length === 0 ? (
-          <View style={styles.emptyTranscript}>
-            <Text style={[styles.emptyTitle, { color: colors.text }]}>{activeSession?.title || (activeHost ? t("mobile.selectSession") : t("mobile.selectHost"))}</Text>
-            <Text style={[styles.emptySubtitle, { color: colors.muted }]}>{activeHost ? t("mobile.workbenchPendingDetail") : t("mobile.signInToSeeHosts")}</Text>
-          </View>
-        ) : (
-          <ScrollView style={styles.transcriptList} contentContainerStyle={styles.transcriptContent}>
-            {groups.map((group) => (
-              <View key={group.id} style={styles.turnGroup}>
-                {group.user ? <Bubble colors={colors} role="user" text={eventText(group.user) || t("mobile.userMessage")} /> : null}
-                {group.assistant.map((event) => <Bubble key={event.seq} colors={colors} role="assistant" text={eventText(event)} />)}
-                {group.details.filter((event) => event.kind === "turn.failed").map((event) => <Text key={event.seq} style={[styles.eventDetail, { color: colors.orange }]}>{eventText(event) || t("status.failed")}</Text>)}
-              </View>
-            ))}
-          </ScrollView>
-        )}
+        <WebView
+          ref={webViewRef}
+          originWhitelist={["*"]}
+          source={{ html: transcriptHtml }}
+          style={[styles.transcriptWebView, { backgroundColor: colors.bg }]}
+          containerStyle={styles.webViewContainer}
+          scrollEnabled
+          javaScriptEnabled
+          setSupportMultipleWindows={false}
+          onLoadEnd={() => setWebViewReady(true)}
+        />
       </View>
       <View style={[styles.composer, { backgroundColor: colors.panelSoft, borderColor: colors.border }]}>
         <TextInput
@@ -833,7 +852,35 @@ function TerminalScreen({ width, colors, t, terminals, activeTerminal, runtime, 
   onSendTerminalInput: () => void;
   onSendTerminalKey: (data: string) => void;
 }): React.JSX.Element {
+  const webViewRef = useRef<WebView | null>(null);
+  const [webViewReady, setWebViewReady] = useState(false);
+  const terminalHtml = useMemo(() => createTerminalWebViewHtml(colors), [colors]);
+  const terminalPayload = useMemo(() => ({
+    terminalId: activeTerminal?.terminal_id ?? "",
+    output: runtime?.output ?? "",
+    placeholder: activeTerminal ? `${activeTerminal.shell ?? "shell"} · ${activeTerminal.cwd ?? "/"}\r\n` : "",
+    state: runtime?.state ?? "closed",
+    canInput: remoteStatus.state === "live" && runtime?.canInput === true,
+    message: runtime?.message ?? "",
+  }), [activeTerminal?.terminal_id, activeTerminal?.shell, activeTerminal?.cwd, remoteStatus.state, runtime?.canInput, runtime?.message, runtime?.output, runtime?.state]);
   const canInput = remoteStatus.state === "live" && Boolean(activeTerminal) && runtime?.canInput === true && terminalInput.trim().length > 0;
+  useEffect(() => {
+    setWebViewReady(false);
+  }, [terminalHtml]);
+  useEffect(() => {
+    if (!webViewReady) return;
+    webViewRef.current?.injectJavaScript(postWebViewMessage("terminal.render", terminalPayload));
+  }, [terminalPayload, webViewReady]);
+  function handleTerminalMessage(event: WebViewMessageEvent): void {
+    try {
+      const message = JSON.parse(event.nativeEvent.data) as { type?: string; data?: unknown };
+      if (message.type === "terminal.input" && typeof message.data === "string" && remoteStatus.state === "live" && runtime?.canInput === true) {
+        onSendTerminalKey(message.data);
+      }
+    } catch {
+      // Ignore renderer diagnostics; the HostRemoteSession remains the control plane.
+    }
+  }
   return (
     <View style={[styles.page, { width, backgroundColor: colors.bg }]}>
       <Header colors={colors} title={t("common.terminal")} subtitle={activeTerminal ? `${activeTerminal.shell ?? "shell"} · ${activeTerminal.cwd ?? "/"}` : t("mobile.terminalInputPaused")} leftIcon={<ChevronLeft size={18} color={colors.text} />} rightIcon={<Plus size={18} color={colors.text} />} onLeftPress={onBack} onRightPress={onNewTerminal} />
@@ -855,9 +902,21 @@ function TerminalScreen({ width, colors, t, terminals, activeTerminal, runtime, 
               <Text style={[styles.inlineStatusText, { color: runtime.state === "failed" ? colors.orange : colors.textSoft }]}>{runtime.message || t(runtime.state === "attaching" ? "status.connecting" : "mobile.terminalInputPaused")}</Text>
             </View>
           ) : null}
-          <ScrollView style={[styles.terminalOutput, { backgroundColor: colors.terminalBg }]} contentContainerStyle={styles.terminalOutputContent}>
-            <Text selectable style={[styles.terminalOutputText, { color: colors.terminalText }]}>{runtime?.output || `${activeTerminal.shell ?? "shell"} · ${activeTerminal.cwd ?? "/"}\n`}</Text>
-          </ScrollView>
+          <View style={[styles.terminalOutput, { backgroundColor: colors.terminalBg }]}>
+            <WebView
+              ref={webViewRef}
+              originWhitelist={["*"]}
+              source={{ html: terminalHtml }}
+              style={[styles.terminalWebView, { backgroundColor: colors.terminalBg }]}
+              containerStyle={styles.webViewContainer}
+              javaScriptEnabled
+              scrollEnabled={false}
+              keyboardDisplayRequiresUserAction={false}
+              setSupportMultipleWindows={false}
+              onLoadEnd={() => setWebViewReady(true)}
+              onMessage={handleTerminalMessage}
+            />
+          </View>
           <View style={[styles.terminalComposer, { backgroundColor: colors.panelSoft, borderColor: colors.border }]}>
             <TextInput
               autoCapitalize="none"
@@ -932,16 +991,6 @@ function InfoRow({ colors, label, value }: { colors: AppPalette; label: string; 
 
 function StatusPill({ colors, label, tone = "muted" }: { colors: AppPalette; label: string; tone?: "good" | "muted" }): React.JSX.Element {
   return <Text style={[styles.statusPill, { color: tone === "good" ? colors.green : colors.muted, backgroundColor: colors.panelStrong }]}>{label}</Text>;
-}
-
-function Bubble({ colors, role, text }: { colors: AppPalette; role: "user" | "assistant"; text: string }): React.JSX.Element | null {
-  if (!text.trim()) return null;
-  const isUser = role === "user";
-  return (
-    <View style={[styles.bubble, isUser ? styles.userBubble : styles.assistantBubble, { backgroundColor: isUser ? colors.panelStrong : "transparent" }]}>
-      <Text style={[styles.bubbleText, { color: colors.text }]}>{text}</Text>
-    </View>
-  );
 }
 
 type Translator = (key: string) => string;
@@ -1090,14 +1139,8 @@ const styles = StyleSheet.create({
   transcriptBody: { flex: 1 },
   inlineStatus: { margin: 12, marginBottom: 0, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 10, paddingVertical: 8 },
   inlineStatusText: { fontSize: 12, fontWeight: "800" },
-  transcriptList: { flex: 1 },
-  transcriptContent: { padding: 12, paddingBottom: 20 },
-  turnGroup: { marginBottom: 16, gap: 8 },
-  bubble: { maxWidth: "86%", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9 },
-  userBubble: { alignSelf: "flex-end" },
-  assistantBubble: { alignSelf: "stretch", paddingHorizontal: 0 },
-  bubbleText: { fontSize: 15, lineHeight: 21, fontWeight: "600" },
-  eventDetail: { fontSize: 12, lineHeight: 18, fontWeight: "700" },
+  webViewContainer: { flex: 1, backgroundColor: "transparent" },
+  transcriptWebView: { flex: 1, backgroundColor: "transparent" },
   emptyTranscript: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
   emptyTitle: { fontSize: 18, fontWeight: "800" },
   emptySubtitle: { marginTop: 6, fontSize: 13, fontWeight: "600" },
@@ -1109,9 +1152,8 @@ const styles = StyleSheet.create({
   terminalTabText: { fontSize: 13, fontWeight: "700" },
   terminalAdd: { width: 36, height: 36, borderRadius: 8, alignItems: "center", justifyContent: "center" },
   terminalBody: { flex: 1 },
-  terminalOutput: { flex: 1, margin: 12, marginBottom: 8, borderRadius: 8 },
-  terminalOutputContent: { padding: 12, paddingBottom: 24 },
-  terminalOutputText: { fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }), fontSize: 12, lineHeight: 17 },
+  terminalOutput: { flex: 1, margin: 12, marginBottom: 8, borderRadius: 8, overflow: "hidden" },
+  terminalWebView: { flex: 1, backgroundColor: "transparent" },
   terminalComposer: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: 8, marginHorizontal: 12, marginBottom: 10, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, padding: 8 },
   terminalInput: { flex: 1, minHeight: 34, fontSize: 14, fontWeight: "600" },
   keybar: { minHeight: 54, flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 10, borderTopWidth: StyleSheet.hairlineWidth },
