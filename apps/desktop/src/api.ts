@@ -29,6 +29,7 @@ import type {
   PairingRequestListResult,
   PairingRequestResolveResult,
   RemoteHostRecord,
+  RemoteHostSessionState,
   Session,
   SessionCommandListResponse,
   SessionCommandResponse,
@@ -87,6 +88,12 @@ export type MeshStateSubscriptionHandlers = {
 
 export type WorkbenchSubscriptionHandlers = {
   onPatch: (patch: WorkbenchPatch) => void;
+  onOpen?: () => void;
+  onError?: (error?: unknown) => void;
+};
+
+export type RemoteHostStateSubscriptionHandlers = {
+  onState: (state: RemoteHostSessionState) => void;
   onOpen?: () => void;
   onError?: (error?: unknown) => void;
 };
@@ -239,6 +246,21 @@ export async function requestRemoteHostPairing(info: DaemonInfo, hostDeviceId: s
     controller_device_id: host.identity.device_id,
     scope: "full",
   });
+}
+
+export function subscribeRemoteHostSessionState(info: DaemonInfo, hostDeviceId: string, handlers: RemoteHostStateSubscriptionHandlers): EventSubscription {
+  const channel = new LocalHttpControlChannel(info);
+  const source = new EventSource(channel.url(`/v1/remote/hosts/${encodeURIComponent(hostDeviceId)}/state`, { stream: 1 }));
+  source.addEventListener("remote-host-state", (message) => {
+    try {
+      handlers.onState(JSON.parse((message as MessageEvent).data) as RemoteHostSessionState);
+    } catch (error) {
+      handlers.onError?.(error);
+    }
+  });
+  source.onopen = () => handlers.onOpen?.();
+  source.onerror = (event) => handlers.onError?.(event);
+  return { close: () => source.close() };
 }
 
 type RequestMethod = "GET" | "PATCH" | "POST" | "DELETE";
@@ -627,6 +649,16 @@ class RemoteDaemonControlChannel implements ControlChannel {
     return new WebSocket(`${this.baseUrl.replace(/^http/, "ws")}${remotePath}${separator}${params.toString()}`);
   }
 
+  url(path: string, params: Record<string, string | number | boolean | undefined> = {}): string {
+    const query = new URLSearchParams({ token: this.token });
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) query.set(key, String(value));
+    }
+    const remotePath = this.remotePath(path);
+    const separator = remotePath.includes("?") ? "&" : "?";
+    return `${this.baseUrl}${remotePath}${separator}${query.toString()}`;
+  }
+
   private remotePath(path: string): string {
     const suffix = path.replace(/^\/v1/, "");
     return `/v1/remote/hosts/${encodeURIComponent(this.hostDeviceId)}${suffix}`;
@@ -878,6 +910,10 @@ export class LocalCoreClient implements CoreClient {
 }
 
 class RemoteCoreClient extends LocalCoreClient {
+  constructor(private readonly remoteChannel: RemoteDaemonControlChannel) {
+    super(remoteChannel);
+  }
+
   health(): Promise<HealthResponse> {
     return Promise.reject(new Error("Remote Host health is not available through the control protocol."));
   }
@@ -930,8 +966,8 @@ class RemoteCoreClient extends LocalCoreClient {
     return Promise.reject(new Error("Remote session commands are not available through the control protocol."));
   }
 
-  mediaUrl(): string {
-    return "";
+  mediaUrl(sessionId: string, eventSeq: number, mediaId: string, download = false): string {
+    return this.remoteChannel.url(`/v1/sessions/${sessionId}/media/${eventSeq}/${encodeURIComponent(mediaId)}`, download ? { download: 1 } : {});
   }
 }
 

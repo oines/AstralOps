@@ -306,6 +306,49 @@ func TestRemoteHostProxyCreatesWorkspaceAndBrowsesHostFilesystem(t *testing.T) {
 	}
 }
 
+func TestRemoteHostProxyReadsSessionMedia(t *testing.T) {
+	hostApp, workspace := newRemoteControlHandlerTestApp(t)
+	session := hostApp.store.createSession(workspace, AgentCodex)
+	media := addControlMediaFixture(t, hostApp, workspace, session, []byte("remote-image-body"))
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
+	defer hostServer.Close()
+
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestCloudMembership(t, controllerStore, false, true)
+	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityMediaRead}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/sessions/"+session.ID+"/media/"+strconv.FormatInt(media.eventSeq, 10)+"/"+media.mediaID, nil)
+	resp := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("remote media status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if got := resp.Body.String(); got != "remote-image-body" {
+		t.Fatalf("remote media body = %q, want fixture bytes", got)
+	}
+	if contentType := resp.Header().Get("Content-Type"); contentType != "image/png" {
+		t.Fatalf("content type = %q, want image/png", contentType)
+	}
+	if strings.Contains(resp.Body.String(), media.path) {
+		t.Fatalf("remote media response leaked Host path: %s", resp.Body.String())
+	}
+}
+
+func TestRemoteHostRecordUsesActiveControlTransport(t *testing.T) {
+	host := remoteHostRecord{DeviceID: "dev_host", Status: remoteHostStatusLAN, Connection: remoteHostStatusLAN}
+	control := remoteHostControlState{State: remoteControlStateConnected, Transport: remoteHostStatusRelay}
+	next := remoteHostRecordWithControlState(host, control)
+	if next.Connection != remoteHostStatusRelay || next.Status != remoteHostStatusOnline {
+		t.Fatalf("record = %#v, want active relay transport to own displayed route", next)
+	}
+}
+
 func TestRemoteHostProxyRejectsUnknownHost(t *testing.T) {
 	controllerStore, err := loadStore(t.TempDir())
 	if err != nil {

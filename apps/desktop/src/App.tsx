@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { AlertTriangle, KeyRound, LoaderCircle, PanelLeft, PanelRight, RefreshCw, X } from "lucide-react";
-import { createLocalCoreClient, createRemoteCoreClient, isCoreRequestError, readMeshState, requestRemoteHostPairing, subscribeMeshState, type CoreClient, type EventSubscription } from "./api";
+import { createLocalCoreClient, createRemoteCoreClient, isCoreRequestError, readMeshState, requestRemoteHostPairing, subscribeMeshState, subscribeRemoteHostSessionState, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
 import { SettingsView } from "./components/SettingsView";
@@ -41,6 +41,7 @@ import type {
   PermissionMode,
   ReasoningEffort,
   RemoteHostRecord,
+  RemoteHostSessionState,
   RunMode,
   Session,
   SessionInputAttachment,
@@ -1117,6 +1118,7 @@ export function App(): React.JSX.Element {
     if (!daemonInfo || !localApi || !activeHostId) return;
     let subscription: EventSubscription | null = null;
     let workbenchSubscription: EventSubscription | null = null;
+    let hostSessionSubscription: EventSubscription | null = null;
     let cancelled = false;
     let resyncOnOpen = false;
     sessionViewRefreshGenerationRef.current += 1;
@@ -1133,6 +1135,16 @@ export function App(): React.JSX.Element {
     setConnection(activeHostNeedsPairing ? "connected" : "booting");
     setError("");
     clearDisplayedWorkbenchState();
+
+    if (!activeHostIsLocal && !activeHostNeedsPairing) {
+      hostSessionSubscription = subscribeRemoteHostSessionState(daemonInfo, activeHostId, {
+        onState: (state) => {
+          if (!isCurrentHost()) return;
+          setConnection(connectionStateFromRemoteHostSession(state));
+        },
+        onError: () => undefined,
+      });
+    }
 
     async function loadSelectedHost(): Promise<void> {
       if (activeHostNeedsPairing) {
@@ -1151,6 +1163,7 @@ export function App(): React.JSX.Element {
           onPatch: (patch) => {
             if (!isCurrentHost()) return;
             applyWorkbenchPatch(patch);
+            setConnection("connected");
           },
           onOpen: () => {
             if (!isCurrentHost()) return;
@@ -1159,12 +1172,13 @@ export function App(): React.JSX.Element {
           onError: () => {
             if (!isCurrentHost()) return;
             resyncOnOpen = true;
-            setConnection("reconnecting");
+            if (activeHostIsLocal) setConnection("reconnecting");
           },
         });
         subscription = client.subscribeEvents(afterSeq, {
           onEvent: (event) => {
             if (!isCurrentHost()) return;
+            setConnection("connected");
             applyHostEventState(event, client, refreshGeneration);
             if (activeHostIsLocal && event.kind.startsWith("control.pairing.")) {
               void refreshRemoteHosts();
@@ -1189,7 +1203,7 @@ export function App(): React.JSX.Element {
             if (!isCurrentHost()) return;
             if (event instanceof SyntaxError) setError("bad SSE event payload");
             resyncOnOpen = true;
-            setConnection("reconnecting");
+            if (activeHostIsLocal) setConnection("reconnecting");
           },
         });
         setConnection("connected");
@@ -1212,6 +1226,7 @@ export function App(): React.JSX.Element {
       cancelled = true;
       subscription?.close();
       workbenchSubscription?.close();
+      hostSessionSubscription?.close();
       if (sseFrameRef.current !== null) {
         window.cancelAnimationFrame(sseFrameRef.current);
         sseFrameRef.current = null;
@@ -1648,6 +1663,23 @@ function remoteHostControlTone(host: RemoteHostRecord, override?: RemoteAuthoriz
       return "warning";
     default:
       return "muted";
+  }
+}
+
+function connectionStateFromRemoteHostSession(state: RemoteHostSessionState): ConnectionState {
+  switch (state.state) {
+    case "live":
+      return "connected";
+    case "connecting":
+      return "booting";
+    case "reconnecting":
+      return "reconnecting";
+    case "failed":
+    case "needs_pairing":
+    case "revoked":
+      return "failed";
+    default:
+      return "booting";
   }
 }
 

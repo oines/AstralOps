@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,6 +85,7 @@ func (a *app) buildRemoteHostRecords(ctx context.Context, discover bool) []remot
 		} else if a.remoteManager != nil {
 			host.Control = a.remoteManager.controlState(host.DeviceID)
 		}
+		host = remoteHostRecordWithControlState(host, host.Control)
 		out = append(out, host)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -196,6 +198,9 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 			continue
 		}
 		known = a.rememberRemoteHostLANRoute(hostInfo, candidate.BaseURL, known)
+		if a.remoteManager != nil && a.remoteManager.lanSuppressed(candidate.DeviceID) {
+			continue
+		}
 		if a.remoteManager != nil {
 			a.remoteManager.clearLANFailure(candidate.DeviceID)
 		}
@@ -208,6 +213,23 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 		next.PairingStatus = existing.PairingStatus
 		hosts[candidate.DeviceID] = next
 	}
+}
+
+func remoteHostRecordWithControlState(host remoteHostRecord, control remoteHostControlState) remoteHostRecord {
+	switch control.State {
+	case remoteControlStateConnecting, remoteControlStateConnected, remoteControlStateReconnecting:
+	default:
+		return host
+	}
+	switch control.Transport {
+	case remoteHostStatusLAN:
+		host.Status = remoteHostStatusLAN
+		host.Connection = remoteHostStatusLAN
+	case remoteHostStatusRelay:
+		host.Status = remoteHostStatusOnline
+		host.Connection = remoteHostStatusRelay
+	}
+	return host
 }
 
 func remoteHostRecordFromCloudDevice(device CloudDeviceRecord, existing remoteHostRecord) remoteHostRecord {
@@ -449,6 +471,8 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityHostManage, ControlActionHostPairingDeny, map[string]any{"request_id": route[2]})
 	case len(route) == 3 && route[0] == "sessions" && route[2] == "view" && r.Method == http.MethodGet:
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreRead, ControlActionSessionView, map[string]any{"session_id": route[1]})
+	case len(route) == 5 && route[0] == "sessions" && route[2] == "media" && r.Method == http.MethodGet:
+		a.handleRemoteSessionMedia(w, r, hostDeviceID, route[1], route[3], route[4])
 	case len(route) == 3 && route[0] == "sessions" && route[2] == "input" && r.Method == http.MethodPost:
 		var req struct {
 			Input           string            `json:"input"`
@@ -526,6 +550,56 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func (a *app) handleRemoteSessionMedia(w http.ResponseWriter, r *http.Request, hostDeviceID, sessionID, seqText, mediaID string) {
+	seq, err := strconv.ParseInt(seqText, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid media reference", "code": "media_reference_invalid"})
+		return
+	}
+	download := r.URL.Query().Get("download") == "1"
+	capability := CapabilityMediaRead
+	action := ControlActionMediaRead
+	if download {
+		capability = CapabilityMediaDownload
+		action = ControlActionMediaDownload
+	}
+	response, err := a.remoteControlResponse(hostDeviceID, capability, action, map[string]any{
+		"session_id": sessionID,
+		"event_seq":  seq,
+		"media_id":   mediaID,
+	})
+	if err != nil {
+		writeRemoteHostError(w, err)
+		return
+	}
+	if !response.OK {
+		writeControlHTTPResult(w, response, action)
+		return
+	}
+	var result mediaReadResult
+	body, err := json.Marshal(response.Result)
+	if err != nil {
+		writeRemoteHostError(w, err)
+		return
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		writeRemoteHostError(w, err)
+		return
+	}
+	content, err := base64.StdEncoding.DecodeString(result.ContentBase64)
+	if err != nil {
+		writeRemoteHostError(w, newActionError(http.StatusBadGateway, "remote_media_invalid", "remote media response is invalid"))
+		return
+	}
+	if result.MIMEType != "" {
+		w.Header().Set("Content-Type", result.MIMEType)
+	}
+	if download {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", result.Name))
+	}
+	_, _ = w.Write(content)
 }
 
 func (a *app) writeRemoteWorkbenchResult(w http.ResponseWriter, hostDeviceID string) {

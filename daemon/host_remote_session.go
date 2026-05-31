@@ -203,7 +203,7 @@ func (s *hostRemoteSession) Request(ctx context.Context, capability, action stri
 	s.setConnectingIfNotLive()
 	response, err := s.manager.lower.Request(ctx, s.hostDeviceID, capability, action, params)
 	if err != nil {
-		s.setHostState(hostRemoteStateFailed, "", err)
+		s.setHostState(hostRemoteRequestFailureState(err), "", err)
 		return ControlResponse{}, err
 	}
 	if response.Error != nil && response.Error.Code == controlAuthorizationRequiredCode {
@@ -267,6 +267,7 @@ func (s *hostRemoteSession) SubscribeWorkbench(ctx context.Context) remoteHostEv
 			}
 			stream, err := s.subscribeEventsOnce(ctx, eventSubscriptionParams{})
 			if err != nil {
+				s.setHostState(hostRemoteStateReconnecting, "", err)
 				s.setWorkbenchState(hostWorkbenchStateResyncing, err)
 				sendRemoteHostStreamMessage(ctx, done, out, remoteHostStreamMessage{Event: "workbench.error", Payload: map[string]string{"error": err.Error()}})
 				if !sleepRemoteHostStream(ctx, done, backoff) {
@@ -286,6 +287,7 @@ func (s *hostRemoteSession) SubscribeWorkbench(ctx context.Context) remoteHostEv
 				case _, ok := <-stream.Events:
 					if !ok {
 						stream.Close()
+						s.setHostState(hostRemoteStateReconnecting, "", errors.New("remote workbench stream closed"))
 						s.setWorkbenchState(hostWorkbenchStateResyncing, errors.New("remote workbench stream closed"))
 						if !sleepRemoteHostStream(ctx, done, backoff) {
 							return
@@ -306,6 +308,25 @@ func (s *hostRemoteSession) SubscribeWorkbench(ctx context.Context) remoteHostEv
 			once.Do(func() { close(done) })
 		},
 	}
+}
+
+func hostRemoteRequestFailureState(err error) string {
+	var actionErr *actionError
+	if !errors.As(err, &actionErr) {
+		return hostRemoteStateReconnecting
+	}
+	switch actionErr.Code {
+	case controlAuthorizationRequiredCode:
+		return hostRemoteStateNeedsPairing
+	case "known_host_revoked", "cloud_device_revoked":
+		return hostRemoteStateRevoked
+	case "remote_host_unknown":
+		return hostRemoteStateFailed
+	}
+	if actionErr.Status >= http.StatusBadRequest && actionErr.Status < http.StatusInternalServerError {
+		return hostRemoteStateFailed
+	}
+	return hostRemoteStateReconnecting
 }
 
 func (s *hostRemoteSession) SubscribeEvents(ctx context.Context, params eventSubscriptionParams) remoteHostEventStream {

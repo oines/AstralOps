@@ -139,13 +139,13 @@ func (m *remoteControlManager) setAllControlStates(state string, err error) {
 		return
 	}
 	m.mu.Lock()
-	ids := make([]string, 0, len(m.states))
-	for id := range m.states {
-		ids = append(ids, id)
+	states := make(map[string]remoteHostControlState, len(m.states))
+	for id, current := range m.states {
+		states[id] = current
 	}
 	m.mu.Unlock()
-	for _, id := range ids {
-		m.setControlState(id, state, controlClientTarget{}, err)
+	for id, current := range states {
+		m.setControlState(id, state, controlClientTargetFromTransport(current.Transport), err)
 	}
 }
 
@@ -189,6 +189,17 @@ func remoteControlTransport(target controlClientTarget) string {
 		return remoteHostStatusLAN
 	}
 	return ""
+}
+
+func controlClientTargetFromTransport(transport string) controlClientTarget {
+	switch transport {
+	case remoteHostStatusRelay:
+		return controlClientTarget{UseRelay: true}
+	case remoteHostStatusLAN:
+		return controlClientTarget{BaseURL: "lan"}
+	default:
+		return controlClientTarget{}
+	}
 }
 
 func (a *app) remoteControlManager() *remoteControlManager {
@@ -469,12 +480,18 @@ func (m *remoteControlManager) Invalidate(hostDeviceID, reason string) {
 	}
 	m.mu.Lock()
 	session := m.sessions[hostDeviceID]
+	target := controlClientTarget{}
+	if session != nil {
+		target = session.target
+	} else if current, ok := m.states[hostDeviceID]; ok {
+		target = controlClientTargetFromTransport(current.Transport)
+	}
 	delete(m.sessions, hostDeviceID)
 	m.mu.Unlock()
 	if session != nil {
 		session.closeWithError(fmt.Errorf("remote control session invalidated: %s", reason))
 	}
-	m.setControlState(hostDeviceID, remoteControlStateReconnecting, controlClientTarget{}, fmt.Errorf("%s", reason))
+	m.setControlState(hostDeviceID, remoteControlStateReconnecting, target, fmt.Errorf("%s", reason))
 	if m.app != nil {
 		m.app.refreshMeshStateAsync(true)
 	}
