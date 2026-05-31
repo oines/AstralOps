@@ -443,10 +443,13 @@ func (a *app) runRemoteWorkspaceExecAt(ctx context.Context, ws Workspace, comman
 }
 
 type ptyClientMessage struct {
-	Type string `json:"type"`
-	Data string `json:"data,omitempty"`
-	Cols uint16 `json:"cols,omitempty"`
-	Rows uint16 `json:"rows,omitempty"`
+	Type         string `json:"type"`
+	Data         string `json:"data,omitempty"`
+	Cols         uint16 `json:"cols,omitempty"`
+	Rows         uint16 `json:"rows,omitempty"`
+	ViewerID     string `json:"viewer_id,omitempty"`
+	InputLeaseID string `json:"input_lease_id,omitempty"`
+	HeartbeatSeq int64  `json:"heartbeat_seq,omitempty"`
 }
 
 func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Workspace) {
@@ -480,15 +483,15 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 			return
 		}
 	}
-	_ = conn.WriteJSON(terminalReadySocketPayload(open.TerminalID, open.Shell, open.CWD, open.OutputSeq))
-
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	localControl := newLocalPTYControlConnection(ctx, cancel, controllerID, conn)
-	if _, err := terminals.attach(controllerID, localControl, terminalAttachParams{TerminalID: open.TerminalID, AfterSeq: afterSeq}); err != nil {
+	attach, err := terminals.attach(controllerID, localControl, terminalAttachParams{TerminalID: open.TerminalID, AfterSeq: afterSeq})
+	if err != nil {
 		_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
+	_ = conn.WriteJSON(terminalReadySocketPayload(open.TerminalID, open.Shell, open.CWD, attach.OutputSeq, attach.ViewerID, attach.InputLeaseID))
 	defer func() {
 		_, _ = terminals.detach(controllerID, localControl, terminalDetachParams{TerminalID: open.TerminalID})
 	}()
@@ -505,11 +508,17 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 		}
 		switch message.Type {
 		case "input":
-			_, _ = terminals.input(r.Context(), controllerID, terminalInputParams{TerminalID: open.TerminalID, Data: message.Data})
+			if _, err := terminals.input(r.Context(), controllerID, terminalInputParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, Data: message.Data}); err != nil {
+				_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+			}
 		case "resize":
 			if message.Cols > 0 && message.Rows > 0 {
-				_, _ = terminals.resize(r.Context(), controllerID, terminalResizeParams{TerminalID: open.TerminalID, Cols: message.Cols, Rows: message.Rows})
+				if _, err := terminals.resize(r.Context(), controllerID, terminalResizeParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, Cols: message.Cols, Rows: message.Rows}); err != nil {
+					_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+				}
 			}
+		case "heartbeat_ack":
+			_, _ = terminals.heartbeatAck(controllerID, terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: message.HeartbeatSeq})
 		case "close":
 			_, _ = terminals.close(r.Context(), controllerID, terminalCloseParams{TerminalID: open.TerminalID})
 			return
@@ -568,6 +577,10 @@ func (c *localPTYControlConnection) writePlain(frame controlPlainFrame) {
 	switch frame.Type {
 	case terminalFrameOutput:
 		if payload := terminalOutputSocketPayload(frame.Terminal); payload != nil {
+			_ = c.socket.WriteJSON(payload)
+		}
+	case terminalFrameHeartbeat:
+		if payload := terminalHeartbeatSocketPayload(frame.Terminal); payload != nil {
 			_ = c.socket.WriteJSON(payload)
 		}
 	case terminalFrameClosed:

@@ -650,7 +650,7 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 	defer terminal.Detach()
 
 	localWriter := &remotePTYLocalWriter{}
-	localWriter.write(local, terminalReadySocketPayload(terminal.terminalID, terminal.shell, terminal.cwd, terminal.outputSeq))
+	localWriter.write(local, terminalReadySocketPayload(terminal.terminalID, terminal.shell, terminal.cwd, terminal.outputSeq, terminal.viewerID, terminal.inputLeaseID))
 
 	done := make(chan struct{})
 	go func() {
@@ -666,6 +666,10 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 			switch frame.Type {
 			case terminalFrameOutput:
 				if payload := terminalOutputSocketPayload(frame.Terminal); payload != nil {
+					localWriter.write(local, payload)
+				}
+			case terminalFrameHeartbeat:
+				if payload := terminalHeartbeatSocketPayload(frame.Terminal); payload != nil {
 					localWriter.write(local, payload)
 				}
 			case terminalFrameClosed:
@@ -736,7 +740,7 @@ func remoteTerminalHandleClientMessage(conn controlClientFrameConn, st *store, t
 			RequestID:  "remote_pty_input_" + randomID(8),
 			Capability: CapabilityTerminalInput,
 			Action:     ControlActionTerminalInput,
-			Params:     map[string]any{"terminal_id": terminalID, "data": message.Data},
+			Params:     map[string]any{"terminal_id": terminalID, "viewer_id": message.ViewerID, "input_lease_id": message.InputLeaseID, "data": message.Data},
 		})
 	case "resize":
 		if message.Cols > 0 && message.Rows > 0 {
@@ -744,7 +748,7 @@ func remoteTerminalHandleClientMessage(conn controlClientFrameConn, st *store, t
 				RequestID:  "remote_pty_resize_" + randomID(8),
 				Capability: CapabilityTerminalInput,
 				Action:     ControlActionTerminalResize,
-				Params:     map[string]any{"terminal_id": terminalID, "cols": message.Cols, "rows": message.Rows},
+				Params:     map[string]any{"terminal_id": terminalID, "viewer_id": message.ViewerID, "input_lease_id": message.InputLeaseID, "cols": message.Cols, "rows": message.Rows},
 			})
 		}
 	case "close":
@@ -759,6 +763,8 @@ func remoteTerminalHandleManagedClientMessage(terminal *remoteManagedTerminalStr
 		return terminal.Input(message.Data)
 	case "resize":
 		return terminal.Resize(int(message.Cols), int(message.Rows))
+	case "heartbeat_ack":
+		return terminal.AckHeartbeat(message.HeartbeatSeq)
 	case "close":
 		return terminal.Close()
 	}

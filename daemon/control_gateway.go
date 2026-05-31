@@ -67,6 +67,7 @@ const (
 	ControlActionTerminalList               = "terminal.list"
 	ControlActionTerminalAttach             = "terminal.attach"
 	ControlActionTerminalDetach             = "terminal.detach"
+	ControlActionTerminalHeartbeatAck       = "terminal.heartbeat_ack"
 	ControlActionTerminalInput              = "terminal.input"
 	ControlActionTerminalResize             = "terminal.resize"
 	ControlActionTerminalClose              = "terminal.close"
@@ -166,7 +167,7 @@ func controlActionCapability(action string) string {
 		return CapabilityWorkspaceFilesWrite
 	case ControlActionWorkspaceExec:
 		return CapabilityWorkspaceExec
-	case ControlActionTerminalOpen, ControlActionTerminalList, ControlActionTerminalAttach, ControlActionTerminalDetach:
+	case ControlActionTerminalOpen, ControlActionTerminalList, ControlActionTerminalAttach, ControlActionTerminalDetach, ControlActionTerminalHeartbeatAck:
 		return CapabilityTerminalOpen
 	case ControlActionTerminalInput, ControlActionTerminalResize, ControlActionTerminalClose:
 		return CapabilityTerminalInput
@@ -518,6 +519,12 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 			return nil, err
 		}
 		return a.terminalManager().detach(req.ControllerDeviceID, conn, params)
+	case ControlActionTerminalHeartbeatAck:
+		var params terminalHeartbeatAckParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return a.terminalManager().heartbeatAck(req.ControllerDeviceID, params)
 	case ControlActionTerminalInput:
 		var params terminalInputParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

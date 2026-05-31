@@ -93,6 +93,8 @@ export type WorkbenchSubscriptionHandlers = {
 
 export type TerminalReadyPayload = {
   terminal_id?: string;
+  viewer_id?: string;
+  input_lease_id?: string;
   shell?: string;
   cwd?: string;
   output_seq?: number;
@@ -101,6 +103,7 @@ export type TerminalReadyPayload = {
 export type TerminalHandlers = {
   onOpen?: () => void;
   onReady?: (payload: TerminalReadyPayload) => void;
+  onHeartbeat?: (payload: { terminal_id?: string; viewer_id?: string; input_lease_id?: string; heartbeat_seq?: number; output_seq?: number }) => void;
   onOutput?: (data: string, outputSeq?: number) => void;
   onExit?: (payload: Record<string, unknown>) => void;
   onError?: (message: string) => void;
@@ -955,10 +958,33 @@ class WebSocketTerminalConnection implements TerminalConnection {
     };
     socket.onmessage = (event) => {
       try {
-        const message = JSON.parse(event.data as string) as { type: string; terminal_id?: string; data?: string; message?: string; shell?: string; cwd?: string; output_seq?: number };
+        const message = JSON.parse(event.data as string) as {
+          type: string;
+          terminal_id?: string;
+          viewer_id?: string;
+          input_lease_id?: string;
+          heartbeat_seq?: number;
+          data?: string;
+          message?: string;
+          shell?: string;
+          cwd?: string;
+          output_seq?: number;
+        };
         if (message.type === "ready") {
           logClientEvent("terminal.ready", { terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
-          handlers.onReady?.({ terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
+          handlers.onReady?.({ terminal_id: message.terminal_id, viewer_id: message.viewer_id, input_lease_id: message.input_lease_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
+        }
+        if (message.type === "heartbeat") {
+          if (message.viewer_id && message.input_lease_id && typeof message.heartbeat_seq === "number") {
+            this.send({ type: "heartbeat_ack", terminal_id: message.terminal_id, viewer_id: message.viewer_id, input_lease_id: message.input_lease_id, heartbeat_seq: message.heartbeat_seq });
+          }
+          handlers.onHeartbeat?.({
+            terminal_id: message.terminal_id,
+            viewer_id: message.viewer_id,
+            input_lease_id: message.input_lease_id,
+            heartbeat_seq: message.heartbeat_seq,
+            output_seq: message.output_seq,
+          });
         }
         if (message.type === "output" && message.data) handlers.onOutput?.(message.data, message.output_seq);
         if (message.type === "exit") {

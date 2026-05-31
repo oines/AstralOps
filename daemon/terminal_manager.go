@@ -17,10 +17,16 @@ const (
 	terminalStatusOpen              = "open"
 	terminalStatusClosed            = "closed"
 	terminalFrameOutput             = "terminal.output"
+	terminalFrameHeartbeat          = "terminal.heartbeat"
 	terminalFrameClosed             = "terminal.closed"
 	terminalOutputDisconnectedCode  = "terminal_output_disconnected"
 	terminalOutputDisconnectedText  = "terminal output stream disconnected"
+	terminalViewerRequiredCode      = "terminal_viewer_required"
+	terminalViewerNotReadyCode      = "terminal_viewer_not_ready"
+	terminalViewerMismatchCode      = "terminal_viewer_mismatch"
 	terminalOutputCoalesceWindow    = 25 * time.Millisecond
+	terminalHeartbeatInterval       = 3 * time.Second
+	terminalViewerAckTTL            = 12 * time.Second
 	defaultTerminalCols             = 100
 	defaultTerminalRows             = 28
 	terminalViewerBuffer            = 4096
@@ -75,8 +81,10 @@ type terminalOpenParams struct {
 }
 
 type terminalInputParams struct {
-	TerminalID string `json:"terminal_id"`
-	Data       string `json:"data,omitempty"`
+	TerminalID   string `json:"terminal_id"`
+	ViewerID     string `json:"viewer_id,omitempty"`
+	InputLeaseID string `json:"input_lease_id,omitempty"`
+	Data         string `json:"data,omitempty"`
 }
 
 type terminalAttachParams struct {
@@ -89,13 +97,22 @@ type terminalDetachParams struct {
 }
 
 type terminalResizeParams struct {
-	TerminalID string `json:"terminal_id"`
-	Cols       uint16 `json:"cols"`
-	Rows       uint16 `json:"rows"`
+	TerminalID   string `json:"terminal_id"`
+	ViewerID     string `json:"viewer_id,omitempty"`
+	InputLeaseID string `json:"input_lease_id,omitempty"`
+	Cols         uint16 `json:"cols"`
+	Rows         uint16 `json:"rows"`
 }
 
 type terminalCloseParams struct {
 	TerminalID string `json:"terminal_id"`
+}
+
+type terminalHeartbeatAckParams struct {
+	TerminalID   string `json:"terminal_id"`
+	ViewerID     string `json:"viewer_id"`
+	InputLeaseID string `json:"input_lease_id"`
+	HeartbeatSeq int64  `json:"heartbeat_seq"`
 }
 
 type terminalOpenResult struct {
@@ -136,20 +153,25 @@ type terminalAttachResult struct {
 	Target         string `json:"target"`
 	Status         string `json:"status"`
 	ViewerDeviceID string `json:"viewer_device_id"`
+	ViewerID       string `json:"viewer_id"`
+	InputLeaseID   string `json:"input_lease_id"`
 	ConnectionID   string `json:"connection_id"`
 	WriterDeviceID string `json:"writer_device_id,omitempty"`
 	OutputSeq      int64  `json:"output_seq"`
 }
 
 type terminalStreamFrame struct {
-	frameType   string `json:"-"`
-	TerminalID  string `json:"terminal_id"`
-	WorkspaceID string `json:"workspace_id"`
-	Target      string `json:"target"`
-	Status      string `json:"status"`
-	OutputSeq   int64  `json:"output_seq"`
-	Data        string `json:"data,omitempty"`
-	Reason      string `json:"reason,omitempty"`
+	frameType    string `json:"-"`
+	TerminalID   string `json:"terminal_id"`
+	WorkspaceID  string `json:"workspace_id"`
+	Target       string `json:"target"`
+	Status       string `json:"status"`
+	OutputSeq    int64  `json:"output_seq"`
+	ViewerID     string `json:"viewer_id,omitempty"`
+	InputLeaseID string `json:"input_lease_id,omitempty"`
+	HeartbeatSeq int64  `json:"heartbeat_seq,omitempty"`
+	Data         string `json:"data,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 type terminalViewer struct {
@@ -157,6 +179,16 @@ type terminalViewer struct {
 	mu                 sync.Mutex
 	connectionID       string
 	controllerDeviceID string
+	viewerID           string
+	inputLeaseID       string
+	terminalID         string
+	workspaceID        string
+	target             string
+	status             string
+	outputSeq          int64
+	heartbeatSeq       int64
+	lastAckSeq         int64
+	lastAckAt          time.Time
 	conn               controlConnection
 	frames             chan terminalStreamFrame
 	closed             bool
@@ -315,6 +347,9 @@ func (m *terminalManager) input(ctx context.Context, controllerDeviceID string, 
 	if err != nil {
 		return terminalAckResult{}, err
 	}
+	if err := session.validateViewerLease(controllerDeviceID, params.ViewerID, params.InputLeaseID); err != nil {
+		return terminalAckResult{}, err
+	}
 	if params.Data == "" {
 		return session.ack(), nil
 	}
@@ -347,6 +382,9 @@ func (m *terminalManager) resize(ctx context.Context, controllerDeviceID string,
 	if params.Cols == 0 || params.Rows == 0 {
 		return terminalAckResult{}, newActionError(http.StatusBadRequest, "terminal_size_invalid", "terminal cols and rows are required")
 	}
+	if err := session.validateViewerLease(controllerDeviceID, params.ViewerID, params.InputLeaseID); err != nil {
+		return terminalAckResult{}, err
+	}
 	if session.sshTerminalOpen {
 		if session.sshWorkspace == nil || m.app.ssh == nil {
 			return terminalAckResult{}, newActionError(http.StatusServiceUnavailable, "ssh_unavailable", "SSH manager is not available")
@@ -366,6 +404,14 @@ func (m *terminalManager) resize(ctx context.Context, controllerDeviceID string,
 		return terminalAckResult{}, err
 	}
 	return session.ack(), nil
+}
+
+func (m *terminalManager) heartbeatAck(controllerDeviceID string, params terminalHeartbeatAckParams) (terminalAckResult, error) {
+	session, err := m.openSession(params.TerminalID)
+	if err != nil {
+		return terminalAckResult{}, err
+	}
+	return session.heartbeatAck(controllerDeviceID, params)
 }
 
 func (m *terminalManager) close(ctx context.Context, controllerDeviceID string, params terminalCloseParams) (terminalAckResult, error) {
@@ -582,6 +628,7 @@ func (s *terminalSession) attachViewer(viewer *terminalViewer, afterSeq int64) (
 		return terminalAttachResult{}, nil, nil, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
 	}
 	s.cancelRetentionLocked()
+	viewer.bindTerminalLocked(s)
 	replaced := s.viewers[viewer.connectionID]
 	s.viewers[viewer.connectionID] = viewer
 	return s.attachResultLocked(viewer.connectionID, viewer.controllerDeviceID), replaced, s.outputHistoryAfterLocked(afterSeq), nil
@@ -608,6 +655,77 @@ func (s *terminalSession) sendToViewers(frame terminalStreamFrame, viewers []*te
 			removed.fail(terminalOutputDisconnectedCode, terminalOutputDisconnectedText)
 		}
 	}
+}
+
+func (s *terminalSession) validateViewerLease(controllerDeviceID, viewerID, inputLeaseID string) error {
+	viewerID = strings.TrimSpace(viewerID)
+	inputLeaseID = strings.TrimSpace(inputLeaseID)
+	if viewerID == "" || inputLeaseID == "" {
+		return newActionError(http.StatusConflict, terminalViewerRequiredCode, "terminal input requires an attached healthy viewer")
+	}
+	s.mu.Lock()
+	if s.status != terminalStatusOpen {
+		s.mu.Unlock()
+		return newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
+	}
+	viewer := s.viewerByIDLocked(viewerID)
+	s.mu.Unlock()
+	if viewer == nil {
+		return newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not attached")
+	}
+	viewer.mu.Lock()
+	defer viewer.mu.Unlock()
+	if viewer.closed {
+		return newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not attached")
+	}
+	if viewer.controllerDeviceID != controllerDeviceID || viewer.inputLeaseID != inputLeaseID {
+		return newActionError(http.StatusForbidden, terminalViewerMismatchCode, "terminal viewer lease does not match controller")
+	}
+	if viewer.lastAckAt.IsZero() || time.Since(viewer.lastAckAt) > terminalViewerAckTTL {
+		return newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal output is not synchronized; input is paused")
+	}
+	return nil
+}
+
+func (s *terminalSession) heartbeatAck(controllerDeviceID string, params terminalHeartbeatAckParams) (terminalAckResult, error) {
+	viewerID := strings.TrimSpace(params.ViewerID)
+	inputLeaseID := strings.TrimSpace(params.InputLeaseID)
+	if viewerID == "" || inputLeaseID == "" {
+		return terminalAckResult{}, newActionError(http.StatusBadRequest, terminalViewerRequiredCode, "terminal heartbeat ack requires viewer lease")
+	}
+	s.mu.Lock()
+	if s.status != terminalStatusOpen {
+		s.mu.Unlock()
+		return terminalAckResult{}, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
+	}
+	viewer := s.viewerByIDLocked(viewerID)
+	ack := s.ackLocked()
+	s.mu.Unlock()
+	if viewer == nil {
+		return terminalAckResult{}, newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not attached")
+	}
+	viewer.mu.Lock()
+	defer viewer.mu.Unlock()
+	if viewer.closed {
+		return terminalAckResult{}, newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not attached")
+	}
+	if viewer.controllerDeviceID != controllerDeviceID || viewer.inputLeaseID != inputLeaseID {
+		return terminalAckResult{}, newActionError(http.StatusForbidden, terminalViewerMismatchCode, "terminal viewer lease does not match controller")
+	}
+	if params.HeartbeatSeq > 0 && params.HeartbeatSeq >= viewer.lastAckSeq {
+		viewer.lastAckSeq = params.HeartbeatSeq
+	}
+	viewer.lastAckAt = time.Now().UTC()
+	return ack, nil
+}
+
+func (s *terminalSession) viewerByIDLocked(viewerID string) *terminalViewer {
+	for _, viewer := range s.viewers {
+		if viewer.viewerID == viewerID {
+			return viewer
+		}
+	}
+	return nil
 }
 
 func (s *terminalSession) rememberOutputLocked(frame terminalStreamFrame) {
@@ -670,12 +788,20 @@ func (s *terminalSession) streamFrameLocked(frameType, data, reason string) term
 }
 
 func (s *terminalSession) attachResultLocked(connectionID, viewerDeviceID string) terminalAttachResult {
+	viewerID := ""
+	inputLeaseID := ""
+	if viewer := s.viewers[connectionID]; viewer != nil {
+		viewerID = viewer.viewerID
+		inputLeaseID = viewer.inputLeaseID
+	}
 	return terminalAttachResult{
 		TerminalID:     s.id,
 		WorkspaceID:    s.workspaceID,
 		Target:         s.target,
 		Status:         s.status,
 		ViewerDeviceID: viewerDeviceID,
+		ViewerID:       viewerID,
+		InputLeaseID:   inputLeaseID,
 		ConnectionID:   connectionID,
 		WriterDeviceID: s.writerDeviceID,
 		OutputSeq:      s.outputSeq,
@@ -807,6 +933,10 @@ func (s *terminalSession) openResult() terminalOpenResult {
 func (s *terminalSession) ack() terminalAckResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.ackLocked()
+}
+
+func (s *terminalSession) ackLocked() terminalAckResult {
 	return terminalAckResult{TerminalID: s.id, Status: s.status, OutputSeq: s.outputSeq, WriterDeviceID: s.writerDeviceID}
 }
 
@@ -870,15 +1000,21 @@ func (s *terminalSession) viewerLifecycle(viewerDeviceID, connectionID, reason s
 }
 
 func newTerminalViewer(conn controlConnection) *terminalViewer {
+	now := time.Now().UTC()
 	return &terminalViewer{
 		connectionID:       conn.connectionID(),
 		controllerDeviceID: conn.controllerID(),
+		viewerID:           "viewer_" + randomID(12),
+		inputLeaseID:       "lease_" + randomID(16),
+		lastAckAt:          now,
 		conn:               conn,
 		frames:             make(chan terminalStreamFrame, terminalViewerBuffer),
 	}
 }
 
 func (v *terminalViewer) run() {
+	ticker := time.NewTicker(terminalHeartbeatInterval)
+	defer ticker.Stop()
 	var pending *terminalStreamFrame
 	for {
 		var frame terminalStreamFrame
@@ -886,11 +1022,16 @@ func (v *terminalViewer) run() {
 			frame = *pending
 			pending = nil
 		} else {
-			next, ok := <-v.frames
-			if !ok {
-				return
+			select {
+			case next, ok := <-v.frames:
+				if !ok {
+					return
+				}
+				frame = next
+			case <-ticker.C:
+				v.writeHeartbeat()
+				continue
 			}
-			frame = next
 		}
 		if frame.frameType != terminalFrameOutput {
 			v.writeFrame(frame)
@@ -904,8 +1045,46 @@ func (v *terminalViewer) run() {
 	}
 }
 
+func (v *terminalViewer) bindTerminalLocked(session *terminalSession) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.terminalID = session.id
+	v.workspaceID = session.workspaceID
+	v.target = session.target
+	v.status = session.status
+	v.outputSeq = session.outputSeq
+}
+
 func (v *terminalViewer) writeFrame(frame terminalStreamFrame) {
 	v.conn.writePlain(controlPlainFrame{Type: frame.frameType, Terminal: &frame})
+}
+
+func (v *terminalViewer) writeHeartbeat() {
+	frame, ok := v.heartbeatFrame()
+	if !ok {
+		return
+	}
+	v.writeFrame(frame)
+}
+
+func (v *terminalViewer) heartbeatFrame() (terminalStreamFrame, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed || v.terminalID == "" {
+		return terminalStreamFrame{}, false
+	}
+	v.heartbeatSeq++
+	return terminalStreamFrame{
+		frameType:    terminalFrameHeartbeat,
+		TerminalID:   v.terminalID,
+		WorkspaceID:  v.workspaceID,
+		Target:       v.target,
+		Status:       v.status,
+		OutputSeq:    v.outputSeq,
+		ViewerID:     v.viewerID,
+		InputLeaseID: v.inputLeaseID,
+		HeartbeatSeq: v.heartbeatSeq,
+	}, true
 }
 
 func (v *terminalViewer) coalesceOutput(first terminalStreamFrame) (terminalStreamFrame, terminalStreamFrame, bool) {
@@ -944,6 +1123,15 @@ func (v *terminalViewer) enqueue(frame terminalStreamFrame) bool {
 	defer v.mu.Unlock()
 	if v.closed {
 		return false
+	}
+	if frame.TerminalID != "" {
+		v.terminalID = frame.TerminalID
+		v.workspaceID = frame.WorkspaceID
+		v.target = frame.Target
+		v.status = frame.Status
+		if frame.OutputSeq > v.outputSeq {
+			v.outputSeq = frame.OutputSeq
+		}
 	}
 	select {
 	case v.frames <- frame:

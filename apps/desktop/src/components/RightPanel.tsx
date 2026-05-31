@@ -11,7 +11,7 @@ import "@xterm/xterm/css/xterm.css";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CoreClient } from "../api";
-import { TerminalViewerController } from "../terminalViewer";
+import { TerminalViewerController, type TerminalViewerHealth } from "../terminalViewer";
 import type { FileListResponse, HealthResponse, PanelTabKind, TerminalTab as HostTerminalTab, Workspace } from "../types";
 import {
   createPanelTab,
@@ -531,6 +531,8 @@ function TerminalTab({
   const workspaceId = workspace?.id ?? "";
   const workspaceRoot = workspace?.local_cwd ?? "";
   const theme = useSystemTerminalTheme();
+  const [viewerHealth, setViewerHealth] = useState<TerminalViewerHealth>("connecting");
+  const [blockedNotice, setBlockedNotice] = useState(false);
   const [fontId] = useState(() => storedTerminalPreference("astralops-terminal-font", "sf-mono"));
   const font = terminalFonts.find((item) => item.id === fontId) ?? terminalFonts[0];
 
@@ -569,6 +571,8 @@ function TerminalTab({
     connectionIdRef.current = connectionId;
     let disposed = false;
     let opened = false;
+    setViewerHealth("connecting");
+    setBlockedNotice(false);
     const term = new Terminal({
       cursorBlink: true,
       convertEol: true,
@@ -630,6 +634,15 @@ function TerminalTab({
           term.writeln("\r\n\x1b[31mPTY 连接失败\x1b[0m");
         }
       },
+      onHealthChange: (health) => {
+        if (!isCurrent()) return;
+        setViewerHealth(health);
+        if (health === "healthy") setBlockedNotice(false);
+      },
+      onInputBlocked: () => {
+        if (!isCurrent()) return;
+        setBlockedNotice(true);
+      },
     });
     terminalController.start();
 
@@ -653,7 +666,12 @@ function TerminalTab({
 
   return (
     <div className="flex h-full flex-col" style={{ backgroundColor: theme.background }}>
-      <div className="min-h-0 flex-1 p-3">
+      <div className="relative min-h-0 flex-1 p-3">
+        {viewerHealth === "degraded" || viewerHealth === "reconnecting" || blockedNotice ? (
+          <div className="absolute left-5 right-5 top-5 z-10 rounded-lg border border-[#f0d6a7] bg-[#fff8ec] px-3 py-2 text-[12px] font-semibold text-[#9a5b14] shadow-[0_8px_24px_rgba(0,0,0,0.12)]">
+            {viewerHealth === "reconnecting" ? "终端正在重连，输入已暂停" : "终端画面未同步，输入已暂停"}
+          </div>
+        ) : null}
         <div ref={hostRef} className="h-full overflow-hidden select-text" style={{ backgroundColor: theme.background }} />
       </div>
     </div>

@@ -1,6 +1,9 @@
 import type { CoreClient, TerminalConnection, TerminalReadyPayload } from "./api";
 
 const terminalReconnectDelaysMs = [400, 800, 1500, 2500, 4000];
+const terminalViewerStaleMs = 9000;
+
+export type TerminalViewerHealth = "connecting" | "healthy" | "reconnecting" | "degraded" | "exited";
 
 type TerminalViewerControllerOptions = {
   api: CoreClient;
@@ -11,6 +14,8 @@ type TerminalViewerControllerOptions = {
   onOutput?: (data: string) => void;
   onExit?: (payload: Record<string, unknown>) => void;
   onError?: (message: string) => void;
+  onHealthChange?: (health: TerminalViewerHealth) => void;
+  onInputBlocked?: () => void;
 };
 
 export class TerminalViewerController {
@@ -22,6 +27,10 @@ export class TerminalViewerController {
   private lastOutputSeq = 0;
   private lastCols = 0;
   private lastRows = 0;
+  private health: TerminalViewerHealth = "connecting";
+  private lastHealthyAt = 0;
+  private healthTimer: number | null = null;
+  private lastBlockedNoticeAt = 0;
 
   constructor(private readonly options: TerminalViewerControllerOptions) {}
 
@@ -33,13 +42,19 @@ export class TerminalViewerController {
     if (!this.connection) {
       this.connect();
     }
+    if (!this.canSendInput()) {
+      this.notifyInputBlocked();
+      return;
+    }
     this.connection?.input(data);
   }
 
   resize(cols: number, rows: number): void {
     this.lastCols = cols;
     this.lastRows = rows;
-    this.connection?.resize(cols, rows);
+    if (this.canSendInput()) {
+      this.connection?.resize(cols, rows);
+    }
   }
 
   dispose(): void {
@@ -48,12 +63,17 @@ export class TerminalViewerController {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.healthTimer !== null) {
+      window.clearTimeout(this.healthTimer);
+      this.healthTimer = null;
+    }
     this.connection?.close();
     this.connection = null;
   }
 
   private connect(): void {
     if (this.disposed || this.exited || this.connection) return;
+    this.setHealth(this.reconnectAttempt > 0 ? "reconnecting" : "connecting");
     const afterSeq = this.lastOutputSeq > 0 ? this.lastOutputSeq : undefined;
     this.connection = this.options.api.terminal.openWorkspaceTerminal(
       this.options.workspaceId,
@@ -63,21 +83,31 @@ export class TerminalViewerController {
           this.reconnectAttempt = 0;
           this.options.onOpen?.();
           if (this.lastCols > 0 && this.lastRows > 0) {
-            this.connection?.resize(this.lastCols, this.lastRows);
+            this.resize(this.lastCols, this.lastRows);
           }
         },
         onReady: (payload) => {
           if (this.disposed || this.exited) return;
+          this.markHealthy();
+          if (this.lastCols > 0 && this.lastRows > 0) {
+            this.resize(this.lastCols, this.lastRows);
+          }
           this.options.onReady?.(payload);
+        },
+        onHeartbeat: () => {
+          if (this.disposed || this.exited) return;
+          this.markHealthy();
         },
         onOutput: (data, outputSeq) => {
           if (this.disposed || this.exited) return;
           if (!this.shouldAcceptOutput(outputSeq)) return;
+          this.markHealthy();
           this.options.onOutput?.(data);
         },
         onExit: (payload) => {
           if (this.disposed) return;
           this.exited = true;
+          this.setHealth("exited");
           this.options.onExit?.(payload);
         },
         onError: (message) => {
@@ -89,10 +119,14 @@ export class TerminalViewerController {
           const failedConnection = this.connection;
           this.connection = null;
           failedConnection?.close();
+          this.setHealth("reconnecting");
           this.scheduleReconnect();
         },
         onClose: () => {
           this.connection = null;
+          if (!this.disposed && !this.exited) {
+            this.setHealth("reconnecting");
+          }
           this.scheduleReconnect();
         },
       },
@@ -119,5 +153,43 @@ export class TerminalViewerController {
     }
     this.lastOutputSeq = outputSeq;
     return true;
+  }
+
+  private markHealthy(): void {
+    this.lastHealthyAt = Date.now();
+    this.setHealth("healthy");
+    this.scheduleHealthCheck();
+  }
+
+  private scheduleHealthCheck(): void {
+    if (this.healthTimer !== null) {
+      window.clearTimeout(this.healthTimer);
+    }
+    this.healthTimer = window.setTimeout(() => {
+      this.healthTimer = null;
+      if (this.disposed || this.exited) return;
+      if (Date.now() - this.lastHealthyAt > terminalViewerStaleMs) {
+        this.setHealth(this.connection ? "degraded" : "reconnecting");
+      } else {
+        this.scheduleHealthCheck();
+      }
+    }, terminalViewerStaleMs + 250);
+  }
+
+  private setHealth(next: TerminalViewerHealth): void {
+    if (this.health === next) return;
+    this.health = next;
+    this.options.onHealthChange?.(next);
+  }
+
+  private canSendInput(): boolean {
+    return this.connection !== null && this.health === "healthy" && Date.now() - this.lastHealthyAt <= terminalViewerStaleMs;
+  }
+
+  private notifyInputBlocked(): void {
+    const now = Date.now();
+    if (now - this.lastBlockedNoticeAt < 1000) return;
+    this.lastBlockedNoticeAt = now;
+    this.options.onInputBlocked?.();
   }
 }

@@ -929,6 +929,7 @@ export type ControlAction =
   | "terminal.list"
   | "terminal.attach"
   | "terminal.detach"
+  | "terminal.heartbeat_ack"
   | "terminal.input"
   | "terminal.resize"
   | "terminal.close"
@@ -949,6 +950,8 @@ export type TerminalOpenParams = {
 
 export type TerminalInputParams = {
   terminal_id: string;
+  viewer_id?: string;
+  input_lease_id?: string;
   data?: string;
 };
 
@@ -963,12 +966,21 @@ export type TerminalDetachParams = {
 
 export type TerminalResizeParams = {
   terminal_id: string;
+  viewer_id?: string;
+  input_lease_id?: string;
   cols: number;
   rows: number;
 };
 
 export type TerminalCloseParams = {
   terminal_id: string;
+};
+
+export type TerminalHeartbeatAckParams = {
+  terminal_id: string;
+  viewer_id: string;
+  input_lease_id: string;
+  heartbeat_seq: number;
 };
 
 export type TerminalOpenResult = {
@@ -997,6 +1009,8 @@ export type TerminalAttachResult = {
   target: WorkspaceTarget;
   status: "open" | "closed";
   viewer_device_id: string;
+  viewer_id: string;
+  input_lease_id: string;
   connection_id: string;
   writer_device_id?: string;
   output_seq: number;
@@ -1008,6 +1022,9 @@ export type TerminalStreamFrame = {
   target: WorkspaceTarget;
   status: "open" | "closed";
   output_seq: number;
+  viewer_id?: string;
+  input_lease_id?: string;
+  heartbeat_seq?: number;
   data?: string;
   reason?: string;
 };
@@ -1357,6 +1374,10 @@ export type ControlPlainFrame =
       terminal: TerminalStreamFrame;
     }
   | {
+      type: "terminal.heartbeat";
+      terminal: TerminalStreamFrame;
+    }
+  | {
       type: "terminal.closed";
       terminal: TerminalStreamFrame;
     }
@@ -1531,6 +1552,7 @@ export type ControlActionParamMap = {
   "terminal.list": undefined;
   "terminal.attach": TerminalAttachParams;
   "terminal.detach": TerminalDetachParams;
+  "terminal.heartbeat_ack": TerminalHeartbeatAckParams;
   "terminal.input": TerminalInputParams;
   "terminal.resize": TerminalResizeParams;
   "terminal.close": TerminalCloseParams;
@@ -1584,6 +1606,7 @@ export type ControlActionResultMap = {
   "terminal.list": TerminalListResult;
   "terminal.attach": TerminalAttachResult;
   "terminal.detach": TerminalAttachResult;
+  "terminal.heartbeat_ack": TerminalAckResult;
   "terminal.input": TerminalAckResult;
   "terminal.resize": TerminalAckResult;
   "terminal.close": TerminalAckResult;

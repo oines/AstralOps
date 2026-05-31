@@ -1273,6 +1273,9 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 	if err := controlClientSmokeResponseError("terminal_attach", attach); err != nil {
 		return steps, err
 	}
+	attachResult := mapValue(attach.Result)
+	viewerID := stringValue(attachResult["viewer_id"])
+	inputLeaseID := stringValue(attachResult["input_lease_id"])
 
 	marker := "terminal-smoke-" + randomID(8)
 	inputReq := ControlRequest{
@@ -1280,8 +1283,10 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 		Capability: CapabilityTerminalInput,
 		Action:     ControlActionTerminalInput,
 		Params: map[string]any{
-			"terminal_id": terminalID,
-			"data":        "printf '%s\\n' " + marker + "\n",
+			"terminal_id":    terminalID,
+			"viewer_id":      viewerID,
+			"input_lease_id": inputLeaseID,
+			"data":           "printf '%s\\n' " + marker + "\n",
 		},
 	}
 	inputReq.ControllerDeviceID = st.deviceIdentity.DeviceID
@@ -1320,6 +1325,16 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 			outputBytes += len(frame.Terminal.Data)
 			if strings.Contains(frame.Terminal.Data, marker) {
 				sawMarker = true
+			}
+		case terminalFrameHeartbeat:
+			if frame.Terminal != nil && frame.Terminal.TerminalID == terminalID && frame.Terminal.ViewerID != "" && frame.Terminal.InputLeaseID != "" {
+				_ = conn.WritePlain(controlPlainFrame{Type: "request", Request: &ControlRequest{
+					RequestID:          "smoke_terminal_heartbeat_ack_" + randomID(8),
+					ControllerDeviceID: st.deviceIdentity.DeviceID,
+					Capability:         CapabilityTerminalOpen,
+					Action:             ControlActionTerminalHeartbeatAck,
+					Params:             map[string]any{"terminal_id": terminalID, "viewer_id": frame.Terminal.ViewerID, "input_lease_id": frame.Terminal.InputLeaseID, "heartbeat_seq": frame.Terminal.HeartbeatSeq},
+				}})
 			}
 		case terminalFrameClosed:
 			err := fmt.Errorf("terminal closed before smoke output was observed")
@@ -1858,6 +1873,7 @@ func controlClientTerminalAttachSmokeSummary(response ControlResponse) map[strin
 		"target":           stringValue(result["target"]),
 		"status":           stringValue(result["status"]),
 		"viewer_device_id": stringValue(result["viewer_device_id"]),
+		"viewer_id":        stringValue(result["viewer_id"]),
 		"connection_id":    stringValue(result["connection_id"]),
 		"writer_device_id": stringValue(result["writer_device_id"]),
 		"output_seq":       int64(numberValue(result["output_seq"])),

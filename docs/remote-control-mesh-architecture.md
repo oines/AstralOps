@@ -1365,6 +1365,7 @@ PTY manager 目标形态：
 ```text
 terminal.open -> terminal_id
 terminal.attach
+terminal.heartbeat_ack
 terminal.input
 terminal.resize
 terminal.output stream
@@ -1377,10 +1378,12 @@ terminal.close
 terminal.open
 terminal.attach
 terminal.detach
+terminal.heartbeat_ack
 terminal.input
 terminal.resize
 terminal.close
 terminal.output stream over E2EE control channel
+viewer lease + heartbeat ack input gate
 local terminal cwd confinement
 bounded terminal.input payload
 bounded terminal.output frame size
@@ -1390,7 +1393,9 @@ opened/attached/detached/closed lifecycle events only
 trust revocation detaches that Controller without closing Host-owned PTY
 ```
 
-这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.attach` 必须发生在已完成握手的 encrypted control WebSocket 上，因为 PTY 输出只能回到这条 E2EE channel。`terminal.open` 的本地 cwd 必须和 workspace files/exec 一样做 workspace root confinement，包括拒绝通过 symlink 逃逸到 root 外。`terminal.open` response 和 terminal lifecycle event 里的 `cwd` 只能是 workspace-relative display cwd，不能暴露 Desktop 本机绝对路径或 SSH remote cwd；真实执行 cwd 只留在 Host 内部。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。`terminal.input` 是按键/粘贴输入，不是无限上传通道，必须有单次 payload 上限；PTY 输出 frame 也必须由 Host 拆成有界 E2EE frame。PTY 输出不进入 JSONL，只有 opened、attached、detached、closed lifecycle event 会落盘。
+这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.attach` 必须发生在已完成握手的 encrypted control WebSocket 上，因为 PTY 输出只能回到这条 E2EE channel。Host 会为每个 attached viewer 生成 `viewer_id` 和短期 `input_lease_id`，并通过 `terminal.heartbeat` stream frame 持续要求 Controller 回 `terminal.heartbeat_ack`。`terminal.input` 和 `terminal.resize` 必须带这个 viewer lease；如果输出通道卡住、viewer 已 detach、lease 不匹配或 heartbeat ack 过期，Host 必须拒绝输入，Desktop 也必须显示“画面未同步，输入已暂停”。这个规则解决的是安全语义：用户不能在看不到最新终端画面的情况下继续把按键写进 Host PTY。
+
+`terminal.open` 的本地 cwd 必须和 workspace files/exec 一样做 workspace root confinement，包括拒绝通过 symlink 逃逸到 root 外。`terminal.open` response 和 terminal lifecycle event 里的 `cwd` 只能是 workspace-relative display cwd，不能暴露 Desktop 本机绝对路径或 SSH remote cwd；真实执行 cwd 只留在 Host 内部。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。`terminal.input` 是按键/粘贴输入，不是无限上传通道，必须有单次 payload 上限；PTY 输出 frame 也必须由 Host 拆成有界 E2EE frame。PTY 输出不进入 JSONL，只有 opened、attached、detached、closed lifecycle event 会落盘。
 
 断线行为：
 

@@ -55,13 +55,15 @@ type remoteControlEventStream struct {
 }
 
 type remoteManagedTerminalStream struct {
-	session     *remoteControlManagedSession
-	terminalID  string
-	shell       string
-	cwd         string
-	outputSeq   int64
-	frames      <-chan controlPlainFrame
-	closeStream func()
+	session      *remoteControlManagedSession
+	terminalID   string
+	viewerID     string
+	inputLeaseID string
+	shell        string
+	cwd          string
+	outputSeq    int64
+	frames       <-chan controlPlainFrame
+	closeStream  func()
 }
 
 type remoteHostControlState struct {
@@ -378,14 +380,25 @@ func (m *remoteControlManager) attachTerminal(ctx context.Context, session *remo
 	if seq := int64(numberValue(attachResult["output_seq"])); seq > 0 {
 		afterSeq = seq
 	}
+	viewerID := stringValue(attachResult["viewer_id"])
+	inputLeaseID := stringValue(attachResult["input_lease_id"])
+	if viewerID == "" || inputLeaseID == "" {
+		unregister()
+		if closeOnAttachFailure {
+			_ = session.remoteTerminalClose(terminalID)
+		}
+		return nil, errors.New("remote terminal attach response missing viewer lease")
+	}
 	return &remoteManagedTerminalStream{
-		session:     session,
-		terminalID:  terminalID,
-		shell:       shell,
-		cwd:         cwd,
-		outputSeq:   afterSeq,
-		frames:      frames,
-		closeStream: unregister,
+		session:      session,
+		terminalID:   terminalID,
+		viewerID:     viewerID,
+		inputLeaseID: inputLeaseID,
+		shell:        shell,
+		cwd:          cwd,
+		outputSeq:    afterSeq,
+		frames:       frames,
+		closeStream:  unregister,
 	}, nil
 }
 
@@ -669,7 +682,7 @@ func (s *remoteControlManagedSession) registerStream(streamID string) (<-chan co
 				delete(s.streams, streamID)
 			}
 			s.mu.Unlock()
-			close(ch)
+			safeCloseControlFrameChan(ch)
 		})
 	}
 }
@@ -752,11 +765,11 @@ func (s *remoteControlManagedSession) closeWithError(err error) {
 		s.mu.Lock()
 		for requestID, ch := range s.pending {
 			delete(s.pending, requestID)
-			close(ch)
+			safeCloseControlFrameChan(ch)
 		}
 		for streamID, ch := range s.streams {
 			delete(s.streams, streamID)
-			close(ch)
+			safeCloseControlFrameChan(ch)
 		}
 		s.orphanStreams = map[string][]controlPlainFrame{}
 		s.mu.Unlock()
@@ -777,16 +790,16 @@ func (s *remoteControlManagedSession) closedError() error {
 	return errors.New("remote control session closed")
 }
 
-func (s *remoteControlManagedSession) remoteTerminalInput(terminalID, data string) error {
+func (s *remoteControlManagedSession) remoteTerminalInput(terminalID, viewerID, inputLeaseID, data string) error {
 	return s.writeTerminalRequest(ControlRequest{
 		RequestID:  remoteControlManagedRequestPrefix + "pty_input_" + randomID(8),
 		Capability: CapabilityTerminalInput,
 		Action:     ControlActionTerminalInput,
-		Params:     map[string]any{"terminal_id": terminalID, "data": data},
+		Params:     map[string]any{"terminal_id": terminalID, "viewer_id": viewerID, "input_lease_id": inputLeaseID, "data": data},
 	})
 }
 
-func (s *remoteControlManagedSession) remoteTerminalResize(terminalID string, cols, rows int) error {
+func (s *remoteControlManagedSession) remoteTerminalResize(terminalID, viewerID, inputLeaseID string, cols, rows int) error {
 	if cols <= 0 || rows <= 0 {
 		return nil
 	}
@@ -794,7 +807,16 @@ func (s *remoteControlManagedSession) remoteTerminalResize(terminalID string, co
 		RequestID:  remoteControlManagedRequestPrefix + "pty_resize_" + randomID(8),
 		Capability: CapabilityTerminalInput,
 		Action:     ControlActionTerminalResize,
-		Params:     map[string]any{"terminal_id": terminalID, "cols": cols, "rows": rows},
+		Params:     map[string]any{"terminal_id": terminalID, "viewer_id": viewerID, "input_lease_id": inputLeaseID, "cols": cols, "rows": rows},
+	})
+}
+
+func (s *remoteControlManagedSession) remoteTerminalHeartbeatAck(terminalID, viewerID, inputLeaseID string, heartbeatSeq int64) error {
+	return s.writeTerminalRequest(ControlRequest{
+		RequestID:  remoteControlManagedRequestPrefix + "pty_heartbeat_ack_" + randomID(8),
+		Capability: CapabilityTerminalOpen,
+		Action:     ControlActionTerminalHeartbeatAck,
+		Params:     map[string]any{"terminal_id": terminalID, "viewer_id": viewerID, "input_lease_id": inputLeaseID, "heartbeat_seq": heartbeatSeq},
 	})
 }
 
@@ -847,14 +869,21 @@ func (t *remoteManagedTerminalStream) Input(data string) error {
 	if t == nil || t.session == nil {
 		return errors.New("remote terminal is closed")
 	}
-	return t.session.remoteTerminalInput(t.terminalID, data)
+	return t.session.remoteTerminalInput(t.terminalID, t.viewerID, t.inputLeaseID, data)
 }
 
 func (t *remoteManagedTerminalStream) Resize(cols, rows int) error {
 	if t == nil || t.session == nil {
 		return errors.New("remote terminal is closed")
 	}
-	return t.session.remoteTerminalResize(t.terminalID, cols, rows)
+	return t.session.remoteTerminalResize(t.terminalID, t.viewerID, t.inputLeaseID, cols, rows)
+}
+
+func (t *remoteManagedTerminalStream) AckHeartbeat(heartbeatSeq int64) error {
+	if t == nil || t.session == nil {
+		return errors.New("remote terminal is closed")
+	}
+	return t.session.remoteTerminalHeartbeatAck(t.terminalID, t.viewerID, t.inputLeaseID, heartbeatSeq)
 }
 
 func (t *remoteManagedTerminalStream) Close() error {

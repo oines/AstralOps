@@ -3104,6 +3104,9 @@ func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *test
 	if plain.Response == nil || !plain.Response.OK {
 		t.Fatalf("attach response = %#v, want ok", plain)
 	}
+	attachResult := mapValue(plain.Response.Result)
+	viewerID := stringValue(attachResult["viewer_id"])
+	inputLeaseID := stringValue(attachResult["input_lease_id"])
 
 	secret := "stream-secret-" + randomID(8)
 	sealedInput := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
@@ -3113,8 +3116,10 @@ func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *test
 			Capability: CapabilityTerminalInput,
 			Action:     ControlActionTerminalInput,
 			Params: map[string]any{
-				"terminal_id": terminalID,
-				"data":        "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
+				"terminal_id":    terminalID,
+				"viewer_id":      viewerID,
+				"input_lease_id": inputLeaseID,
+				"data":           "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
 			},
 		},
 	})
@@ -3234,6 +3239,9 @@ func TestControlWebSocketTerminalResizeAndDetachAreEncrypted(t *testing.T) {
 	if plain.Response == nil || !plain.Response.OK {
 		t.Fatalf("attach response = %#v, want ok", plain)
 	}
+	attachResult := mapValue(plain.Response.Result)
+	viewerID := stringValue(attachResult["viewer_id"])
+	inputLeaseID := stringValue(attachResult["input_lease_id"])
 
 	sealedResize := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
 		Type: "request",
@@ -3242,9 +3250,11 @@ func TestControlWebSocketTerminalResizeAndDetachAreEncrypted(t *testing.T) {
 			Capability: CapabilityTerminalInput,
 			Action:     ControlActionTerminalResize,
 			Params: map[string]any{
-				"terminal_id": terminalID,
-				"cols":        120,
-				"rows":        32,
+				"terminal_id":    terminalID,
+				"viewer_id":      viewerID,
+				"input_lease_id": inputLeaseID,
+				"cols":           120,
+				"rows":           32,
 			},
 		},
 	})
@@ -3355,6 +3365,9 @@ func TestControlWebSocketTerminalReconnectAttachWithinRetention(t *testing.T) {
 	if plain.Response == nil || !plain.Response.OK {
 		t.Fatalf("reattach response = %#v, want ok", plain)
 	}
+	reattachResult := mapValue(plain.Response.Result)
+	viewerID := stringValue(reattachResult["viewer_id"])
+	inputLeaseID := stringValue(reattachResult["input_lease_id"])
 
 	secret := "reattach-secret-" + randomID(8)
 	writeEncryptedControlFrame(t, reconnected, reconnectedCipher, controlPlainFrame{
@@ -3364,8 +3377,10 @@ func TestControlWebSocketTerminalReconnectAttachWithinRetention(t *testing.T) {
 			Capability: CapabilityTerminalInput,
 			Action:     ControlActionTerminalInput,
 			Params: map[string]any{
-				"terminal_id": terminalID,
-				"data":        "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
+				"terminal_id":    terminalID,
+				"viewer_id":      viewerID,
+				"input_lease_id": inputLeaseID,
+				"data":           "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
 			},
 		},
 	})
