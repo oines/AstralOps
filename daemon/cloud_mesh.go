@@ -1,12 +1,12 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/oines/astralops/pkg/cloudmesh"
+	"github.com/oines/astralops/pkg/relaymesh"
 )
 
 const (
@@ -14,10 +14,10 @@ const (
 	cloudDeviceStatusOffline = cloudmesh.DeviceStatusOffline
 	cloudDeviceStatusRevoked = cloudmesh.DeviceStatusRevoked
 
-	relayEnvelopeVersion               = "astralops-relay-envelope-v1"
-	relayPayloadKindControlHello       = "control.hello"
-	relayPayloadKindControlHelloAck    = "control.hello_ack"
-	relayPayloadKindControlSealedFrame = "control.sealed_frame"
+	relayEnvelopeVersion               = relaymesh.EnvelopeVersion
+	relayPayloadKindControlHello       = relaymesh.PayloadKindControlHello
+	relayPayloadKindControlHelloAck    = relaymesh.PayloadKindControlHelloAck
+	relayPayloadKindControlSealedFrame = relaymesh.PayloadKindControlSealedFrame
 )
 
 type CloudDeviceRecord = cloudmesh.DeviceRecord
@@ -26,17 +26,7 @@ type CloudMembershipLease = cloudmesh.MembershipLease
 type CloudRelayConfig = cloudmesh.RelayConfig
 type CloudRelayListResponse = cloudmesh.RelayListResponse
 type CloudRelayUpdateRequest = cloudmesh.RelayUpdateRequest
-
-type RelayEnvelope struct {
-	Version       string `json:"version"`
-	EnvelopeID    string `json:"envelope_id,omitempty"`
-	ConnectionID  string `json:"connection_id,omitempty"`
-	FromDeviceID  string `json:"from_device_id"`
-	ToDeviceID    string `json:"to_device_id"`
-	PayloadKind   string `json:"payload_kind"`
-	PayloadBase64 string `json:"payload_base64"`
-	CreatedAt     string `json:"created_at,omitempty"`
-}
+type RelayEnvelope = relaymesh.Envelope
 
 func cloudDeviceRecordFromIdentity(accountIDHash string, identity DeviceIdentity, status, relayURL string, now time.Time) (CloudDeviceRecord, error) {
 	if now.IsZero() {
@@ -97,37 +87,9 @@ func normalizeCloudDeviceStatus(status string) string {
 }
 
 func validateRelayEnvelope(envelope RelayEnvelope) error {
-	if strings.TrimSpace(envelope.Version) != relayEnvelopeVersion {
-		return fmt.Errorf("relay envelope version invalid")
-	}
-	if strings.TrimSpace(envelope.FromDeviceID) == "" {
-		return fmt.Errorf("from_device_id required")
-	}
-	if strings.TrimSpace(envelope.ToDeviceID) == "" {
-		return fmt.Errorf("to_device_id required")
-	}
-	payloadKind := strings.TrimSpace(envelope.PayloadKind)
-	if !isAllowedRelayPayloadKind(payloadKind) {
-		return fmt.Errorf("relay payload kind invalid")
-	}
-	if payloadKind != relayPayloadKindControlHello && strings.TrimSpace(envelope.ConnectionID) == "" {
-		return fmt.Errorf("connection_id required")
-	}
-	payload := strings.TrimSpace(envelope.PayloadBase64)
-	if payload == "" {
-		return fmt.Errorf("payload_base64 required")
-	}
-	if _, err := base64.StdEncoding.DecodeString(payload); err != nil {
-		return fmt.Errorf("payload_base64 invalid")
-	}
-	return nil
+	return relaymesh.ValidateEnvelope(envelope)
 }
 
 func isAllowedRelayPayloadKind(kind string) bool {
-	switch strings.TrimSpace(kind) {
-	case relayPayloadKindControlHello, relayPayloadKindControlHelloAck, relayPayloadKindControlSealedFrame:
-		return true
-	default:
-		return false
-	}
+	return relaymesh.IsAllowedPayloadKind(kind)
 }
