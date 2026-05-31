@@ -16,6 +16,7 @@
     "@astralops/i18n": "file:../../packages/i18n",
     "@astralops/protocol": "file:../../protocol",
     "@astralops/transcript": "file:../../packages/transcript",
+    "@astralops/transcript-web": "file:../../packages/transcript-web",
     "@astralops/workbench-state": "file:../../packages/workbench-state",
     "@expo/metro-runtime": "~6.1.2",
     "@noble/ciphers": "^2.2.0",

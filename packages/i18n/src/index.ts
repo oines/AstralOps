@@ -75,6 +75,14 @@ export const mobileResources = {
       revoked: "Revoked",
       live: "Connected",
     },
+    transcript: {
+      cancelled: "Cancelled",
+      operationProcessed: "Processed",
+      operationRunning: "Running",
+      plan: "Plan",
+      processed: "Processed",
+      processing: "Processing",
+    },
     settings: {
       title: "Settings",
       account: "Account",
@@ -148,6 +156,14 @@ export const mobileResources = {
       denied: "已拒绝",
       revoked: "已撤销",
       live: "已连接",
+    },
+    transcript: {
+      cancelled: "已取消",
+      operationProcessed: "已处理",
+      operationRunning: "正在运行",
+      plan: "计划",
+      processed: "已处理",
+      processing: "正在处理",
     },
     settings: {
       title: "设置",

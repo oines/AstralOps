@@ -10,13 +10,14 @@
     "packages/controller-client",
     "packages/i18n",
     "packages/transcript",
+    "packages/transcript-web",
     "packages/workbench-state"
   ],
   "scripts": {
     "dev": "npm run dev -w apps/desktop",
-    "build": "npm run build -w protocol && npm run build -w @astralops/transcript && npm run build -w @astralops/workbench-state && npm run build -w @astralops/i18n && npm run build -w @astralops/controller-client && npm run build -w apps/desktop && npm run build -w apps/mobile && go build ./daemon ./proxy-agent ./relay",
+    "build": "npm run build -w protocol && npm run build -w @astralops/transcript && npm run build -w @astralops/transcript-web && npm run build -w @astralops/workbench-state && npm run build -w @astralops/i18n && npm run build -w @astralops/controller-client && npm run build -w apps/desktop && npm run build -w apps/mobile && go build ./daemon ./proxy-agent ./relay",
     "test": "go test ./...",
-    "check": "npm run check -w protocol && npm run check -w @astralops/transcript && npm run check -w @astralops/workbench-state && npm run check -w @astralops/i18n && npm run check -w @astralops/controller-client && npm run check -w apps/desktop && npm run check -w apps/mobile && go test ./...",
+    "check": "npm run check -w protocol && npm run check -w @astralops/transcript && npm run check -w @astralops/transcript-web && npm run check -w @astralops/workbench-state && npm run check -w @astralops/i18n && npm run check -w @astralops/controller-client && npm run check -w apps/desktop && npm run check -w apps/mobile && go test ./...",
     "package:desktop": "node scripts/package-desktop.mjs"
   },
   "devDependencies": {
