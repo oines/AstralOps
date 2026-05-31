@@ -7,7 +7,7 @@ import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, L
 import { getLocales } from "expo-localization";
 import type { AstralEvent, CloudAccountStatus, CloudAuthProvider, CloudRelayListResponse, DeviceIdentity, HostSnapshotResponse, Session, TerminalTab, WorkbenchState, Workspace } from "@astralops/protocol";
 import { mobileResources, resolveAppLanguage, type AppLanguage, type ResolvedLanguage } from "@astralops/i18n";
-import { EMPTY_EVENT_INDEX, groupTranscriptEvents, maxEventSeq, mergeEventIndex, selectSessionEvents, type EventIndex } from "@astralops/transcript";
+import { EMPTY_EVENT_INDEX, groupTranscriptEvents, maxEventSeq, mergeEventIndex, selectSessionEvents, textValue, type EventIndex } from "@astralops/transcript";
 import { createEmptyWorkbenchState, selectSessions, selectTerminalTabs, selectWorkspaces } from "@astralops/workbench-state";
 import { DEFAULT_CLOUD_BASE_URL, clearStoredCloudSession, loadCloudMeshSnapshot, loadStoredCloudSession, removeSelfFromCloud, requestCloudPairing, startCloudOAuth, type MobileHostRecord, type StoredCloudSession } from "./src/mobileCloud";
 import { loadOrCreateStoredMobileIdentity, resetStoredMobileIdentity, type StoredMobileIdentity } from "./src/mobileIdentity";
@@ -17,6 +17,7 @@ type Page = "navigator" | "transcript" | "terminal";
 
 const initialWorkbench = createEmptyWorkbenchState();
 const mobileDebugForceRelayKey = "astralops.mobile.debug.force-relay.v1";
+const mobileEventWindowSize = 1000;
 
 type TerminalRuntime = MobileTerminalStatus & {
   output: string;
@@ -50,6 +51,7 @@ function AppShell(): React.JSX.Element {
   const scrollRef = useRef<ScrollView | null>(null);
   const eventIndexRef = useRef<EventIndex>(EMPTY_EVENT_INDEX);
   const activeSessionIdRef = useRef("");
+  const loadedSessionEventsRef = useRef(new Set<string>());
   const pollTickRef = useRef(0);
   const [workbench, setWorkbench] = useState<WorkbenchState>(initialWorkbench);
   const [eventIndex, setEventIndex] = useState<EventIndex>(EMPTY_EVENT_INDEX);
@@ -163,6 +165,7 @@ function AppShell(): React.JSX.Element {
     terminalHandleRef.current = undefined;
     pollTickRef.current = 0;
     if (hostChanged) {
+      loadedSessionEventsRef.current.clear();
       setWorkbench(createEmptyWorkbenchState());
       setEventIndex(EMPTY_EVENT_INDEX);
       setTerminalRuntime({});
@@ -172,6 +175,7 @@ function AppShell(): React.JSX.Element {
     }
     if (!host || !cloudSession || !storedIdentity) {
       if (!host) {
+        loadedSessionEventsRef.current.clear();
         setWorkbench(createEmptyWorkbenchState());
         setEventIndex(EMPTY_EVENT_INDEX);
         setTerminalRuntime({});
@@ -191,7 +195,7 @@ function AppShell(): React.JSX.Element {
       setHostLoading(true);
       setHostError("");
       try {
-        const snapshot = await session.snapshot();
+        const snapshot = await session.snapshot(mobileEventWindowSize);
         if (cancelled) return;
         applyHostSnapshot(snapshot);
         setRemoteStatus(session.currentStatus());
@@ -240,6 +244,26 @@ function AppShell(): React.JSX.Element {
       session.close();
     };
   }, [activeHostId, activeHostIdentityKey, activeHostCanControl, cloudSession?.account_token, storedIdentity?.seed_hex, forceRelayOnly]);
+
+  useEffect(() => {
+    if (!remoteSession || remoteStatus.state !== "live" || !activeSessionId) return () => undefined;
+    if (loadedSessionEventsRef.current.has(activeSessionId)) return () => undefined;
+    let cancelled = false;
+    loadedSessionEventsRef.current.add(activeSessionId);
+    void remoteSession.events(0, activeSessionId, mobileEventWindowSize).then((events) => {
+      if (cancelled) return;
+      setEventIndex((current) => mergeEventIndex(current, events));
+      setRemoteStatus(remoteSession.currentStatus());
+    }).catch((error) => {
+      if (cancelled) return;
+      loadedSessionEventsRef.current.delete(activeSessionId);
+      setHostError(errorMessage(error));
+      setRemoteStatus(remoteSession.currentStatus());
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [remoteSession, remoteStatus.state, activeSessionId]);
 
   async function refreshCloud(sessionArg = cloudSession, identityArg = identity, silent = false): Promise<void> {
     if (!sessionArg || !identityArg) {
@@ -977,8 +1001,8 @@ function errorMessage(error: unknown): string {
 
 function eventText(event: AstralEvent): string {
   const normalized = event.normalized as Record<string, unknown>;
-  const text = normalized.text ?? normalized.message ?? normalized.output;
-  if (typeof text === "string") return text;
+  const text = textValue(normalized, "text") || textValue(normalized, "message") || textValue(normalized, "output");
+  if (text) return text;
   if (event.kind === "message.user" && typeof normalized.input === "string") return normalized.input;
   return "";
 }

@@ -151,11 +151,12 @@ export class MobileHostRemoteSession {
     return this.request<HostSnapshotResponse>("core.read", "core.read.host_snapshot", { event_limit: eventLimit });
   }
 
-  async events(afterSeq: number, sessionId?: string): Promise<AstralEvent[]> {
+  async events(afterSeq: number, sessionId?: string, limit = 200, beforeSeq = 0): Promise<AstralEvent[]> {
     return this.request<AstralEvent[]>("core.read", "core.read.events", {
-      after_seq: afterSeq,
+      ...(afterSeq > 0 ? { after_seq: afterSeq } : {}),
+      ...(beforeSeq > 0 ? { before_seq: beforeSeq } : {}),
       ...(sessionId ? { session_id: sessionId } : {}),
-      limit: 200,
+      limit,
     });
   }
 
