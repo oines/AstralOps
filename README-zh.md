@@ -4,6 +4,8 @@
 
 **把你的 AI 编程助手带到任何远程服务器。**
 
+![AstralOps 远程 Host 会话](./docs/assets/astralops-remote-session.png)
+
 ---
 
 ## 这是什么？

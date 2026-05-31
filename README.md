@@ -4,6 +4,8 @@
 
 **Bring your AI coding agents to any remote server.**
 
+![AstralOps remote Host session](./docs/assets/astralops-remote-session.png)
+
 ---
 
 ## What Is AstralOps?
