@@ -197,11 +197,11 @@ func (s *hostRemoteSession) State() remoteHostSessionState {
 }
 
 func (s *hostRemoteSession) Request(ctx context.Context, capability, action string, params map[string]any) (ControlResponse, error) {
-	if s == nil || s.manager == nil || s.manager.lower == nil {
+	if s == nil || s.manager == nil || s.manager.app == nil || s.manager.lower == nil {
 		return ControlResponse{}, errors.New("remote control manager is not initialized")
 	}
 	s.setConnectingIfNotLive()
-	response, err := s.manager.lower.Request(ctx, s.hostDeviceID, capability, action, params)
+	response, err := s.manager.app.controllerCoreRequest(ctx, s.hostDeviceID, capability, action, params)
 	if err != nil {
 		s.setHostState(hostRemoteRequestFailureState(err), "", err)
 		return ControlResponse{}, err
@@ -390,11 +390,11 @@ func (s *hostRemoteSession) SubscribeEvents(ctx context.Context, params eventSub
 }
 
 func (s *hostRemoteSession) subscribeEventsOnce(ctx context.Context, params eventSubscriptionParams) (remoteControlEventStream, error) {
-	if s == nil || s.manager == nil || s.manager.lower == nil {
+	if s == nil || s.manager == nil || s.manager.app == nil || s.manager.lower == nil {
 		return remoteControlEventStream{}, errors.New("remote control manager is not initialized")
 	}
 	s.setConnectingIfNotLive()
-	stream, err := s.manager.lower.SubscribeEvents(ctx, s.hostDeviceID, params)
+	stream, err := s.manager.app.controllerCoreSubscribeEvents(ctx, s.hostDeviceID, params)
 	if err != nil {
 		s.setHostState(hostRemoteStateReconnecting, "", err)
 		return remoteControlEventStream{}, err

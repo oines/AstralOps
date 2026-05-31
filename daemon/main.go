@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/oines/astralops/pkg/controllercore"
 )
 
 var version = "dev"
@@ -52,6 +53,7 @@ type app struct {
 	network              *networkMonitor
 	remoteControlMu      sync.Mutex
 	remoteControl        *remoteControlRuntime
+	controllerCore       *controllercore.Controller
 	mesh                 *meshStateManager
 	cloudMu              sync.Mutex
 	cloudCancel          context.CancelFunc
@@ -116,6 +118,7 @@ func main() {
 		},
 	}
 	a.remoteManager = newRemoteControlManager(a)
+	a.controllerCore = a.newControllerCore()
 	a.hostRemoteSessions = newHostRemoteSessionManager(a, a.remoteManager)
 	a.network = newNetworkMonitor(a)
 	a.mesh = newMeshStateManager(a)

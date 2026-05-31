@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 
 	"github.com/oines/astralops/pkg/controllercore"
 )
@@ -12,6 +13,64 @@ type daemonControllerTransport struct {
 
 func (a *app) newControllerCore() *controllercore.Controller {
 	return controllercore.New(daemonControllerTransport{app: a})
+}
+
+func (a *app) controllerCoreManager() *controllercore.Controller {
+	if a == nil {
+		return nil
+	}
+	a.remoteControlMu.Lock()
+	defer a.remoteControlMu.Unlock()
+	if a.controllerCore == nil {
+		a.controllerCore = a.newControllerCore()
+	}
+	return a.controllerCore
+}
+
+func (a *app) controllerCoreRequest(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
+	core := a.controllerCoreManager()
+	if core == nil {
+		return ControlResponse{}, errors.New("controller core is not initialized")
+	}
+	response, err := core.Request(ctx, hostDeviceID, capability, action, params)
+	return fromCoreControlResponse(response), err
+}
+
+func (a *app) controllerCoreSubscribeEvents(ctx context.Context, hostDeviceID string, params eventSubscriptionParams) (remoteControlEventStream, error) {
+	core := a.controllerCoreManager()
+	if core == nil {
+		return remoteControlEventStream{}, errors.New("controller core is not initialized")
+	}
+	session := core.OpenHostSession(hostDeviceID)
+	if session == nil {
+		return remoteControlEventStream{}, errors.New("remote Host device id is required")
+	}
+	stream, err := session.SubscribeEvents(ctx, controllercore.EventSubscriptionParams{
+		WorkspaceID: params.WorkspaceID,
+		SessionID:   params.SessionID,
+		AfterSeq:    params.AfterSeq,
+		ReplayLimit: params.ReplayLimit,
+	})
+	if err != nil {
+		return remoteControlEventStream{}, err
+	}
+	out := make(chan AstralEvent, remoteControlStreamBufferSize)
+	go func() {
+		defer close(out)
+		for envelope := range stream.Events {
+			event, ok := envelope.Event.(AstralEvent)
+			if !ok {
+				continue
+			}
+			select {
+			case out <- event:
+			case <-ctx.Done():
+				stream.Close()
+				return
+			}
+		}
+	}()
+	return remoteControlEventStream{Events: out, Close: stream.Close}, nil
 }
 
 func (t daemonControllerTransport) ControlState(hostDeviceID string) controllercore.ControlState {
@@ -173,6 +232,22 @@ func toCoreControlError(err *ControlError) *controllercore.ControlError {
 		return nil
 	}
 	return &controllercore.ControlError{Status: err.Status, Code: err.Code, Message: err.Message}
+}
+
+func fromCoreControlResponse(response controllercore.ControlResponse) ControlResponse {
+	return ControlResponse{
+		RequestID: response.RequestID,
+		OK:        response.OK,
+		Result:    response.Result,
+		Error:     fromCoreControlError(response.Error),
+	}
+}
+
+func fromCoreControlError(err *controllercore.ControlError) *ControlError {
+	if err == nil {
+		return nil
+	}
+	return &ControlError{Status: err.Status, Code: err.Code, Message: err.Message}
 }
 
 func toCoreTerminalFrame(frame controlPlainFrame) controllercore.TerminalFrame {

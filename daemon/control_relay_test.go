@@ -261,12 +261,21 @@ func TestRemoteControlManagerReusesRelaySessionForSequentialRequests(t *testing.
 
 	manager := controllerApp.remoteControlManager()
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	if len(manager.sessions) != 1 {
+		manager.mu.Unlock()
 		t.Fatalf("manager sessions = %d, want 1", len(manager.sessions))
 	}
 	if manager.sessions[hostDeviceID] == nil || manager.sessions[hostDeviceID].isClosed() {
+		manager.mu.Unlock()
 		t.Fatalf("manager session for %s is not reusable", hostDeviceID)
+	}
+	manager.mu.Unlock()
+	coreState := controllerApp.controllerCoreManager().State(hostDeviceID)
+	if coreState.State != "live" {
+		t.Fatalf("controller core state = %q, want live", coreState.State)
+	}
+	if coreState.Transport != remoteHostStatusRelay {
+		t.Fatalf("controller core transport = %q, want relay", coreState.Transport)
 	}
 }
 
