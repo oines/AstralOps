@@ -204,7 +204,7 @@ func (m *terminalManager) openLocal(_ context.Context, controllerDeviceID string
 	if err != nil {
 		return terminalOpenResult{}, err
 	}
-	session := newTerminalSession(ws.ID, ws.Agent, ws.Target, displayCWD, filepath.Base(shell), controllerDeviceID)
+	session := newTerminalSession(ws.ID, ws.Agent, ws.Target, displayCWD, filepath.Base(shell))
 	session.localCmd = cmd
 	session.localPTY = ptmx
 	m.register(session)
@@ -230,7 +230,7 @@ func (m *terminalManager) openSSH(ctx context.Context, controllerDeviceID string
 			return terminalOpenResult{}, newActionError(http.StatusBadRequest, "path_invalid", err.Error())
 		}
 	}
-	session := newTerminalSession(ws.ID, ws.Agent, ws.Target, displayCWD, "", controllerDeviceID)
+	session := newTerminalSession(ws.ID, ws.Agent, ws.Target, displayCWD, "")
 	session.sshWorkspace = &ws
 	session.sshTerminalID = session.id
 	_, events, unsubscribe, started, err := m.app.ssh.startPTY(ctx, ws, session.id, map[string]any{"cwd": cwd, "cols": cols, "rows": rows})
@@ -305,7 +305,7 @@ func (m *terminalManager) input(ctx context.Context, controllerDeviceID string, 
 	if len(params.Data) > terminalInputMaxBytes {
 		return terminalAckResult{}, newActionError(http.StatusRequestEntityTooLarge, "terminal_input_too_large", "terminal input is too large")
 	}
-	session, err := m.writerSession(controllerDeviceID, params.TerminalID)
+	session, err := m.openSession(params.TerminalID)
 	if err != nil {
 		return terminalAckResult{}, err
 	}
@@ -334,7 +334,7 @@ func (m *terminalManager) input(ctx context.Context, controllerDeviceID string, 
 }
 
 func (m *terminalManager) resize(ctx context.Context, controllerDeviceID string, params terminalResizeParams) (terminalAckResult, error) {
-	session, err := m.writerSession(controllerDeviceID, params.TerminalID)
+	session, err := m.openSession(params.TerminalID)
 	if err != nil {
 		return terminalAckResult{}, err
 	}
@@ -363,7 +363,7 @@ func (m *terminalManager) resize(ctx context.Context, controllerDeviceID string,
 }
 
 func (m *terminalManager) close(ctx context.Context, controllerDeviceID string, params terminalCloseParams) (terminalAckResult, error) {
-	session, err := m.writerSession(controllerDeviceID, params.TerminalID)
+	session, err := m.openSession(params.TerminalID)
 	if err != nil {
 		return terminalAckResult{}, err
 	}
@@ -481,7 +481,7 @@ func (m *terminalManager) session(id string) (*terminalSession, bool) {
 	return session, ok
 }
 
-func (m *terminalManager) writerSession(controllerDeviceID, terminalID string) (*terminalSession, error) {
+func (m *terminalManager) openSession(terminalID string) (*terminalSession, error) {
 	session, ok := m.session(terminalID)
 	if !ok {
 		return nil, newActionError(http.StatusNotFound, "terminal_not_found", "terminal not found")
@@ -491,63 +491,27 @@ func (m *terminalManager) writerSession(controllerDeviceID, terminalID string) (
 	if session.status != terminalStatusOpen {
 		return nil, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
 	}
-	if session.writerDeviceID == "" {
-		session.writerDeviceID = controllerDeviceID
-		session.updatedAt = time.Now().UTC()
-		return session, nil
-	}
-	if session.writerDeviceID != controllerDeviceID {
-		if m.app != nil && m.app.store != nil && controllerDeviceID == m.app.store.hostInfo().Identity.DeviceID {
-			session.writerDeviceID = controllerDeviceID
-			session.updatedAt = time.Now().UTC()
-			return session, nil
-		}
-		return nil, newActionError(http.StatusForbidden, "terminal_writer_denied", "controller is not the terminal active writer")
-	}
 	return session, nil
 }
 
-func (m *terminalManager) releaseWriterForDevice(controllerDeviceID string) int {
-	m.mu.Lock()
-	sessions := make([]*terminalSession, 0, len(m.sessions))
-	for _, session := range m.sessions {
-		sessions = append(sessions, session)
-	}
-	m.mu.Unlock()
-
-	released := 0
-	for _, session := range sessions {
-		if session.releaseWriter(controllerDeviceID) {
-			released++
-		}
-	}
-	return released
-}
-
 func (a *app) releaseTerminalWritersForDevice(controllerDeviceID string) int {
-	a.terminalMu.Lock()
-	manager := a.terminals
-	a.terminalMu.Unlock()
-	if manager == nil {
-		return 0
-	}
-	return manager.releaseWriterForDevice(controllerDeviceID)
+	// Compatibility metric for older control responses; shared-input terminals no longer track per-controller writers.
+	return 0
 }
 
-func newTerminalSession(workspaceID string, agent AgentKind, target, cwd, shell, writerDeviceID string) *terminalSession {
+func newTerminalSession(workspaceID string, agent AgentKind, target, cwd, shell string) *terminalSession {
 	now := time.Now().UTC()
 	return &terminalSession{
-		id:             "term_" + randomID(16),
-		workspaceID:    workspaceID,
-		agent:          agent,
-		target:         target,
-		cwd:            cwd,
-		shell:          shell,
-		writerDeviceID: writerDeviceID,
-		status:         terminalStatusOpen,
-		createdAt:      now,
-		updatedAt:      now,
-		viewers:        map[string]*terminalViewer{},
+		id:          "term_" + randomID(16),
+		workspaceID: workspaceID,
+		agent:       agent,
+		target:      target,
+		cwd:         cwd,
+		shell:       shell,
+		status:      terminalStatusOpen,
+		createdAt:   now,
+		updatedAt:   now,
+		viewers:     map[string]*terminalViewer{},
 	}
 }
 
@@ -627,17 +591,6 @@ func (s *terminalSession) detachViewer(connectionID string) (terminalAttachResul
 		delete(s.viewers, connectionID)
 	}
 	return s.attachResultLocked(connectionID, viewerDeviceID), viewer
-}
-
-func (s *terminalSession) releaseWriter(controllerDeviceID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.status != terminalStatusOpen || s.writerDeviceID != controllerDeviceID {
-		return false
-	}
-	s.writerDeviceID = ""
-	s.updatedAt = time.Now().UTC()
-	return true
 }
 
 func (s *terminalSession) sendToViewers(frame terminalStreamFrame, viewers []*terminalViewer) {

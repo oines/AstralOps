@@ -407,7 +407,7 @@ func TestControlGatewayReadsWorkspaceConnectionFromHostState(t *testing.T) {
 
 func TestControlGatewayDeletesWorkspaceOnHost(t *testing.T) {
 	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
-	terminal := newTerminalSession(workspace.ID, AgentCodex, "local", ".", "zsh", "device_mobile")
+	terminal := newTerminalSession(workspace.ID, AgentCodex, "local", ".", "zsh")
 	app.terminalManager().register(terminal)
 	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
 

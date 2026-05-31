@@ -20,7 +20,7 @@ func TestControlGatewayTerminalOpenInputResizeAndClose(t *testing.T) {
 	trustControlDevice(t, app, "device_mobile", CapabilityTerminalOpen, CapabilityTerminalInput)
 
 	open := openTerminalForTest(t, app, "device_mobile", workspace.ID)
-	if open.WorkspaceID != workspace.ID || open.Target != "local" || open.Status != terminalStatusOpen || open.WriterDeviceID != "device_mobile" {
+	if open.WorkspaceID != workspace.ID || open.Target != "local" || open.Status != terminalStatusOpen || open.WriterDeviceID != "" {
 		t.Fatalf("terminal open result = %#v", open)
 	}
 
@@ -233,7 +233,7 @@ func TestControlGatewayRejectsTerminalCWDThroughSymlink(t *testing.T) {
 }
 
 func TestTerminalOutputIsSplitIntoBoundedFrames(t *testing.T) {
-	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh", "device_mobile")
+	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh")
 	viewer := &terminalViewer{
 		connectionID:       "conn_terminal",
 		controllerDeviceID: "device_mobile",
@@ -264,7 +264,7 @@ func TestTerminalOutputIsSplitIntoBoundedFrames(t *testing.T) {
 }
 
 func TestTerminalAttachReplaysOutputHistoryAfterSeq(t *testing.T) {
-	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh", "device_mobile")
+	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh")
 	session.appendOutput("one\n")
 	session.appendOutput("two\n")
 	viewer := &terminalViewer{
@@ -283,7 +283,7 @@ func TestTerminalAttachReplaysOutputHistoryAfterSeq(t *testing.T) {
 }
 
 func TestTerminalDetachKeepsHostTerminalOpen(t *testing.T) {
-	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh", "device_mobile")
+	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh")
 	viewer := &terminalViewer{
 		connectionID:       "conn_detach",
 		controllerDeviceID: "device_mobile",
@@ -309,11 +309,11 @@ func TestTerminalDetachKeepsHostTerminalOpen(t *testing.T) {
 	}
 }
 
-func TestTerminalManagerKeepsSingleActiveWriter(t *testing.T) {
+func TestTerminalManagerAllowsSharedInput(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 
 	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
-	trustControlDevice(t, app, "device_a", CapabilityTerminalOpen)
+	trustControlDevice(t, app, "device_a", CapabilityTerminalOpen, CapabilityTerminalInput)
 	trustControlDevice(t, app, "device_b", CapabilityTerminalInput)
 
 	open := openTerminalForTest(t, app, "device_a", workspace.ID)
@@ -321,16 +321,27 @@ func TestTerminalManagerKeepsSingleActiveWriter(t *testing.T) {
 		_, _ = app.terminalManager().close(context.Background(), "device_a", terminalCloseParams{TerminalID: open.TerminalID})
 	})
 
-	_, err := app.executeControlRequest(ControlRequest{
+	marker := filepath.Join(t.TempDir(), "shared-terminal-input")
+	response, err := app.executeControlRequest(ControlRequest{
 		ControllerDeviceID: "device_b",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
 		Params: map[string]any{
 			"terminal_id": open.TerminalID,
-			"data":        "echo wrong-writer\n",
+			"data":        "printf shared > " + shellSingleQuote(marker) + "\n",
 		},
 	})
-	assertActionError(t, err, http.StatusForbidden, "terminal_writer_denied")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack, ok := response.Result.(terminalAckResult)
+	if !ok {
+		t.Fatalf("input result = %#v, want terminalAckResult", response.Result)
+	}
+	if !response.OK || ack.WriterDeviceID != "" {
+		t.Fatalf("input response = %#v, want shared input without writer", response)
+	}
+	waitForFileContent(t, marker, "shared")
 }
 
 func TestHostDeviceCanCloseRemoteOwnedTerminal(t *testing.T) {
@@ -345,12 +356,12 @@ func TestHostDeviceCanCloseRemoteOwnedTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closed.Status != terminalStatusClosed || closed.WriterDeviceID != hostDeviceID {
-		t.Fatalf("closed terminal = %#v, want host-owned close", closed)
+	if closed.Status != terminalStatusClosed || closed.WriterDeviceID != "" {
+		t.Fatalf("closed terminal = %#v, want shared-input close without writer", closed)
 	}
 }
 
-func TestTrustRevocationReleasesTerminalWriterForNextTrustedController(t *testing.T) {
+func TestTrustRevocationLeavesSharedTerminalInputAvailableForTrustedController(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 
 	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
@@ -370,8 +381,8 @@ func TestTrustRevocationReleasesTerminalWriterForNextTrustedController(t *testin
 	if err := json.Unmarshal(rr.Body.Bytes(), &revokeResult); err != nil {
 		t.Fatal(err)
 	}
-	if numberValue(revokeResult["released_terminal_writers"]) != 1 {
-		t.Fatalf("revoke response = %#v, want one released terminal writer", revokeResult)
+	if numberValue(revokeResult["released_terminal_writers"]) != 0 {
+		t.Fatalf("revoke response = %#v, want no terminal writers in shared-input mode", revokeResult)
 	}
 
 	response, err := app.executeControlRequest(ControlRequest{
@@ -390,8 +401,8 @@ func TestTrustRevocationReleasesTerminalWriterForNextTrustedController(t *testin
 	if !ok {
 		t.Fatalf("input result = %#v, want terminalAckResult", response.Result)
 	}
-	if ack.WriterDeviceID != "device_b" {
-		t.Fatalf("writer device = %q, want device_b", ack.WriterDeviceID)
+	if ack.WriterDeviceID != "" {
+		t.Fatalf("writer device = %q, want empty in shared-input mode", ack.WriterDeviceID)
 	}
 	waitForFileContent(t, marker, "claimed")
 
