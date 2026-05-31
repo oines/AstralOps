@@ -1,6 +1,6 @@
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Dimensions, NativeScrollEvent, NativeSyntheticEvent, Pressable, ScrollView, StyleSheet, Text, TextInput, useColorScheme, View } from "react-native";
+import { Dimensions, KeyboardAvoidingView, NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useColorScheme, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, LogOut, Menu, Plus, RefreshCw, Settings, TerminalSquare } from "lucide-react-native";
 import { WebView } from "react-native-webview";
@@ -173,74 +173,80 @@ function AppShell(): React.JSX.Element {
   return (
     <SafeAreaView style={[styles.app, { backgroundColor: colors.bg }]}>
       <StatusBar style={colorScheme === "dark" ? "light" : "dark"} />
-      <ScrollView
-        ref={scrollRef}
-        horizontal
-        pagingEnabled
-        bounces={false}
-        showsHorizontalScrollIndicator={false}
-        onMomentumScrollEnd={handleMomentumEnd}
-        keyboardShouldPersistTaps="handled"
-        style={styles.pager}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={0}
+        style={styles.keyboardAvoider}
       >
-        <NavigatorScreen
-          width={width}
-          colors={colors}
-          t={t}
-          identity={identity}
-          cloudSession={cloudSession}
-          cloudAccount={cloudAccount}
-          cloudRelays={cloudRelays}
-          cloudLoading={cloudLoading}
-          authLoading={authLoading}
-          cloudError={cloudError}
-          hosts={hosts}
-          workspaces={workspaces}
-          sessions={sessions}
-          activeHost={activeHost}
-          activeWorkspaceId={activeWorkspaceId}
-          activeSessionId={activeSessionId}
-          onBack={() => scrollToPage("transcript")}
-          onLoginCloud={loginCloud}
-          onLogoutCloud={logoutCloud}
-          onRefreshCloud={() => refreshCloud()}
-          onRequestPairing={requestPairingForHost}
-          pairingHostId={pairingHostId}
-          onSelectHost={(hostId) => {
-            setActiveHostId(hostId);
-            scrollToPage("transcript");
-          }}
-          onSelectWorkspace={setActiveWorkspaceId}
-          onSelectSession={(sessionId) => {
-            setActiveSessionId(sessionId);
-            scrollToPage("transcript");
-          }}
-        />
-        <TranscriptScreen
-          width={width}
-          colors={colors}
-          t={t}
-          activeHost={activeHost}
-          activeWorkspace={activeWorkspace}
-          activeSession={activeSession}
-          onOpenNavigator={() => scrollToPage("navigator")}
-          onOpenTerminal={() => scrollToPage("terminal")}
-        />
-        <TerminalScreen
-          width={width}
-          colors={colors}
-          t={t}
-          terminals={terminals}
-          activeTerminal={activeTerminal}
-          onBack={() => scrollToPage("transcript")}
-          onSelectTerminal={setActiveTerminalId}
-        />
-      </ScrollView>
-      <View pointerEvents="none" style={[styles.pageIndicator, { backgroundColor: colors.panelStrong }]}>
-        <View style={[styles.pageDot, page === "navigator" && { backgroundColor: colors.green }]} />
-        <View style={[styles.pageDot, page === "transcript" && { backgroundColor: colors.green }]} />
-        <View style={[styles.pageDot, page === "terminal" && { backgroundColor: colors.green }]} />
-      </View>
+        <ScrollView
+          ref={scrollRef}
+          horizontal
+          pagingEnabled
+          bounces={false}
+          showsHorizontalScrollIndicator={false}
+          onMomentumScrollEnd={handleMomentumEnd}
+          keyboardShouldPersistTaps="handled"
+          style={styles.pager}
+        >
+          <NavigatorScreen
+            width={width}
+            colors={colors}
+            t={t}
+            identity={identity}
+            cloudSession={cloudSession}
+            cloudAccount={cloudAccount}
+            cloudRelays={cloudRelays}
+            cloudLoading={cloudLoading}
+            authLoading={authLoading}
+            cloudError={cloudError}
+            hosts={hosts}
+            workspaces={workspaces}
+            sessions={sessions}
+            activeHost={activeHost}
+            activeWorkspaceId={activeWorkspaceId}
+            activeSessionId={activeSessionId}
+            onBack={() => scrollToPage("transcript")}
+            onLoginCloud={loginCloud}
+            onLogoutCloud={logoutCloud}
+            onRefreshCloud={() => refreshCloud()}
+            onRequestPairing={requestPairingForHost}
+            pairingHostId={pairingHostId}
+            onSelectHost={(hostId) => {
+              setActiveHostId(hostId);
+              scrollToPage("transcript");
+            }}
+            onSelectWorkspace={setActiveWorkspaceId}
+            onSelectSession={(sessionId) => {
+              setActiveSessionId(sessionId);
+              scrollToPage("transcript");
+            }}
+          />
+          <TranscriptScreen
+            width={width}
+            colors={colors}
+            t={t}
+            activeHost={activeHost}
+            activeWorkspace={activeWorkspace}
+            activeSession={activeSession}
+            onOpenNavigator={() => scrollToPage("navigator")}
+            onOpenTerminal={() => scrollToPage("terminal")}
+          />
+          <TerminalScreen
+            width={width}
+            colors={colors}
+            t={t}
+            terminals={terminals}
+            activeTerminal={activeTerminal}
+            onBack={() => scrollToPage("transcript")}
+            onSelectTerminal={setActiveTerminalId}
+          />
+        </ScrollView>
+        <View pointerEvents="none" style={[styles.pageIndicator, { backgroundColor: colors.panelStrong }]}>
+          <View style={[styles.pageDot, page === "navigator" && { backgroundColor: colors.green }]} />
+          <View style={[styles.pageDot, page === "transcript" && { backgroundColor: colors.green }]} />
+          <View style={[styles.pageDot, page === "terminal" && { backgroundColor: colors.green }]} />
+        </View>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -579,6 +585,7 @@ function terminalHtml(colors: AppPalette): string {
 
 const styles = StyleSheet.create({
   app: { flex: 1 },
+  keyboardAvoider: { flex: 1 },
   pager: { flex: 1 },
   page: { flex: 1 },
   header: { height: 58, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 12, borderBottomWidth: StyleSheet.hairlineWidth },

@@ -13,6 +13,7 @@
     },
     "android": {
       "package": "dev.oines.astralops",
+      "softwareKeyboardLayoutMode": "resize",
       "permissions": ["INTERNET", "ACCESS_NETWORK_STATE", "ACCESS_WIFI_STATE", "CHANGE_WIFI_MULTICAST_STATE"]
     },
     "plugins": [
