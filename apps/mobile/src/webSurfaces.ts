@@ -113,6 +113,92 @@ export function createTranscriptWebViewHtml(colors: WebSurfacePalette): string {
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
+    .meta {
+      margin-top: 12px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 20px;
+      font-weight: 700;
+    }
+    .meta .summary {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .operation {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--panel-strong) 52%, transparent);
+      padding: 9px 11px;
+    }
+    .operation-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-soft);
+      font-size: 13px;
+      line-height: 18px;
+      font-weight: 800;
+    }
+    .operation-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--muted);
+    }
+    .operation.running .operation-dot {
+      background: #2f8cff;
+    }
+    .operation-summary {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 17px;
+      font-weight: 650;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .plan {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--panel-strong) 42%, transparent);
+      padding: 11px 12px;
+    }
+    .plan-title {
+      margin-bottom: 7px;
+      color: var(--text-soft);
+      font-size: 13px;
+      line-height: 18px;
+      font-weight: 800;
+    }
+    .plan-body {
+      color: var(--text);
+      font-size: 15px;
+      line-height: 22px;
+      font-weight: 650;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .notice {
+      border: 1px solid color-mix(in srgb, var(--orange) 34%, transparent);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--orange) 10%, transparent);
+      padding: 8px 10px;
+      color: var(--orange);
+      font-size: 12px;
+      line-height: 17px;
+      font-weight: 800;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
   </style>
 </head>
 <body>
@@ -127,6 +213,69 @@ export function createTranscriptWebViewHtml(colors: WebSurfacePalette): string {
         node.className = className;
         node.textContent = String(text);
         parent.appendChild(node);
+      }
+
+      function renderBlock(parent, block) {
+        if (!block) return;
+        if (block.kind === "user") {
+          appendText(parent, "bubble user", block.text);
+          return;
+        }
+        if (block.kind === "assistant") {
+          appendText(parent, "bubble assistant", block.text);
+          return;
+        }
+        if (block.kind === "plan") {
+          var plan = document.createElement("section");
+          plan.className = "plan";
+          var title = document.createElement("div");
+          title.className = "plan-title";
+          title.textContent = block.title || "Plan";
+          var body = document.createElement("div");
+          body.className = "plan-body";
+          body.textContent = block.text || "";
+          plan.appendChild(title);
+          plan.appendChild(body);
+          parent.appendChild(plan);
+          return;
+        }
+        if (block.kind === "operation") {
+          var operation = document.createElement("section");
+          operation.className = "operation " + (block.status === "running" ? "running" : "completed");
+          var header = document.createElement("div");
+          header.className = "operation-title";
+          var dot = document.createElement("span");
+          dot.className = "operation-dot";
+          var label = document.createElement("span");
+          label.textContent = block.status === "running" ? "Running" : "Processed";
+          header.appendChild(dot);
+          header.appendChild(label);
+          var summary = document.createElement("div");
+          summary.className = "operation-summary";
+          summary.textContent = block.summary || "";
+          operation.appendChild(header);
+          operation.appendChild(summary);
+          parent.appendChild(operation);
+          return;
+        }
+        if (block.kind === "notice") {
+          appendText(parent, "notice", block.text);
+          return;
+        }
+        if (block.kind === "meta") {
+          var meta = document.createElement("div");
+          meta.className = "meta";
+          var text = document.createElement("span");
+          text.textContent = [block.text, block.time].filter(Boolean).join("  ");
+          meta.appendChild(text);
+          if (block.summary) {
+            var metaSummary = document.createElement("span");
+            metaSummary.className = "summary";
+            metaSummary.textContent = block.summary;
+            meta.appendChild(metaSummary);
+          }
+          parent.appendChild(meta);
+        }
       }
 
       function renderEmpty(payload) {
@@ -156,13 +305,17 @@ export function createTranscriptWebViewHtml(colors: WebSurfacePalette): string {
         groups.forEach(function (group) {
           var turn = document.createElement("section");
           turn.className = "turn";
-          appendText(turn, "bubble user", group.user);
-          (group.assistant || []).forEach(function (text) {
-            appendText(turn, "bubble assistant", text);
-          });
-          (group.details || []).forEach(function (text) {
-            appendText(turn, "detail", text);
-          });
+          if (Array.isArray(group.blocks)) {
+            group.blocks.forEach(function (block) { renderBlock(turn, block); });
+          } else {
+            appendText(turn, "bubble user", group.user);
+            (group.assistant || []).forEach(function (text) {
+              appendText(turn, "bubble assistant", text);
+            });
+            (group.details || []).forEach(function (text) {
+              appendText(turn, "detail", text);
+            });
+          }
           root.appendChild(turn);
         });
         root.scrollTop = root.scrollHeight;

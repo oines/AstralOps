@@ -8,7 +8,24 @@ import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, L
 import { getLocales } from "expo-localization";
 import type { AstralEvent, CloudAccountStatus, CloudAuthProvider, CloudRelayListResponse, DeviceIdentity, HostSnapshotResponse, Session, TerminalTab, WorkbenchState, Workspace } from "@astralops/protocol";
 import { mobileResources, resolveAppLanguage, type AppLanguage, type ResolvedLanguage } from "@astralops/i18n";
-import { EMPTY_EVENT_INDEX, groupTranscriptEvents, maxEventSeq, mergeEventIndex, selectSessionEvents, textValue, type EventIndex } from "@astralops/transcript";
+import {
+  EMPTY_EVENT_INDEX,
+  buildOperationGroups,
+  compactStreamingEvents,
+  groupTranscriptEvents,
+  isAssistantContentEvent,
+  isTranscriptPlanEvent,
+  isTranscriptUserEvent,
+  maxEventSeq,
+  mergeEventIndex,
+  selectSessionEvents,
+  shouldRenderEvent,
+  summarizeDetails,
+  textValue,
+  transcriptPlanText,
+  type EventIndex,
+  type TurnGroup,
+} from "@astralops/transcript";
 import { createEmptyWorkbenchState, selectSessions, selectTerminalTabs, selectWorkspaces } from "@astralops/workbench-state";
 import { DEFAULT_CLOUD_BASE_URL, clearStoredCloudSession, loadCloudMeshSnapshot, loadStoredCloudSession, removeSelfFromCloud, requestCloudPairing, startCloudOAuth, type MobileHostRecord, type StoredCloudSession } from "./src/mobileCloud";
 import { loadOrCreateStoredMobileIdentity, resetStoredMobileIdentity, type StoredMobileIdentity } from "./src/mobileIdentity";
@@ -767,19 +784,15 @@ function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoad
 }): React.JSX.Element {
   const webViewRef = useRef<WebView | null>(null);
   const [webViewReady, setWebViewReady] = useState(false);
-  const groups = useMemo(() => groupTranscriptEvents(events), [events]);
+  const renderedEvents = useMemo(() => compactStreamingEvents(events.filter(shouldRenderEvent)), [events]);
+  const groups = useMemo(() => groupTranscriptEvents(renderedEvents), [renderedEvents]);
   const transcriptHtml = useMemo(() => createTranscriptWebViewHtml(colors), [colors]);
   const transcriptPayload = useMemo(() => ({
     empty: {
       title: activeSession?.title || (activeHost ? t("mobile.selectSession") : t("mobile.selectHost")),
       subtitle: activeHost ? t("mobile.workbenchPendingDetail") : t("mobile.signInToSeeHosts"),
     },
-    groups: groups.map((group) => ({
-      id: group.id,
-      user: group.user ? eventText(group.user) || t("mobile.userMessage") : "",
-      assistant: group.assistant.map((event) => eventText(event)).filter((text) => text.trim().length > 0),
-      details: group.details.filter((event) => event.kind === "turn.failed").map((event) => eventText(event) || t("status.failed")),
-    })),
+    groups: groups.map((group) => buildTranscriptWebGroup(group, t)),
   }), [activeHost, activeSession?.title, groups, t]);
   const canSend = remoteStatus.state === "live" && Boolean(activeWorkspace) && composerText.trim().length > 0;
   useEffect(() => {
@@ -1054,6 +1067,98 @@ function eventText(event: AstralEvent): string {
   if (text) return text;
   if (event.kind === "message.user" && typeof normalized.input === "string") return normalized.input;
   return "";
+}
+
+type TranscriptWebBlock =
+  | { kind: "user"; text: string }
+  | { kind: "assistant"; text: string }
+  | { kind: "plan"; title: string; text: string }
+  | { kind: "operation"; status: "running" | "completed"; summary: string }
+  | { kind: "notice"; tone: "danger" | "muted"; text: string }
+  | { kind: "meta"; text: string; time?: string; summary?: string };
+
+function buildTranscriptWebGroup(group: TurnGroup, t: Translator): { id: string; blocks: TranscriptWebBlock[] } {
+  const blocks: TranscriptWebBlock[] = [];
+  const operationGroups = buildOperationGroups(group.timeline, group.status);
+  let operationIndex = 0;
+  let hasPendingOperations = false;
+
+  function addUser(event: AstralEvent | undefined): void {
+    if (!event) return;
+    const text = eventText(event);
+    if (text.trim()) blocks.push({ kind: "user", text });
+  }
+
+  function addAssistant(event: AstralEvent): void {
+    if (isTranscriptPlanEvent(event)) {
+      const text = transcriptPlanText(event);
+      if (text.trim()) blocks.push({ kind: "plan", title: "计划", text });
+      return;
+    }
+    const text = eventText(event);
+    if (text.trim()) blocks.push({ kind: "assistant", text });
+  }
+
+  function flushOperations(): void {
+    if (!hasPendingOperations) return;
+    const operation = operationGroups[operationIndex];
+    operationIndex += 1;
+    hasPendingOperations = false;
+    if (operation?.summary) {
+      blocks.push({ kind: "operation", status: operation.status, summary: operation.summary });
+    }
+  }
+
+  addUser(group.user);
+  if (group.start || group.end) {
+    blocks.push({
+      kind: "meta",
+      text: group.status === "failed" ? t("status.failed") : group.status === "cancelled" ? "已取消" : group.status === "running" ? "正在处理" : "已处理",
+      time: formatTranscriptTime(group.end?.ts ?? group.start?.ts ?? ""),
+      summary: summarizeDetails(group.details),
+    });
+  }
+
+  for (const event of group.timeline) {
+    if (isTranscriptUserEvent(event) || event.kind === "queue.steered") {
+      flushOperations();
+      addUser(event);
+      continue;
+    }
+    if (isAssistantContentEvent(event)) {
+      flushOperations();
+      addAssistant(event);
+      continue;
+    }
+    if (event.kind === "turn.failed" || event.kind === "control.error") {
+      flushOperations();
+      blocks.push({ kind: "notice", tone: "danger", text: eventText(event) || t("status.failed") });
+      continue;
+    }
+    if (event.kind === "turn.cancelled") {
+      flushOperations();
+      blocks.push({ kind: "notice", tone: "muted", text: "已取消" });
+      continue;
+    }
+    hasPendingOperations = true;
+  }
+  flushOperations();
+
+  for (const detail of group.details) {
+    if (detail.kind === "turn.failed" || detail.kind === "control.error") {
+      const text = eventText(detail) || t("status.failed");
+      if (!blocks.some((block) => block.kind === "notice" && block.text === text)) blocks.push({ kind: "notice", tone: "danger", text });
+    }
+  }
+
+  return { id: group.id, blocks };
+}
+
+function formatTranscriptTime(ts: string): string {
+  if (!ts) return "";
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function workbenchFromSnapshot(snapshot: HostSnapshotResponse): WorkbenchState {
