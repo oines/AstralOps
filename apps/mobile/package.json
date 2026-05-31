@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "license": "AGPL-3.0-only",
-  "main": "expo/AppEntry.js",
+  "main": "index.ts",
   "scripts": {
     "dev": "expo start --dev-client",
     "android": "expo run:android",
@@ -28,6 +28,7 @@
     "expo-crypto": "~15.0.9",
     "expo-linking": "~8.0.12",
     "expo-localization": "~17.0.9",
+    "expo-network": "~8.0.8",
     "expo-secure-store": "~15.0.8",
     "expo-status-bar": "~3.0.9",
     "expo-web-browser": "~15.0.11",

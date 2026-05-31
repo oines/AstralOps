@@ -1,4 +1,5 @@
 import * as Crypto from "expo-crypto";
+import * as Network from "expo-network";
 import * as ed25519 from "@noble/ed25519";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
@@ -15,6 +16,7 @@ import type {
   ControlRequest,
   ControlResponse,
   ControlSealedFrame,
+  HostInfo,
   HostSnapshotResponse,
   RelayEnvelope,
   Session,
@@ -36,6 +38,10 @@ const relayEnvelopeVersion = "astralops-relay-envelope-v1";
 const controlDirectionControllerToHost = "controller-to-host";
 const controlDirectionHostToController = "host-to-controller";
 const requestTimeoutMs = 15000;
+const lanControlPort = 43900;
+const lanHostProbeTimeoutMs = 650;
+const lanSocketConnectTimeoutMs = 5000;
+const lanScanBatchSize = 32;
 
 type RelayWebSocketFrame = {
   type: "send" | "envelope" | "error" | string;
@@ -67,7 +73,13 @@ type PendingHelloAck = {
 
 export type MobileRemoteSessionStatus = {
   state: "idle" | "connecting" | "live" | "failed" | "needs_pairing";
+  transport?: "lan" | "relay";
+  route?: string;
   message?: string;
+};
+
+export type MobileRemoteRouteOptions = {
+  forceRelay?: boolean;
 };
 
 export type MobileTerminalStatus = {
@@ -106,7 +118,9 @@ type TerminalAttachment = {
 export class MobileHostRemoteSession {
   private cipher?: ControlCipher;
   private openedAt = 0;
-  private relaySocket?: WebSocket;
+  private controlSocket?: WebSocket;
+  private transport?: "lan" | "relay";
+  private lanBaseURL?: string;
   private pendingHello?: PendingHelloAck;
   private status: MobileRemoteSessionStatus = { state: "idle" };
   private pending = new Map<string, PendingRequest>();
@@ -117,6 +131,7 @@ export class MobileHostRemoteSession {
     private readonly cloud: StoredCloudSession,
     private readonly identity: StoredMobileIdentity,
     private readonly host: MobileHostRecord,
+    private readonly routeOptions: MobileRemoteRouteOptions = {},
   ) {}
 
   currentStatus(): MobileRemoteSessionStatus {
@@ -276,16 +291,17 @@ export class MobileHostRemoteSession {
   }
 
   private async ensureConnected(): Promise<void> {
-    if (this.cipher && this.relaySocket?.readyState === WebSocket.OPEN) return;
+    if (this.cipher && this.controlSocket?.readyState === WebSocket.OPEN) return;
     if (this.closed) throw new Error("Mobile Host session is closed.");
-    this.status = { state: "connecting" };
+    this.status = { state: "connecting", transport: this.routeOptions.forceRelay ? "relay" : undefined };
     try {
-      this.cipher = await this.openRelayControlCipher();
-      this.status = { state: "live" };
+      this.cipher = await this.openControlCipher();
+      this.status = { state: "live", transport: this.transport, route: this.transport === "lan" ? this.lanBaseURL : this.cloud.relay_url };
     } catch (error) {
-      this.closeRelaySocket();
+      const failedTransport = this.transport;
+      this.closeControlSocket();
       const message = errorMessage(error);
-      this.status = { state: isPairingError(message) ? "needs_pairing" : "failed", message };
+      this.status = { state: isPairingError(message) ? "needs_pairing" : "failed", transport: failedTransport, message };
       throw error;
     }
   }
@@ -348,10 +364,11 @@ export class MobileHostRemoteSession {
   }
 
   private invalidate(error: Error): void {
-    this.closeRelaySocket();
+    const previousTransport = this.transport;
+    this.closeControlSocket();
     this.cipher = undefined;
     this.rejectPendingHello(error);
-    this.status = { state: isPairingError(error.message) ? "needs_pairing" : "failed", message: error.message };
+    this.status = { state: isPairingError(error.message) ? "needs_pairing" : "failed", transport: previousTransport, message: error.message };
     for (const [requestID, pending] of this.pending) {
       clearTimeout(pending.timeout);
       pending.reject(error);
@@ -362,13 +379,83 @@ export class MobileHostRemoteSession {
     }
   }
 
+  private async openControlCipher(): Promise<ControlCipher> {
+    let lanError: unknown;
+    if (!this.routeOptions.forceRelay) {
+      const baseURL = await this.resolveLanBaseURL().catch((error) => {
+        lanError = error;
+        return undefined;
+      });
+      if (baseURL) {
+        this.status = { state: "connecting", transport: "lan", route: baseURL };
+        try {
+          const cipher = await this.openDirectControlCipher(baseURL);
+          this.transport = "lan";
+          this.lanBaseURL = baseURL;
+          return cipher;
+        } catch (error) {
+          lanError = error;
+          this.closeControlSocket();
+        }
+      }
+    }
+
+    this.status = {
+      state: "connecting",
+      transport: "relay",
+      route: this.cloud.relay_url,
+      ...(lanError ? { message: `LAN unavailable: ${errorMessage(lanError)}` } : {}),
+    };
+    const cipher = await this.openRelayControlCipher();
+    this.transport = "relay";
+    return cipher;
+  }
+
+  private async openDirectControlCipher(baseURL: string): Promise<ControlCipher> {
+    if (!this.cloud.membership_lease || !this.cloud.membership_signing_public_key || !this.cloud.account_id_hash) throw new Error("Cloud membership lease is missing.");
+    if (!this.host.public_key) throw new Error("Host public key is missing.");
+
+    this.openedAt = Date.now();
+    this.transport = "lan";
+    await this.openDirectWebSocket(baseURL);
+    const { hello, ephemeralSecret } = this.createControlHello();
+    const ackPromise = this.waitForHelloAck(hello);
+    try {
+      this.sendDirectFrame(hello);
+    } catch (error) {
+      this.rejectPendingHello(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+    const ack = await ackPromise;
+    validateHelloAck(this.cloud, this.host, hello, ack);
+    const sharedSecret = x25519.getSharedSecret(ephemeralSecret, base64ToBytes(ack.host_ephemeral_key));
+    return newControllerCipher(sharedSecret, hello, ack);
+  }
+
   private async openRelayControlCipher(): Promise<ControlCipher> {
     if (!this.cloud.relay_url || !this.cloud.relay_credential) throw new Error("Relay credential is missing.");
     if (!this.cloud.membership_lease || !this.cloud.membership_signing_public_key || !this.cloud.account_id_hash) throw new Error("Cloud membership lease is missing.");
     if (!this.host.public_key) throw new Error("Host public key is missing.");
 
     this.openedAt = Date.now();
+    this.transport = "relay";
     await this.openRelayWebSocket();
+    const { hello, ephemeralSecret } = this.createControlHello();
+
+    const ackPromise = this.waitForHelloAck(hello);
+    try {
+      this.sendRelayEnvelope("control.hello", bytesToBase64(utf8ToBytes(JSON.stringify(hello))));
+    } catch (error) {
+      this.rejectPendingHello(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+    const ack = await ackPromise;
+    validateHelloAck(this.cloud, this.host, hello, ack);
+    const sharedSecret = x25519.getSharedSecret(ephemeralSecret, base64ToBytes(ack.host_ephemeral_key));
+    return newControllerCipher(sharedSecret, hello, ack);
+  }
+
+  private createControlHello(): { hello: ControlHelloFrame; ephemeralSecret: Uint8Array } {
     const ephemeralSecret = Crypto.getRandomBytes(32);
     const ephemeralPublic = x25519.getPublicKey(ephemeralSecret);
     const clientNonce = bytesToBase64(Crypto.getRandomBytes(32));
@@ -383,18 +470,7 @@ export class MobileHostRemoteSession {
       membership_lease: this.cloud.membership_lease,
     };
     hello.signature = bytesToBase64(ed25519.sign(controlClientSignaturePayload(this.host.device_id, hello), hexToBytes(this.identity.seed_hex)));
-
-    const ackPromise = this.waitForHelloAck(hello);
-    try {
-      this.sendRelayEnvelope("control.hello", bytesToBase64(utf8ToBytes(JSON.stringify(hello))));
-    } catch (error) {
-      this.rejectPendingHello(error instanceof Error ? error : new Error(String(error)));
-      throw error;
-    }
-    const ack = await ackPromise;
-    validateHelloAck(this.cloud, this.host, hello, ack);
-    const sharedSecret = x25519.getSharedSecret(ephemeralSecret, base64ToBytes(ack.host_ephemeral_key));
-    return newControllerCipher(sharedSecret, hello, ack);
+    return { hello, ephemeralSecret };
   }
 
   private waitForHelloAck(hello: ControlHelloFrame): Promise<ControlHelloAckFrame> {
@@ -424,18 +500,66 @@ export class MobileHostRemoteSession {
   private async writePlain(frame: ControlPlainFrame): Promise<void> {
     if (!this.cipher) throw new Error("Control channel is not connected.");
     const sealed = sealFrame(this.cipher, frame);
+    if (this.transport === "lan") {
+      this.sendDirectFrame(sealed);
+      return;
+    }
     this.sendRelayEnvelope("control.sealed_frame", bytesToBase64(utf8ToBytes(JSON.stringify(sealed))), this.cipher.connectionID);
   }
 
+  private async openDirectWebSocket(baseURL: string): Promise<void> {
+    if (this.controlSocket?.readyState === WebSocket.OPEN && this.transport === "lan") return;
+    this.closeControlSocket();
+    const socket = new WebSocket(controlWebSocketURL(baseURL));
+    this.controlSocket = socket;
+    await new Promise<void>((resolve, reject) => {
+      let opened = false;
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error("LAN websocket connect timed out."));
+        this.closeControlSocket(socket);
+      }, lanSocketConnectTimeoutMs);
+      socket.onopen = () => {
+        if (settled) return;
+        opened = true;
+        settled = true;
+        clearTimeout(timeout);
+        resolve();
+      };
+      socket.onerror = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(new Error("LAN websocket error."));
+      };
+      socket.onclose = () => {
+        clearTimeout(timeout);
+        if (!opened && !settled) {
+          settled = true;
+          reject(new Error("LAN websocket closed before connecting."));
+        }
+        if (this.controlSocket === socket) {
+          this.controlSocket = undefined;
+          if (!this.closed) this.invalidate(new Error("LAN websocket closed."));
+        }
+      };
+      socket.onmessage = (event) => {
+        this.handleDirectWebSocketMessage(event.data);
+      };
+    });
+  }
+
   private async openRelayWebSocket(): Promise<void> {
-    if (this.relaySocket?.readyState === WebSocket.OPEN) return;
-    this.closeRelaySocket();
+    if (this.controlSocket?.readyState === WebSocket.OPEN && this.transport === "relay") return;
+    this.closeControlSocket();
     if (!this.cloud.relay_url || !this.cloud.relay_credential) throw new Error("Relay credential is missing.");
     const RelayWebSocket = WebSocket as unknown as new (url: string, protocols?: string | string[], options?: { headers?: Record<string, string> }) => WebSocket;
     const socket = new RelayWebSocket(relayWebSocketURL(this.cloud.relay_url, this.identity.identity.device_id), [], {
       headers: { Authorization: `Bearer ${this.cloud.relay_credential}` },
     });
-    this.relaySocket = socket;
+    this.controlSocket = socket;
     await new Promise<void>((resolve, reject) => {
       let opened = false;
       let settled = false;
@@ -443,7 +567,7 @@ export class MobileHostRemoteSession {
         if (settled) return;
         settled = true;
         reject(new Error("Relay websocket connect timed out."));
-        this.closeRelaySocket(socket);
+        this.closeControlSocket(socket);
       }, 12000);
       socket.onopen = () => {
         if (settled) return;
@@ -464,8 +588,8 @@ export class MobileHostRemoteSession {
           settled = true;
           reject(new Error("Relay websocket closed before connecting."));
         }
-        if (this.relaySocket === socket) {
-          this.relaySocket = undefined;
+        if (this.controlSocket === socket) {
+          this.controlSocket = undefined;
           if (!this.closed) this.invalidate(new Error("Relay websocket closed."));
         }
       };
@@ -475,8 +599,14 @@ export class MobileHostRemoteSession {
     });
   }
 
+  private sendDirectFrame(frame: ControlHelloFrame | ControlSealedFrame): void {
+    const socket = this.controlSocket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error("LAN websocket is not connected.");
+    socket.send(JSON.stringify(frame));
+  }
+
   private sendRelayEnvelope(payloadKind: RelayEnvelope["payload_kind"], payloadBase64: string, connectionID = ""): void {
-    const socket = this.relaySocket;
+    const socket = this.controlSocket;
     if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error("Relay websocket is not connected.");
     socket.send(JSON.stringify({
       type: "send",
@@ -501,6 +631,32 @@ export class MobileHostRemoteSession {
       }
       if (frame.type !== "envelope" || !frame.envelope) return;
       this.handleRelayEnvelope(frame.envelope);
+    } catch (error) {
+      this.invalidate(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  private handleDirectWebSocketMessage(data: unknown): void {
+    try {
+      if (typeof data !== "string") throw new Error("LAN websocket frame must be text.");
+      const frame = parseJSON(data) as Partial<ControlPlainFrame> | ControlHelloAckFrame | ControlSealedFrame;
+      if ((frame as Partial<ControlPlainFrame>).type === "close") {
+        const closeFrame = frame as Record<string, unknown>;
+        const reason = typeof closeFrame.reason === "string" ? closeFrame.reason : typeof closeFrame.code === "string" ? closeFrame.code : "Host rejected control request.";
+        const error = new Error(reason);
+        if (this.pendingHello) this.rejectPendingHello(error);
+        else this.invalidate(error);
+        return;
+      }
+      if ((frame as ControlHelloAckFrame).type === "hello_ack") {
+        const ack = frame as ControlHelloAckFrame;
+        if (!this.pendingHello || (ack.client_nonce && ack.client_nonce !== this.pendingHello.clientNonce)) return;
+        this.pendingHello.resolve(ack);
+        return;
+      }
+      const cipher = this.cipher;
+      if (!cipher || (frame as ControlSealedFrame).type !== "sealed") return;
+      this.dispatchFrame(openFrame(cipher, frame as ControlSealedFrame));
     } catch (error) {
       this.invalidate(error instanceof Error ? error : new Error(String(error)));
     }
@@ -535,9 +691,12 @@ export class MobileHostRemoteSession {
     pending.reject(error);
   }
 
-  private closeRelaySocket(socket = this.relaySocket): void {
+  private closeControlSocket(socket = this.controlSocket): void {
     if (!socket) return;
-    if (this.relaySocket === socket) this.relaySocket = undefined;
+    if (this.controlSocket === socket) {
+      this.controlSocket = undefined;
+      this.transport = undefined;
+    }
     socket.onopen = null;
     socket.onmessage = null;
     socket.onerror = null;
@@ -548,6 +707,71 @@ export class MobileHostRemoteSession {
       // Ignore close races from React Native's websocket bridge.
     }
   }
+
+  private async resolveLanBaseURL(): Promise<string | undefined> {
+    if (this.lanBaseURL && await this.probeLanHost(this.lanBaseURL).catch(() => false)) return this.lanBaseURL;
+    for (const baseURL of uniqueStrings([this.host.lan_base_url, this.host.last_base_url])) {
+      if (baseURL && await this.probeLanHost(baseURL).catch(() => false)) {
+        this.lanBaseURL = baseURL;
+        return baseURL;
+      }
+    }
+    const networkState = await Network.getNetworkStateAsync().catch(() => undefined);
+    if (networkState?.type && ![Network.NetworkStateType.WIFI, Network.NetworkStateType.ETHERNET, Network.NetworkStateType.UNKNOWN].includes(networkState.type)) {
+      return undefined;
+    }
+    const ip = await Network.getIpAddressAsync();
+    const octets = ip.split(".").map((part) => Number(part));
+    if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255) || ip === "0.0.0.0") {
+      throw new Error("Mobile LAN IP is unavailable.");
+    }
+    const prefix = octets.slice(0, 3).join(".");
+    const ownHost = octets[3];
+    const candidates: string[] = [];
+    for (let host = 1; host <= 254; host += 1) {
+      if (host !== ownHost) candidates.push(`http://${prefix}.${host}:${lanControlPort}`);
+    }
+    for (let index = 0; index < candidates.length; index += lanScanBatchSize) {
+      let found = "";
+      const batch = candidates.slice(index, index + lanScanBatchSize);
+      await Promise.all(batch.map(async (baseURL) => {
+        if (found) return;
+        if (await this.probeLanHost(baseURL).catch(() => false)) found = baseURL;
+      }));
+      if (found) {
+        this.lanBaseURL = found;
+        return found;
+      }
+    }
+    return undefined;
+  }
+
+  private async probeLanHost(baseURL: string): Promise<boolean> {
+    const info = await fetchLanHostInfo(baseURL);
+    return hostInfoMatchesCloudHost(info, this.host);
+  }
+}
+
+async function fetchLanHostInfo(baseURL: string): Promise<HostInfo> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), lanHostProbeTimeoutMs);
+  try {
+    const response = await fetch(`${baseURL.replace(/\/+$/g, "")}/v1/host`, { signal: controller.signal });
+    if (!response.ok) throw new Error(`Host info failed: ${response.status}`);
+    return await response.json() as HostInfo;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function hostInfoMatchesCloudHost(info: HostInfo, host: MobileHostRecord): boolean {
+  return info.identity?.device_id === host.device_id
+    && info.identity?.public_key === host.public_key
+    && info.identity?.public_key_fingerprint === host.public_key_fingerprint;
+}
+
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
 }
 
 function newControllerCipher(sharedSecret: Uint8Array, hello: ControlHelloFrame, ack: ControlHelloAckFrame): ControlCipher {
@@ -613,6 +837,20 @@ function relayWebSocketURL(baseURL: string, deviceID: string): string {
   }
   url.pathname = `${url.pathname.replace(/\/+$/g, "")}/v1/relay/connect`;
   url.searchParams.set("device_id", deviceID);
+  return url.toString();
+}
+
+function controlWebSocketURL(baseURL: string): string {
+  const url = new URL(baseURL);
+  if (url.protocol === "http:") {
+    url.protocol = "ws:";
+  } else if (url.protocol === "https:") {
+    url.protocol = "wss:";
+  } else if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+    throw new Error(`Control websocket url scheme ${url.protocol.replace(/:$/, "")} is not supported.`);
+  }
+  url.pathname = `${url.pathname.replace(/\/+$/g, "")}/v1/control/ws`;
+  url.search = "";
   return url.toString();
 }
 

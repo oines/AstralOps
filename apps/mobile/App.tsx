@@ -1,6 +1,7 @@
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Dimensions, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useColorScheme, View } from "react-native";
+import { Dimensions, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, useColorScheme, View } from "react-native";
+import * as SecureStore from "expo-secure-store";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, LogOut, Menu, Plus, RefreshCw, Settings, TerminalSquare } from "lucide-react-native";
 import { getLocales } from "expo-localization";
@@ -15,6 +16,7 @@ import { MobileHostRemoteSession, type MobileRemoteSessionStatus, type MobileTer
 type Page = "navigator" | "transcript" | "terminal";
 
 const initialWorkbench = createEmptyWorkbenchState();
+const mobileDebugForceRelayKey = "astralops.mobile.debug.force-relay.v1";
 
 type TerminalRuntime = MobileTerminalStatus & {
   output: string;
@@ -53,6 +55,7 @@ function AppShell(): React.JSX.Element {
   const [eventIndex, setEventIndex] = useState<EventIndex>(EMPTY_EVENT_INDEX);
   const [remoteSession, setRemoteSession] = useState<MobileHostRemoteSession | undefined>();
   const [remoteStatus, setRemoteStatus] = useState<MobileRemoteSessionStatus>({ state: "idle" });
+  const [forceRelayOnly, setForceRelayOnly] = useState(false);
   const [terminalRuntime, setTerminalRuntime] = useState<Record<string, TerminalRuntime>>({});
   const [terminalInput, setTerminalInput] = useState("");
   const terminalHandleRef = useRef<MobileTerminalHandle | undefined>(undefined);
@@ -69,6 +72,16 @@ function AppShell(): React.JSX.Element {
   useEffect(() => {
     const subscription = Dimensions.addEventListener("change", ({ window }) => setWidth(window.width));
     return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void SecureStore.getItemAsync(mobileDebugForceRelayKey).then((value) => {
+      if (!cancelled) setForceRelayOnly(value === "1");
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -152,7 +165,7 @@ function AppShell(): React.JSX.Element {
       setRemoteStatus({ state: "needs_pairing", message: host.authorization_state === "pending" ? t("status.pending") : t("status.needs_pairing") });
       return () => undefined;
     }
-    const session = new MobileHostRemoteSession(cloudSession, storedIdentity, host);
+    const session = new MobileHostRemoteSession(cloudSession, storedIdentity, host, { forceRelay: forceRelayOnly });
     setRemoteSession(session);
     async function loadSnapshot(): Promise<void> {
       setHostLoading(true);
@@ -165,7 +178,8 @@ function AppShell(): React.JSX.Element {
         setHosts((current) => current.map((item) => item.device_id === host.device_id ? {
           ...item,
           authorization_state: "approved",
-          control: { ...(item.control ?? { route_generation: 0 }), state: "live", transport: "relay", route_generation: item.control?.route_generation ?? 0, updated_at: new Date().toISOString() },
+          connection: session.currentStatus().transport ?? item.connection,
+          control: { ...(item.control ?? { route_generation: 0 }), state: "live", transport: session.currentStatus().transport, route_generation: item.control?.route_generation ?? 0, updated_at: new Date().toISOString() },
         } : item));
       } catch (error) {
         if (cancelled) return;
@@ -205,7 +219,7 @@ function AppShell(): React.JSX.Element {
       if (timer) clearInterval(timer);
       session.close();
     };
-  }, [activeHostId, activeHost?.authorization_state, cloudSession?.account_token, cloudSession?.updated_at, storedIdentity?.seed_hex]);
+  }, [activeHostId, activeHost?.authorization_state, cloudSession?.account_token, cloudSession?.updated_at, storedIdentity?.seed_hex, forceRelayOnly]);
 
   async function refreshCloud(sessionArg = cloudSession, identityArg = identity, silent = false): Promise<void> {
     if (!sessionArg || !identityArg) {
@@ -294,6 +308,11 @@ function AppShell(): React.JSX.Element {
     } finally {
       setPairingHostId(undefined);
     }
+  }
+
+  function updateForceRelayOnly(next: boolean): void {
+    setForceRelayOnly(next);
+    void SecureStore.setItemAsync(mobileDebugForceRelayKey, next ? "1" : "0").catch(() => undefined);
   }
 
   function scrollToPage(next: Page, animated = true): void {
@@ -442,6 +461,7 @@ function AppShell(): React.JSX.Element {
             sessions={sessions}
             activeHost={activeHost}
             remoteStatus={remoteStatus}
+            forceRelayOnly={forceRelayOnly}
             activeWorkspaceId={activeWorkspaceId}
             activeSessionId={activeSessionId}
             onBack={() => scrollToPage("transcript")}
@@ -449,6 +469,7 @@ function AppShell(): React.JSX.Element {
             onLogoutCloud={logoutCloud}
             onRefreshCloud={() => refreshCloud()}
             onRequestPairing={requestPairingForHost}
+            onForceRelayOnlyChange={updateForceRelayOnly}
             pairingHostId={pairingHostId}
             onSelectHost={(hostId) => {
               setActiveHostId(hostId);
@@ -524,6 +545,7 @@ function NavigatorScreen({
   sessions,
   activeHost,
   remoteStatus,
+  forceRelayOnly,
   activeWorkspaceId,
   activeSessionId,
   onBack,
@@ -531,6 +553,7 @@ function NavigatorScreen({
   onLogoutCloud,
   onRefreshCloud,
   onRequestPairing,
+  onForceRelayOnlyChange,
   pairingHostId,
   onSelectHost,
   onSelectWorkspace,
@@ -552,6 +575,7 @@ function NavigatorScreen({
   sessions: Session[];
   activeHost?: MobileHostRecord;
   remoteStatus: MobileRemoteSessionStatus;
+  forceRelayOnly: boolean;
   activeWorkspaceId: string;
   activeSessionId: string;
   onBack: () => void;
@@ -559,6 +583,7 @@ function NavigatorScreen({
   onLogoutCloud: () => void;
   onRefreshCloud: () => void;
   onRequestPairing: (host: MobileHostRecord) => void;
+  onForceRelayOnlyChange: (next: boolean) => void;
   pairingHostId?: string;
   onSelectHost: (hostId: string) => void;
   onSelectWorkspace: (workspaceId: string) => void;
@@ -583,6 +608,18 @@ function NavigatorScreen({
               <InfoRow colors={colors} label={t("settings.account")} value={cloudAccount?.account_id_hash ?? cloudSession.account_id_hash ?? t("common.empty")} />
               <InfoRow colors={colors} label={t("settings.relay")} value={relayLabel(cloudAccount, cloudRelays) || t("common.empty")} />
               <InfoRow colors={colors} label={t("mobile.thisDevice")} value={identity?.device_id ?? t("common.empty")} />
+              <View style={[styles.switchRow, { borderTopColor: colors.border }]}>
+                <View style={styles.rowText}>
+                  <Text style={[styles.rowTitle, { color: colors.text }]}>{t("mobile.forceRelayOnly")}</Text>
+                  <Text style={[styles.rowSubtitle, { color: colors.muted }]}>{t("mobile.forceRelayOnlyDetail")}</Text>
+                </View>
+                <Switch
+                  value={forceRelayOnly}
+                  onValueChange={onForceRelayOnlyChange}
+                  trackColor={{ false: colors.panelStrong, true: colors.greenSoft }}
+                  thumbColor={forceRelayOnly ? colors.green : colors.textSoft}
+                />
+              </View>
               <View style={styles.accountActions}>
                 <Pressable style={({ pressed }) => [styles.secondaryButton, { backgroundColor: colors.panelStrong }, pressed && styles.pressed]} onPress={onRefreshCloud}>
                   <RefreshCw size={15} color={colors.text} />
@@ -890,6 +927,7 @@ function palette(dark: boolean) {
     textSoft: dark ? "#c7c8ca" : "#4f5358",
     muted: dark ? "#999b9f" : "#8f9296",
     green: dark ? "#5fce8f" : "#2f8c58",
+    greenSoft: dark ? "rgba(95,206,143,0.28)" : "rgba(47,140,88,0.22)",
     orange: dark ? "#f2a66f" : "#a65020",
     terminalBg: dark ? "#111213" : "#171819",
     terminalText: "#e8e8e6",
@@ -974,6 +1012,7 @@ const styles = StyleSheet.create({
   infoRow: { minHeight: 31, flexDirection: "row", alignItems: "center", gap: 10, borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 8 },
   infoLabel: { width: 82, fontSize: 12, fontWeight: "800" },
   infoValue: { flex: 1, textAlign: "right", fontSize: 12, fontWeight: "700" },
+  switchRow: { minHeight: 44, flexDirection: "row", alignItems: "center", gap: 12, borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 8 },
   emptyPanel: { borderRadius: 8, padding: 12, marginBottom: 8 },
   emptyPanelTitle: { fontSize: 14, fontWeight: "800" },
   emptyPanelSubtitle: { marginTop: 4, fontSize: 12, lineHeight: 17, fontWeight: "600" },

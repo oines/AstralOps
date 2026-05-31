@@ -11,10 +11,17 @@
     ],
     "ios": {
       "bundleIdentifier": "dev.oines.astralops",
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "AstralOps uses the local network to find and connect to your trusted desktop Host.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
     },
     "android": {
       "package": "dev.oines.astralops",
+      "usesCleartextTraffic": true,
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "INTERNET",
