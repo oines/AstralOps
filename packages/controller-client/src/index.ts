@@ -1,12 +1,16 @@
 import type {
   AstralEvent,
+  CloudAccount,
   CloudAccountStatus,
   CloudAuthProvider,
   CloudDeviceRecord,
+  CloudDeviceListResponse,
   CloudPairingSignalResponse,
   CloudRelayListResponse,
   CloudRelayUpdateRequest,
+  ControlCapability,
   CreateWorkspaceRequest,
+  DeviceIdentity,
   HostSnapshotRequest,
   HostSnapshotResponse,
   MeshState,
@@ -104,6 +108,178 @@ export interface ControllerClient {
   listCloudDevices(): Promise<CloudDeviceRecord[]>;
   listCloudRelays(): Promise<CloudRelayListResponse>;
   setCloudAccountRelay(input: CloudRelayUpdateRequest): Promise<CloudAccountStatus>;
+}
+
+export type CloudDeviceRegistration = {
+  device_id: string;
+  device_name?: string;
+  device_kind: "desktop" | "mobile" | string;
+  public_key: string;
+  public_key_fingerprint: string;
+  capabilities?: ControlCapability[];
+  can_host: boolean;
+  can_control: boolean;
+  relay_url?: string;
+};
+
+export type CloudLoginCodeExchangeResponse = {
+  account: CloudAccount;
+  account_token: string;
+  expires_at?: string;
+  device?: CloudDeviceRecord;
+};
+
+export type CloudPairingSignalInput = {
+  host_device_id: string;
+  controller_device_id: string;
+  scope?: "full" | string;
+  capabilities?: ControlCapability[];
+  workspace_exec_policy?: "trusted" | "require_approval" | "disabled" | string;
+};
+
+export type CloudHttpClientOptions = {
+  baseUrl: string;
+  accountToken?: string;
+  fetchImpl?: typeof fetch;
+};
+
+export class CloudHttpClient {
+  private readonly baseUrl: string;
+  private readonly accountToken: string;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(options: CloudHttpClientOptions) {
+    this.baseUrl = normalizeBaseUrl(options.baseUrl);
+    this.accountToken = options.accountToken?.trim() ?? "";
+    this.fetchImpl = options.fetchImpl ?? fetch;
+  }
+
+  authStartUrl(provider: CloudAuthProvider, redirectUri: string, state: string): string {
+    const url = new URL(`/v1/auth/${provider}/start`, `${this.baseUrl}/`);
+    url.searchParams.set("redirect_uri", redirectUri);
+    url.searchParams.set("state", state);
+    return url.toString();
+  }
+
+  exchangeLoginCode(loginCode: string, device: DeviceIdentity): Promise<CloudLoginCodeExchangeResponse> {
+    return this.request("POST", "/v1/auth/login-code/exchange", {
+      login_code: loginCode.trim(),
+      device: deviceRegistrationFromIdentity(device, false, true),
+    }, false);
+  }
+
+  account(): Promise<CloudAccount> {
+    return this.request("GET", "/v1/account");
+  }
+
+  async accountStatus(): Promise<CloudAccountStatus> {
+    const account = await this.account();
+    return cloudAccountStatus(account);
+  }
+
+  relays(): Promise<CloudRelayListResponse> {
+    return this.request("GET", "/v1/relays");
+  }
+
+  setRelay(input: CloudRelayUpdateRequest): Promise<CloudAccount> {
+    return this.request("PATCH", "/v1/account/relay", input);
+  }
+
+  registerDevice(identity: DeviceIdentity, relayUrl = ""): Promise<CloudDeviceRecord> {
+    return this.request("POST", "/v1/devices", deviceRegistrationFromIdentity(identity, false, true, relayUrl));
+  }
+
+  async devices(): Promise<CloudDeviceRecord[]> {
+    const response = await this.request<CloudDeviceListResponse>("GET", "/v1/devices");
+    return Array.isArray(response.devices) ? response.devices : [];
+  }
+
+  heartbeat(deviceId: string, relayUrl = ""): Promise<CloudDeviceRecord> {
+    return this.request("POST", `/v1/devices/${encodeURIComponent(deviceId)}/heartbeat`, { relay_url: relayUrl });
+  }
+
+  offline(deviceId: string): Promise<CloudDeviceRecord> {
+    return this.request("POST", `/v1/devices/${encodeURIComponent(deviceId)}/offline`, {});
+  }
+
+  removeDevice(deviceId: string): Promise<CloudDeviceRecord> {
+    return this.request("POST", `/v1/devices/${encodeURIComponent(deviceId)}/remove`, {});
+  }
+
+  requestPairing(input: CloudPairingSignalInput): Promise<CloudPairingSignalResponse> {
+    return this.request("POST", "/v1/pairing/requests", input);
+  }
+
+  private async request<T>(method: "GET" | "PATCH" | "POST", path: string, body?: unknown, auth = true): Promise<T> {
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method,
+      headers: {
+        ...(auth ? this.authHeaders() : {}),
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await response.text();
+    const parsed = text ? parseJSON(text) : {};
+    if (!response.ok) {
+      const message = errorMessage(parsed) ?? (text || `${response.status} ${response.statusText}`);
+      throw new Error(message);
+    }
+    return parsed as T;
+  }
+
+  private authHeaders(): Record<string, string> {
+    if (!this.accountToken) throw new Error("Cloud account token is missing.");
+    return { Authorization: `Bearer ${this.accountToken}` };
+  }
+}
+
+export function deviceRegistrationFromIdentity(identity: DeviceIdentity, canHost: boolean, canControl: boolean, relayUrl = ""): CloudDeviceRegistration {
+  return {
+    device_id: identity.device_id,
+    device_name: identity.device_name,
+    device_kind: identity.device_kind,
+    public_key: identity.public_key,
+    public_key_fingerprint: identity.public_key_fingerprint,
+    capabilities: identity.capabilities,
+    can_host: canHost,
+    can_control: canControl,
+    ...(relayUrl.trim() ? { relay_url: relayUrl.trim() } : {}),
+  };
+}
+
+function cloudAccountStatus(account: CloudAccount): CloudAccountStatus {
+  return {
+    account_id_hash: account.account_id_hash,
+    relay: account.relay ? {
+      relay_id: account.relay.relay_id,
+      relay_url: account.relay.relay_url,
+      region: account.relay.region,
+      name: account.relay.name,
+      credential_available: Boolean(account.relay.credential),
+      credential_expires_at: account.relay.credential_expires_at,
+    } : undefined,
+  };
+}
+
+function normalizeBaseUrl(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!trimmed) throw new Error("Cloud base URL is missing.");
+  return trimmed;
+}
+
+function parseJSON(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function errorMessage(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const value = payload as Record<string, unknown>;
+  return typeof value.error === "string" ? value.error : typeof value.message === "string" ? value.message : undefined;
 }
 
 export class ControllerClientUnavailableError extends Error {

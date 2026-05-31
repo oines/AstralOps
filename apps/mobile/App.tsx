@@ -2,64 +2,19 @@ import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Dimensions, NativeScrollEvent, NativeSyntheticEvent, Pressable, ScrollView, StyleSheet, Text, TextInput, useColorScheme, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { Bot, Check, ChevronLeft, ChevronRight, Folder, Laptop, Menu, Plus, Settings, TerminalSquare, Wifi } from "lucide-react-native";
+import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, LogOut, Menu, Plus, RefreshCw, Settings, TerminalSquare } from "lucide-react-native";
 import { WebView } from "react-native-webview";
 import { getLocales } from "expo-localization";
-import type { RemoteHostRecord, Session, TerminalTab, Workspace } from "@astralops/protocol";
+import type { CloudAccountStatus, CloudAuthProvider, CloudRelayListResponse, DeviceIdentity, RemoteHostRecord, Session, TerminalTab, WorkbenchState, Workspace } from "@astralops/protocol";
 import { mobileResources, resolveAppLanguage, type AppLanguage, type ResolvedLanguage } from "@astralops/i18n";
 import { groupTranscriptEvents } from "@astralops/transcript";
 import { createEmptyWorkbenchState, selectSessions, selectTerminalTabs, selectWorkspaces } from "@astralops/workbench-state";
+import { DEFAULT_CLOUD_BASE_URL, clearStoredCloudSession, loadCloudMeshSnapshot, loadStoredCloudSession, removeSelfFromCloud, requestCloudPairing, startCloudOAuth, type StoredCloudSession } from "./src/mobileCloud";
+import { loadOrCreateMobileIdentity, resetMobileIdentity } from "./src/mobileIdentity";
 
 type Page = "navigator" | "transcript" | "terminal";
 
 const initialWorkbench = createEmptyWorkbenchState();
-const now = new Date().toISOString();
-initialWorkbench.workspaces.project = {
-  id: "project",
-  name: "project",
-  target: "local",
-  agent: "claude",
-  local_projection_root: "",
-  local_cwd: "",
-  created_at: now,
-  updated_at: now,
-};
-initialWorkbench.sessions.hello = {
-  id: "hello",
-  workspace_id: "project",
-  agent: "claude",
-  title: "hello",
-  status: "idle",
-  created_at: now,
-  updated_at: now,
-};
-initialWorkbench.terminal_tabs["term-1"] = {
-  terminal_id: "term-1",
-  workspace_id: "project",
-  agent: "claude",
-  target: "local",
-  shell: "zsh",
-  cwd: "/",
-  status: "open",
-  output_seq: 1,
-  created_at: now,
-  updated_at: now,
-};
-
-const demoHosts: RemoteHostRecord[] = [
-  {
-    device_id: "dev_mobile_preview_host",
-    device_name: "oinesdeMac-mini.local",
-    device_kind: "desktop",
-    public_key_fingerprint: "sha256:PREVIEW",
-    known_identity: true,
-    status: "lan",
-    connection: "lan",
-    authorization_state: "approved",
-    capabilities: ["core.read", "session.input", "terminal.open"],
-    control: { state: "live", transport: "lan", route_generation: 1, updated_at: now },
-  },
-];
 
 function AppShell(): React.JSX.Element {
   const colorScheme = useColorScheme();
@@ -70,15 +25,25 @@ function AppShell(): React.JSX.Element {
   const t = useMemo(() => translator(resolvedLanguage), [resolvedLanguage]);
   const [width, setWidth] = useState(Dimensions.get("window").width);
   const [page, setPage] = useState<Page>("transcript");
-  const [activeHostId, setActiveHostId] = useState(demoHosts[0]?.device_id ?? "");
-  const [activeWorkspaceId, setActiveWorkspaceId] = useState("project");
-  const [activeSessionId, setActiveSessionId] = useState("hello");
-  const [activeTerminalId, setActiveTerminalId] = useState("term-1");
+  const [identity, setIdentity] = useState<DeviceIdentity | undefined>();
+  const [cloudSession, setCloudSession] = useState<StoredCloudSession | undefined>();
+  const [cloudAccount, setCloudAccount] = useState<CloudAccountStatus | undefined>();
+  const [cloudRelays, setCloudRelays] = useState<CloudRelayListResponse | undefined>();
+  const [hosts, setHosts] = useState<RemoteHostRecord[]>([]);
+  const [cloudLoading, setCloudLoading] = useState(true);
+  const [authLoading, setAuthLoading] = useState<CloudAuthProvider | undefined>();
+  const [pairingHostId, setPairingHostId] = useState<string | undefined>();
+  const [cloudError, setCloudError] = useState("");
+  const [activeHostId, setActiveHostId] = useState("");
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState("");
+  const [activeSessionId, setActiveSessionId] = useState("");
+  const [activeTerminalId, setActiveTerminalId] = useState("");
   const scrollRef = useRef<ScrollView | null>(null);
-  const workspaces = selectWorkspaces(initialWorkbench);
-  const sessions = selectSessions(initialWorkbench, activeWorkspaceId);
-  const terminals = selectTerminalTabs(initialWorkbench, activeWorkspaceId);
-  const activeHost = demoHosts.find((host) => host.device_id === activeHostId) ?? demoHosts[0];
+  const [workbench] = useState<WorkbenchState>(initialWorkbench);
+  const workspaces = selectWorkspaces(workbench);
+  const sessions = selectSessions(workbench, activeWorkspaceId);
+  const terminals = selectTerminalTabs(workbench, activeWorkspaceId);
+  const activeHost = hosts.find((host) => host.device_id === activeHostId) ?? hosts[0];
   const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
   const activeSession = sessions.find((session) => session.id === activeSessionId);
   const activeTerminal = terminals.find((terminal) => terminal.terminal_id === activeTerminalId) ?? terminals[0];
@@ -89,8 +54,110 @@ function AppShell(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const nextIdentity = await loadOrCreateMobileIdentity();
+        if (cancelled) return;
+        setIdentity(nextIdentity);
+        const stored = await loadStoredCloudSession();
+        if (cancelled) return;
+        setCloudSession(stored);
+        if (stored) {
+          await refreshCloud(stored, nextIdentity);
+        }
+      } catch (error) {
+        if (!cancelled) setCloudError(errorMessage(error));
+      } finally {
+        if (!cancelled) setCloudLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     requestAnimationFrame(() => scrollToPage("transcript", false));
   }, [width]);
+
+  async function refreshCloud(sessionArg = cloudSession, identityArg = identity): Promise<void> {
+    if (!sessionArg || !identityArg) {
+      setCloudLoading(false);
+      return;
+    }
+    setCloudLoading(true);
+    setCloudError("");
+    try {
+      const snapshot = await loadCloudMeshSnapshot(sessionArg, identityArg);
+      setCloudSession(snapshot.session);
+      setCloudAccount(snapshot.account);
+      setCloudRelays(snapshot.relays);
+      setHosts(snapshot.hosts);
+      setActiveHostId((current) => snapshot.hosts.some((host) => host.device_id === current) ? current : snapshot.hosts[0]?.device_id ?? "");
+    } catch (error) {
+      setCloudError(errorMessage(error));
+    } finally {
+      setCloudLoading(false);
+    }
+  }
+
+  async function loginCloud(provider: CloudAuthProvider): Promise<void> {
+    let currentIdentity = identity;
+    if (!currentIdentity) {
+      currentIdentity = await loadOrCreateMobileIdentity();
+      setIdentity(currentIdentity);
+    }
+    setAuthLoading(provider);
+    setCloudError("");
+    try {
+      const session = await startCloudOAuth(provider, currentIdentity);
+      setCloudSession(session);
+      await refreshCloud(session, currentIdentity);
+    } catch (error) {
+      setCloudError(errorMessage(error));
+    } finally {
+      setAuthLoading(undefined);
+    }
+  }
+
+  async function logoutCloud(): Promise<void> {
+    const previousSession = cloudSession;
+    const previousIdentity = identity;
+    setCloudLoading(true);
+    setCloudError("");
+    try {
+      if (previousSession && previousIdentity) {
+        await removeSelfFromCloud(previousSession, previousIdentity).catch(() => undefined);
+      }
+      await clearStoredCloudSession();
+      const nextIdentity = await resetMobileIdentity();
+      setIdentity(nextIdentity);
+      setCloudSession(undefined);
+      setCloudAccount(undefined);
+      setCloudRelays(undefined);
+      setHosts([]);
+      setActiveHostId("");
+    } catch (error) {
+      setCloudError(errorMessage(error));
+    } finally {
+      setCloudLoading(false);
+    }
+  }
+
+  async function requestPairingForHost(host: RemoteHostRecord): Promise<void> {
+    if (!cloudSession || !identity) return;
+    setPairingHostId(host.device_id);
+    setCloudError("");
+    try {
+      await requestCloudPairing(cloudSession, identity, host.device_id);
+      setHosts((current) => current.map((item) => item.device_id === host.device_id ? { ...item, authorization_state: "pending", control: { ...(item.control ?? { route_generation: 0 }), state: "needs_pairing", route_generation: item.control?.route_generation ?? 0, updated_at: new Date().toISOString() } } : item));
+    } catch (error) {
+      setCloudError(errorMessage(error));
+    } finally {
+      setPairingHostId(undefined);
+    }
+  }
 
   function scrollToPage(next: Page, animated = true): void {
     const index = next === "navigator" ? 0 : next === "transcript" ? 1 : 2;
@@ -120,13 +187,25 @@ function AppShell(): React.JSX.Element {
           width={width}
           colors={colors}
           t={t}
-          hosts={demoHosts}
+          identity={identity}
+          cloudSession={cloudSession}
+          cloudAccount={cloudAccount}
+          cloudRelays={cloudRelays}
+          cloudLoading={cloudLoading}
+          authLoading={authLoading}
+          cloudError={cloudError}
+          hosts={hosts}
           workspaces={workspaces}
           sessions={sessions}
           activeHost={activeHost}
           activeWorkspaceId={activeWorkspaceId}
           activeSessionId={activeSessionId}
           onBack={() => scrollToPage("transcript")}
+          onLoginCloud={loginCloud}
+          onLogoutCloud={logoutCloud}
+          onRefreshCloud={() => refreshCloud()}
+          onRequestPairing={requestPairingForHost}
+          pairingHostId={pairingHostId}
           onSelectHost={(hostId) => {
             setActiveHostId(hostId);
             scrollToPage("transcript");
@@ -178,6 +257,13 @@ function NavigatorScreen({
   width,
   colors,
   t,
+  identity,
+  cloudSession,
+  cloudAccount,
+  cloudRelays,
+  cloudLoading,
+  authLoading,
+  cloudError,
   hosts,
   workspaces,
   sessions,
@@ -185,6 +271,11 @@ function NavigatorScreen({
   activeWorkspaceId,
   activeSessionId,
   onBack,
+  onLoginCloud,
+  onLogoutCloud,
+  onRefreshCloud,
+  onRequestPairing,
+  pairingHostId,
   onSelectHost,
   onSelectWorkspace,
   onSelectSession,
@@ -192,6 +283,13 @@ function NavigatorScreen({
   width: number;
   colors: AppPalette;
   t: Translator;
+  identity?: DeviceIdentity;
+  cloudSession?: StoredCloudSession;
+  cloudAccount?: CloudAccountStatus;
+  cloudRelays?: CloudRelayListResponse;
+  cloudLoading: boolean;
+  authLoading?: CloudAuthProvider;
+  cloudError: string;
   hosts: RemoteHostRecord[];
   workspaces: Workspace[];
   sessions: Session[];
@@ -199,6 +297,11 @@ function NavigatorScreen({
   activeWorkspaceId: string;
   activeSessionId: string;
   onBack: () => void;
+  onLoginCloud: (provider: CloudAuthProvider) => void;
+  onLogoutCloud: () => void;
+  onRefreshCloud: () => void;
+  onRequestPairing: (host: RemoteHostRecord) => void;
+  pairingHostId?: string;
   onSelectHost: (hostId: string) => void;
   onSelectWorkspace: (workspaceId: string) => void;
   onSelectSession: (sessionId: string) => void;
@@ -207,22 +310,77 @@ function NavigatorScreen({
     <View style={[styles.page, { width, backgroundColor: colors.panel }]}>
       <Header colors={colors} title={t("common.navigator")} subtitle={t("mobile.controllerOnly")} leftIcon={<ChevronLeft size={18} color={colors.text} />} onLeftPress={onBack} />
       <ScrollView style={styles.navigatorBody} contentContainerStyle={styles.navigatorContent}>
+        <SectionTitle colors={colors} label={t("settings.account")} />
+        <View style={[styles.accountPanel, { backgroundColor: colors.panelSoft, borderColor: colors.border }]}>
+          <View style={styles.accountHeader}>
+            <Cloud size={19} color={colors.textSoft} />
+            <View style={styles.rowText}>
+              <Text style={[styles.rowTitle, { color: colors.text }]}>{cloudSession ? t("mobile.cloudConnected") : t("mobile.cloudDisconnected")}</Text>
+              <Text style={[styles.rowSubtitle, { color: colors.muted }]} numberOfLines={1}>{cloudSession?.base_url ?? DEFAULT_CLOUD_BASE_URL}</Text>
+            </View>
+            {cloudLoading ? <Text style={[styles.loadingText, { color: colors.muted }]}>{t("common.loading")}</Text> : null}
+          </View>
+          {cloudSession ? (
+            <>
+              <InfoRow colors={colors} label={t("settings.account")} value={cloudAccount?.account_id_hash ?? cloudSession.account_id_hash ?? t("common.empty")} />
+              <InfoRow colors={colors} label={t("settings.relay")} value={relayLabel(cloudAccount, cloudRelays) || t("common.empty")} />
+              <InfoRow colors={colors} label={t("mobile.thisDevice")} value={identity?.device_id ?? t("common.empty")} />
+              <View style={styles.accountActions}>
+                <Pressable style={[styles.secondaryButton, { backgroundColor: colors.panelStrong }]} onPress={onRefreshCloud}>
+                  <RefreshCw size={15} color={colors.text} />
+                  <Text style={[styles.secondaryButtonText, { color: colors.text }]}>{t("common.refresh")}</Text>
+                </Pressable>
+                <Pressable style={[styles.secondaryButton, { backgroundColor: colors.panelStrong }]} onPress={onLogoutCloud}>
+                  <LogOut size={15} color={colors.text} />
+                  <Text style={[styles.secondaryButtonText, { color: colors.text }]}>{t("common.logout")}</Text>
+                </Pressable>
+              </View>
+            </>
+          ) : (
+            <View style={styles.accountActions}>
+              <Pressable style={[styles.secondaryButton, { backgroundColor: colors.panelStrong }]} onPress={() => onLoginCloud("github")}>
+                <Github size={15} color={colors.text} />
+                <Text style={[styles.secondaryButtonText, { color: colors.text }]}>{authLoading === "github" ? t("common.loading") : t("mobile.loginGitHub")}</Text>
+              </Pressable>
+              <Pressable style={[styles.secondaryButton, { backgroundColor: colors.panelStrong }]} onPress={() => onLoginCloud("google")}>
+                <Text style={[styles.googleGlyph, { color: colors.text }]}>G</Text>
+                <Text style={[styles.secondaryButtonText, { color: colors.text }]}>{authLoading === "google" ? t("common.loading") : t("mobile.loginGoogle")}</Text>
+              </Pressable>
+            </View>
+          )}
+          {cloudError ? <Text style={[styles.errorText, { color: colors.orange }]}>{cloudError}</Text> : null}
+        </View>
+
         <SectionTitle colors={colors} label={t("mobile.hosts")} />
-        {hosts.map((host) => (
+        {hosts.length === 0 ? (
+          <View style={[styles.emptyPanel, { backgroundColor: colors.panelSoft }]}>
+            <Text style={[styles.emptyPanelTitle, { color: colors.text }]}>{cloudSession ? t("mobile.noHosts") : t("mobile.signInToSeeHosts")}</Text>
+            <Text style={[styles.emptyPanelSubtitle, { color: colors.muted }]}>{t("mobile.hostsFromCloud")}</Text>
+          </View>
+        ) : hosts.map((host) => (
           <Pressable key={host.device_id} style={[styles.hostRow, { backgroundColor: host.device_id === activeHost?.device_id ? colors.panelStrong : colors.panelSoft }]} onPress={() => onSelectHost(host.device_id)}>
             <Laptop size={20} color={colors.textSoft} />
             <View style={styles.rowText}>
               <Text style={[styles.rowTitle, { color: colors.text }]} numberOfLines={1}>{host.device_name ?? host.device_id}</Text>
               <View style={styles.rowMeta}>
-                <Text style={[styles.rowSubtitle, { color: colors.muted }]}>{host.connection === "lan" ? t("status.lan") : t("status.relay")}</Text>
-                <StatusPill colors={colors} label={host.control?.state === "live" ? t("status.live") : t(`status.${host.control?.state ?? "offline"}`)} tone="good" />
+                <Text style={[styles.rowSubtitle, { color: colors.muted }]}>{host.connection === "relay" ? t("status.relay") : t(`status.${host.connection || "offline"}`)}</Text>
+                <StatusPill colors={colors} label={host.authorization_state === "pending" ? t("status.pending") : host.authorization_state === "needs_pairing" ? t("status.needs_pairing") : t(`status.${host.status || "offline"}`)} tone={host.status === "online" ? "good" : "muted"} />
               </View>
             </View>
+            {host.authorization_state === "needs_pairing" ? (
+              <Pressable style={[styles.pairButton, { backgroundColor: colors.panel }]} onPress={() => onRequestPairing(host)}>
+                <Text style={[styles.pairButtonText, { color: colors.text }]}>{pairingHostId === host.device_id ? t("common.loading") : t("mobile.requestControl")}</Text>
+              </Pressable>
+            ) : null}
             {host.device_id === activeHost?.device_id ? <Check size={18} color={colors.text} /> : null}
           </Pressable>
         ))}
 
         <SectionTitle colors={colors} label={t("mobile.workspaces")} />
+        <View style={[styles.emptyPanel, { backgroundColor: colors.panelSoft }]}>
+          <Text style={[styles.emptyPanelTitle, { color: colors.text }]}>{activeHost ? t("mobile.workbenchPending") : t("mobile.selectHost")}</Text>
+          <Text style={[styles.emptyPanelSubtitle, { color: colors.muted }]}>{t("mobile.workbenchPendingDetail")}</Text>
+        </View>
         <Pressable style={[styles.actionRow, { backgroundColor: colors.panelSoft }]}>
           <Plus size={18} color={colors.text} />
           <Text style={[styles.actionLabel, { color: colors.text }]}>{t("mobile.newWorkspace")}</Text>
@@ -275,8 +433,8 @@ function TranscriptScreen({ width, colors, t, activeHost, activeWorkspace, activ
       <View style={styles.transcriptBody}>
         {groups.length === 0 ? (
           <View style={styles.emptyTranscript}>
-            <Text style={[styles.emptyTitle, { color: colors.text }]}>{activeSession?.title || t("mobile.selectSession")}</Text>
-            <Text style={[styles.emptySubtitle, { color: colors.muted }]}>{activeHost?.connection === "lan" ? t("status.lan") : t("status.relay")}</Text>
+            <Text style={[styles.emptyTitle, { color: colors.text }]}>{activeSession?.title || (activeHost ? t("mobile.selectSession") : t("mobile.selectHost"))}</Text>
+            <Text style={[styles.emptySubtitle, { color: colors.muted }]}>{activeHost ? t("mobile.workbenchPendingDetail") : t("mobile.signInToSeeHosts")}</Text>
           </View>
         ) : null}
       </View>
@@ -360,6 +518,15 @@ function SectionTitle({ colors, label }: { colors: AppPalette; label: string }):
   return <Text style={[styles.sectionTitle, { color: colors.muted }]}>{label}</Text>;
 }
 
+function InfoRow({ colors, label, value }: { colors: AppPalette; label: string; value: string }): React.JSX.Element {
+  return (
+    <View style={[styles.infoRow, { borderTopColor: colors.border }]}>
+      <Text style={[styles.infoLabel, { color: colors.muted }]}>{label}</Text>
+      <Text style={[styles.infoValue, { color: colors.textSoft }]} numberOfLines={1}>{value}</Text>
+    </View>
+  );
+}
+
 function StatusPill({ colors, label, tone = "muted" }: { colors: AppPalette; label: string; tone?: "good" | "muted" }): React.JSX.Element {
   return <Text style={[styles.statusPill, { color: tone === "good" ? colors.green : colors.muted, backgroundColor: colors.panelStrong }]}>{label}</Text>;
 }
@@ -391,7 +558,19 @@ function palette(dark: boolean) {
     textSoft: dark ? "#c7c8ca" : "#4f5358",
     muted: dark ? "#999b9f" : "#8f9296",
     green: dark ? "#5fce8f" : "#2f8c58",
+    orange: dark ? "#f2a66f" : "#a65020",
   };
+}
+
+function relayLabel(account: CloudAccountStatus | undefined, relays: CloudRelayListResponse | undefined): string {
+  const relay = account?.relay;
+  if (!relay?.relay_id && !relay?.relay_url) return "";
+  const option = relays?.relays.find((item) => item.relay_id === relay?.relay_id);
+  return [relay?.relay_id, option?.name || relay?.name, relay?.relay_url].filter(Boolean).join(" · ");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function terminalHtml(colors: AppPalette): string {
@@ -410,12 +589,28 @@ const styles = StyleSheet.create({
   navigatorBody: { flex: 1 },
   navigatorContent: { padding: 12, paddingBottom: 96 },
   sectionTitle: { marginTop: 14, marginBottom: 8, paddingHorizontal: 4, fontSize: 12, fontWeight: "700" },
+  accountPanel: { borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, padding: 10, gap: 9 },
+  accountHeader: { minHeight: 36, flexDirection: "row", alignItems: "center", gap: 10 },
+  accountActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  secondaryButton: { minHeight: 36, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, borderRadius: 8, paddingHorizontal: 11 },
+  secondaryButtonText: { fontSize: 13, fontWeight: "800" },
+  googleGlyph: { fontSize: 14, fontWeight: "900" },
+  loadingText: { fontSize: 12, fontWeight: "800" },
+  errorText: { fontSize: 12, fontWeight: "700" },
+  infoRow: { minHeight: 31, flexDirection: "row", alignItems: "center", gap: 10, borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 8 },
+  infoLabel: { width: 82, fontSize: 12, fontWeight: "800" },
+  infoValue: { flex: 1, textAlign: "right", fontSize: 12, fontWeight: "700" },
+  emptyPanel: { borderRadius: 8, padding: 12, marginBottom: 8 },
+  emptyPanelTitle: { fontSize: 14, fontWeight: "800" },
+  emptyPanelSubtitle: { marginTop: 4, fontSize: 12, lineHeight: 17, fontWeight: "600" },
   hostRow: { minHeight: 58, flexDirection: "row", alignItems: "center", gap: 10, padding: 10, borderRadius: 8, marginBottom: 8 },
   rowText: { flex: 1, minWidth: 0 },
   rowTitle: { fontSize: 15, fontWeight: "700" },
   rowSubtitle: { fontSize: 12, fontWeight: "600" },
   rowMeta: { marginTop: 3, flexDirection: "row", alignItems: "center", gap: 6 },
   statusPill: { overflow: "hidden", borderRadius: 8, paddingHorizontal: 7, paddingVertical: 2, fontSize: 11, fontWeight: "800" },
+  pairButton: { minHeight: 32, justifyContent: "center", borderRadius: 8, paddingHorizontal: 9 },
+  pairButtonText: { fontSize: 12, fontWeight: "800" },
   actionRow: { height: 38, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 10, borderRadius: 8, marginBottom: 8 },
   actionLabel: { fontSize: 14, fontWeight: "700" },
   workspaceRow: { height: 38, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 10, borderRadius: 8 },
