@@ -1,6 +1,6 @@
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Dimensions, KeyboardAvoidingView, NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useColorScheme, View } from "react-native";
+import { Dimensions, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useColorScheme, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, LogOut, Menu, Plus, RefreshCw, Settings, TerminalSquare } from "lucide-react-native";
 import { WebView } from "react-native-webview";
@@ -24,7 +24,6 @@ function AppShell(): React.JSX.Element {
   const resolvedLanguage = resolveAppLanguage(language, systemLanguage);
   const t = useMemo(() => translator(resolvedLanguage), [resolvedLanguage]);
   const [width, setWidth] = useState(Dimensions.get("window").width);
-  const [page, setPage] = useState<Page>("transcript");
   const [identity, setIdentity] = useState<DeviceIdentity | undefined>();
   const [cloudSession, setCloudSession] = useState<StoredCloudSession | undefined>();
   const [cloudAccount, setCloudAccount] = useState<CloudAccountStatus | undefined>();
@@ -161,13 +160,7 @@ function AppShell(): React.JSX.Element {
 
   function scrollToPage(next: Page, animated = true): void {
     const index = next === "navigator" ? 0 : next === "transcript" ? 1 : 2;
-    setPage(next);
     scrollRef.current?.scrollTo({ x: width * index, animated });
-  }
-
-  function handleMomentumEnd(event: NativeSyntheticEvent<NativeScrollEvent>): void {
-    const index = Math.round(event.nativeEvent.contentOffset.x / Math.max(1, width));
-    setPage(index === 0 ? "navigator" : index === 2 ? "terminal" : "transcript");
   }
 
   return (
@@ -184,7 +177,6 @@ function AppShell(): React.JSX.Element {
           pagingEnabled
           bounces={false}
           showsHorizontalScrollIndicator={false}
-          onMomentumScrollEnd={handleMomentumEnd}
           keyboardShouldPersistTaps="handled"
           style={styles.pager}
         >
@@ -241,11 +233,6 @@ function AppShell(): React.JSX.Element {
             onSelectTerminal={setActiveTerminalId}
           />
         </ScrollView>
-        <View pointerEvents="none" style={[styles.pageIndicator, { backgroundColor: colors.panelStrong }]}>
-          <View style={[styles.pageDot, page === "navigator" && { backgroundColor: colors.green }]} />
-          <View style={[styles.pageDot, page === "transcript" && { backgroundColor: colors.green }]} />
-          <View style={[styles.pageDot, page === "terminal" && { backgroundColor: colors.green }]} />
-        </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -314,7 +301,7 @@ function NavigatorScreen({
 }): React.JSX.Element {
   return (
     <View style={[styles.page, { width, backgroundColor: colors.panel }]}>
-      <Header colors={colors} title={t("common.navigator")} subtitle={t("mobile.controllerOnly")} leftIcon={<ChevronLeft size={18} color={colors.text} />} onLeftPress={onBack} />
+      <Header colors={colors} title={t("common.navigator")} leftIcon={<ChevronLeft size={18} color={colors.text} />} onLeftPress={onBack} />
       <ScrollView style={styles.navigatorBody} contentContainerStyle={styles.navigatorContent}>
         <SectionTitle colors={colors} label={t("settings.account")} />
         <View style={[styles.accountPanel, { backgroundColor: colors.panelSoft, borderColor: colors.border }]}>
@@ -332,11 +319,11 @@ function NavigatorScreen({
               <InfoRow colors={colors} label={t("settings.relay")} value={relayLabel(cloudAccount, cloudRelays) || t("common.empty")} />
               <InfoRow colors={colors} label={t("mobile.thisDevice")} value={identity?.device_id ?? t("common.empty")} />
               <View style={styles.accountActions}>
-                <Pressable style={[styles.secondaryButton, { backgroundColor: colors.panelStrong }]} onPress={onRefreshCloud}>
+                <Pressable style={({ pressed }) => [styles.secondaryButton, { backgroundColor: colors.panelStrong }, pressed && styles.pressed]} onPress={onRefreshCloud}>
                   <RefreshCw size={15} color={colors.text} />
                   <Text style={[styles.secondaryButtonText, { color: colors.text }]}>{t("common.refresh")}</Text>
                 </Pressable>
-                <Pressable style={[styles.secondaryButton, { backgroundColor: colors.panelStrong }]} onPress={onLogoutCloud}>
+                <Pressable style={({ pressed }) => [styles.secondaryButton, { backgroundColor: colors.panelStrong }, pressed && styles.pressed]} onPress={onLogoutCloud}>
                   <LogOut size={15} color={colors.text} />
                   <Text style={[styles.secondaryButtonText, { color: colors.text }]}>{t("common.logout")}</Text>
                 </Pressable>
@@ -344,11 +331,11 @@ function NavigatorScreen({
             </>
           ) : (
             <View style={styles.accountActions}>
-              <Pressable style={[styles.secondaryButton, { backgroundColor: colors.panelStrong }]} onPress={() => onLoginCloud("github")}>
+              <Pressable style={({ pressed }) => [styles.secondaryButton, { backgroundColor: colors.panelStrong }, pressed && styles.pressed]} onPress={() => onLoginCloud("github")}>
                 <Github size={15} color={colors.text} />
                 <Text style={[styles.secondaryButtonText, { color: colors.text }]}>{authLoading === "github" ? t("common.loading") : t("mobile.loginGitHub")}</Text>
               </Pressable>
-              <Pressable style={[styles.secondaryButton, { backgroundColor: colors.panelStrong }]} onPress={() => onLoginCloud("google")}>
+              <Pressable style={({ pressed }) => [styles.secondaryButton, { backgroundColor: colors.panelStrong }, pressed && styles.pressed]} onPress={() => onLoginCloud("google")}>
                 <Text style={[styles.googleGlyph, { color: colors.text }]}>G</Text>
                 <Text style={[styles.secondaryButtonText, { color: colors.text }]}>{authLoading === "google" ? t("common.loading") : t("mobile.loginGoogle")}</Text>
               </Pressable>
@@ -361,10 +348,9 @@ function NavigatorScreen({
         {hosts.length === 0 ? (
           <View style={[styles.emptyPanel, { backgroundColor: colors.panelSoft }]}>
             <Text style={[styles.emptyPanelTitle, { color: colors.text }]}>{cloudSession ? t("mobile.noHosts") : t("mobile.signInToSeeHosts")}</Text>
-            <Text style={[styles.emptyPanelSubtitle, { color: colors.muted }]}>{t("mobile.hostsFromCloud")}</Text>
           </View>
         ) : hosts.map((host) => (
-          <Pressable key={host.device_id} style={[styles.hostRow, { backgroundColor: host.device_id === activeHost?.device_id ? colors.panelStrong : colors.panelSoft }]} onPress={() => onSelectHost(host.device_id)}>
+          <Pressable key={host.device_id} style={({ pressed }) => [styles.hostRow, { backgroundColor: host.device_id === activeHost?.device_id ? colors.panelStrong : colors.panelSoft }, pressed && styles.pressed]} onPress={() => onSelectHost(host.device_id)}>
             <Laptop size={20} color={colors.textSoft} />
             <View style={styles.rowText}>
               <Text style={[styles.rowTitle, { color: colors.text }]} numberOfLines={1}>{host.device_name ?? host.device_id}</Text>
@@ -374,7 +360,7 @@ function NavigatorScreen({
               </View>
             </View>
             {host.authorization_state === "needs_pairing" ? (
-              <Pressable style={[styles.pairButton, { backgroundColor: colors.panel }]} onPress={() => onRequestPairing(host)}>
+              <Pressable style={({ pressed }) => [styles.pairButton, { backgroundColor: colors.panel }, pressed && styles.pressed]} onPress={() => onRequestPairing(host)}>
                 <Text style={[styles.pairButtonText, { color: colors.text }]}>{pairingHostId === host.device_id ? t("common.loading") : t("mobile.requestControl")}</Text>
               </Pressable>
             ) : null}
@@ -385,31 +371,30 @@ function NavigatorScreen({
         <SectionTitle colors={colors} label={t("mobile.workspaces")} />
         <View style={[styles.emptyPanel, { backgroundColor: colors.panelSoft }]}>
           <Text style={[styles.emptyPanelTitle, { color: colors.text }]}>{activeHost ? t("mobile.workbenchPending") : t("mobile.selectHost")}</Text>
-          <Text style={[styles.emptyPanelSubtitle, { color: colors.muted }]}>{t("mobile.workbenchPendingDetail")}</Text>
         </View>
-        <Pressable style={[styles.actionRow, { backgroundColor: colors.panelSoft }]}>
+        <Pressable style={({ pressed }) => [styles.actionRow, { backgroundColor: colors.panelSoft }, pressed && styles.pressed]}>
           <Plus size={18} color={colors.text} />
           <Text style={[styles.actionLabel, { color: colors.text }]}>{t("mobile.newWorkspace")}</Text>
         </Pressable>
         {workspaces.map((workspace) => (
           <View key={workspace.id}>
-            <Pressable style={[styles.workspaceRow, { backgroundColor: workspace.id === activeWorkspaceId ? colors.panelStrong : "transparent" }]} onPress={() => onSelectWorkspace(workspace.id)}>
+            <Pressable style={({ pressed }) => [styles.workspaceRow, { backgroundColor: workspace.id === activeWorkspaceId ? colors.panelStrong : "transparent" }, pressed && styles.pressed]} onPress={() => onSelectWorkspace(workspace.id)}>
               <Folder size={18} color={colors.textSoft} />
               <Text style={[styles.rowTitle, { color: colors.text }]}>{workspace.name}</Text>
             </Pressable>
             {workspace.id === activeWorkspaceId ? sessions.map((session) => (
-              <Pressable key={session.id} style={[styles.sessionRow, { backgroundColor: session.id === activeSessionId ? colors.panelStrong : "transparent" }]} onPress={() => onSelectSession(session.id)}>
+              <Pressable key={session.id} style={({ pressed }) => [styles.sessionRow, { backgroundColor: session.id === activeSessionId ? colors.panelStrong : "transparent" }, pressed && styles.pressed]} onPress={() => onSelectSession(session.id)}>
                 <Bot size={16} color={colors.muted} />
                 <Text style={[styles.sessionTitle, { color: session.id === activeSessionId ? colors.text : colors.textSoft }]} numberOfLines={1}>{session.title || session.id}</Text>
               </Pressable>
             )) : null}
           </View>
         ))}
+        <Pressable style={({ pressed }) => [styles.settingsRow, { backgroundColor: colors.panelSoft }, pressed && styles.pressed]} onPress={() => undefined}>
+          <Settings size={18} color={colors.textSoft} />
+          <Text style={[styles.actionLabel, { color: colors.text }]}>{t("common.settings")}</Text>
+        </Pressable>
       </ScrollView>
-      <Pressable style={[styles.settingsButton, { borderColor: colors.border }]} onPress={() => undefined}>
-        <Settings size={18} color={colors.textSoft} />
-        <Text style={[styles.actionLabel, { color: colors.text }]}>{t("common.settings")}</Text>
-      </Pressable>
     </View>
   );
 }
@@ -451,7 +436,7 @@ function TranscriptScreen({ width, colors, t, activeHost, activeWorkspace, activ
           style={[styles.composerInput, { color: colors.text }]}
           multiline
         />
-        <Pressable style={[styles.sendButton, { backgroundColor: colors.panelStrong }]}>
+        <Pressable style={({ pressed }) => [styles.sendButton, { backgroundColor: colors.panelStrong }, pressed && styles.pressed]}>
           <ChevronRight size={20} color={colors.text} />
         </Pressable>
       </View>
@@ -473,12 +458,12 @@ function TerminalScreen({ width, colors, t, terminals, activeTerminal, onBack, o
       <Header colors={colors} title={t("common.terminal")} subtitle={activeTerminal ? `${activeTerminal.shell ?? "shell"} · ${activeTerminal.cwd ?? "/"}` : t("mobile.terminalInputPaused")} leftIcon={<ChevronLeft size={18} color={colors.text} />} onLeftPress={onBack} />
       <View style={[styles.terminalTabs, { borderBottomColor: colors.border }]}>
         {terminals.map((terminal) => (
-          <Pressable key={terminal.terminal_id} style={[styles.terminalTab, { backgroundColor: terminal.terminal_id === activeTerminal?.terminal_id ? colors.panelStrong : colors.panelSoft }]} onPress={() => onSelectTerminal(terminal.terminal_id)}>
+          <Pressable key={terminal.terminal_id} style={({ pressed }) => [styles.terminalTab, { backgroundColor: terminal.terminal_id === activeTerminal?.terminal_id ? colors.panelStrong : colors.panelSoft }, pressed && styles.pressed]} onPress={() => onSelectTerminal(terminal.terminal_id)}>
             <TerminalSquare size={14} color={colors.textSoft} />
             <Text style={[styles.terminalTabText, { color: colors.text }]} numberOfLines={1}>{terminal.shell ?? "shell"} · {terminal.cwd ?? "/"}</Text>
           </Pressable>
         ))}
-        <Pressable style={[styles.terminalAdd, { backgroundColor: colors.panelSoft }]}>
+        <Pressable style={({ pressed }) => [styles.terminalAdd, { backgroundColor: colors.panelSoft }, pressed && styles.pressed]}>
           <Plus size={18} color={colors.text} />
         </Pressable>
       </View>
@@ -490,7 +475,7 @@ function TerminalScreen({ width, colors, t, terminals, activeTerminal, onBack, o
       />
       <View style={[styles.keybar, { borderTopColor: colors.border }]}>
         {["ESC", "TAB", "CTRL", "↑", "↓", "←", "→"].map((key) => (
-          <Pressable key={key} style={[styles.keyButton, { backgroundColor: colors.panelSoft }]}>
+          <Pressable key={key} style={({ pressed }) => [styles.keyButton, { backgroundColor: colors.panelSoft }, pressed && styles.pressed]}>
             <Text style={[styles.keyText, { color: colors.textSoft }]}>{key}</Text>
           </Pressable>
         ))}
@@ -510,12 +495,12 @@ function Header({ colors, title, subtitle, leftIcon, rightIcon, onLeftPress, onR
 }): React.JSX.Element {
   return (
     <View style={[styles.header, { borderBottomColor: colors.border }]}>
-      <Pressable style={[styles.headerButton, { backgroundColor: colors.panelSoft }]} onPress={onLeftPress}>{leftIcon}</Pressable>
+      <Pressable hitSlop={6} style={({ pressed }) => [styles.headerButton, { backgroundColor: colors.panelSoft }, pressed && styles.pressed]} onPress={onLeftPress}>{leftIcon}</Pressable>
       <View style={styles.headerTitle}>
         <Text style={[styles.headerText, { color: colors.text }]} numberOfLines={1}>{title}</Text>
         {subtitle ? <Text style={[styles.headerSubtitle, { color: colors.muted }]} numberOfLines={1}>{subtitle}</Text> : null}
       </View>
-      <Pressable style={[styles.headerButton, { backgroundColor: rightIcon ? colors.panelSoft : "transparent" }]} onPress={onRightPress}>{rightIcon}</Pressable>
+      <Pressable hitSlop={6} style={({ pressed }) => [styles.headerButton, { backgroundColor: rightIcon ? colors.panelSoft : "transparent" }, pressed && rightIcon ? styles.pressed : null]} onPress={onRightPress}>{rightIcon}</Pressable>
     </View>
   );
 }
@@ -594,7 +579,7 @@ const styles = StyleSheet.create({
   headerText: { fontSize: 15, fontWeight: "700" },
   headerSubtitle: { marginTop: 2, fontSize: 12, fontWeight: "600" },
   navigatorBody: { flex: 1 },
-  navigatorContent: { padding: 12, paddingBottom: 96 },
+  navigatorContent: { padding: 12, paddingBottom: 28 },
   sectionTitle: { marginTop: 14, marginBottom: 8, paddingHorizontal: 4, fontSize: 12, fontWeight: "700" },
   accountPanel: { borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, padding: 10, gap: 9 },
   accountHeader: { minHeight: 36, flexDirection: "row", alignItems: "center", gap: 10 },
@@ -620,10 +605,10 @@ const styles = StyleSheet.create({
   pairButtonText: { fontSize: 12, fontWeight: "800" },
   actionRow: { height: 38, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 10, borderRadius: 8, marginBottom: 8 },
   actionLabel: { fontSize: 14, fontWeight: "700" },
+  settingsRow: { height: 42, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 10, borderRadius: 8, marginTop: 18 },
   workspaceRow: { height: 38, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 10, borderRadius: 8 },
   sessionRow: { height: 34, flexDirection: "row", alignItems: "center", gap: 8, marginLeft: 20, paddingHorizontal: 10, borderRadius: 8 },
   sessionTitle: { flex: 1, fontSize: 14, fontWeight: "600" },
-  settingsButton: { position: "absolute", left: 12, right: 12, bottom: 16, height: 42, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth },
   transcriptBody: { flex: 1 },
   emptyTranscript: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
   emptyTitle: { fontSize: 18, fontWeight: "800" },
@@ -639,6 +624,5 @@ const styles = StyleSheet.create({
   keybar: { minHeight: 54, flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 10, borderTopWidth: StyleSheet.hairlineWidth },
   keyButton: { height: 34, minWidth: 42, alignItems: "center", justifyContent: "center", borderRadius: 8, paddingHorizontal: 8 },
   keyText: { fontSize: 12, fontWeight: "800" },
-  pageIndicator: { position: "absolute", alignSelf: "center", bottom: 6, flexDirection: "row", gap: 5, borderRadius: 8, padding: 4 },
-  pageDot: { width: 5, height: 5, borderRadius: 999, backgroundColor: "transparent" },
+  pressed: { opacity: 0.72, transform: [{ scale: 0.98 }] },
 });
