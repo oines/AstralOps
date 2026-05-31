@@ -2,7 +2,7 @@ import * as Crypto from "expo-crypto";
 import * as Linking from "expo-linking";
 import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
-import type { CloudAccount, CloudAccountStatus, CloudAuthProvider, CloudDeviceRecord, CloudMembershipLease, CloudRelayListResponse, DeviceIdentity, RemoteHostRecord } from "@astralops/protocol";
+import type { CloudAccount, CloudAccountStatus, CloudAuthProvider, CloudDeviceRecord, CloudMembershipLease, CloudPairingSignal, CloudRelayListResponse, DeviceIdentity, RemoteHostRecord } from "@astralops/protocol";
 import { CloudHttpClient } from "@astralops/controller-client";
 import { bytesToBase64URL, mobileControllerCapabilities } from "./mobileIdentity";
 
@@ -36,6 +36,7 @@ export type CloudMeshSnapshot = {
   account: CloudAccountStatus;
   relays: CloudRelayListResponse;
   devices: CloudDeviceRecord[];
+  pairing_signals: CloudPairingSignal[];
   hosts: MobileHostRecord[];
 };
 
@@ -103,9 +104,10 @@ export async function loadCloudMeshSnapshot(session: StoredCloudSession, identit
   const accountStatus = cloudAccountStatus(account);
   const relayUrl = account.relay?.relay_url ?? session.relay_url ?? "";
   const heartbeat = await client.heartbeat(identity.device_id, relayUrl);
-  const [relays, devices] = await Promise.all([
+  const [relays, devices, pairingSignals] = await Promise.all([
     client.relays().catch(() => ({ relays: [], current_relay_id: account.relay?.relay_id })),
     client.devices(),
+    client.pairingSignals(identity.device_id).catch(() => []),
   ]);
   const nextSession = mergeSessionCloudFacts(session, account, heartbeat);
   await saveCloudSession(nextSession);
@@ -114,18 +116,20 @@ export async function loadCloudMeshSnapshot(session: StoredCloudSession, identit
     account: accountStatus,
     relays,
     devices,
-    hosts: cloudDevicesToRemoteHosts(devices, identity.device_id, accountStatus),
+    pairing_signals: pairingSignals,
+    hosts: cloudDevicesToRemoteHosts(devices, identity.device_id, accountStatus, pairingSignals),
   };
 }
 
-export async function requestCloudPairing(session: StoredCloudSession, identity: DeviceIdentity, hostDeviceId: string): Promise<void> {
-  await cloudClient(session).requestPairing({
+export async function requestCloudPairing(session: StoredCloudSession, identity: DeviceIdentity, hostDeviceId: string): Promise<CloudPairingSignal> {
+  const response = await cloudClient(session).requestPairing({
     host_device_id: hostDeviceId,
     controller_device_id: identity.device_id,
     scope: "full",
     capabilities: mobileControllerCapabilities,
     workspace_exec_policy: "trusted",
   });
+  return response.request;
 }
 
 export async function removeSelfFromCloud(session: StoredCloudSession, identity: DeviceIdentity): Promise<void> {
@@ -149,14 +153,16 @@ function mergeSessionCloudFacts(session: StoredCloudSession, account: CloudAccou
   };
 }
 
-function cloudDevicesToRemoteHosts(devices: CloudDeviceRecord[], selfDeviceId: string, account: CloudAccountStatus): MobileHostRecord[] {
+function cloudDevicesToRemoteHosts(devices: CloudDeviceRecord[], selfDeviceId: string, account: CloudAccountStatus, pairingSignals: CloudPairingSignal[]): MobileHostRecord[] {
+  const signalsByHost = latestPairingSignalsByHost(pairingSignals, selfDeviceId);
   return devices
     .filter((device) => device.device_id !== selfDeviceId && device.can_host && device.status !== "revoked")
     .map((device) => {
       const online = device.status === "online";
       const relayURL = device.relay_url || account.relay?.relay_url || "";
       const connection = online && relayURL ? "relay" : "offline";
-      const authorization = online ? "needs_pairing" : "known";
+      const signal = signalsByHost.get(device.device_id);
+      const authorization = signal?.status === "approved" ? "approved" : signal?.status === "pending" ? "pending" : signal?.status === "denied" ? "denied" : "needs_pairing";
       return {
         device_id: device.device_id,
         device_name: device.device_name,
@@ -167,15 +173,30 @@ function cloudDevicesToRemoteHosts(devices: CloudDeviceRecord[], selfDeviceId: s
         status: online ? "online" : "offline",
         connection,
         authorization_state: authorization,
+        pairing_request_id: signal?.request_id,
+        pairing_status: signal?.status,
         capabilities: device.capabilities,
         control: {
-          state: online ? "needs_pairing" : "idle",
+          state: authorization === "approved" ? "idle" : "needs_pairing",
           transport: connection === "relay" ? "relay" : undefined,
           route_generation: 0,
           updated_at: device.updated_at,
         },
       } satisfies MobileHostRecord;
     });
+}
+
+function latestPairingSignalsByHost(signals: CloudPairingSignal[], controllerDeviceId: string): Map<string, CloudPairingSignal> {
+  const result = new Map<string, CloudPairingSignal>();
+  for (const signal of signals) {
+    if (signal.controller_device_id !== controllerDeviceId) continue;
+    const hostID = signal.host_device_id;
+    const existing = result.get(hostID);
+    if (!existing || Date.parse(signal.updated_at || signal.created_at) >= Date.parse(existing.updated_at || existing.created_at)) {
+      result.set(hostID, signal);
+    }
+  }
+  return result;
 }
 
 function cloudAccountStatus(account: CloudAccount): CloudAccountStatus {

@@ -5,6 +5,8 @@ import type {
   CloudAuthProvider,
   CloudDeviceRecord,
   CloudDeviceListResponse,
+  CloudPairingSignal,
+  CloudPairingSignalListResponse,
   CloudPairingSignalResponse,
   CloudRelayListResponse,
   CloudRelayUpdateRequest,
@@ -208,6 +210,12 @@ export class CloudHttpClient {
 
   requestPairing(input: CloudPairingSignalInput): Promise<CloudPairingSignalResponse> {
     return this.request("POST", "/v1/pairing/requests", input);
+  }
+
+  async pairingSignals(deviceId?: string): Promise<CloudPairingSignal[]> {
+    const query = deviceId?.trim() ? `?device_id=${encodeURIComponent(deviceId.trim())}` : "";
+    const response = await this.request<CloudPairingSignalListResponse>("GET", `/v1/pairing/requests${query}`);
+    return Array.isArray(response.requests) ? response.requests : [];
   }
 
   private async request<T>(method: "GET" | "PATCH" | "POST", path: string, body?: unknown, auth = true): Promise<T> {

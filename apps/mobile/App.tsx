@@ -3,7 +3,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Dimensions, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useColorScheme, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, LogOut, Menu, Plus, RefreshCw, Settings, TerminalSquare } from "lucide-react-native";
-import { WebView } from "react-native-webview";
 import { getLocales } from "expo-localization";
 import type { AstralEvent, CloudAccountStatus, CloudAuthProvider, CloudRelayListResponse, DeviceIdentity, HostSnapshotResponse, Session, TerminalTab, WorkbenchState, Workspace } from "@astralops/protocol";
 import { mobileResources, resolveAppLanguage, type AppLanguage, type ResolvedLanguage } from "@astralops/i18n";
@@ -11,11 +10,15 @@ import { EMPTY_EVENT_INDEX, groupTranscriptEvents, maxEventSeq, mergeEventIndex,
 import { createEmptyWorkbenchState, selectSessions, selectTerminalTabs, selectWorkspaces } from "@astralops/workbench-state";
 import { DEFAULT_CLOUD_BASE_URL, clearStoredCloudSession, loadCloudMeshSnapshot, loadStoredCloudSession, removeSelfFromCloud, requestCloudPairing, startCloudOAuth, type MobileHostRecord, type StoredCloudSession } from "./src/mobileCloud";
 import { loadOrCreateStoredMobileIdentity, resetStoredMobileIdentity, type StoredMobileIdentity } from "./src/mobileIdentity";
-import { MobileHostRemoteSession, type MobileRemoteSessionStatus } from "./src/mobileRemote";
+import { MobileHostRemoteSession, type MobileRemoteSessionStatus, type MobileTerminalHandle, type MobileTerminalStatus } from "./src/mobileRemote";
 
 type Page = "navigator" | "transcript" | "terminal";
 
 const initialWorkbench = createEmptyWorkbenchState();
+
+type TerminalRuntime = MobileTerminalStatus & {
+  output: string;
+};
 
 function AppShell(): React.JSX.Element {
   const colorScheme = useColorScheme();
@@ -50,6 +53,9 @@ function AppShell(): React.JSX.Element {
   const [eventIndex, setEventIndex] = useState<EventIndex>(EMPTY_EVENT_INDEX);
   const [remoteSession, setRemoteSession] = useState<MobileHostRemoteSession | undefined>();
   const [remoteStatus, setRemoteStatus] = useState<MobileRemoteSessionStatus>({ state: "idle" });
+  const [terminalRuntime, setTerminalRuntime] = useState<Record<string, TerminalRuntime>>({});
+  const [terminalInput, setTerminalInput] = useState("");
+  const terminalHandleRef = useRef<MobileTerminalHandle | undefined>(undefined);
   const workspaces = selectWorkspaces(workbench);
   const sessions = selectSessions(workbench, activeWorkspaceId);
   const terminals = selectTerminalTabs(workbench, activeWorkspaceId);
@@ -57,6 +63,7 @@ function AppShell(): React.JSX.Element {
   const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
   const activeSession = sessions.find((session) => session.id === activeSessionId);
   const activeTerminal = terminals.find((terminal) => terminal.terminal_id === activeTerminalId) ?? terminals[0];
+  const activeTerminalRuntime = activeTerminal ? terminalRuntime[activeTerminal.terminal_id] : undefined;
   const activeSessionEvents = activeSession ? selectSessionEvents(eventIndex, activeSession.id) : [];
 
   useEffect(() => {
@@ -94,6 +101,16 @@ function AppShell(): React.JSX.Element {
   }, [width]);
 
   useEffect(() => {
+    if (!cloudSession || !identity) return () => undefined;
+    const timer = setInterval(() => {
+      void refreshCloud(cloudSession, identity, true).catch(() => undefined);
+    }, 5000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [cloudSession?.account_token, identity?.device_id]);
+
+  useEffect(() => {
     eventIndexRef.current = eventIndex;
   }, [eventIndex]);
 
@@ -122,11 +139,17 @@ function AppShell(): React.JSX.Element {
     setHostError("");
     setWorkbench(createEmptyWorkbenchState());
     setEventIndex(EMPTY_EVENT_INDEX);
+    setTerminalRuntime({});
+    terminalHandleRef.current = undefined;
     pollTickRef.current = 0;
     setActiveWorkspaceId("");
     setActiveSessionId("");
     setActiveTerminalId("");
     if (!host || !cloudSession || !storedIdentity) {
+      return () => undefined;
+    }
+    if (!hostCanControl(host)) {
+      setRemoteStatus({ state: "needs_pairing", message: host.authorization_state === "pending" ? t("status.pending") : t("status.needs_pairing") });
       return () => undefined;
     }
     const session = new MobileHostRemoteSession(cloudSession, storedIdentity, host);
@@ -180,15 +203,16 @@ function AppShell(): React.JSX.Element {
     return () => {
       cancelled = true;
       if (timer) clearInterval(timer);
+      session.close();
     };
-  }, [activeHostId, cloudSession?.account_token, cloudSession?.updated_at, storedIdentity?.seed_hex]);
+  }, [activeHostId, activeHost?.authorization_state, cloudSession?.account_token, cloudSession?.updated_at, storedIdentity?.seed_hex]);
 
-  async function refreshCloud(sessionArg = cloudSession, identityArg = identity): Promise<void> {
+  async function refreshCloud(sessionArg = cloudSession, identityArg = identity, silent = false): Promise<void> {
     if (!sessionArg || !identityArg) {
-      setCloudLoading(false);
+      if (!silent) setCloudLoading(false);
       return;
     }
-    setCloudLoading(true);
+    if (!silent) setCloudLoading(true);
     setCloudError("");
     try {
       const snapshot = await loadCloudMeshSnapshot(sessionArg, identityArg);
@@ -200,7 +224,7 @@ function AppShell(): React.JSX.Element {
     } catch (error) {
       setCloudError(errorMessage(error));
     } finally {
-      setCloudLoading(false);
+      if (!silent) setCloudLoading(false);
     }
   }
 
@@ -256,8 +280,15 @@ function AppShell(): React.JSX.Element {
     setPairingHostId(host.device_id);
     setCloudError("");
     try {
-      await requestCloudPairing(cloudSession, identity, host.device_id);
-      setHosts((current) => current.map((item) => item.device_id === host.device_id ? { ...item, authorization_state: "pending", control: { ...(item.control ?? { route_generation: 0 }), state: "needs_pairing", route_generation: item.control?.route_generation ?? 0, updated_at: new Date().toISOString() } } : item));
+      const request = await requestCloudPairing(cloudSession, identity, host.device_id);
+      setHosts((current) => current.map((item) => item.device_id === host.device_id ? {
+        ...item,
+        authorization_state: request.status,
+        pairing_request_id: request.request_id,
+        pairing_status: request.status,
+        control: { ...(item.control ?? { route_generation: 0 }), state: "needs_pairing", route_generation: item.control?.route_generation ?? 0, updated_at: new Date().toISOString() },
+      } : item));
+      await refreshCloud(cloudSession, identity, true).catch(() => undefined);
     } catch (error) {
       setCloudError(errorMessage(error));
     } finally {
@@ -295,6 +326,85 @@ function AppShell(): React.JSX.Element {
     } catch (error) {
       setHostError(errorMessage(error));
       setRemoteStatus(remoteSession.currentStatus());
+    }
+  }
+
+  useEffect(() => {
+    terminalHandleRef.current = undefined;
+    if (!remoteSession || !activeTerminal || remoteStatus.state !== "live") return () => undefined;
+    let closed = false;
+    const terminalID = activeTerminal.terminal_id;
+    const afterSeq = terminalRuntime[terminalID]?.outputSeq ?? 0;
+    setTerminalRuntime((current) => ({
+      ...current,
+      [terminalID]: current[terminalID] ?? { state: "attaching", canInput: false, outputSeq: afterSeq, output: "" },
+    }));
+    void remoteSession.attachTerminal(terminalID, {
+      onReady: (ready) => {
+        setTerminalRuntime((current) => ({ ...current, [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime()), state: "live", canInput: true, outputSeq: ready.output_seq ?? 0 } }));
+      },
+      onStatus: (status) => {
+        setTerminalRuntime((current) => ({
+          ...current,
+          [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime()), ...status, outputSeq: status.outputSeq },
+        }));
+      },
+      onOutput: (data, outputSeq) => {
+        setTerminalRuntime((current) => {
+          const previous = current[terminalID] ?? emptyTerminalRuntime();
+          return { ...current, [terminalID]: { ...previous, outputSeq, output: appendTerminalOutput(previous.output, data) } };
+        });
+      },
+      onClosed: () => {
+        setTerminalRuntime((current) => ({ ...current, [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime()), state: "closed", canInput: false } }));
+      },
+      onError: (message) => {
+        setTerminalRuntime((current) => ({ ...current, [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime()), state: "failed", canInput: false, message } }));
+      },
+    }, afterSeq).then((handle) => {
+      if (closed) {
+        void handle.detach();
+        return;
+      }
+      terminalHandleRef.current = handle;
+    }).catch((error) => setHostError(errorMessage(error)));
+    return () => {
+      closed = true;
+      const handle = terminalHandleRef.current;
+      terminalHandleRef.current = undefined;
+      void handle?.detach();
+    };
+  }, [remoteSession, remoteStatus.state, activeTerminal?.terminal_id]);
+
+  async function openTerminalForWorkspace(): Promise<void> {
+    if (!remoteSession || !activeWorkspace || remoteStatus.state !== "live") return;
+    setHostError("");
+    try {
+      const terminal = await remoteSession.createTerminal(activeWorkspace.id);
+      setActiveTerminalId(terminal.terminal_id);
+      const snapshot = await remoteSession.snapshot(20);
+      applyHostSnapshot(snapshot);
+      scrollToPage("terminal");
+    } catch (error) {
+      setHostError(errorMessage(error));
+      setRemoteStatus(remoteSession.currentStatus());
+    }
+  }
+
+  async function sendTerminalInput(data?: string): Promise<void> {
+    const value = data ?? `${terminalInput}\r`;
+    if (!value || !activeTerminalRuntime?.canInput) return;
+    try {
+      await terminalHandleRef.current?.input(value);
+      if (!data) setTerminalInput("");
+    } catch (error) {
+      setHostError(errorMessage(error));
+      if (activeTerminal) {
+        setTerminalRuntime((current) => ({
+          ...current,
+          [activeTerminal.terminal_id]: { ...(current[activeTerminal.terminal_id] ?? emptyTerminalRuntime()), state: "paused", canInput: false, message: errorMessage(error) },
+        }));
+      }
     }
   }
 
@@ -373,9 +483,15 @@ function AppShell(): React.JSX.Element {
             t={t}
             terminals={terminals}
             activeTerminal={activeTerminal}
+            runtime={activeTerminalRuntime}
             remoteStatus={remoteStatus}
+            terminalInput={terminalInput}
             onBack={() => scrollToPage("transcript")}
             onSelectTerminal={setActiveTerminalId}
+            onNewTerminal={openTerminalForWorkspace}
+            onTerminalInputChange={setTerminalInput}
+            onSendTerminalInput={() => sendTerminalInput()}
+            onSendTerminalKey={(data) => sendTerminalInput(data)}
           />
         </ScrollView>
       </KeyboardAvoidingView>
@@ -506,10 +622,10 @@ function NavigatorScreen({
               <Text style={[styles.rowTitle, { color: colors.text }]} numberOfLines={1}>{host.device_name ?? host.device_id}</Text>
               <View style={styles.rowMeta}>
                 <Text style={[styles.rowSubtitle, { color: colors.muted }]}>{host.device_id === activeHost?.device_id && remoteStatus.state !== "idle" ? t(`status.${remoteStatus.state}`) : host.connection === "relay" ? t("status.relay") : t(`status.${host.connection || "offline"}`)}</Text>
-                <StatusPill colors={colors} label={host.authorization_state === "pending" ? t("status.pending") : host.authorization_state === "needs_pairing" ? t("status.needs_pairing") : t(`status.${host.status || "offline"}`)} tone={host.status === "online" ? "good" : "muted"} />
+                <StatusPill colors={colors} label={host.authorization_state === "approved" ? t(`status.${host.status || "offline"}`) : host.authorization_state === "pending" ? t("status.pending") : host.authorization_state === "denied" ? t("status.denied") : t("status.needs_pairing")} tone={host.status === "online" && host.authorization_state === "approved" ? "good" : "muted"} />
               </View>
             </View>
-            {host.authorization_state === "needs_pairing" ? (
+            {!hostCanControl(host) ? (
               <Pressable style={({ pressed }) => [styles.pairButton, { backgroundColor: colors.panel }, pressed && styles.pressed]} onPress={() => onRequestPairing(host)}>
                 <Text style={[styles.pairButtonText, { color: colors.text }]}>{pairingHostId === host.device_id ? t("common.loading") : t("mobile.requestControl")}</Text>
               </Pressable>
@@ -620,19 +736,26 @@ function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoad
   );
 }
 
-function TerminalScreen({ width, colors, t, terminals, activeTerminal, remoteStatus, onBack, onSelectTerminal }: {
+function TerminalScreen({ width, colors, t, terminals, activeTerminal, runtime, remoteStatus, terminalInput, onBack, onSelectTerminal, onNewTerminal, onTerminalInputChange, onSendTerminalInput, onSendTerminalKey }: {
   width: number;
   colors: AppPalette;
   t: Translator;
   terminals: TerminalTab[];
   activeTerminal?: TerminalTab;
+  runtime?: TerminalRuntime;
   remoteStatus: MobileRemoteSessionStatus;
+  terminalInput: string;
   onBack: () => void;
   onSelectTerminal: (terminalId: string) => void;
+  onNewTerminal: () => void;
+  onTerminalInputChange: (value: string) => void;
+  onSendTerminalInput: () => void;
+  onSendTerminalKey: (data: string) => void;
 }): React.JSX.Element {
+  const canInput = remoteStatus.state === "live" && Boolean(activeTerminal) && runtime?.canInput === true && terminalInput.trim().length > 0;
   return (
     <View style={[styles.page, { width, backgroundColor: colors.bg }]}>
-      <Header colors={colors} title={t("common.terminal")} subtitle={activeTerminal ? `${activeTerminal.shell ?? "shell"} · ${activeTerminal.cwd ?? "/"}` : t("mobile.terminalInputPaused")} leftIcon={<ChevronLeft size={18} color={colors.text} />} onLeftPress={onBack} />
+      <Header colors={colors} title={t("common.terminal")} subtitle={activeTerminal ? `${activeTerminal.shell ?? "shell"} · ${activeTerminal.cwd ?? "/"}` : t("mobile.terminalInputPaused")} leftIcon={<ChevronLeft size={18} color={colors.text} />} rightIcon={<Plus size={18} color={colors.text} />} onLeftPress={onBack} onRightPress={onNewTerminal} />
       <View style={[styles.terminalTabs, { borderBottomColor: colors.border }]}>
         {terminals.map((terminal) => (
           <Pressable key={terminal.terminal_id} style={({ pressed }) => [styles.terminalTab, { backgroundColor: terminal.terminal_id === activeTerminal?.terminal_id ? colors.panelStrong : colors.panelSoft }, pressed && styles.pressed]} onPress={() => onSelectTerminal(terminal.terminal_id)}>
@@ -640,27 +763,51 @@ function TerminalScreen({ width, colors, t, terminals, activeTerminal, remoteSta
             <Text style={[styles.terminalTabText, { color: colors.text }]} numberOfLines={1}>{terminal.shell ?? "shell"} · {terminal.cwd ?? "/"}</Text>
           </Pressable>
         ))}
-        <Pressable style={({ pressed }) => [styles.terminalAdd, { backgroundColor: colors.panelSoft }, pressed && styles.pressed]}>
+        <Pressable style={({ pressed }) => [styles.terminalAdd, { backgroundColor: colors.panelSoft }, pressed && styles.pressed]} onPress={onNewTerminal}>
           <Plus size={18} color={colors.text} />
         </Pressable>
       </View>
       {activeTerminal ? (
-        <WebView
-          style={styles.terminalWebView}
-          originWhitelist={["*"]}
-          source={{ html: terminalHtml(colors, activeTerminal, remoteStatus) }}
-          scrollEnabled={false}
-        />
+        <View style={styles.terminalBody}>
+          {runtime?.state && runtime.state !== "live" ? (
+            <View style={[styles.inlineStatus, { backgroundColor: colors.panelSoft, borderColor: colors.border }]}>
+              <Text style={[styles.inlineStatusText, { color: runtime.state === "failed" ? colors.orange : colors.textSoft }]}>{runtime.message || t(runtime.state === "attaching" ? "status.connecting" : "mobile.terminalInputPaused")}</Text>
+            </View>
+          ) : null}
+          <ScrollView style={[styles.terminalOutput, { backgroundColor: colors.terminalBg }]} contentContainerStyle={styles.terminalOutputContent}>
+            <Text selectable style={[styles.terminalOutputText, { color: colors.terminalText }]}>{runtime?.output || `${activeTerminal.shell ?? "shell"} · ${activeTerminal.cwd ?? "/"}\n`}</Text>
+          </ScrollView>
+          <View style={[styles.terminalComposer, { backgroundColor: colors.panelSoft, borderColor: colors.border }]}>
+            <TextInput
+              autoCapitalize="none"
+              autoCorrect={false}
+              editable={runtime?.canInput === true}
+              placeholder={runtime?.canInput ? t("mobile.terminalCommandPlaceholder") : t("mobile.terminalInputPaused")}
+              placeholderTextColor={colors.muted}
+              style={[styles.terminalInput, { color: colors.text }]}
+              value={terminalInput}
+              onChangeText={onTerminalInputChange}
+              onSubmitEditing={onSendTerminalInput}
+            />
+            <Pressable disabled={!canInput} style={({ pressed }) => [styles.sendButton, { backgroundColor: canInput ? colors.panelStrong : colors.panel }, pressed && canInput && styles.pressed]} onPress={onSendTerminalInput}>
+              <ChevronRight size={20} color={canInput ? colors.text : colors.muted} />
+            </Pressable>
+          </View>
+        </View>
       ) : (
         <View style={styles.emptyTranscript}>
           <Text style={[styles.emptyTitle, { color: colors.text }]}>{t("mobile.noTerminal")}</Text>
           <Text style={[styles.emptySubtitle, { color: colors.muted }]}>{t("mobile.terminalStreamPending")}</Text>
+          <Pressable style={({ pressed }) => [styles.secondaryButton, { backgroundColor: colors.panelStrong, marginTop: 14 }, pressed && styles.pressed]} onPress={onNewTerminal}>
+            <Plus size={15} color={colors.text} />
+            <Text style={[styles.secondaryButtonText, { color: colors.text }]}>{t("mobile.newTerminal")}</Text>
+          </Pressable>
         </View>
       )}
       <View style={[styles.keybar, { borderTopColor: colors.border }]}>
-        {["ESC", "TAB", "CTRL", "↑", "↓", "←", "→"].map((key) => (
-          <Pressable key={key} style={({ pressed }) => [styles.keyButton, { backgroundColor: colors.panelSoft }, pressed && styles.pressed]}>
-            <Text style={[styles.keyText, { color: colors.textSoft }]}>{key}</Text>
+        {terminalKeys.map((key) => (
+          <Pressable key={key.label} disabled={runtime?.canInput !== true} style={({ pressed }) => [styles.keyButton, { backgroundColor: colors.panelSoft, opacity: runtime?.canInput === true ? 1 : 0.45 }, pressed && runtime?.canInput === true && styles.pressed]} onPress={() => onSendTerminalKey(key.data)}>
+            <Text style={[styles.keyText, { color: colors.textSoft }]}>{key.label}</Text>
           </Pressable>
         ))}
       </View>
@@ -744,8 +891,20 @@ function palette(dark: boolean) {
     muted: dark ? "#999b9f" : "#8f9296",
     green: dark ? "#5fce8f" : "#2f8c58",
     orange: dark ? "#f2a66f" : "#a65020",
+    terminalBg: dark ? "#111213" : "#171819",
+    terminalText: "#e8e8e6",
   };
 }
+
+const terminalKeys = [
+  { label: "ESC", data: "\x1b" },
+  { label: "TAB", data: "\t" },
+  { label: "Ctrl-C", data: "\x03" },
+  { label: "Up", data: "\x1b[A" },
+  { label: "Down", data: "\x1b[B" },
+  { label: "Left", data: "\x1b[D" },
+  { label: "Right", data: "\x1b[C" },
+];
 
 function relayLabel(account: CloudAccountStatus | undefined, relays: CloudRelayListResponse | undefined): string {
   const relay = account?.relay;
@@ -778,18 +937,17 @@ function workbenchFromSnapshot(snapshot: HostSnapshotResponse): WorkbenchState {
   return { ...state, version: snapshot.workbench?.version ?? 1, updated_at: new Date().toISOString() };
 }
 
-function terminalHtml(colors: AppPalette, terminal: TerminalTab, status: MobileRemoteSessionStatus): string {
-  const lines = [
-    `${terminal.shell ?? "shell"} · ${terminal.cwd ?? "/"}`,
-    "",
-    `status: ${status.state}`,
-    "Terminal output streaming is gated until the mobile terminal viewer is attached.",
-  ];
-  return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;background:${colors.bg};color:${colors.text};font:13px ui-monospace,SFMono-Regular,Menlo,monospace}.term{padding:14px;white-space:pre-wrap}.cursor{display:inline-block;width:7px;height:14px;background:${colors.green};vertical-align:-2px}</style></head><body><div class="term">${escapeHTML(lines.join("\n"))}\n<span class="cursor"></span></div></body></html>`;
+function hostCanControl(host?: MobileHostRecord): boolean {
+  return host?.authorization_state === "approved";
 }
 
-function escapeHTML(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function emptyTerminalRuntime(): TerminalRuntime {
+  return { state: "attaching", canInput: false, outputSeq: 0, output: "" };
+}
+
+function appendTerminalOutput(current: string, data: string): string {
+  const next = `${current}${data}`;
+  return next.length > 120000 ? next.slice(next.length - 120000) : next;
 }
 
 const styles = StyleSheet.create({
@@ -854,7 +1012,12 @@ const styles = StyleSheet.create({
   terminalTab: { maxWidth: 168, height: 36, flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 10, borderRadius: 8 },
   terminalTabText: { fontSize: 13, fontWeight: "700" },
   terminalAdd: { width: 36, height: 36, borderRadius: 8, alignItems: "center", justifyContent: "center" },
-  terminalWebView: { flex: 1, backgroundColor: "transparent" },
+  terminalBody: { flex: 1 },
+  terminalOutput: { flex: 1, margin: 12, marginBottom: 8, borderRadius: 8 },
+  terminalOutputContent: { padding: 12, paddingBottom: 24 },
+  terminalOutputText: { fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }), fontSize: 12, lineHeight: 17 },
+  terminalComposer: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: 8, marginHorizontal: 12, marginBottom: 10, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, padding: 8 },
+  terminalInput: { flex: 1, minHeight: 34, fontSize: 14, fontWeight: "600" },
   keybar: { minHeight: 54, flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 10, borderTopWidth: StyleSheet.hairlineWidth },
   keyButton: { height: 34, minWidth: 42, alignItems: "center", justifyContent: "center", borderRadius: 8, paddingHorizontal: 8 },
   keyText: { fontSize: 12, fontWeight: "800" },

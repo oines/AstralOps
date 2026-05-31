@@ -20,7 +20,10 @@ import type {
   Session,
   SessionInputAttachment,
   SessionView,
+  TerminalAckResult,
+  TerminalAttachResult,
   TerminalOpenResult,
+  TerminalStreamFrame,
   WorkbenchState,
   Workspace,
 } from "@astralops/protocol";
@@ -32,6 +35,7 @@ const controlProtocolVersion = "astralops-control-v1";
 const relayEnvelopeVersion = "astralops-relay-envelope-v1";
 const controlDirectionControllerToHost = "controller-to-host";
 const controlDirectionHostToController = "host-to-controller";
+const requestTimeoutMs = 15000;
 
 type RelayListResponse = {
   envelopes?: RelayEnvelope[];
@@ -45,15 +49,57 @@ type ControlCipher = {
   recvSeq: number;
 };
 
+type PendingRequest = {
+  resolve: (response: ControlResponse) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
 export type MobileRemoteSessionStatus = {
   state: "idle" | "connecting" | "live" | "failed" | "needs_pairing";
   message?: string;
+};
+
+export type MobileTerminalStatus = {
+  state: "attaching" | "live" | "resyncing" | "paused" | "failed" | "closed";
+  canInput: boolean;
+  outputSeq: number;
+  message?: string;
+};
+
+export type MobileTerminalHandlers = {
+  onReady?: (result: TerminalAttachResult) => void;
+  onStatus?: (status: MobileTerminalStatus) => void;
+  onOutput?: (data: string, outputSeq: number) => void;
+  onClosed?: (frame?: TerminalStreamFrame) => void;
+  onError?: (message: string) => void;
+};
+
+export type MobileTerminalHandle = {
+  terminalId: string;
+  input: (data: string) => Promise<void>;
+  resize: (cols: number, rows: number) => Promise<void>;
+  detach: () => Promise<void>;
+  close: () => Promise<void>;
+};
+
+type TerminalAttachment = {
+  terminalID: string;
+  viewerID?: string;
+  inputLeaseID?: string;
+  outputSeq: number;
+  state: MobileTerminalStatus["state"];
+  canInput: boolean;
+  handlers: MobileTerminalHandlers;
 };
 
 export class MobileHostRemoteSession {
   private cipher?: ControlCipher;
   private openedAt = 0;
   private status: MobileRemoteSessionStatus = { state: "idle" };
+  private pending = new Map<string, PendingRequest>();
+  private terminals = new Map<string, TerminalAttachment>();
+  private closed = false;
 
   constructor(
     private readonly cloud: StoredCloudSession,
@@ -65,9 +111,13 @@ export class MobileHostRemoteSession {
     return this.status;
   }
 
+  close(): void {
+    this.closed = true;
+    this.invalidate(new Error("Mobile Host session closed."));
+  }
+
   async snapshot(eventLimit = 200): Promise<HostSnapshotResponse> {
-    const response = await this.request<HostSnapshotResponse>("core.read", "core.read.host_snapshot", { event_limit: eventLimit });
-    return response;
+    return this.request<HostSnapshotResponse>("core.read", "core.read.host_snapshot", { event_limit: eventLimit });
   }
 
   async events(afterSeq: number, sessionId?: string): Promise<AstralEvent[]> {
@@ -106,6 +156,79 @@ export class MobileHostRemoteSession {
     return this.request<WorkbenchState["terminal_tabs"][string][]>("terminal.open", "terminal.list");
   }
 
+  async attachTerminal(terminalId: string, handlers: MobileTerminalHandlers = {}, afterSeq = 0): Promise<MobileTerminalHandle> {
+    const terminalID = terminalId.trim();
+    if (!terminalID) throw new Error("Terminal id is required.");
+    this.terminals.set(terminalID, {
+      terminalID,
+      outputSeq: afterSeq,
+      state: "attaching",
+      canInput: false,
+      handlers,
+    });
+    handlers.onStatus?.({ state: "attaching", canInput: false, outputSeq: afterSeq });
+    try {
+      const result = await this.request<TerminalAttachResult>("terminal.open", "terminal.attach", { terminal_id: terminalID, after_seq: afterSeq });
+      const attachment = this.terminals.get(terminalID);
+      if (!attachment) throw new Error("Terminal attachment was closed.");
+      attachment.viewerID = result.viewer_id;
+      attachment.inputLeaseID = result.input_lease_id;
+      attachment.outputSeq = result.output_seq;
+      attachment.state = "live";
+      attachment.canInput = true;
+      handlers.onReady?.(result);
+      handlers.onStatus?.({ state: "live", canInput: true, outputSeq: result.output_seq });
+      return this.terminalHandle(terminalID);
+    } catch (error) {
+      const message = errorMessage(error);
+      this.updateTerminalStatus(terminalID, "failed", false, undefined, message);
+      handlers.onError?.(message);
+      throw error;
+    }
+  }
+
+  private terminalHandle(terminalID: string): MobileTerminalHandle {
+    return {
+      terminalId: terminalID,
+      input: async (data: string) => {
+        const attachment = this.requireLiveTerminal(terminalID);
+        await this.request<TerminalAckResult>("terminal.input", "terminal.input", {
+          terminal_id: terminalID,
+          viewer_id: attachment.viewerID,
+          input_lease_id: attachment.inputLeaseID,
+          data,
+        });
+      },
+      resize: async (cols: number, rows: number) => {
+        if (cols <= 0 || rows <= 0) return;
+        const attachment = this.requireLiveTerminal(terminalID);
+        await this.request<TerminalAckResult>("terminal.input", "terminal.resize", {
+          terminal_id: terminalID,
+          viewer_id: attachment.viewerID,
+          input_lease_id: attachment.inputLeaseID,
+          cols,
+          rows,
+        });
+      },
+      detach: async () => {
+        this.terminals.delete(terminalID);
+        await this.request<TerminalAckResult>("terminal.open", "terminal.detach", { terminal_id: terminalID }).catch(() => undefined);
+      },
+      close: async () => {
+        this.terminals.delete(terminalID);
+        await this.request<TerminalAckResult>("terminal.input", "terminal.close", { terminal_id: terminalID });
+      },
+    };
+  }
+
+  private requireLiveTerminal(terminalID: string): TerminalAttachment {
+    const attachment = this.terminals.get(terminalID);
+    if (!attachment || !attachment.canInput || attachment.state !== "live" || !attachment.viewerID || !attachment.inputLeaseID) {
+      throw new Error("Terminal viewer is not synchronized; input is paused.");
+    }
+    return attachment;
+  }
+
   private async request<T>(capability: ControlCapability, action: string, params?: Record<string, unknown>): Promise<T> {
     await this.ensureConnected();
     const requestID = `mob_${bytesToBase64URL(Crypto.getRandomBytes(10))}`;
@@ -116,28 +239,134 @@ export class MobileHostRemoteSession {
       action,
       ...(params ? { params } : {}),
     };
-    await this.writePlain({ type: "request", request } as ControlPlainFrame);
-    for (;;) {
-      const frame = await this.readPlain(15000);
-      if ("response" in frame && frame.response) {
-        const response = frame.response as ControlResponse;
-        if (response.request_id && response.request_id !== requestID) continue;
-        if (!response.ok) throw controlResponseError(response);
-        return response.result as T;
+    const responsePromise = new Promise<ControlResponse>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pending.delete(requestID);
+        const error = new Error("Remote control request timed out.");
+        this.invalidate(error);
+        reject(error);
+      }, requestTimeoutMs);
+      this.pending.set(requestID, { resolve, reject, timeout });
+    });
+    try {
+      await this.writePlain({ type: "request", request } as ControlPlainFrame);
+    } catch (error) {
+      const pending = this.pending.get(requestID);
+      if (pending) {
+        clearTimeout(pending.timeout);
+        this.pending.delete(requestID);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
       }
     }
+    const response = await responsePromise;
+    if (!response.ok) throw controlResponseError(response);
+    return response.result as T;
   }
 
   private async ensureConnected(): Promise<void> {
     if (this.cipher) return;
+    if (this.closed) throw new Error("Mobile Host session is closed.");
     this.status = { state: "connecting" };
     try {
       this.cipher = await this.openRelayControlCipher();
       this.status = { state: "live" };
+      this.startReadLoop(this.cipher);
     } catch (error) {
       const message = errorMessage(error);
-      this.status = { state: message.includes("approved") || message.includes("trusted") ? "needs_pairing" : "failed", message };
+      this.status = { state: isPairingError(message) ? "needs_pairing" : "failed", message };
       throw error;
+    }
+  }
+
+  private startReadLoop(cipher: ControlCipher): void {
+    void this.readLoop(cipher);
+  }
+
+  private async readLoop(cipher: ControlCipher): Promise<void> {
+    try {
+      while (!this.closed && this.cipher === cipher) {
+        const envelopes = await this.listEnvelopes("10s");
+        for (const envelope of envelopes) {
+          await this.ackEnvelope(envelope);
+          if (this.cipher !== cipher) break;
+          if (envelope.payload_kind !== "control.sealed_frame" || envelope.from_device_id !== this.host.device_id) continue;
+          if (envelope.connection_id && envelope.connection_id !== cipher.connectionID) continue;
+          const sealed = parseJSON(bytesToUtf8(base64ToBytes(envelope.payload_base64))) as ControlSealedFrame;
+          this.dispatchFrame(openFrame(cipher, sealed));
+        }
+      }
+    } catch (error) {
+      if (!this.closed && this.cipher === cipher) this.invalidate(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  private dispatchFrame(frame: ControlPlainFrame): void {
+    if ("response" in frame && frame.response) {
+      const response = frame.response as ControlResponse;
+      const requestID = response.request_id ?? "";
+      const pending = this.pending.get(requestID);
+      if (!pending) return;
+      clearTimeout(pending.timeout);
+      this.pending.delete(requestID);
+      pending.resolve(response);
+      return;
+    }
+    if ("terminal" in frame && frame.terminal) {
+      this.dispatchTerminalFrame(frame.type ?? "", frame.terminal);
+    }
+  }
+
+  private dispatchTerminalFrame(type: string, terminal: TerminalStreamFrame): void {
+    const terminalID = terminal.terminal_id;
+    const attachment = this.terminals.get(terminalID);
+    if (!attachment) return;
+    if (terminal.output_seq > attachment.outputSeq) attachment.outputSeq = terminal.output_seq;
+    if (type === "terminal.output") {
+      attachment.handlers.onOutput?.(terminal.data ?? "", attachment.outputSeq);
+      return;
+    }
+    if (type === "terminal.heartbeat") {
+      if (terminal.viewer_id && terminal.input_lease_id && terminal.heartbeat_seq) {
+        attachment.viewerID = terminal.viewer_id;
+        attachment.inputLeaseID = terminal.input_lease_id;
+        void this.request<TerminalAckResult>("terminal.open", "terminal.heartbeat_ack", {
+          terminal_id: terminalID,
+          viewer_id: terminal.viewer_id,
+          input_lease_id: terminal.input_lease_id,
+          heartbeat_seq: terminal.heartbeat_seq,
+        }).catch((error) => {
+          this.updateTerminalStatus(terminalID, "paused", false, attachment.outputSeq, errorMessage(error));
+        });
+      }
+      this.updateTerminalStatus(terminalID, "live", true, attachment.outputSeq);
+      return;
+    }
+    if (type === "terminal.closed") {
+      attachment.handlers.onClosed?.(terminal);
+      this.updateTerminalStatus(terminalID, "closed", false, attachment.outputSeq, terminal.reason);
+      this.terminals.delete(terminalID);
+    }
+  }
+
+  private updateTerminalStatus(terminalID: string, state: MobileTerminalStatus["state"], canInput: boolean, outputSeq?: number, message?: string): void {
+    const attachment = this.terminals.get(terminalID);
+    if (!attachment) return;
+    attachment.state = state;
+    attachment.canInput = canInput;
+    if (typeof outputSeq === "number") attachment.outputSeq = outputSeq;
+    attachment.handlers.onStatus?.({ state, canInput, outputSeq: attachment.outputSeq, message });
+  }
+
+  private invalidate(error: Error): void {
+    this.cipher = undefined;
+    this.status = { state: isPairingError(error.message) ? "needs_pairing" : "failed", message: error.message };
+    for (const [requestID, pending] of this.pending) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+      this.pending.delete(requestID);
+    }
+    for (const terminalID of this.terminals.keys()) {
+      this.updateTerminalStatus(terminalID, "paused", false, undefined, error.message);
     }
   }
 
@@ -172,7 +401,7 @@ export class MobileHostRemoteSession {
   private async waitForHelloAck(hello: ControlHelloFrame): Promise<ControlHelloAckFrame> {
     const started = Date.now();
     for (;;) {
-      if (Date.now() - started > 18000) throw new Error("Timed out waiting for Host approval.");
+      if (Date.now() - started > 18000) throw new Error("Host did not answer the control handshake.");
       const envelopes = await this.listEnvelopes("10s");
       for (const envelope of envelopes) {
         await this.ackEnvelope(envelope);
@@ -193,25 +422,6 @@ export class MobileHostRemoteSession {
     if (!this.cipher) throw new Error("Control channel is not connected.");
     const sealed = sealFrame(this.cipher, frame);
     await this.enqueueEnvelope("control.sealed_frame", bytesToBase64(utf8ToBytes(JSON.stringify(sealed))), this.cipher.connectionID);
-  }
-
-  private async readPlain(waitMs: number): Promise<ControlPlainFrame> {
-    if (!this.cipher) throw new Error("Control channel is not connected.");
-    const started = Date.now();
-    for (;;) {
-      if (Date.now() - started > waitMs) {
-        this.cipher = undefined;
-        throw new Error("Remote control request timed out.");
-      }
-      const envelopes = await this.listEnvelopes("10s");
-      for (const envelope of envelopes) {
-        await this.ackEnvelope(envelope);
-        if (envelope.payload_kind !== "control.sealed_frame" || envelope.from_device_id !== this.host.device_id) continue;
-        if (envelope.connection_id && envelope.connection_id !== this.cipher.connectionID) continue;
-        const sealed = parseJSON(bytesToUtf8(base64ToBytes(envelope.payload_base64))) as ControlSealedFrame;
-        return openFrame(this.cipher, sealed);
-      }
-    }
   }
 
   private async enqueueEnvelope(payloadKind: RelayEnvelope["payload_kind"], payloadBase64: string, connectionID = ""): Promise<void> {
@@ -390,6 +600,11 @@ function controlResponseError(response: ControlResponse): Error {
   const code = response.error?.code ?? "";
   const message = response.error?.message || code || "Remote control request failed.";
   return new Error(code === "control_authorization_required" ? "Host has not approved this device yet." : message);
+}
+
+function isPairingError(message: string): boolean {
+  const value = message.toLowerCase();
+  return value.includes("approved") || value.includes("trusted") || value.includes("authorization") || value.includes("control_authorization_required");
 }
 
 function base64ToBytes(value: string): Uint8Array {

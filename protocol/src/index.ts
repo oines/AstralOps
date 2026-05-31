@@ -1318,6 +1318,10 @@ export type CloudPairingSignalResponse = {
   request: CloudPairingSignal;
 };
 
+export type CloudPairingSignalListResponse = {
+  requests: CloudPairingSignal[];
+};
+
 export type RelayPayloadKind = "control.hello" | "control.hello_ack" | "control.sealed_frame";
 
 export type RelayEnvelope = {
