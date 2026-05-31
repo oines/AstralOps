@@ -1444,13 +1444,34 @@ export type RemoteHostRecord = {
   lan_base_url?: string;
   capabilities?: ControlCapability[];
   control?: {
-    state: "idle" | "connecting" | "connected" | "reconnecting" | "failed" | string;
+    state: "idle" | "connecting" | "connected" | "live" | "reconnecting" | "failed" | "needs_pairing" | "revoked" | string;
     transport?: "lan" | "relay" | string;
     route_generation: number;
     last_error_code?: string;
     last_error?: string;
     updated_at?: string;
   };
+};
+
+export type RemoteHostSessionState = {
+  host_device_id: string;
+  state: "idle" | "connecting" | "live" | "reconnecting" | "failed" | "needs_pairing" | "revoked" | string;
+  transport?: "lan" | "relay" | string;
+  can_request: boolean;
+  workbench: {
+    state: "loading" | "live" | "resyncing" | "stale" | "failed" | string;
+    version?: number;
+    last_error?: string;
+  };
+  terminals: Record<string, {
+    state: "attaching" | "live" | "resyncing" | "paused" | "failed" | "closed" | string;
+    can_input: boolean;
+    output_seq?: number;
+    last_error?: string;
+    updated_at: string;
+  }>;
+  last_error?: string;
+  updated_at: string;
 };
 
 export type RemoteHostsResponse = {

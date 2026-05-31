@@ -1,7 +1,6 @@
-import type { CoreClient, TerminalConnection, TerminalReadyPayload } from "./api";
+import type { CoreClient, TerminalConnection, TerminalReadyPayload, TerminalStatusPayload } from "./api";
 
 const terminalReconnectDelaysMs = [400, 800, 1500, 2500, 4000];
-const terminalViewerStaleMs = 9000;
 
 export type TerminalViewerHealth = "connecting" | "healthy" | "reconnecting" | "degraded" | "exited";
 
@@ -28,9 +27,8 @@ export class TerminalViewerController {
   private lastCols = 0;
   private lastRows = 0;
   private health: TerminalViewerHealth = "connecting";
-  private lastHealthyAt = 0;
-  private healthTimer: number | null = null;
   private lastBlockedNoticeAt = 0;
+  private canInput = false;
 
   constructor(private readonly options: TerminalViewerControllerOptions) {}
 
@@ -63,10 +61,6 @@ export class TerminalViewerController {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    if (this.healthTimer !== null) {
-      window.clearTimeout(this.healthTimer);
-      this.healthTimer = null;
-    }
     this.connection?.close();
     this.connection = null;
   }
@@ -98,6 +92,10 @@ export class TerminalViewerController {
           if (this.disposed || this.exited) return;
           this.markHealthy();
         },
+        onStatus: (payload) => {
+          if (this.disposed || this.exited) return;
+          this.applyStatus(payload);
+        },
         onOutput: (data, outputSeq) => {
           if (this.disposed || this.exited) return;
           if (!this.shouldAcceptOutput(outputSeq)) return;
@@ -118,6 +116,7 @@ export class TerminalViewerController {
           if (this.disposed || this.exited) return;
           const failedConnection = this.connection;
           this.connection = null;
+          this.canInput = false;
           failedConnection?.close();
           this.setHealth("reconnecting");
           this.scheduleReconnect();
@@ -125,6 +124,7 @@ export class TerminalViewerController {
         onClose: () => {
           this.connection = null;
           if (!this.disposed && !this.exited) {
+            this.canInput = false;
             this.setHealth("reconnecting");
           }
           this.scheduleReconnect();
@@ -156,24 +156,33 @@ export class TerminalViewerController {
   }
 
   private markHealthy(): void {
-    this.lastHealthyAt = Date.now();
+    this.canInput = true;
     this.setHealth("healthy");
-    this.scheduleHealthCheck();
   }
 
-  private scheduleHealthCheck(): void {
-    if (this.healthTimer !== null) {
-      window.clearTimeout(this.healthTimer);
+  private applyStatus(payload: TerminalStatusPayload): void {
+    this.canInput = payload.can_input === true;
+    switch (payload.state) {
+      case "live":
+        this.markHealthy();
+        break;
+      case "attaching":
+        this.setHealth("connecting");
+        break;
+      case "resyncing":
+      case "paused":
+        this.setHealth("degraded");
+        break;
+      case "failed":
+        this.setHealth("reconnecting");
+        break;
+      case "closed":
+        this.exited = true;
+        this.setHealth("exited");
+        break;
+      default:
+        if (!this.canInput) this.setHealth("degraded");
     }
-    this.healthTimer = window.setTimeout(() => {
-      this.healthTimer = null;
-      if (this.disposed || this.exited) return;
-      if (Date.now() - this.lastHealthyAt > terminalViewerStaleMs) {
-        this.setHealth(this.connection ? "degraded" : "reconnecting");
-      } else {
-        this.scheduleHealthCheck();
-      }
-    }, terminalViewerStaleMs + 250);
   }
 
   private setHealth(next: TerminalViewerHealth): void {
@@ -183,7 +192,7 @@ export class TerminalViewerController {
   }
 
   private canSendInput(): boolean {
-    return this.connection !== null && this.health === "healthy" && Date.now() - this.lastHealthyAt <= terminalViewerStaleMs;
+    return this.connection !== null && this.health === "healthy" && this.canInput;
   }
 
   private notifyInputBlocked(): void {

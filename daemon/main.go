@@ -48,6 +48,7 @@ type app struct {
 	codexRemoteHomeMu    sync.Mutex
 	codexRemoteHome      map[string]string
 	remoteManager        *remoteControlManager
+	hostRemoteSessions   *hostRemoteSessionManager
 	network              *networkMonitor
 	remoteControlMu      sync.Mutex
 	remoteControl        *remoteControlRuntime
@@ -115,6 +116,7 @@ func main() {
 		},
 	}
 	a.remoteManager = newRemoteControlManager(a)
+	a.hostRemoteSessions = newHostRemoteSessionManager(a, a.remoteManager)
 	a.network = newNetworkMonitor(a)
 	a.mesh = newMeshStateManager(a)
 	a.rebuildSessionProjections()

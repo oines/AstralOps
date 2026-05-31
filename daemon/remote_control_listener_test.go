@@ -408,6 +408,23 @@ func TestRemoteHostProxyOpensWorkspacePTY(t *testing.T) {
 	if ready["type"] != "ready" {
 		t.Fatalf("first PTY message = %#v, want ready", ready)
 	}
+	terminalID := stringValue(ready["terminal_id"])
+	stateReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/state", nil)
+	stateResp := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(stateResp, stateReq)
+	if stateResp.Code != http.StatusOK {
+		t.Fatalf("remote Host state status = %d body = %s", stateResp.Code, stateResp.Body.String())
+	}
+	var state remoteHostSessionState
+	if err := json.Unmarshal(stateResp.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.State != hostRemoteStateLive {
+		t.Fatalf("remote Host state = %q, want live", state.State)
+	}
+	if terminal := state.Terminals[terminalID]; terminal.State != hostTerminalStateLive || !terminal.CanInput {
+		t.Fatalf("terminal state = %#v, want live can_input", terminal)
+	}
 
 	marker := "remote-pty-facade-" + randomID(8)
 	command := "printf '%s\\n' " + shellSingleQuote(marker) + "\n"
@@ -435,7 +452,7 @@ func TestRemoteHostProxyOpensWorkspacePTY(t *testing.T) {
 	t.Fatalf("remote PTY output did not contain marker %q", marker)
 }
 
-func TestRemoteHostProxyReportsTerminalStreamDisconnectAsError(t *testing.T) {
+func TestRemoteHostProxyReportsTerminalStreamDisconnectAsResyncing(t *testing.T) {
 	if !terminalAvailableOnHost() {
 		t.Skip("terminal is not available on this Host")
 	}
@@ -487,14 +504,15 @@ func TestRemoteHostProxyReportsTerminalStreamDisconnectAsError(t *testing.T) {
 			t.Fatal(err)
 		}
 		switch message["type"] {
-		case "error":
-			if !strings.Contains(stringValue(message["message"]), "terminal output stream disconnected") {
-				t.Fatalf("remote PTY stream error = %#v", message)
+		case "status":
+			if stringValue(message["state"]) == "resyncing" && message["can_input"] == false {
+				return
 			}
-			return
 		case "exit":
 			t.Fatalf("remote PTY stream disconnect was reported as terminal exit: %#v", message)
+		case "error":
+			t.Fatalf("remote PTY stream disconnect should stay attached for resync, got error: %#v", message)
 		}
 	}
-	t.Fatal("remote PTY stream disconnect did not report an error")
+	t.Fatal("remote PTY stream disconnect did not report resyncing status")
 }

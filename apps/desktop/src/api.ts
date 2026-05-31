@@ -100,9 +100,18 @@ export type TerminalReadyPayload = {
   output_seq?: number;
 };
 
+export type TerminalStatusPayload = {
+  terminal_id?: string;
+  state?: "attaching" | "live" | "resyncing" | "paused" | "failed" | "closed" | string;
+  can_input?: boolean;
+  message?: string;
+  output_seq?: number;
+};
+
 export type TerminalHandlers = {
   onOpen?: () => void;
   onReady?: (payload: TerminalReadyPayload) => void;
+  onStatus?: (payload: TerminalStatusPayload) => void;
   onHeartbeat?: (payload: { terminal_id?: string; viewer_id?: string; input_lease_id?: string; heartbeat_seq?: number; output_seq?: number }) => void;
   onOutput?: (data: string, outputSeq?: number) => void;
   onExit?: (payload: Record<string, unknown>) => void;
@@ -973,6 +982,16 @@ class WebSocketTerminalConnection implements TerminalConnection {
         if (message.type === "ready") {
           logClientEvent("terminal.ready", { terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
           handlers.onReady?.({ terminal_id: message.terminal_id, viewer_id: message.viewer_id, input_lease_id: message.input_lease_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
+        }
+        if (message.type === "status") {
+          const raw = message as Record<string, unknown>;
+          handlers.onStatus?.({
+            terminal_id: message.terminal_id,
+            state: typeof raw.state === "string" ? raw.state : undefined,
+            can_input: typeof raw.can_input === "boolean" ? raw.can_input : undefined,
+            message: message.message,
+            output_seq: message.output_seq,
+          });
         }
         if (message.type === "heartbeat") {
           if (message.viewer_id && message.input_lease_id && typeof message.heartbeat_seq === "number") {
