@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
+	"time"
 
 	"github.com/oines/astralops/pkg/controllercore"
+	"github.com/oines/astralops/pkg/controlwire"
 )
 
 type daemonControllerTransport struct {
@@ -15,6 +19,61 @@ type daemonControllerTransport struct {
 
 func (a *app) newControllerCore() *controllercore.Controller {
 	return controllercore.New(daemonControllerTransport{app: a})
+}
+
+func (a *app) controllerManagedTransport() *controllercore.ManagedTransport {
+	if a == nil {
+		return nil
+	}
+	a.remoteControlMu.Lock()
+	defer a.remoteControlMu.Unlock()
+	if a.controllerTransport == nil {
+		a.controllerTransport = a.newControllerManagedTransport()
+	}
+	return a.controllerTransport
+}
+
+func (a *app) newControllerManagedTransport() *controllercore.ManagedTransport {
+	return controllercore.NewManagedTransport(controllercore.ManagedTransportConfig{
+		OpenFrameConn: func(ctx context.Context, hostDeviceID string, preferRelay bool) (controllercore.FrameConn, controllercore.ResolvedTarget, error) {
+			target, err := a.remoteHostTarget(hostDeviceID)
+			if err != nil {
+				return nil, controllercore.ResolvedTarget{HostDeviceID: hostDeviceID}, toCoreError(err)
+			}
+			if preferRelay && strings.TrimSpace(target.RelayClient.BaseURL) != "" && strings.TrimSpace(target.RelayClient.Token) != "" {
+				target.UseRelay = true
+			}
+			conn, activeTarget, err := controlClientOpenTargetWithTransports(ctx, target, a.store, controlClientTransportPlan(target))
+			resolved := toCoreResolvedTarget(hostDeviceID, activeTarget)
+			if err != nil {
+				return nil, resolved, toCoreError(err)
+			}
+			return daemonControllerFrameConn{conn: conn}, resolved, nil
+		},
+		SelfDeviceID: func() string {
+			if a == nil || a.store == nil {
+				return ""
+			}
+			return a.store.deviceIdentity.DeviceID
+		},
+		DecodeEvent: func(body json.RawMessage) (controllercore.EventEnvelope, bool) {
+			var event AstralEvent
+			if err := json.Unmarshal(body, &event); err != nil {
+				return controllercore.EventEnvelope{}, false
+			}
+			return controllercore.EventEnvelope{Seq: event.Seq, Event: event}, true
+		},
+		StateChanged: func(hostDeviceID string, state controllercore.ControlState) {
+			if a != nil {
+				a.refreshMeshStateAsync(true)
+			}
+		},
+		RefreshMesh: func(discover bool) {
+			if a != nil {
+				a.refreshMeshStateAsync(discover)
+			}
+		},
+	})
 }
 
 func (a *app) controllerCoreManager() *controllercore.Controller {
@@ -161,56 +220,62 @@ func (t daemonControllerTransport) RequestPairing(ctx context.Context, hostDevic
 }
 
 func (t daemonControllerTransport) ControlState(hostDeviceID string) controllercore.ControlState {
-	manager := t.app.remoteControlManager()
+	manager := t.app.controllerManagedTransport()
 	if manager == nil {
 		return controllercore.ControlState{State: controllercore.StateIdle}
 	}
-	return toCoreControlState(manager.controlState(hostDeviceID))
+	return manager.ControlState(hostDeviceID)
 }
 
 func (t daemonControllerTransport) Request(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (controllercore.ControlResponse, error) {
-	response, err := t.app.remoteControlManager().Request(ctx, hostDeviceID, capability, action, params)
-	return toCoreControlResponse(response), toCoreError(err)
+	return t.app.controllerManagedTransport().Request(ctx, hostDeviceID, capability, action, params)
 }
 
 func (t daemonControllerTransport) SubscribeEvents(ctx context.Context, hostDeviceID string, params controllercore.EventSubscriptionParams) (controllercore.EventStream, error) {
-	stream, err := t.app.remoteControlManager().SubscribeEvents(ctx, hostDeviceID, eventSubscriptionParams{
-		WorkspaceID: params.WorkspaceID,
-		SessionID:   params.SessionID,
-		AfterSeq:    params.AfterSeq,
-		ReplayLimit: params.ReplayLimit,
-	})
-	if err != nil {
-		return controllercore.EventStream{}, toCoreError(err)
-	}
-	out := make(chan controllercore.EventEnvelope, remoteControlStreamBufferSize)
-	go func() {
-		defer close(out)
-		for event := range stream.Events {
-			out <- controllercore.EventEnvelope{Seq: event.Seq, Event: event}
-		}
-	}()
-	return controllercore.EventStream{Events: out, Close: stream.Close}, nil
+	return t.app.controllerManagedTransport().SubscribeEvents(ctx, hostDeviceID, params)
 }
 
 func (t daemonControllerTransport) OpenTerminal(ctx context.Context, hostDeviceID, workspaceID string, afterSeq int64) (controllercore.TerminalStream, error) {
-	stream, err := t.app.remoteControlManager().OpenTerminal(ctx, hostDeviceID, workspaceID, afterSeq)
-	if err != nil {
-		return nil, toCoreError(err)
-	}
-	return daemonTerminalStreamAdapter{stream: stream}, nil
+	return t.app.controllerManagedTransport().OpenTerminal(ctx, hostDeviceID, workspaceID, afterSeq)
 }
 
 func (t daemonControllerTransport) AttachTerminal(ctx context.Context, hostDeviceID, terminalID string, afterSeq int64) (controllercore.TerminalStream, error) {
-	stream, err := t.app.remoteControlManager().AttachTerminal(ctx, hostDeviceID, terminalID, afterSeq)
-	if err != nil {
-		return nil, toCoreError(err)
-	}
-	return daemonTerminalStreamAdapter{stream: stream}, nil
+	return t.app.controllerManagedTransport().AttachTerminal(ctx, hostDeviceID, terminalID, afterSeq)
 }
 
 func (t daemonControllerTransport) Invalidate(hostDeviceID, reason string) {
-	t.app.remoteControlManager().Invalidate(hostDeviceID, reason)
+	if manager := t.app.controllerManagedTransport(); manager != nil {
+		manager.Invalidate(hostDeviceID, reason)
+	}
+}
+
+type daemonControllerFrameConn struct {
+	conn controlClientFrameConn
+}
+
+func (d daemonControllerFrameConn) Close() error {
+	if d.conn == nil {
+		return nil
+	}
+	return d.conn.Close()
+}
+
+func (d daemonControllerFrameConn) WritePlain(frame controlwire.PlainFrame) error {
+	if d.conn == nil {
+		return errors.New("remote control frame connection is closed")
+	}
+	return d.conn.WritePlain(fromWirePlainFrame(frame))
+}
+
+func (d daemonControllerFrameConn) ReadPlain(timeout time.Duration) (controlwire.PlainFrame, error) {
+	if d.conn == nil {
+		return controlwire.PlainFrame{}, errors.New("remote control frame connection is closed")
+	}
+	frame, err := d.conn.ReadPlain(timeout)
+	if err != nil {
+		return controlwire.PlainFrame{}, err
+	}
+	return toWirePlainFrame(frame), nil
 }
 
 type daemonTerminalStreamAdapter struct {
@@ -399,6 +464,183 @@ func toCoreControlState(state remoteHostControlState) controllercore.ControlStat
 		LastError:       state.LastError,
 		UpdatedAt:       state.UpdatedAt,
 	}
+}
+
+func fromCoreControlState(state controllercore.ControlState) remoteHostControlState {
+	return remoteHostControlState{
+		State:           state.State,
+		Transport:       state.Transport,
+		RouteGeneration: state.RouteGeneration,
+		LastErrorCode:   state.LastErrorCode,
+		LastError:       state.LastError,
+		UpdatedAt:       state.UpdatedAt,
+	}
+}
+
+func toCoreResolvedTarget(hostDeviceID string, target controlClientTarget) controllercore.ResolvedTarget {
+	return controllercore.ResolvedTarget{
+		HostDeviceID: hostDeviceID,
+		Transport:    remoteControlTransport(target),
+		Timeout:      target.Timeout,
+		HasRelay:     strings.TrimSpace(target.RelayClient.BaseURL) != "" && strings.TrimSpace(target.RelayClient.Token) != "",
+	}
+}
+
+func toWirePlainFrame(frame controlPlainFrame) controlwire.PlainFrame {
+	return controlwire.PlainFrame{
+		Type:          frame.Type,
+		Request:       toWireControlRequestPtr(frame.Request),
+		Response:      toWireControlResponsePtr(frame.Response),
+		Event:         marshalRaw(frame.Event),
+		Terminal:      marshalRaw(frame.Terminal),
+		Media:         marshalRaw(frame.Media),
+		WorkspaceFile: marshalRaw(frame.WorkspaceFile),
+		Reason:        frame.Reason,
+		Code:          frame.Code,
+	}
+}
+
+func fromWirePlainFrame(frame controlwire.PlainFrame) controlPlainFrame {
+	return controlPlainFrame{
+		Type:          frame.Type,
+		Request:       fromWireControlRequestPtr(frame.Request),
+		Response:      fromWireControlResponsePtr(frame.Response),
+		Event:         eventFrameFromRaw(frame.Event),
+		Terminal:      terminalFrameFromRaw(frame.Terminal),
+		Media:         mediaFrameFromRaw(frame.Media),
+		WorkspaceFile: workspaceFileFrameFromRaw(frame.WorkspaceFile),
+		Reason:        frame.Reason,
+		Code:          frame.Code,
+	}
+}
+
+func toWireControlRequestPtr(req *ControlRequest) *controlwire.ControlRequest {
+	if req == nil {
+		return nil
+	}
+	return &controlwire.ControlRequest{
+		RequestID:          req.RequestID,
+		ControllerDeviceID: req.ControllerDeviceID,
+		Capability:         req.Capability,
+		Action:             req.Action,
+		Params:             req.Params,
+	}
+}
+
+func fromWireControlRequestPtr(req *controlwire.ControlRequest) *ControlRequest {
+	if req == nil {
+		return nil
+	}
+	return &ControlRequest{
+		RequestID:          req.RequestID,
+		ControllerDeviceID: req.ControllerDeviceID,
+		Capability:         req.Capability,
+		Action:             req.Action,
+		Params:             req.Params,
+	}
+}
+
+func toWireControlResponsePtr(response *ControlResponse) *controlwire.ControlResponse {
+	if response == nil {
+		return nil
+	}
+	return &controlwire.ControlResponse{
+		RequestID: response.RequestID,
+		OK:        response.OK,
+		Result:    response.Result,
+		Error:     toWireControlError(response.Error),
+	}
+}
+
+func fromWireControlResponsePtr(response *controlwire.ControlResponse) *ControlResponse {
+	if response == nil {
+		return nil
+	}
+	return &ControlResponse{
+		RequestID: response.RequestID,
+		OK:        response.OK,
+		Result:    response.Result,
+		Error:     fromWireControlError(response.Error),
+	}
+}
+
+func toWireControlError(err *ControlError) *controlwire.ControlError {
+	if err == nil {
+		return nil
+	}
+	return &controlwire.ControlError{Status: err.Status, Code: err.Code, Message: err.Message}
+}
+
+func fromWireControlError(err *controlwire.ControlError) *ControlError {
+	if err == nil {
+		return nil
+	}
+	return &ControlError{Status: err.Status, Code: err.Code, Message: err.Message}
+}
+
+func marshalRaw(value any) json.RawMessage {
+	if value == nil {
+		return nil
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if reflected.IsNil() {
+			return nil
+		}
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	if string(body) == "null" {
+		return nil
+	}
+	return body
+}
+
+func eventFrameFromRaw(body json.RawMessage) *eventStreamFrame {
+	if len(body) == 0 {
+		return nil
+	}
+	var frame eventStreamFrame
+	if err := json.Unmarshal(body, &frame); err != nil {
+		return nil
+	}
+	return &frame
+}
+
+func terminalFrameFromRaw(body json.RawMessage) *terminalStreamFrame {
+	if len(body) == 0 {
+		return nil
+	}
+	var frame terminalStreamFrame
+	if err := json.Unmarshal(body, &frame); err != nil {
+		return nil
+	}
+	return &frame
+}
+
+func mediaFrameFromRaw(body json.RawMessage) *mediaStreamFrame {
+	if len(body) == 0 {
+		return nil
+	}
+	var frame mediaStreamFrame
+	if err := json.Unmarshal(body, &frame); err != nil {
+		return nil
+	}
+	return &frame
+}
+
+func workspaceFileFrameFromRaw(body json.RawMessage) *workspaceFileStreamFrame {
+	if len(body) == 0 {
+		return nil
+	}
+	var frame workspaceFileStreamFrame
+	if err := json.Unmarshal(body, &frame); err != nil {
+		return nil
+	}
+	return &frame
 }
 
 func toCoreControlResponse(response ControlResponse) controllercore.ControlResponse {

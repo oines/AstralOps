@@ -1,10 +1,12 @@
 package mobilecore
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,8 +15,51 @@ import (
 	"github.com/oines/astralops/pkg/deviceidentity"
 )
 
+func TestMobileCoreFacadeDelegatesRemoteActionsToGoController(t *testing.T) {
+	transport := &fakeMobileCoreTransport{terminal: newFakeMobileCoreTerminal("term_1")}
+	core := New()
+	core.controller = controllercore.New(transport)
+
+	if _, err := core.Snapshot("dev_host", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.SendInput("dev_host", "session_1", mustJSON(t, map[string]any{"input": "hello"})); err != nil {
+		t.Fatal(err)
+	}
+	body, err := core.OpenTerminal("dev_host", "workspace_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opened map[string]any
+	if err := json.Unmarshal([]byte(body), &opened); err != nil {
+		t.Fatal(err)
+	}
+	if opened["terminal_id"] != "term_1" {
+		t.Fatalf("opened terminal = %#v, want term_1", opened)
+	}
+	if _, err := core.TerminalInput("dev_host", "term_1", "pwd\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.TerminalResize("dev_host", "term_1", 100, 40); err != nil {
+		t.Fatal(err)
+	}
+	if transport.requestCount(controllercore.ActionHostSnapshot) != 1 {
+		t.Fatalf("snapshot requests = %d, want 1", transport.requestCount(controllercore.ActionHostSnapshot))
+	}
+	if transport.requestCount(controllercore.ActionSessionInput) != 1 {
+		t.Fatalf("session input requests = %d, want 1", transport.requestCount(controllercore.ActionSessionInput))
+	}
+	if transport.terminal.input != "pwd\n" {
+		t.Fatalf("terminal input = %q, want pwd", transport.terminal.input)
+	}
+	if transport.terminal.cols != 100 || transport.terminal.rows != 40 {
+		t.Fatalf("terminal resize = %dx%d, want 100x40", transport.terminal.cols, transport.terminal.rows)
+	}
+}
+
 func TestSetCloudSessionRefreshesMeshThroughGoCore(t *testing.T) {
-	identity := testMobileIdentity(t)
+	stored := testMobileStoredIdentity(t)
+	identity := stored.DeviceIdentity
 	host := cloudmesh.DeviceRecord{
 		AccountIDHash:        "acct_test",
 		DeviceID:             "dev_host",
@@ -46,7 +91,7 @@ func TestSetCloudSessionRefreshesMeshThroughGoCore(t *testing.T) {
 
 	core := New()
 	payload := mustJSON(t, map[string]any{
-		"identity": identity,
+		"stored_identity": stored,
 		"session": map[string]any{
 			"base_url":      server.URL,
 			"account_token": "token_test",
@@ -74,8 +119,90 @@ func TestSetCloudSessionRefreshesMeshThroughGoCore(t *testing.T) {
 	}
 }
 
+type fakeMobileCoreTransport struct {
+	mu       sync.Mutex
+	requests []controllercore.ControlRequest
+	terminal *fakeMobileCoreTerminal
+}
+
+func (f *fakeMobileCoreTransport) ControlState(string) controllercore.ControlState {
+	return controllercore.ControlState{State: controllercore.StateLive, Transport: controllercore.TransportRelay}
+}
+
+func (f *fakeMobileCoreTransport) Request(_ context.Context, _ string, capability, action string, params map[string]any) (controllercore.ControlResponse, error) {
+	f.mu.Lock()
+	f.requests = append(f.requests, controllercore.ControlRequest{Capability: capability, Action: action, Params: params})
+	f.mu.Unlock()
+	return controllercore.ControlResponse{OK: true, Result: map[string]any{"ok": true}}, nil
+}
+
+func (f *fakeMobileCoreTransport) SubscribeEvents(context.Context, string, controllercore.EventSubscriptionParams) (controllercore.EventStream, error) {
+	ch := make(chan controllercore.EventEnvelope)
+	close(ch)
+	return controllercore.EventStream{Events: ch, Close: func() {}}, nil
+}
+
+func (f *fakeMobileCoreTransport) OpenTerminal(context.Context, string, string, int64) (controllercore.TerminalStream, error) {
+	return f.terminal, nil
+}
+
+func (f *fakeMobileCoreTransport) AttachTerminal(context.Context, string, string, int64) (controllercore.TerminalStream, error) {
+	return f.terminal, nil
+}
+
+func (f *fakeMobileCoreTransport) Invalidate(string, string) {}
+
+func (f *fakeMobileCoreTransport) requestCount(action string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, request := range f.requests {
+		if request.Action == action {
+			count++
+		}
+	}
+	return count
+}
+
+type fakeMobileCoreTerminal struct {
+	terminalID string
+	frames     chan controllercore.TerminalFrame
+	input      string
+	cols       int
+	rows       int
+}
+
+func newFakeMobileCoreTerminal(terminalID string) *fakeMobileCoreTerminal {
+	return &fakeMobileCoreTerminal{terminalID: terminalID, frames: make(chan controllercore.TerminalFrame)}
+}
+
+func (f *fakeMobileCoreTerminal) TerminalID() string { return f.terminalID }
+func (f *fakeMobileCoreTerminal) ViewerID() string   { return "viewer_1" }
+func (f *fakeMobileCoreTerminal) InputLeaseID() string {
+	return "lease_1"
+}
+func (f *fakeMobileCoreTerminal) Shell() string    { return "zsh" }
+func (f *fakeMobileCoreTerminal) CWD() string      { return "/" }
+func (f *fakeMobileCoreTerminal) OutputSeq() int64 { return 0 }
+func (f *fakeMobileCoreTerminal) Frames() <-chan controllercore.TerminalFrame {
+	return f.frames
+}
+func (f *fakeMobileCoreTerminal) Input(data string) error {
+	f.input += data
+	return nil
+}
+func (f *fakeMobileCoreTerminal) Resize(cols, rows int) error {
+	f.cols = cols
+	f.rows = rows
+	return nil
+}
+func (f *fakeMobileCoreTerminal) AckHeartbeat(int64) error { return nil }
+func (f *fakeMobileCoreTerminal) Close() error             { return nil }
+func (f *fakeMobileCoreTerminal) Detach() error            { return nil }
+
 func TestRequestPairingUsesCloudMeshClient(t *testing.T) {
-	identity := testMobileIdentity(t)
+	stored := testMobileStoredIdentity(t)
+	identity := stored.DeviceIdentity
 	var captured cloudmesh.PairingSignalInput
 	server := newMobileCoreCloudServer(t, identity, nil, nil)
 	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -117,8 +244,8 @@ func TestRequestPairingUsesCloudMeshClient(t *testing.T) {
 
 	core := New()
 	if _, err := core.SetCloudSession(mustJSON(t, map[string]any{
-		"identity": identity,
-		"session":  map[string]any{"base_url": server.URL, "account_token": "token_test"},
+		"stored_identity": stored,
+		"session":         map[string]any{"base_url": server.URL, "account_token": "token_test"},
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +269,8 @@ func TestRequestPairingUsesCloudMeshClient(t *testing.T) {
 }
 
 func TestSetCloudSessionCanExchangeLoginCode(t *testing.T) {
-	identity := testMobileIdentity(t)
+	stored := testMobileStoredIdentity(t)
+	identity := stored.DeviceIdentity
 	var captured cloudmesh.LoginCodeExchangeRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/auth/login-code/exchange" {
@@ -180,9 +308,9 @@ func TestSetCloudSessionCanExchangeLoginCode(t *testing.T) {
 
 	core := New()
 	body, err := core.SetCloudSession(mustJSON(t, map[string]any{
-		"identity":   identity,
-		"base_url":   server.URL,
-		"login_code": "login_123",
+		"stored_identity": stored,
+		"base_url":        server.URL,
+		"login_code":      "login_123",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -196,6 +324,63 @@ func TestSetCloudSessionCanExchangeLoginCode(t *testing.T) {
 	}
 	if state.Cloud == nil || state.Cloud.AccountIDHash != "acct_test" {
 		t.Fatalf("state = %#v, want exchanged cloud state", state)
+	}
+}
+
+func TestLogoutRemovesCloudDeviceAndResetsMeshIdentity(t *testing.T) {
+	stored := testMobileStoredIdentity(t)
+	identity := stored.DeviceIdentity
+	removeCalled := false
+	server := newMobileCoreCloudServer(t, identity, nil, nil)
+	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer token_test" {
+			t.Fatalf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/account":
+			writeTestJSON(t, w, cloudmesh.Account{AccountIDHash: "acct_test"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/devices/"+cloudmesh.PathEscape(identity.DeviceID)+"/heartbeat":
+			writeTestJSON(t, w, cloudmesh.DeviceRecord{AccountIDHash: "acct_test", DeviceID: identity.DeviceID, DeviceName: identity.DeviceName, DeviceKind: identity.DeviceKind, PublicKey: identity.PublicKey, PublicKeyFingerprint: identity.PublicKeyFingerprint, CanControl: true, Status: cloudmesh.DeviceStatusOnline})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/devices":
+			writeTestJSON(t, w, cloudmesh.DeviceListResponse{Devices: []cloudmesh.DeviceRecord{{AccountIDHash: "acct_test", DeviceID: identity.DeviceID, DeviceName: identity.DeviceName, DeviceKind: identity.DeviceKind, PublicKey: identity.PublicKey, PublicKeyFingerprint: identity.PublicKeyFingerprint, CanControl: true, Status: cloudmesh.DeviceStatusOnline}}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/pairing/requests":
+			writeTestJSON(t, w, cloudmesh.PairingSignalListResponse{})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/devices/"+cloudmesh.PathEscape(identity.DeviceID)+"/remove":
+			removeCalled = true
+			writeTestJSON(t, w, cloudmesh.DeviceRecord{AccountIDHash: "acct_test", DeviceID: identity.DeviceID, Status: cloudmesh.DeviceStatusRevoked})
+		default:
+			t.Fatalf("unexpected cloud request %s %s", r.Method, r.URL.String())
+		}
+	})
+	defer server.Close()
+
+	core := New()
+	if _, err := core.SetCloudSession(mustJSON(t, map[string]any{
+		"stored_identity": stored,
+		"session":         map[string]any{"base_url": server.URL, "account_token": "token_test"},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	body, err := core.Logout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		CloudRemoved bool                     `json:"cloud_removed"`
+		MeshReset    bool                     `json:"mesh_reset"`
+		Identity     cloudmesh.DeviceIdentity `json:"identity"`
+	}
+	if err := json.Unmarshal([]byte(body), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !removeCalled || !result.CloudRemoved || !result.MeshReset {
+		t.Fatalf("logout result = %#v removeCalled=%v, want cloud removed mesh reset", result, removeCalled)
+	}
+	if result.Identity.DeviceID == "" || result.Identity.DeviceID == identity.DeviceID {
+		t.Fatalf("identity = %#v, want fresh mobile identity", result.Identity)
+	}
+	if _, err := core.RefreshMesh(); controllercore.ErrorCode(err) != "cloud_session_missing" {
+		t.Fatalf("RefreshMesh error = %v, want cloud_session_missing", err)
 	}
 }
 
@@ -235,6 +420,11 @@ func newMobileCoreCloudServer(t *testing.T, identity cloudmesh.DeviceIdentity, h
 
 func testMobileIdentity(t *testing.T) cloudmesh.DeviceIdentity {
 	t.Helper()
+	return testMobileStoredIdentity(t).DeviceIdentity
+}
+
+func testMobileStoredIdentity(t *testing.T) deviceidentity.StoredIdentity {
+	t.Helper()
 	stored, _, err := deviceidentity.NewStored(deviceidentity.Options{
 		DeviceKind:   deviceidentity.DeviceKindMobile,
 		DeviceName:   "Phone",
@@ -243,7 +433,7 @@ func testMobileIdentity(t *testing.T) cloudmesh.DeviceIdentity {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return stored.DeviceIdentity
+	return stored
 }
 
 func mustJSON(t *testing.T, value any) string {

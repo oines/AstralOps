@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/oines/astralops/internal/relayauth"
+	"github.com/oines/astralops/pkg/cloudmesh"
 )
 
 const testRelayCredentialKid = "test-1"
@@ -128,7 +129,16 @@ func setTestCloudMembership(t *testing.T, st *store, canHost, canControl bool) c
 }
 
 func signTestCloudMembershipLease(accountIDHash, deviceID, publicKeyFingerprint string, canHost, canControl bool, keyID string, privateKey ed25519.PrivateKey, now time.Time) (*CloudMembershipLease, error) {
-	payload := cloudMembershipLeasePayload{
+	payload := struct {
+		AccountIDHash        string `json:"account_id_hash"`
+		DeviceID             string `json:"device_id"`
+		PublicKeyFingerprint string `json:"public_key_fingerprint"`
+		CanHost              bool   `json:"can_host"`
+		CanControl           bool   `json:"can_control"`
+		MeshEpoch            int64  `json:"mesh_epoch"`
+		IssuedAt             int64  `json:"iat"`
+		ExpiresAt            int64  `json:"exp"`
+	}{
 		AccountIDHash:        strings.TrimSpace(accountIDHash),
 		DeviceID:             strings.TrimSpace(deviceID),
 		PublicKeyFingerprint: strings.TrimSpace(publicKeyFingerprint),
@@ -145,8 +155,8 @@ func signTestCloudMembershipLease(accountIDHash, deviceID, publicKeyFingerprint 
 	payloadPart := base64.RawURLEncoding.EncodeToString(raw)
 	signature := ed25519.Sign(privateKey, []byte(payloadPart))
 	return &CloudMembershipLease{
-		Version:       cloudMembershipLeaseVersion,
-		Algorithm:     cloudMembershipLeaseAlgorithm,
+		Version:       cloudmesh.MembershipLeaseVersion,
+		Algorithm:     cloudmesh.MembershipLeaseAlgorithm,
 		KeyID:         keyID,
 		PayloadBase64: payloadPart,
 		Signature:     base64.RawURLEncoding.EncodeToString(signature),

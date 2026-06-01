@@ -82,6 +82,9 @@ func (m *networkMonitor) handleChange(next string) {
 	if m.app.remoteManager != nil {
 		m.app.remoteManager.InvalidateAll("network_changed")
 	}
+	if transport := m.app.controllerManagedTransport(); transport != nil {
+		transport.InvalidateAll("network_changed")
+	}
 	m.app.refreshMeshStateAsync(true)
 	m.app.syncCloudRegistrationSoon(m.app.currentSettings())
 }

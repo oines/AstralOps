@@ -54,6 +54,7 @@ type app struct {
 	remoteControlMu      sync.Mutex
 	remoteControl        *remoteControlRuntime
 	controllerCore       *controllercore.Controller
+	controllerTransport  *controllercore.ManagedTransport
 	mesh                 *meshStateManager
 	cloudMu              sync.Mutex
 	cloudCancel          context.CancelFunc

@@ -535,7 +535,7 @@ func TestRemoteHostProxyReportsTerminalStreamDisconnectAsResyncing(t *testing.T)
 		t.Fatalf("first PTY message = %#v, want ready", ready)
 	}
 
-	controllerApp.remoteControlManager().Invalidate(hostApp.store.deviceIdentity.DeviceID, "test_disconnect")
+	controllerApp.controllerManagedTransport().Invalidate(hostApp.store.deviceIdentity.DeviceID, "test_disconnect")
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {

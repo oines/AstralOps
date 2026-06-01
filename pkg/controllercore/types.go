@@ -6,21 +6,27 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/oines/astralops/pkg/controlwire"
 )
 
 const (
 	CapabilityCoreRead           = "core.read"
+	CapabilityCoreControl        = "core.control"
 	CapabilityWorkspaceFilesRead = "workspace.files.read"
 	CapabilityMediaRead          = "media.read"
 	CapabilityTerminalOpen       = "terminal.open"
+	CapabilityTerminalInput      = "terminal.input"
 	ActionHostSnapshot           = "core.read.host_snapshot"
 	ActionSessionView            = "core.read.session_view"
 	ActionSessions               = "core.read.sessions"
 	ActionWorkspaces             = "core.read.workspaces"
-	ActionWorkspaceConnection    = "core.read.workspace_connection"
+	ActionWorkspaceConnection    = "core.read.workspace.connection"
+	ActionWorkspaceConnect       = "core.control.workspace.connect"
+	ActionSessionInput           = "core.control.session_input"
 	ActionEvents                 = "core.read.events"
-	ActionEventsSubscribe        = "core.read.events.subscribe"
-	ActionEventsUnsubscribe      = "core.read.events.unsubscribe"
+	ActionEventsSubscribe        = "core.subscribe.events"
+	ActionEventsUnsubscribe      = "core.unsubscribe.events"
 	ActionWorkspaceFilesRead     = "workspace.files.read"
 	ActionMediaRead              = "media.read"
 	ActionTerminalOpen           = "terminal.open"
@@ -58,26 +64,9 @@ const (
 	TransportRelay               = "relay"
 )
 
-type ControlRequest struct {
-	RequestID          string         `json:"request_id,omitempty"`
-	ControllerDeviceID string         `json:"controller_device_id,omitempty"`
-	Capability         string         `json:"capability"`
-	Action             string         `json:"action"`
-	Params             map[string]any `json:"params,omitempty"`
-}
-
-type ControlResponse struct {
-	RequestID string        `json:"request_id,omitempty"`
-	OK        bool          `json:"ok"`
-	Result    any           `json:"result,omitempty"`
-	Error     *ControlError `json:"error,omitempty"`
-}
-
-type ControlError struct {
-	Status  int    `json:"status,omitempty"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
+type ControlRequest = controlwire.ControlRequest
+type ControlResponse = controlwire.ControlResponse
+type ControlError = controlwire.ControlError
 
 type ActionError struct {
 	Status  int

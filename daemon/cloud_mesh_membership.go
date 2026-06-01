@@ -111,6 +111,9 @@ func (a *app) logoutCloudMesh(ctx context.Context, removeSelf bool) (cloudMeshLo
 	if a.remoteManager != nil {
 		a.remoteManager.InvalidateAll("mesh_logout")
 	}
+	if transport := a.controllerManagedTransport(); transport != nil {
+		transport.InvalidateAll("mesh_logout")
+	}
 	for _, grant := range a.store.listTrustGrants() {
 		result.ReleasedTerminalWriters += a.releaseTerminalWritersForDevice(grant.ControllerDeviceID)
 	}

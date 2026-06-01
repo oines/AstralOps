@@ -154,7 +154,9 @@ func (m *hostRemoteSessionManager) ControlState(hostDeviceID string) remoteHostC
 	}
 	state := session.State()
 	lower := remoteHostControlState{}
-	if m.lower != nil {
+	if m.app != nil {
+		lower = fromCoreControlState(m.app.controllerManagedTransport().ControlState(hostDeviceID))
+	} else if m.lower != nil {
 		lower = m.lower.controlState(hostDeviceID)
 	}
 	controlState := hostRemoteControlStateName(state.State)
@@ -419,7 +421,9 @@ func (s *hostRemoteSession) setHostState(state, transport string, err error) {
 	if s == nil {
 		return
 	}
-	if transport == "" && s.manager != nil && s.manager.lower != nil {
+	if transport == "" && s.manager != nil && s.manager.app != nil {
+		transport = fromCoreControlState(s.manager.app.controllerManagedTransport().ControlState(s.hostDeviceID)).Transport
+	} else if transport == "" && s.manager != nil && s.manager.lower != nil {
 		transport = s.manager.lower.controlState(s.hostDeviceID).Transport
 	}
 	s.mu.Lock()

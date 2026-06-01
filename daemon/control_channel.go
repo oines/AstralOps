@@ -2,60 +2,29 @@ package main
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ed25519"
-	"crypto/hkdf"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/oines/astralops/pkg/controlwire"
 )
 
 const (
-	controlProtocolVersion            = "astralops-control-v1"
+	controlProtocolVersion            = controlwire.ProtocolVersion
 	controlHelloFrameMaxBytesDefault  = 16 * 1024
 	controlSealedFrameMaxBytesDefault = 64 * 1024 * 1024
-
-	controlDirectionControllerToHost = "controller-to-host"
-	controlDirectionHostToController = "host-to-controller"
 )
 
-type controlHelloFrame struct {
-	Type                   string                `json:"type"`
-	Version                string                `json:"version"`
-	ControllerDeviceID     string                `json:"controller_device_id"`
-	ControllerPublicKey    string                `json:"controller_public_key"`
-	ControllerEphemeralKey string                `json:"controller_ephemeral_key"`
-	ClientNonce            string                `json:"client_nonce"`
-	Signature              string                `json:"signature"`
-	MembershipLease        *CloudMembershipLease `json:"membership_lease,omitempty"`
-}
-
-type controlHelloAckFrame struct {
-	Type               string                `json:"type"`
-	Version            string                `json:"version"`
-	ConnectionID       string                `json:"connection_id"`
-	HostDeviceID       string                `json:"host_device_id"`
-	HostPublicKey      string                `json:"host_public_key"`
-	HostEphemeralKey   string                `json:"host_ephemeral_key"`
-	ClientNonce        string                `json:"client_nonce"`
-	ServerNonce        string                `json:"server_nonce"`
-	Signature          string                `json:"signature"`
-	Encryption         string                `json:"encryption"`
-	SignatureAlgorithm string                `json:"signature_algorithm"`
-	MembershipLease    *CloudMembershipLease `json:"membership_lease,omitempty"`
-}
+type controlHelloFrame = controlwire.HelloFrame
+type controlHelloAckFrame = controlwire.HelloAckFrame
 
 type controlPlainFrame struct {
 	Type          string                    `json:"type"`
@@ -69,12 +38,7 @@ type controlPlainFrame struct {
 	Code          string                    `json:"code,omitempty"`
 }
 
-type controlSealedFrame struct {
-	Type       string `json:"type"`
-	Seq        uint64 `json:"seq"`
-	Nonce      string `json:"nonce"`
-	Ciphertext string `json:"ciphertext"`
-}
+type controlSealedFrame = controlwire.SealedFrame
 
 type controlFrameRead struct {
 	plain        controlPlainFrame
@@ -107,13 +71,7 @@ type controlWSConn struct {
 }
 
 type controlCipher struct {
-	sendAEAD      cipher.AEAD
-	recvAEAD      cipher.AEAD
-	connectionID  string
-	sendDirection string
-	recvDirection string
-	sendSeq       uint64
-	recvSeq       uint64
+	inner *controlwire.Cipher
 }
 
 func (a *app) handleControlWS(w http.ResponseWriter, r *http.Request) {
@@ -646,191 +604,58 @@ func (a *app) activeControlSessionCountForDevice(controllerDeviceID string) int 
 	return count
 }
 
-type controlSessionKeys struct {
-	controllerToHost []byte
-	hostToController []byte
-}
-
 func newControlHostCipher(sharedSecret []byte, hello controlHelloFrame, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID string) (*controlCipher, error) {
-	keys := deriveControlSessionKeys(sharedSecret, hello, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID)
-	return newControlCipher(keys.hostToController, keys.controllerToHost, connectionID, controlDirectionHostToController, controlDirectionControllerToHost)
+	cipher, err := controlwire.NewHostCipher(sharedSecret, hello, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID)
+	if err != nil {
+		return nil, err
+	}
+	return &controlCipher{inner: cipher}, nil
 }
 
 func newControlControllerCipher(sharedSecret []byte, hello controlHelloFrame, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID string) (*controlCipher, error) {
-	keys := deriveControlSessionKeys(sharedSecret, hello, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID)
-	return newControlCipher(keys.controllerToHost, keys.hostToController, connectionID, controlDirectionControllerToHost, controlDirectionHostToController)
-}
-
-func newControlCipher(sendKey, recvKey []byte, connectionID, sendDirection, recvDirection string) (*controlCipher, error) {
-	if strings.TrimSpace(connectionID) == "" || strings.TrimSpace(sendDirection) == "" || strings.TrimSpace(recvDirection) == "" {
-		return nil, errors.New("control cipher context required")
-	}
-	sendAEAD, err := newControlAEAD(sendKey)
+	cipher, err := controlwire.NewControllerCipher(sharedSecret, hello, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID)
 	if err != nil {
 		return nil, err
 	}
-	recvAEAD, err := newControlAEAD(recvKey)
-	if err != nil {
-		return nil, err
-	}
-	return &controlCipher{
-		sendAEAD:      sendAEAD,
-		recvAEAD:      recvAEAD,
-		connectionID:  connectionID,
-		sendDirection: sendDirection,
-		recvDirection: recvDirection,
-	}, nil
-}
-
-func newControlAEAD(key []byte) (cipher.AEAD, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	return aead, nil
+	return &controlCipher{inner: cipher}, nil
 }
 
 func (c *controlCipher) seal(frame controlPlainFrame) (controlSealedFrame, error) {
-	body, err := json.Marshal(frame)
-	if err != nil {
-		return controlSealedFrame{}, err
+	if c == nil || c.inner == nil {
+		return controlSealedFrame{}, errors.New("control cipher is not initialized")
 	}
-	nonce := make([]byte, c.sendAEAD.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return controlSealedFrame{}, err
-	}
-	c.sendSeq++
-	sealed := c.sendAEAD.Seal(nil, nonce, body, controlFrameAAD(c.connectionID, c.sendDirection, c.sendSeq))
-	return controlSealedFrame{
-		Type:       "sealed",
-		Seq:        c.sendSeq,
-		Nonce:      base64.StdEncoding.EncodeToString(nonce),
-		Ciphertext: base64.StdEncoding.EncodeToString(sealed),
-	}, nil
+	return c.inner.Seal(toWirePlainFrame(frame))
 }
 
 func (c *controlCipher) open(frame controlSealedFrame) (controlPlainFrame, error) {
-	if frame.Type != "sealed" || frame.Seq == 0 || frame.Seq != c.recvSeq+1 {
-		return controlPlainFrame{}, errors.New("invalid sealed frame sequence")
+	if c == nil || c.inner == nil {
+		return controlPlainFrame{}, errors.New("control cipher is not initialized")
 	}
-	nonce, err := base64.StdEncoding.DecodeString(frame.Nonce)
+	plain, err := c.inner.Open(frame)
 	if err != nil {
 		return controlPlainFrame{}, err
 	}
-	ciphertext, err := base64.StdEncoding.DecodeString(frame.Ciphertext)
-	if err != nil {
-		return controlPlainFrame{}, err
-	}
-	body, err := c.recvAEAD.Open(nil, nonce, ciphertext, controlFrameAAD(c.connectionID, c.recvDirection, frame.Seq))
-	if err != nil {
-		return controlPlainFrame{}, err
-	}
-	var plain controlPlainFrame
-	if err := json.Unmarshal(body, &plain); err != nil {
-		return controlPlainFrame{}, err
-	}
-	c.recvSeq = frame.Seq
-	return plain, nil
-}
-
-func controlFrameAAD(connectionID, direction string, seq uint64) []byte {
-	return []byte(strings.Join([]string{
-		controlProtocolVersion,
-		"sealed",
-		connectionID,
-		direction,
-		strconv.FormatUint(seq, 10),
-	}, "\n"))
-}
-
-func deriveControlSessionKeys(sharedSecret []byte, hello controlHelloFrame, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID string) controlSessionKeys {
-	salt := sha256.Sum256([]byte(hello.ClientNonce + "\x00" + serverNonce))
-	info := strings.Join([]string{
-		controlProtocolVersion,
-		"session-key",
-		connectionID,
-		hostDeviceID,
-		hostPublicKey,
-		hello.ControllerDeviceID,
-		hello.ControllerPublicKey,
-		hello.ControllerEphemeralKey,
-		hostEphemeralKey,
-	}, "\n")
-	return controlSessionKeys{
-		controllerToHost: deriveControlSessionDirectionKey(sharedSecret, salt[:], info, controlDirectionControllerToHost),
-		hostToController: deriveControlSessionDirectionKey(sharedSecret, salt[:], info, controlDirectionHostToController),
-	}
-}
-
-func deriveControlSessionDirectionKey(sharedSecret, salt []byte, baseInfo, direction string) []byte {
-	key, err := hkdf.Key(sha256.New, sharedSecret, salt, baseInfo+"\n"+direction, 32)
-	if err != nil {
-		panic(err)
-	}
-	return key
+	return fromWirePlainFrame(plain), nil
 }
 
 func controlClientSignaturePayload(hostDeviceID string, hello controlHelloFrame) []byte {
-	return []byte(strings.Join([]string{
-		controlProtocolVersion,
-		"client-hello",
-		hostDeviceID,
-		hello.ControllerDeviceID,
-		hello.ControllerPublicKey,
-		hello.ControllerEphemeralKey,
-		hello.ClientNonce,
-		controlMembershipLeaseSignaturePart(hello.MembershipLease),
-	}, "\n"))
+	return controlwire.ControllerSignaturePayload(hostDeviceID, hello)
 }
 
 func controlHostSignaturePayload(hello controlHelloFrame, ack controlHelloAckFrame) []byte {
-	return []byte(strings.Join([]string{
-		controlProtocolVersion,
-		"host-hello-ack",
-		ack.ConnectionID,
-		ack.HostDeviceID,
-		ack.HostPublicKey,
-		hello.ControllerDeviceID,
-		hello.ControllerPublicKey,
-		hello.ControllerEphemeralKey,
-		ack.HostEphemeralKey,
-		hello.ClientNonce,
-		ack.ServerNonce,
-		controlMembershipLeaseSignaturePart(hello.MembershipLease),
-		controlMembershipLeaseSignaturePart(ack.MembershipLease),
-	}, "\n"))
+	return controlwire.HostSignaturePayload(hello, ack)
 }
 
 func validateControlClientHelloAck(st *store, hostInfo HostInfo, hello controlHelloFrame, ack controlHelloAckFrame) error {
-	if ack.Type != "hello_ack" || ack.Version != controlProtocolVersion {
-		return fmt.Errorf("invalid control hello_ack")
-	}
-	if ack.HostDeviceID != hostInfo.Identity.DeviceID || ack.HostPublicKey != hostInfo.Identity.PublicKey {
-		return fmt.Errorf("remote Host identity changed during handshake")
-	}
-	if ack.ClientNonce != hello.ClientNonce {
-		return fmt.Errorf("invalid control hello_ack client nonce")
-	}
 	membership, err := st.currentCloudMembership(cloudMembershipRole{CanControl: true})
 	if err != nil {
 		return err
 	}
-	if err := validateCloudMembershipLease(firstNonNilMembershipLease(ack.MembershipLease), membership.SigningPublicKey, membership.AccountIDHash, ack.HostDeviceID, hostInfo.Identity.PublicKeyFingerprint, cloudMembershipRole{CanHost: true}, time.Now().UTC()); err != nil {
-		return err
-	}
-	hostPublicKey, err := decodeDevicePublicKey(ack.HostPublicKey)
-	if err != nil {
-		return err
-	}
-	signature, err := base64.StdEncoding.DecodeString(ack.Signature)
-	if err != nil || !ed25519.Verify(hostPublicKey, controlHostSignaturePayload(hello, ack), signature) {
-		return fmt.Errorf("invalid Host hello_ack signature")
-	}
-	return nil
+	return controlwire.ValidateControllerHelloAck(hostInfo.Identity, controlwire.MembershipState{
+		AccountIDHash:    membership.AccountIDHash,
+		SigningPublicKey: membership.SigningPublicKey,
+		Lease:            membership.Lease,
+	}, hello, ack)
 }
 
 func firstNonNilMembershipLease(lease *CloudMembershipLease) CloudMembershipLease {

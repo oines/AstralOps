@@ -6,17 +6,18 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import WebView, { type WebViewMessageEvent } from "react-native-webview";
 import { Bot, Check, ChevronLeft, ChevronRight, Cloud, Folder, Github, Laptop, LogOut, Menu, Plus, RefreshCw, Settings, TerminalSquare, X } from "lucide-react-native";
 import { getLocales } from "expo-localization";
-import type { AstralEvent, CloudAccountStatus, CloudAuthProvider, CloudRelayListResponse, DeviceIdentity, Session, TerminalTab, WorkbenchState, Workspace } from "@astralops/protocol";
+import type { AstralEvent, CloudAccountStatus, CloudAuthProvider, DeviceIdentity, Session, TerminalTab, WorkbenchState, Workspace } from "@astralops/protocol";
 import { mobileResources, resolveAppLanguage, type AppLanguage, type ResolvedLanguage } from "@astralops/i18n";
 import {
   EMPTY_EVENT_INDEX,
+  mergeEventIndex,
   selectSessionEvents,
   type EventIndex,
 } from "@astralops/transcript";
 import { buildTranscriptWebPayload, createTranscriptWebViewHtml, postTranscriptWebPayload } from "@astralops/transcript-web";
 import { createEmptyWorkbenchState, selectSessions, selectTerminalTabs, selectWorkspaces } from "@astralops/workbench-state";
-import { DEFAULT_CLOUD_BASE_URL, clearStoredCloudSession, loadCloudMeshSnapshot, loadStoredCloudSession, removeSelfFromCloud, requestCloudPairing, startCloudOAuth, type MobileHostRecord, type StoredCloudSession } from "./src/mobileCloud";
-import { loadOrCreateStoredMobileIdentity, resetStoredMobileIdentity, type StoredMobileIdentity } from "./src/mobileIdentity";
+import { DEFAULT_CLOUD_BASE_URL, requestCloudLoginCode } from "./src/mobileCloud";
+import * as mobileCore from "./src/mobileCoreBridge";
 import { createTerminalWebViewHtml, postWebViewMessage } from "./src/webSurfaces";
 
 type Page = "navigator" | "transcript" | "terminal";
@@ -51,11 +52,9 @@ function AppShell(): React.JSX.Element {
   const t = useMemo(() => translator(resolvedLanguage), [resolvedLanguage]);
   const [width, setWidth] = useState(Dimensions.get("window").width);
   const [identity, setIdentity] = useState<DeviceIdentity | undefined>();
-  const [storedIdentity, setStoredIdentity] = useState<StoredMobileIdentity | undefined>();
-  const [cloudSession, setCloudSession] = useState<StoredCloudSession | undefined>();
+  const [cloudSession, setCloudSession] = useState<mobileCore.MobileCoreCloudSession | undefined>();
   const [cloudAccount, setCloudAccount] = useState<CloudAccountStatus | undefined>();
-  const [cloudRelays, setCloudRelays] = useState<CloudRelayListResponse | undefined>();
-  const [hosts, setHosts] = useState<MobileHostRecord[]>([]);
+  const [hosts, setHosts] = useState<mobileCore.MobileHostRecord[]>([]);
   const [cloudLoading, setCloudLoading] = useState(true);
   const [hostLoading, setHostLoading] = useState(false);
   const [authLoading, setAuthLoading] = useState<CloudAuthProvider | undefined>();
@@ -83,7 +82,7 @@ function AppShell(): React.JSX.Element {
   const activeTerminalRuntime = activeTerminal ? terminalRuntime[activeTerminal.terminal_id] : undefined;
   const activeSessionEvents = activeSession ? selectSessionEvents(eventIndex, activeSession.id) : [];
   const activeHostCanControl = hostCanControl(activeHost);
-  const activeHostIdentityKey = activeHost ? `${activeHost.device_id}:${activeHost.public_key}:${activeHost.public_key_fingerprint}` : "";
+  const activeHostIdentityKey = activeHost ? `${activeHost.device_id}:${activeHost.public_key_fingerprint}` : "";
   const previousRemoteHostIdRef = useRef("");
 
   useEffect(() => {
@@ -105,16 +104,14 @@ function AppShell(): React.JSX.Element {
     let cancelled = false;
     (async () => {
       try {
-        const nextStoredIdentity = await loadOrCreateStoredMobileIdentity();
-        if (cancelled) return;
-        setStoredIdentity(nextStoredIdentity);
-        setIdentity(nextStoredIdentity.identity);
-        const stored = await loadStoredCloudSession();
-        if (cancelled) return;
-        setCloudSession(stored);
-        if (stored) {
-          await refreshCloud(stored, nextStoredIdentity.identity);
+        if (!mobileCore.mobileCoreAvailable()) {
+          if (!cancelled) setCloudError(t("mobile.controllerCoreUnavailable"));
+          return;
         }
+        const started = await mobileCore.start({ force_relay_only: forceRelayOnly });
+        if (cancelled) return;
+        setIdentity(started.identity);
+        await refreshCloud(true);
       } catch (error) {
         if (!cancelled) setCloudError(errorMessage(error));
       } finally {
@@ -124,21 +121,21 @@ function AppShell(): React.JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [forceRelayOnly, t]);
 
   useEffect(() => {
     requestAnimationFrame(() => scrollToPage("transcript", false));
   }, [width]);
 
   useEffect(() => {
-    if (!cloudSession || !identity) return () => undefined;
+    if (!cloudSession || !mobileCore.mobileCoreAvailable()) return () => undefined;
     const timer = setInterval(() => {
-      void refreshCloud(cloudSession, identity, true).catch(() => undefined);
+      void refreshCloud(true).catch(() => undefined);
     }, 5000);
     return () => {
       clearInterval(timer);
     };
-  }, [cloudSession?.account_token, identity?.device_id]);
+  }, [cloudSession?.account_id_hash, cloudSession?.relay_url]);
 
   useEffect(() => {
     setActiveWorkspaceId((current) => current && workspaces.some((workspace) => workspace.id === current) ? current : workspaces[0]?.id ?? "");
@@ -167,7 +164,7 @@ function AppShell(): React.JSX.Element {
       setActiveSessionId("");
       setActiveTerminalId("");
     }
-    if (!host || !cloudSession || !storedIdentity) {
+    if (!host || !cloudSession) {
       if (!host) {
         setWorkbench(createEmptyWorkbenchState());
         setEventIndex(EMPTY_EVENT_INDEX);
@@ -182,49 +179,83 @@ function AppShell(): React.JSX.Element {
       setRemoteStatus({ state: "needs_pairing", message: host.authorization_state === "pending" ? t("status.pending") : t("status.needs_pairing") });
       return () => undefined;
     }
-    setRemoteStatus({ state: "failed", message: t("mobile.controllerCoreUnavailable") });
-    setHostLoading(false);
-    return () => undefined;
-  }, [activeHostId, activeHostIdentityKey, activeHostCanControl, cloudSession?.account_token, storedIdentity?.seed_hex, forceRelayOnly]);
+    if (!mobileCore.mobileCoreAvailable()) {
+      setRemoteStatus({ state: "failed", message: t("mobile.controllerCoreUnavailable") });
+      setHostLoading(false);
+      return () => undefined;
+    }
+    let cancelled = false;
+    setHostLoading(true);
+    setRemoteStatus({ state: "connecting" });
+    void (async () => {
+      try {
+        await mobileCore.openHostSession(host.device_id);
+        const nextSnapshot = await mobileCore.snapshot(host.device_id);
+        if (cancelled) return;
+        applyMobileCoreSnapshot(nextSnapshot);
+        setRemoteStatus({ state: "live", transport: host.connection === "lan" ? "lan" : "relay" });
+      } catch (error) {
+        if (!cancelled) {
+          setRemoteStatus({ state: "failed", message: errorMessage(error) });
+          setHostError(errorMessage(error));
+        }
+      } finally {
+        if (!cancelled) setHostLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeHostId, activeHostIdentityKey, activeHostCanControl, cloudSession?.account_id_hash, forceRelayOnly]);
 
   useEffect(() => {
     return () => undefined;
   }, [remoteStatus.state, activeSessionId]);
 
-  async function refreshCloud(sessionArg = cloudSession, identityArg = identity, silent = false): Promise<void> {
-    if (!sessionArg || !identityArg) {
+  async function refreshCloud(silent = false): Promise<void> {
+    if (!mobileCore.mobileCoreAvailable()) {
+      setCloudError(t("mobile.controllerCoreUnavailable"));
       if (!silent) setCloudLoading(false);
       return;
     }
     if (!silent) setCloudLoading(true);
     setCloudError("");
     try {
-      const snapshot = await loadCloudMeshSnapshot(sessionArg, identityArg);
-      setCloudSession(snapshot.session);
-      setCloudAccount(snapshot.account);
-      setCloudRelays(snapshot.relays);
-      setHosts((current) => mergeCloudHostsWithLocalControl(snapshot.hosts, current));
-      setActiveHostId((current) => snapshot.hosts.some((host) => host.device_id === current) ? current : snapshot.hosts[0]?.device_id ?? "");
+      const mesh = await mobileCore.refreshMesh();
+      setCloudSession(mobileCore.meshCloudSession(mesh, cloudSession?.base_url ?? DEFAULT_CLOUD_BASE_URL));
+      setCloudAccount(mobileCore.meshAccountStatus(mesh));
+      const nextHosts = Array.isArray(mesh.hosts) ? mesh.hosts : [];
+      setHosts((current) => mergeCloudHostsWithLocalControl(nextHosts, current));
+      setActiveHostId((current) => nextHosts.some((host) => host.device_id === current) ? current : nextHosts[0]?.device_id ?? "");
     } catch (error) {
-      setCloudError(errorMessage(error));
+      const message = errorMessage(error);
+      if (message.includes("cloud_session_missing")) {
+        setCloudSession(undefined);
+        setCloudAccount(undefined);
+        setHosts([]);
+        setActiveHostId("");
+      } else {
+        setCloudError(message);
+      }
     } finally {
       if (!silent) setCloudLoading(false);
     }
   }
 
   async function loginCloud(provider: CloudAuthProvider): Promise<void> {
-    let currentStoredIdentity = storedIdentity;
-    if (!currentStoredIdentity) {
-      currentStoredIdentity = await loadOrCreateStoredMobileIdentity();
-      setStoredIdentity(currentStoredIdentity);
-      setIdentity(currentStoredIdentity.identity);
+    if (!mobileCore.mobileCoreAvailable()) {
+      setCloudError(t("mobile.controllerCoreUnavailable"));
+      return;
     }
     setAuthLoading(provider);
     setCloudError("");
     try {
-      const session = await startCloudOAuth(provider, currentStoredIdentity.identity);
-      setCloudSession(session);
-      await refreshCloud(session, currentStoredIdentity.identity);
+      const login = await requestCloudLoginCode(provider);
+      const mesh = await mobileCore.setCloudSession(login);
+      setCloudSession(mobileCore.meshCloudSession(mesh, login.base_url));
+      setCloudAccount(mobileCore.meshAccountStatus(mesh));
+      setHosts(Array.isArray(mesh.hosts) ? mesh.hosts : []);
+      setActiveHostId((current) => mesh.hosts?.some((host) => host.device_id === current) ? current : mesh.hosts?.[0]?.device_id ?? "");
     } catch (error) {
       setCloudError(errorMessage(error));
     } finally {
@@ -233,21 +264,15 @@ function AppShell(): React.JSX.Element {
   }
 
   async function logoutCloud(): Promise<void> {
-    const previousSession = cloudSession;
-    const previousIdentity = identity;
     setCloudLoading(true);
     setCloudError("");
     try {
-      if (previousSession && previousIdentity) {
-        await removeSelfFromCloud(previousSession, previousIdentity).catch(() => undefined);
+      if (mobileCore.mobileCoreAvailable()) {
+        const result = await mobileCore.logout() as { identity?: DeviceIdentity };
+        if (result.identity) setIdentity(result.identity);
       }
-      await clearStoredCloudSession();
-      const nextStoredIdentity = await resetStoredMobileIdentity();
-      setStoredIdentity(nextStoredIdentity);
-      setIdentity(nextStoredIdentity.identity);
       setCloudSession(undefined);
       setCloudAccount(undefined);
-      setCloudRelays(undefined);
       setHosts([]);
       setActiveHostId("");
       setWorkbench(createEmptyWorkbenchState());
@@ -259,24 +284,36 @@ function AppShell(): React.JSX.Element {
     }
   }
 
-  async function requestPairingForHost(host: MobileHostRecord): Promise<void> {
-    if (!cloudSession || !identity) return;
+  async function requestPairingForHost(host: mobileCore.MobileHostRecord): Promise<void> {
+    if (!cloudSession || !mobileCore.mobileCoreAvailable()) return;
     setPairingHostId(host.device_id);
     setCloudError("");
     try {
-      const request = await requestCloudPairing(cloudSession, identity, host.device_id);
+      const request = await mobileCore.requestPairing(host.device_id) as { request_id?: string; status?: string };
       setHosts((current) => current.map((item) => item.device_id === host.device_id ? {
         ...item,
-        authorization_state: request.status,
+        authorization_state: request.status ?? "pending",
         pairing_request_id: request.request_id,
-        pairing_status: request.status,
+        pairing_status: request.status ?? "pending",
         control: { ...(item.control ?? { route_generation: 0 }), state: "needs_pairing", route_generation: item.control?.route_generation ?? 0, updated_at: new Date().toISOString() },
       } : item));
-      await refreshCloud(cloudSession, identity, true).catch(() => undefined);
+      await refreshCloud(true).catch(() => undefined);
     } catch (error) {
       setCloudError(errorMessage(error));
     } finally {
       setPairingHostId(undefined);
+    }
+  }
+
+  function applyMobileCoreSnapshot(snapshot: mobileCore.MobileCoreSnapshot): void {
+    if (snapshot.workbench) {
+      setWorkbench(snapshot.workbench);
+    }
+    const record = snapshot as Record<string, unknown>;
+    const events = [...arrayValue<AstralEvent>(record.events), ...arrayValue<AstralEvent>(record.initial_session_events)]
+      .filter(isAstralEvent);
+    if (events.length > 0) {
+      setEventIndex(mergeEventIndex(EMPTY_EVENT_INDEX, events));
     }
   }
 
@@ -291,8 +328,19 @@ function AppShell(): React.JSX.Element {
   }
 
   async function sendPrompt(): Promise<void> {
-    if (!composerText.trim()) return;
-    setHostError(t("mobile.controllerCoreUnavailable"));
+    const input = composerText.trim();
+    if (!input || !activeHost || !activeSession) return;
+    if (!mobileCore.mobileCoreAvailable()) {
+      setHostError(t("mobile.controllerCoreUnavailable"));
+      return;
+    }
+    setHostError("");
+    try {
+      await mobileCore.sendInput(activeHost.device_id, activeSession.id, { input });
+      setComposerText("");
+    } catch (error) {
+      setHostError(errorMessage(error));
+    }
   }
 
   useEffect(() => {
@@ -305,19 +353,56 @@ function AppShell(): React.JSX.Element {
   }, [activeTerminal?.terminal_id, t]);
 
   async function openTerminalForWorkspace(): Promise<void> {
-    setHostError(t("mobile.controllerCoreUnavailable"));
+    if (!activeHost || !activeWorkspace) {
+      scrollToPage("terminal");
+      return;
+    }
+    if (!mobileCore.mobileCoreAvailable()) {
+      setHostError(t("mobile.controllerCoreUnavailable"));
+      scrollToPage("terminal");
+      return;
+    }
+    setHostError("");
+    try {
+      const info = await mobileCore.openTerminal(activeHost.device_id, activeWorkspace.id);
+      if (info.terminal_id) {
+        setActiveTerminalId(info.terminal_id);
+        setTerminalRuntime((current) => ({
+          ...current,
+          [info.terminal_id as string]: {
+            state: "live",
+            canInput: true,
+            outputSeq: info.output_seq,
+            output: "",
+          },
+        }));
+      }
+    } catch (error) {
+      setHostError(errorMessage(error));
+    }
     scrollToPage("terminal");
   }
 
   async function sendTerminalInput(data: string): Promise<void> {
     if (!data || !activeTerminalRuntime?.canInput) return;
-    setHostError(t("mobile.controllerCoreUnavailable"));
+    if (!activeHost || !activeTerminal || !mobileCore.mobileCoreAvailable()) {
+      setHostError(t("mobile.controllerCoreUnavailable"));
+      return;
+    }
+    try {
+      await mobileCore.terminalInput(activeHost.device_id, activeTerminal.terminal_id, data);
+    } catch (error) {
+      setHostError(errorMessage(error));
+    }
   }
 
   async function closeActiveTerminal(): Promise<void> {
     if (!activeTerminal) return;
     const terminalID = activeTerminal.terminal_id;
     setHostError("");
+    if (activeHost && mobileCore.mobileCoreAvailable()) {
+      await mobileCore.terminalClose(activeHost.device_id, terminalID).catch((error) => setHostError(errorMessage(error)));
+    }
     setTerminalRuntime((current) => ({
       ...current,
       [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime(t("mobile.controllerCoreUnavailable"))), state: "closed", canInput: false },
@@ -354,7 +439,6 @@ function AppShell(): React.JSX.Element {
             identity={identity}
             cloudSession={cloudSession}
             cloudAccount={cloudAccount}
-            cloudRelays={cloudRelays}
             cloudLoading={cloudLoading}
             authLoading={authLoading}
             cloudError={cloudError}
@@ -436,7 +520,6 @@ function NavigatorScreen({
   identity,
   cloudSession,
   cloudAccount,
-  cloudRelays,
   cloudLoading,
   authLoading,
   cloudError,
@@ -464,17 +547,16 @@ function NavigatorScreen({
   colors: AppPalette;
   t: Translator;
   identity?: DeviceIdentity;
-  cloudSession?: StoredCloudSession;
+  cloudSession?: mobileCore.MobileCoreCloudSession;
   cloudAccount?: CloudAccountStatus;
-  cloudRelays?: CloudRelayListResponse;
   cloudLoading: boolean;
   authLoading?: CloudAuthProvider;
   cloudError: string;
   hostError: string;
-  hosts: MobileHostRecord[];
+  hosts: mobileCore.MobileHostRecord[];
   workspaces: Workspace[];
   sessions: Session[];
-  activeHost?: MobileHostRecord;
+  activeHost?: mobileCore.MobileHostRecord;
   remoteStatus: MobileRemoteSessionStatus;
   forceRelayOnly: boolean;
   activeWorkspaceId: string;
@@ -483,7 +565,7 @@ function NavigatorScreen({
   onLoginCloud: (provider: CloudAuthProvider) => void;
   onLogoutCloud: () => void;
   onRefreshCloud: () => void;
-  onRequestPairing: (host: MobileHostRecord) => void;
+  onRequestPairing: (host: mobileCore.MobileHostRecord) => void;
   onForceRelayOnlyChange: (next: boolean) => void;
   pairingHostId?: string;
   onSelectHost: (hostId: string) => void;
@@ -507,7 +589,7 @@ function NavigatorScreen({
           {cloudSession ? (
             <>
               <InfoRow colors={colors} label={t("settings.account")} value={cloudAccount?.account_id_hash ?? cloudSession.account_id_hash ?? t("common.empty")} />
-              <InfoRow colors={colors} label={t("settings.relay")} value={relayLabel(cloudAccount, cloudRelays) || t("common.empty")} />
+              <InfoRow colors={colors} label={t("settings.relay")} value={relayLabel(cloudAccount) || t("common.empty")} />
               <InfoRow colors={colors} label={t("mobile.thisDevice")} value={identity?.device_id ?? t("common.empty")} />
               <View style={[styles.switchRow, { borderTopColor: colors.border }]}>
                 <View style={styles.rowText}>
@@ -607,7 +689,7 @@ function TranscriptScreen({ width, colors, t, activeHost, remoteStatus, hostLoad
   width: number;
   colors: AppPalette;
   t: Translator;
-  activeHost?: MobileHostRecord;
+  activeHost?: mobileCore.MobileHostRecord;
   remoteStatus: MobileRemoteSessionStatus;
   hostLoading: boolean;
   hostError: string;
@@ -892,22 +974,31 @@ const terminalKeys = [
   { label: "Right", data: "\x1b[C" },
 ];
 
-function relayLabel(account: CloudAccountStatus | undefined, relays: CloudRelayListResponse | undefined): string {
+function relayLabel(account: CloudAccountStatus | undefined): string {
   const relay = account?.relay;
   if (!relay?.relay_id && !relay?.relay_url) return "";
-  const option = relays?.relays.find((item) => item.relay_id === relay?.relay_id);
-  return [relay?.relay_id, option?.name || relay?.name, relay?.relay_url].filter(Boolean).join(" · ");
+  return [relay?.relay_id, relay?.name, relay?.relay_url].filter(Boolean).join(" · ");
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function hostCanControl(host?: MobileHostRecord): boolean {
+function hostCanControl(host?: mobileCore.MobileHostRecord): boolean {
   return host?.authorization_state === "approved";
 }
 
-function mergeCloudHostsWithLocalControl(cloudHosts: MobileHostRecord[], localHosts: MobileHostRecord[]): MobileHostRecord[] {
+function arrayValue<T>(value: unknown): T[] {
+  return Array.isArray(value) ? value as T[] : [];
+}
+
+function isAstralEvent(value: unknown): value is AstralEvent {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.kind === "string" && typeof record.seq === "number";
+}
+
+function mergeCloudHostsWithLocalControl(cloudHosts: mobileCore.MobileHostRecord[], localHosts: mobileCore.MobileHostRecord[]): mobileCore.MobileHostRecord[] {
   const localByID = new Map(localHosts.map((host) => [host.device_id, host]));
   return cloudHosts.map((host) => {
     const local = localByID.get(host.device_id);
