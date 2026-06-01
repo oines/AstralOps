@@ -101,12 +101,9 @@ export class TerminalViewerController {
           if (this.disposed || this.exited) return;
           this.applyStatus(payload);
         },
-        onOutput: (data, outputSeq, canInput) => {
+        onOutput: (data, outputSeq) => {
           if (this.disposed || this.exited) return;
           if (!this.shouldAcceptOutput(outputSeq)) return;
-          if (canInput !== undefined) {
-            this.hostAllowsInput = canInput === true;
-          }
           this.canInput = false;
           this.setHealth("degraded");
           const renderedSeq = outputSeq ?? this.lastOutputSeq;

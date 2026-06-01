@@ -121,7 +121,7 @@ export type TerminalHandlers = {
   onReady?: (payload: TerminalReadyPayload) => void;
   onStatus?: (payload: TerminalStatusPayload) => void;
   onHeartbeat?: (payload: { terminal_id?: string; viewer_id?: string; input_lease_id?: string; heartbeat_seq?: number; output_seq?: number; can_input?: boolean }) => void;
-  onOutput?: (data: string, outputSeq?: number, canInput?: boolean) => void;
+  onOutput?: (data: string, outputSeq?: number) => void;
   onExit?: (payload: Record<string, unknown>) => void;
   onError?: (message: string) => void;
   onConnectionError?: (message: string) => void;
@@ -1054,7 +1054,7 @@ class WebSocketTerminalConnection implements TerminalConnection {
             can_input: message.can_input,
           });
         }
-        if (message.type === "output" && message.data) handlers.onOutput?.(message.data, message.output_seq, message.can_input);
+        if (message.type === "output" && message.data) handlers.onOutput?.(message.data, message.output_seq);
         if (message.type === "exit") {
           const exitPayload = message as unknown as Record<string, unknown>;
           logClientEvent("terminal.exit", { code: exitPayload.code, exit_code: exitPayload.exit_code });

@@ -41,7 +41,6 @@ func terminalOutputSocketPayload(frame *terminalStreamFrame) map[string]any {
 		"type":       "output",
 		"data":       frame.Data,
 		"output_seq": frame.OutputSeq,
-		"can_input":  frame.CanInput,
 	}
 }
 
