@@ -260,12 +260,9 @@ func (m *ManagedTransport) AttachTerminal(ctx context.Context, hostDeviceID, ter
 	if err != nil {
 		return nil, err
 	}
-	terminalID, shell, cwd, outputSeq, err := session.remoteTerminalByID(ctx, terminalID)
+	terminalID, shell, cwd, _, err := session.remoteTerminalByID(ctx, terminalID)
 	if err != nil {
 		return nil, err
-	}
-	if afterSeq <= 0 {
-		afterSeq = outputSeq
 	}
 	return m.attachTerminal(ctx, session, terminalID, shell, cwd, afterSeq, false)
 }

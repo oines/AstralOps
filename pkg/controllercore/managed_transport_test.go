@@ -106,6 +106,22 @@ func TestManagedTransportRoutesTerminalFramesAndInput(t *testing.T) {
 	}
 }
 
+func TestManagedTransportAttachTerminalPreservesAfterSeqForReplay(t *testing.T) {
+	opener := &fakeManagedOpener{}
+	manager := NewManagedTransport(ManagedTransportConfig{OpenFrameConn: opener.open})
+
+	stream, err := manager.AttachTerminal(context.Background(), "dev_host", "term_1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stream.OutputSeq() != 0 {
+		t.Fatalf("stream output seq = %d, want 0 so host replays ring buffer", stream.OutputSeq())
+	}
+	if got := opener.conn(0).lastRequestParam(ActionTerminalAttach, "after_seq"); numberValue(got) != 0 {
+		t.Fatalf("terminal attach after_seq = %#v, want 0", got)
+	}
+}
+
 func TestManagedTransportReportsActivityForInboundFrames(t *testing.T) {
 	opener := &fakeManagedOpener{}
 	var mu sync.Mutex
@@ -279,6 +295,22 @@ func (c *fakeManagedFrameConn) requestCount(action string) int {
 		}
 	}
 	return count
+}
+
+func (c *fakeManagedFrameConn) lastRequestParam(action, key string) any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := len(c.writes) - 1; i >= 0; i-- {
+		request := c.writes[i].Request
+		if request == nil || request.Action != action {
+			continue
+		}
+		if request.Params == nil {
+			return nil
+		}
+		return request.Params[key]
+	}
+	return nil
 }
 
 func (c *fakeManagedFrameConn) sendTerminalFrame(frameType string, payload TerminalPayload) {
