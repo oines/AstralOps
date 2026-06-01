@@ -1,39 +1,23 @@
-export type AgentKind = "claude" | "codex";
-export type WorkspaceTarget = "local" | "ssh";
+import type {
+  AgentKind as GeneratedAgentKind,
+  AstralEvent as GeneratedAstralEvent,
+  Workspace as GeneratedWorkspace,
+  WorkspaceConnection as GeneratedWorkspaceConnection,
+  WorkspaceTarget as GeneratedWorkspaceTarget,
+} from "./generated";
 
-export type Workspace = {
-  id: string;
-  name: string;
+export * as GeneratedProtocol from "./generated";
+
+export type AgentKind = GeneratedAgentKind;
+export type WorkspaceTarget = GeneratedWorkspaceTarget;
+
+export type Workspace = Omit<GeneratedWorkspace, "target"> & {
   target: WorkspaceTarget;
-  agent: AgentKind;
-  local_projection_root: string;
-  local_cwd?: string;
-  ssh?: {
-    endpoint: string;
-    port: number;
-    remote_cwd: string;
-  };
-  native_session_id?: string;
-  native_thread_id?: string;
-  created_at?: string;
-  updated_at?: string;
 };
 
-export type WorkspaceConnection = {
-  workspace_id: string;
-  target: WorkspaceTarget;
+export type WorkspaceConnection = Omit<GeneratedWorkspaceConnection, "target" | "status" | "capabilities"> & {
+  target: WorkspaceTarget | string;
   status: "disconnected" | "connecting" | "connected" | "reconnecting" | "degraded" | "failed" | string;
-  endpoint?: string;
-  port?: number;
-  remote_cwd?: string;
-  remote_user?: string;
-  remote_host?: string;
-  remote_os?: string;
-  remote_arch?: string;
-  remote_shell?: string;
-  display_cwd?: string;
-  helper_path?: string;
-  helper_status?: string;
   capabilities?: {
     rg?: {
       available?: boolean;
@@ -42,22 +26,11 @@ export type WorkspaceConnection = {
     };
     [key: string]: unknown;
   };
-  message?: string;
-  retry_attempt?: number;
-  retry_max?: number;
-  updated_at: string;
-  raw?: Record<string, unknown>;
 };
 
-export type AstralEvent = {
-  seq: number;
-  ts: string;
-  workspace_id: string;
-  session_id: string;
-  agent: AgentKind;
+export type AstralEvent = Omit<GeneratedAstralEvent, "kind" | "normalized"> & {
   kind: AstralEventKind;
   normalized: AstralNormalizedEvent;
-  raw?: unknown;
 };
 
 export type AstralEventFamily =

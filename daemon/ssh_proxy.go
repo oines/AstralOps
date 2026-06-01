@@ -32,34 +32,20 @@ const (
 	sshBrowseSessionTTL    = 5 * time.Minute
 )
 
-type WorkspaceConnection struct {
-	WorkspaceID  string         `json:"workspace_id"`
-	Target       string         `json:"target"`
-	Status       string         `json:"status"`
-	Endpoint     string         `json:"endpoint,omitempty"`
-	Port         int            `json:"port,omitempty"`
-	RemoteCWD    string         `json:"remote_cwd,omitempty"`
-	RemoteUser   string         `json:"remote_user,omitempty"`
-	RemoteHost   string         `json:"remote_host,omitempty"`
-	RemoteOS     string         `json:"remote_os,omitempty"`
-	RemoteArch   string         `json:"remote_arch,omitempty"`
-	RemoteShell  string         `json:"remote_shell,omitempty"`
-	DisplayCWD   string         `json:"display_cwd,omitempty"`
-	HelperPath   string         `json:"helper_path,omitempty"`
-	HelperStatus string         `json:"helper_status,omitempty"`
-	Capabilities map[string]any `json:"capabilities,omitempty"`
-	Message      string         `json:"message,omitempty"`
-	RetryAttempt int            `json:"retry_attempt,omitempty"`
-	RetryMax     int            `json:"retry_max,omitempty"`
-	UpdatedAt    string         `json:"updated_at"`
-	Raw          map[string]any `json:"raw,omitempty"`
-}
-
 type sshManager struct {
-	app    *app
+	deps   sshDeps
 	mu     sync.Mutex
 	by     map[string]*sshTarget
 	browse map[string]*sshBrowseSession
+}
+
+type sshDeps struct {
+	currentSettings       func() AppSettings
+	listWorkspaces        func() []Workspace
+	latestConnection      func(string) (WorkspaceConnection, bool)
+	stopWorkspaceSessions func(string, string)
+	emit                  func(AstralEvent)
+	dataDir               string
 }
 
 type sshTarget struct {
@@ -75,12 +61,30 @@ type sshBrowseSession struct {
 }
 
 func newSSHManager(a *app) *sshManager {
-	return &sshManager{app: a, by: map[string]*sshTarget{}, browse: map[string]*sshBrowseSession{}}
+	return &sshManager{deps: sshDepsFromApp(a), by: map[string]*sshTarget{}, browse: map[string]*sshBrowseSession{}}
+}
+
+func sshDepsFromApp(a *app) sshDeps {
+	deps := sshDeps{}
+	if a != nil {
+		deps.currentSettings = a.currentSettings
+		deps.stopWorkspaceSessions = a.stopWorkspaceSessions
+		deps.emit = a.emit
+		if a.store != nil {
+			deps.listWorkspaces = a.store.listWorkspaces
+			deps.latestConnection = a.store.latestWorkspaceConnection
+			deps.dataDir = a.store.dataDir
+		}
+	}
+	return deps
 }
 
 func (m *sshManager) restorePersistedConnections(ctx context.Context) {
-	autoReconnect := m.app.currentSettings().Workspace.SSHAutoReconnect
-	for _, ws := range m.app.store.listWorkspaces() {
+	if m == nil || m.deps.currentSettings == nil || m.deps.listWorkspaces == nil || m.deps.latestConnection == nil {
+		return
+	}
+	autoReconnect := m.deps.currentSettings().Workspace.SSHAutoReconnect
+	for _, ws := range m.deps.listWorkspaces() {
 		if ws.Target != "ssh" {
 			continue
 		}
@@ -88,7 +92,7 @@ func (m *sshManager) restorePersistedConnections(ctx context.Context) {
 			m.seedState(ws, initialSSHConnection(ws, connectionDisconnected))
 			continue
 		}
-		last, ok := m.app.store.latestWorkspaceConnection(ws.ID)
+		last, ok := m.deps.latestConnection(ws.ID)
 		if !ok {
 			continue
 		}
@@ -370,8 +374,8 @@ func (m *sshManager) call(ctx context.Context, ws Workspace, method string, para
 	}
 	message := fmt.Sprintf("ssh operation failed after %d attempts: %s", sshProxyMaxAttempts, lastErr.Error())
 	m.markDegraded(ws, message)
-	if m.app != nil {
-		m.app.stopWorkspaceSessions(ws.ID, message)
+	if m.deps.stopWorkspaceSessions != nil {
+		m.deps.stopWorkspaceSessions(ws.ID, message)
 	}
 	return errors.New(message)
 }
@@ -612,8 +616,8 @@ func (m *sshManager) startEventProcess(ctx context.Context, ws Workspace, id, me
 	}
 	message := fmt.Sprintf("ssh operation failed after %d attempts: %s", sshProxyMaxAttempts, lastErr.Error())
 	m.markDegraded(ws, message)
-	if m.app != nil {
-		m.app.stopWorkspaceSessions(ws.ID, message)
+	if m.deps.stopWorkspaceSessions != nil {
+		m.deps.stopWorkspaceSessions(ws.ID, message)
 	}
 	return nil, nil, nil, nil, errors.New(message)
 }
@@ -715,7 +719,10 @@ func (m *sshManager) seedState(ws Workspace, state WorkspaceConnection) {
 }
 
 func (m *sshManager) emitConnection(ws Workspace, state WorkspaceConnection) {
-	m.app.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.connection", Normalized: state})
+	if m == nil || m.deps.emit == nil {
+		return
+	}
+	m.deps.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.connection", Normalized: state})
 }
 
 func (m *sshManager) watchProxy(ws Workspace, proxy *proxyClient) {
@@ -1081,7 +1088,7 @@ func (m *sshManager) localHelperBinary(ctx context.Context, probe sshProbe) (str
 	if bundled := findBundledProxyAgent(probe); bundled != "" {
 		return bundled, nil
 	}
-	out := filepath.Join(m.app.store.dataDir, "helpers", probe.OS+"-"+probe.Arch, "astral-proxy-agent")
+	out := filepath.Join(m.deps.dataDir, "helpers", probe.OS+"-"+probe.Arch, "astral-proxy-agent")
 	root := repoRootGuess()
 	if _, err := os.Stat(filepath.Join(root, "proxy-agent", "main.go")); err == nil {
 		if st, statErr := os.Stat(out); statErr == nil && helperBinaryUsable(st) && helperBinaryFresh(root, st.ModTime()) {

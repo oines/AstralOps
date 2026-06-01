@@ -32,7 +32,7 @@ func TestManagedControlRequestTimeoutClosesCachedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newRemoteControlManager(&app{store: st})
+	manager := newRemoteControlManager(remoteControlDeps{store: st})
 	conn := &timeoutFrameConn{}
 	session := &remoteControlManagedSession{
 		manager:       manager,

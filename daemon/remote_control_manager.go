@@ -24,13 +24,19 @@ const (
 )
 
 type remoteControlManager struct {
-	app *app
-	mu  sync.Mutex
+	deps remoteControlDeps
+	mu   sync.Mutex
 
 	sessions       map[string]*remoteControlManagedSession
 	states         map[string]remoteHostControlState
 	lanFailedUntil map[string]time.Time
 	routeGen       int64
+}
+
+type remoteControlDeps struct {
+	store            *store
+	refreshMesh      func(bool)
+	remoteHostTarget func(string) (controlClientTarget, error)
 }
 
 type remoteControlManagedSession struct {
@@ -75,13 +81,37 @@ type remoteHostControlState struct {
 	UpdatedAt       string `json:"updated_at,omitempty"`
 }
 
-func newRemoteControlManager(a *app) *remoteControlManager {
+func newRemoteControlManager(deps remoteControlDeps) *remoteControlManager {
 	return &remoteControlManager{
-		app:            a,
+		deps:           deps,
 		sessions:       map[string]*remoteControlManagedSession{},
 		states:         map[string]remoteHostControlState{},
 		lanFailedUntil: map[string]time.Time{},
 	}
+}
+
+func remoteControlDepsFromApp(a *app) remoteControlDeps {
+	if a == nil {
+		return remoteControlDeps{}
+	}
+	return remoteControlDeps{
+		store:            a.store,
+		refreshMesh:      a.refreshMeshStateAsync,
+		remoteHostTarget: a.remoteHostTarget,
+	}
+}
+
+func (m *remoteControlManager) refreshMesh(discover bool) {
+	if m != nil && m.deps.refreshMesh != nil {
+		m.deps.refreshMesh(discover)
+	}
+}
+
+func (m *remoteControlManager) controllerDeviceID() string {
+	if m == nil || m.deps.store == nil {
+		return ""
+	}
+	return m.deps.store.deviceIdentity.DeviceID
 }
 
 func (m *remoteControlManager) controlState(hostDeviceID string) remoteHostControlState {
@@ -129,8 +159,8 @@ func (m *remoteControlManager) setControlState(hostDeviceID, state string, targe
 	next.RouteGeneration = m.routeGen
 	m.states[hostDeviceID] = next
 	m.mu.Unlock()
-	if changed && m.app != nil {
-		m.app.refreshMeshStateAsync(false)
+	if changed {
+		m.refreshMesh(false)
 	}
 }
 
@@ -207,7 +237,7 @@ func (a *app) remoteControlManager() *remoteControlManager {
 		return nil
 	}
 	if a.remoteManager == nil {
-		a.remoteManager = newRemoteControlManager(a)
+		a.remoteManager = newRemoteControlManager(remoteControlDepsFromApp(a))
 	}
 	return a.remoteManager
 }
@@ -492,9 +522,7 @@ func (m *remoteControlManager) Invalidate(hostDeviceID, reason string) {
 		session.closeWithError(fmt.Errorf("remote control session invalidated: %s", reason))
 	}
 	m.setControlState(hostDeviceID, remoteControlStateReconnecting, target, fmt.Errorf("%s", reason))
-	if m.app != nil {
-		m.app.refreshMeshStateAsync(true)
-	}
+	m.refreshMesh(true)
 }
 
 func (m *remoteControlManager) InvalidateAll(reason string) {
@@ -509,9 +537,7 @@ func (m *remoteControlManager) InvalidateAll(reason string) {
 		session.closeWithError(fmt.Errorf("remote control session invalidated: %s", reason))
 	}
 	m.setAllControlStates(remoteControlStateReconnecting, fmt.Errorf("%s", reason))
-	if m.app != nil {
-		m.app.refreshMeshStateAsync(true)
-	}
+	m.refreshMesh(true)
 }
 
 func (m *remoteControlManager) getSession(ctx context.Context, hostDeviceID string) (*remoteControlManagedSession, error) {
@@ -528,7 +554,12 @@ func (m *remoteControlManager) getSession(ctx context.Context, hostDeviceID stri
 	m.mu.Unlock()
 
 	m.setControlState(hostDeviceID, remoteControlStateConnecting, controlClientTarget{}, nil)
-	target, err := m.app.remoteHostTarget(hostDeviceID)
+	if m.deps.remoteHostTarget == nil || m.deps.store == nil {
+		err := errors.New("remote control manager is not initialized")
+		m.setControlState(hostDeviceID, remoteControlStateFailed, controlClientTarget{}, err)
+		return nil, err
+	}
+	target, err := m.deps.remoteHostTarget(hostDeviceID)
 	if err != nil {
 		m.setControlState(hostDeviceID, remoteControlStateFailed, controlClientTarget{}, err)
 		return nil, err
@@ -536,7 +567,7 @@ func (m *remoteControlManager) getSession(ctx context.Context, hostDeviceID stri
 	if m.lanSuppressed(hostDeviceID) && strings.TrimSpace(target.RelayClient.BaseURL) != "" && strings.TrimSpace(target.RelayClient.Token) != "" {
 		target.UseRelay = true
 	}
-	conn, activeTarget, err := controlClientOpenTargetWithTransports(ctx, target, m.app.store, controlClientTransportPlan(target))
+	conn, activeTarget, err := controlClientOpenTargetWithTransports(ctx, target, m.deps.store, controlClientTransportPlan(target))
 	if err != nil {
 		if !target.UseRelay {
 			m.markLANFailed(hostDeviceID)
@@ -545,9 +576,7 @@ func (m *remoteControlManager) getSession(ctx context.Context, hostDeviceID stri
 		if controlClientTransportErrorIsTerminal(err) {
 			return nil, err
 		}
-		if m.app != nil {
-			m.app.refreshMeshStateAsync(true)
-		}
+		m.refreshMesh(true)
 		return nil, err
 	}
 	if !target.UseRelay && activeTarget.UseRelay {
@@ -577,9 +606,7 @@ func (m *remoteControlManager) getSession(ctx context.Context, hostDeviceID stri
 
 	go session.readLoop()
 	m.setControlState(hostDeviceID, remoteControlStateConnected, activeTarget, nil)
-	if m.app != nil {
-		m.app.refreshMeshStateAsync(true)
-	}
+	m.refreshMesh(true)
 	return session, nil
 }
 
@@ -592,9 +619,7 @@ func (m *remoteControlManager) removeSession(session *remoteControlManagedSessio
 		delete(m.sessions, session.hostDeviceID)
 	}
 	m.mu.Unlock()
-	if m.app != nil {
-		m.app.refreshMeshStateAsync(true)
-	}
+	m.refreshMesh(true)
 }
 
 func (s *remoteControlManagedSession) isClosed() bool {
@@ -630,7 +655,7 @@ func (s *remoteControlManagedSession) request(ctx context.Context, req ControlRe
 	if strings.TrimSpace(req.RequestID) == "" {
 		req.RequestID = remoteControlManagedRequestPrefix + randomID(12)
 	}
-	req.ControllerDeviceID = s.manager.app.store.deviceIdentity.DeviceID
+	req.ControllerDeviceID = s.manager.controllerDeviceID()
 
 	timeout := controlClientRequestRoundTripTimeout(s.target.Timeout, req)
 	if timeout > 0 {
@@ -878,7 +903,7 @@ func (s *remoteControlManagedSession) writeTerminalRequest(req ControlRequest) e
 	if s.isClosed() {
 		return s.closedError()
 	}
-	req.ControllerDeviceID = s.manager.app.store.deviceIdentity.DeviceID
+	req.ControllerDeviceID = s.manager.controllerDeviceID()
 	if err := s.conn.WritePlain(controlPlainFrame{Type: "request", Request: &req}); err != nil {
 		s.closeWithError(err)
 		return err

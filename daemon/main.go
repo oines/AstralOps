@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/oines/astralops/daemon/internal/eventlog"
 	"github.com/oines/astralops/pkg/controllercore"
 	"github.com/oines/astralops/pkg/hostcore"
 )
@@ -31,6 +32,7 @@ type app struct {
 	addr                 string
 	runtimePort          int
 	hub                  *eventHub
+	eventLog             *eventlog.Service
 	upgrader             websocket.Upgrader
 	agents               map[AgentKind]agentInfo
 	runtimes             map[AgentKind]AgentRuntime
@@ -121,11 +123,12 @@ func main() {
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
-	a.remoteManager = newRemoteControlManager(a)
+	a.eventPublisher()
+	a.remoteManager = newRemoteControlManager(remoteControlDepsFromApp(a))
 	a.controllerCore = a.newControllerCore()
-	a.hostRemoteSessions = newHostRemoteSessionManager(a, a.remoteManager)
-	a.network = newNetworkMonitor(a)
-	a.mesh = newMeshStateManager(a)
+	a.hostRemoteSessions = newHostRemoteSessionManager(hostRemoteSessionDepsFromApp(a), a.remoteManager)
+	a.network = newNetworkMonitor(networkMonitorDepsFromApp(a))
+	a.mesh = newMeshStateManager(meshStateDepsFromApp(a))
 	a.rebuildSessionProjections()
 	if err := a.backfillHistoricalContextEvents(); err != nil {
 		log.Fatal(err)
@@ -593,8 +596,4 @@ func dedupeStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
-}
-
-func (s Session) String() string {
-	return fmt.Sprintf("%s/%s", s.WorkspaceID, s.ID)
 }

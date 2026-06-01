@@ -266,6 +266,10 @@ func (s *store) allEvents() []AstralEvent {
 	return append([]AstralEvent(nil), s.events...)
 }
 
+func (s *store) AllEvents() []AstralEvent {
+	return s.allEvents()
+}
+
 func (s *store) latestSessionIDForWorkspace(workspaceID string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -577,6 +581,10 @@ func (s *store) appendEvent(ev AstralEvent) (AstralEvent, error) {
 	body, _ := json.Marshal(ev)
 	_, err = f.Write(append(body, '\n'))
 	return ev, err
+}
+
+func (s *store) AppendEvent(ev AstralEvent) (AstralEvent, error) {
+	return s.appendEvent(ev)
 }
 
 func (s *store) queryEvents(workspaceID, sessionID string, afterSeq int64) []AstralEvent {

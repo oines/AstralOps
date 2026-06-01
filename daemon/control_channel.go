@@ -57,7 +57,7 @@ type controlConnection interface {
 }
 
 type controlWSConn struct {
-	app                *app
+	control            *remoteControlService
 	socket             *websocket.Conn
 	id                 string
 	controllerDeviceID string
@@ -89,14 +89,15 @@ func (a *app) handleControlWS(w http.ResponseWriter, r *http.Request) {
 	}
 	socket.SetReadLimit(a.controlHelloFrameMaxBytes())
 	ctx, cancel := context.WithCancel(context.Background())
-	conn := &controlWSConn{app: a, socket: socket, ctx: ctx, cancel: cancel}
+	control := a.remoteControlService()
+	conn := &controlWSConn{control: control, socket: socket, ctx: ctx, cancel: cancel}
 	if err := conn.acceptHello(); err != nil {
 		cancel()
 		_ = socket.Close()
 		return
 	}
 	socket.SetReadLimit(a.controlSealedFrameMaxBytes())
-	a.registerControlSession(conn)
+	control.registerControlSession(conn)
 	conn.serve()
 }
 
@@ -124,7 +125,7 @@ func (c *controlWSConn) acceptHello() error {
 		c.writeUnsealedClose("invalid_hello", "invalid control hello")
 		return err
 	}
-	core := c.app.hostCoreManager()
+	core := c.control.hostCoreManager()
 	if core == nil {
 		c.writeUnsealedClose("host_service_unavailable", "host core is not enabled")
 		return errors.New("host core is not enabled")
@@ -223,18 +224,18 @@ func (c *controlWSConn) sendControlFrameRead(frames chan<- controlFrameRead, fra
 func (c *controlWSConn) handleRequest(req ControlRequest) (*ControlResponse, func()) {
 	session := c.hostSession
 	session.Connection = c
-	core := c.app.hostCoreManager()
+	core := c.control.hostCoreManager()
 	if core == nil {
 		return controlResponseError(req.RequestID, http.StatusServiceUnavailable, "host_service_unavailable", "host core is not enabled"), nil
 	}
 	response, err := core.Dispatch(c.requestContext(), session, req)
 	if err == nil {
-		return &response, c.app.afterControlResponse(c, req, response)
+		return &response, c.control.afterControlResponse(c, req, response)
 	}
 	return controlResponseFromError(req.RequestID, err), nil
 }
 
-func (a *app) afterControlResponse(conn controlConnection, req ControlRequest, response ControlResponse) func() {
+func (s *remoteControlService) afterControlResponse(conn controlConnection, req ControlRequest, response ControlResponse) func() {
 	if !response.OK {
 		return nil
 	}
@@ -248,7 +249,7 @@ func (a *app) afterControlResponse(conn controlConnection, req ControlRequest, r
 		conn.registerControlStream(result.StreamID, cancel)
 		return func() {
 			defer conn.unregisterControlStream(result.StreamID)
-			a.streamControlEvents(ctx, result, conn, req.RequestID)
+			s.streamControlEvents(ctx, result, conn, req.RequestID)
 		}
 	case ControlActionMediaStream:
 		result, ok := response.Result.(mediaStreamResult)
@@ -259,7 +260,7 @@ func (a *app) afterControlResponse(conn controlConnection, req ControlRequest, r
 		conn.registerControlStream(result.StreamID, cancel)
 		return func() {
 			defer conn.unregisterControlStream(result.StreamID)
-			a.streamControlMedia(ctx, result, conn, req.RequestID)
+			s.mediaService().streamControlMedia(ctx, result, conn, req.RequestID)
 		}
 	case ControlActionHostTrustRevoke:
 		result, ok := response.Result.(hostTrustRevokeResult)
@@ -267,7 +268,7 @@ func (a *app) afterControlResponse(conn controlConnection, req ControlRequest, r
 			return nil
 		}
 		return func() {
-			a.closeControlSessionsForDevice(conn.controllerID(), "trust_revoked")
+			s.closeControlSessionsForDevice(conn.controllerID(), "trust_revoked")
 		}
 	case ControlActionWorkspaceFilesStream:
 		result, ok := response.Result.(workspaceFileStreamResult)
@@ -282,7 +283,7 @@ func (a *app) afterControlResponse(conn controlConnection, req ControlRequest, r
 		conn.registerControlStream(result.StreamID, cancel)
 		return func() {
 			defer conn.unregisterControlStream(result.StreamID)
-			a.streamControlWorkspaceFile(ctx, params, result, conn, req.RequestID)
+			s.workspaceService().streamControlWorkspaceFile(ctx, params, result, conn, req.RequestID)
 		}
 	default:
 		return nil
@@ -449,50 +450,49 @@ func (c *controlWSConn) writeUnsealedClose(code, reason string) {
 func (c *controlWSConn) shutdown() {
 	c.cancelControlSession()
 	c.cancelAllMediaStreams()
-	c.app.detachTerminalViewersForControlSession(c.id, "connection_closed")
-	c.app.unregisterControlSession(c.id)
+	c.control.detachTerminalViewersForControlSession(c.id, "connection_closed")
+	c.control.unregisterControlSession(c.id)
 	_ = c.socket.Close()
 }
 
-func (a *app) registerControlSession(conn *controlWSConn) {
-	a.controlMu.Lock()
-	defer a.controlMu.Unlock()
-	if a.controlSessions == nil {
-		a.controlSessions = map[string]*controlWSConn{}
-	}
-	a.controlSessions[conn.id] = conn
+func (s *remoteControlService) registerControlSession(conn *controlWSConn) {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	s.wsSessions()[conn.id] = conn
 }
 
-func (a *app) unregisterControlSession(connectionID string) {
+func (s *remoteControlService) unregisterControlSession(connectionID string) {
 	if connectionID == "" {
 		return
 	}
-	a.controlMu.Lock()
-	defer a.controlMu.Unlock()
-	delete(a.controlSessions, connectionID)
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	delete(s.wsSessions(), connectionID)
 }
 
-func (a *app) closeControlSessionsForDevice(controllerDeviceID, reason string) int {
-	return a.closeControlSessionsForDeviceExcept(controllerDeviceID, reason, "")
+func (s *remoteControlService) closeControlSessionsForDevice(controllerDeviceID, reason string) int {
+	return s.closeControlSessionsForDeviceExcept(controllerDeviceID, reason, "")
 }
 
-func (a *app) closeAllControlSessions(reason string) int {
-	a.controlMu.Lock()
-	wsSessions := make([]*controlWSConn, 0, len(a.controlSessions))
-	for id, conn := range a.controlSessions {
+func (s *remoteControlService) closeAllControlSessions(reason string) int {
+	s.controlMu.Lock()
+	controlSessions := s.wsSessions()
+	wsSessions := make([]*controlWSConn, 0, len(controlSessions))
+	for id, conn := range controlSessions {
 		wsSessions = append(wsSessions, conn)
-		delete(a.controlSessions, id)
+		delete(controlSessions, id)
 	}
-	relaySessions := make([]*controlRelaySession, 0, len(a.controlRelaySessions))
-	for id, session := range a.controlRelaySessions {
+	controlRelaySessions := s.relaySessions()
+	relaySessions := make([]*controlRelaySession, 0, len(controlRelaySessions))
+	for id, session := range controlRelaySessions {
 		relaySessions = append(relaySessions, session)
-		delete(a.controlRelaySessions, id)
+		delete(controlRelaySessions, id)
 	}
-	a.controlMu.Unlock()
+	s.controlMu.Unlock()
 	for _, conn := range wsSessions {
 		conn.cancelControlSession()
 		conn.cancelAllControlStreams()
-		a.detachTerminalViewersForControlSession(conn.id, reason)
+		s.detachTerminalViewersForControlSession(conn.id, reason)
 		conn.writeEncryptedClose(reason, reason)
 		_ = conn.socket.Close()
 	}
@@ -503,36 +503,37 @@ func (a *app) closeAllControlSessions(reason string) int {
 	return len(wsSessions) + len(relaySessions)
 }
 
-func (a *app) closeControlSessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID string) int {
-	a.controlMu.Lock()
+func (s *remoteControlService) closeControlSessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID string) int {
+	s.controlMu.Lock()
 	sessions := []*controlWSConn{}
-	for id, conn := range a.controlSessions {
+	controlSessions := s.wsSessions()
+	for id, conn := range controlSessions {
 		if conn.controllerDeviceID == controllerDeviceID && id != exceptConnectionID {
 			sessions = append(sessions, conn)
-			delete(a.controlSessions, id)
+			delete(controlSessions, id)
 		}
 	}
-	a.controlMu.Unlock()
+	s.controlMu.Unlock()
 	for _, conn := range sessions {
 		conn.cancelControlSession()
 		conn.cancelAllControlStreams()
-		a.detachTerminalViewersForControlSession(conn.id, reason)
+		s.detachTerminalViewersForControlSession(conn.id, reason)
 		conn.writeEncryptedClose("trust_revoked", reason)
 		_ = conn.socket.Close()
 	}
-	return len(sessions) + a.closeControlRelaySessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID)
+	return len(sessions) + s.closeControlRelaySessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID)
 }
 
-func (a *app) activeControlSessionCountForDevice(controllerDeviceID string) int {
-	a.controlMu.Lock()
-	defer a.controlMu.Unlock()
+func (s *remoteControlService) activeControlSessionCountForDevice(controllerDeviceID string) int {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
 	count := 0
-	for _, conn := range a.controlSessions {
+	for _, conn := range s.wsSessions() {
 		if conn.controllerDeviceID == controllerDeviceID {
 			count++
 		}
 	}
-	for _, session := range a.controlRelaySessions {
+	for _, session := range s.relaySessions() {
 		if session.controllerDeviceID == controllerDeviceID {
 			count++
 		}

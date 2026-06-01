@@ -21,43 +21,80 @@ func (a *app) hostCoreManager() *hostcore.Core {
 	defer a.controlMu.Unlock()
 	if a.hostCore == nil {
 		a.hostCore = hostcore.New(hostcore.Adapters{
-			Identity:     hostCoreIdentityAdapter{app: a},
-			Membership:   hostCoreMembershipAdapter{app: a},
-			Trust:        hostCoreTrustAdapter{app: a},
+			Identity:     hostCoreIdentityAdapterFromApp(a),
+			Membership:   hostCoreMembershipAdapterFromApp(a),
+			Trust:        hostCoreTrustAdapterFromApp(a),
 			Capabilities: hostcore.CapabilityResolverFunc(controlActionCapability),
-			Dispatcher:   hostCoreDispatchAdapter{app: a},
+			Dispatcher:   hostCoreDispatchAdapter{control: a.remoteControlService(), store: a.store},
 		})
 	}
 	return a.hostCore
 }
 
 type hostCoreIdentityAdapter struct {
-	app *app
+	hostIdentity func() (DeviceIdentity, error)
+	signHost     func([]byte) ([]byte, error)
+}
+
+func hostCoreIdentityAdapterFromApp(a *app) hostCoreIdentityAdapter {
+	var st *store
+	if a != nil {
+		st = a.store
+	}
+	return hostCoreIdentityAdapter{
+		hostIdentity: func() (DeviceIdentity, error) {
+			if st == nil {
+				return DeviceIdentity{}, errors.New("host store is not initialized")
+			}
+			return st.hostInfo().Identity, nil
+		},
+		signHost: func(payload []byte) ([]byte, error) {
+			if st == nil || len(st.devicePrivateKey) != ed25519.PrivateKeySize {
+				return nil, errors.New("host private key is not initialized")
+			}
+			return ed25519.Sign(ed25519.PrivateKey(st.devicePrivateKey), payload), nil
+		},
+	}
 }
 
 func (p hostCoreIdentityAdapter) HostIdentity(context.Context) (DeviceIdentity, error) {
-	if p.app == nil || p.app.store == nil {
+	if p.hostIdentity == nil {
 		return DeviceIdentity{}, errors.New("host store is not initialized")
 	}
-	return p.app.store.hostInfo().Identity, nil
+	return p.hostIdentity()
 }
 
 func (p hostCoreIdentityAdapter) SignHost(_ context.Context, payload []byte) ([]byte, error) {
-	if p.app == nil || p.app.store == nil || len(p.app.store.devicePrivateKey) != ed25519.PrivateKeySize {
+	if p.signHost == nil {
 		return nil, errors.New("host private key is not initialized")
 	}
-	return ed25519.Sign(ed25519.PrivateKey(p.app.store.devicePrivateKey), payload), nil
+	return p.signHost(payload)
 }
 
 type hostCoreMembershipAdapter struct {
-	app *app
+	currentMembership func(cloudMembershipRole) (cloudMembershipState, error)
+}
+
+func hostCoreMembershipAdapterFromApp(a *app) hostCoreMembershipAdapter {
+	var st *store
+	if a != nil {
+		st = a.store
+	}
+	return hostCoreMembershipAdapter{
+		currentMembership: func(role cloudMembershipRole) (cloudMembershipState, error) {
+			if st == nil {
+				return cloudMembershipState{}, cloudMeshInactiveError()
+			}
+			return st.currentCloudMembership(role)
+		},
+	}
 }
 
 func (p hostCoreMembershipAdapter) HostMembership(context.Context) (controlwire.MembershipState, error) {
-	if p.app == nil || p.app.store == nil {
+	if p.currentMembership == nil {
 		return controlwire.MembershipState{}, cloudMeshInactiveError()
 	}
-	membership, err := p.app.store.currentCloudMembership(cloudMembershipRole{CanHost: true})
+	membership, err := p.currentMembership(cloudMembershipRole{CanHost: true})
 	if err != nil {
 		return controlwire.MembershipState{}, err
 	}
@@ -69,14 +106,29 @@ func (p hostCoreMembershipAdapter) HostMembership(context.Context) (controlwire.
 }
 
 type hostCoreTrustAdapter struct {
-	app *app
+	trustedController func(string) (TrustGrant, bool)
+}
+
+func hostCoreTrustAdapterFromApp(a *app) hostCoreTrustAdapter {
+	var st *store
+	if a != nil {
+		st = a.store
+	}
+	return hostCoreTrustAdapter{
+		trustedController: func(controllerDeviceID string) (TrustGrant, bool) {
+			if st == nil {
+				return TrustGrant{}, false
+			}
+			return st.trustedControlGrant(controllerDeviceID)
+		},
+	}
 }
 
 func (p hostCoreTrustAdapter) TrustedController(_ context.Context, controllerDeviceID string) (hostcore.TrustGrant, bool, error) {
-	if p.app == nil || p.app.store == nil {
+	if p.trustedController == nil {
 		return hostcore.TrustGrant{}, false, errors.New("host store is not initialized")
 	}
-	grant, ok := p.app.store.trustedControlGrant(controllerDeviceID)
+	grant, ok := p.trustedController(controllerDeviceID)
 	if !ok {
 		return hostcore.TrustGrant{}, false, nil
 	}
@@ -84,19 +136,20 @@ func (p hostCoreTrustAdapter) TrustedController(_ context.Context, controllerDev
 }
 
 type hostCoreDispatchAdapter struct {
-	app *app
+	control *remoteControlService
+	store   *store
 }
 
 func (p hostCoreDispatchAdapter) DispatchControlRequest(ctx context.Context, session hostcore.Session, req ControlRequest) (ControlResponse, error) {
-	if p.app == nil || p.app.store == nil {
+	if p.control == nil || p.store == nil {
 		return ControlResponse{RequestID: req.RequestID}, newActionError(http.StatusServiceUnavailable, "host_service_unavailable", "host store is not initialized")
 	}
 	conn, _ := session.Connection.(controlConnection)
-	grant, ok := p.app.store.trustedControlGrant(req.ControllerDeviceID)
+	grant, ok := p.store.trustedControlGrant(req.ControllerDeviceID)
 	if !ok {
 		return ControlResponse{RequestID: req.RequestID}, newActionError(http.StatusForbidden, "capability_denied", "controller is not allowed to use capability")
 	}
-	return p.app.executeAuthorizedControlRequestWithContext(ctx, req, conn, grant)
+	return p.control.executeAuthorizedControlRequestWithContext(ctx, req, conn, grant)
 }
 
 func toHostCoreTrustGrant(grant TrustGrant) hostcore.TrustGrant {

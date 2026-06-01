@@ -711,7 +711,7 @@ func (a *app) handleSessions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	ss, err := a.createSession(req)
+	ss, err := a.sessions().createSession(req)
 	if err != nil {
 		writeActionError(w, err)
 		return
@@ -722,7 +722,7 @@ func (a *app) handleSessions(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/sessions/"), "/")
 	if len(parts) == 1 && r.Method == http.MethodDelete {
-		if _, err := a.deleteSessionByID(parts[0]); err != nil {
+		if _, err := a.sessions().deleteSessionByID(parts[0]); err != nil {
 			writeActionError(w, err)
 			return
 		}
@@ -778,10 +778,10 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 	case action == "interrupt" && r.Method == http.MethodPost:
 		a.handleSessionInterrupt(w, sessionID)
 	case action == "queue" && len(parts) == 4 && parts[3] == "cancel" && r.Method == http.MethodPost:
-		a.cancelQueuedTurn(sessionID, parts[2])
+		a.sessions().cancelQueuedTurn(sessionID, parts[2])
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case action == "queue" && len(parts) == 4 && parts[3] == "steer" && r.Method == http.MethodPost:
-		if err := a.steerQueuedTurn(sessionID, parts[2]); err != nil {
+		if err := a.sessions().steerQueuedTurn(sessionID, parts[2]); err != nil {
 			status := http.StatusConflict
 			if err.Error() == "session not found" {
 				status = http.StatusNotFound
@@ -799,7 +799,7 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleSessionInput(w http.ResponseWriter, sessionID, input string, options TurnOptions) {
-	result, err := a.startSessionInput(sessionID, input, options)
+	result, err := a.sessions().startSessionInput(sessionID, input, options)
 	if err != nil {
 		writeActionError(w, err)
 		return
@@ -808,7 +808,7 @@ func (a *app) handleSessionInput(w http.ResponseWriter, sessionID, input string,
 }
 
 func (a *app) handleSessionInterrupt(w http.ResponseWriter, sessionID string) {
-	result, err := a.interruptSession(sessionID)
+	result, err := a.sessions().interruptSession(sessionID)
 	if err != nil {
 		writeActionError(w, err)
 		return

@@ -14,11 +14,30 @@ import (
 )
 
 type daemonControllerTransport struct {
-	app *app
+	deps controllerTransportDeps
+}
+
+type controllerTransportDeps struct {
+	meshState        func(context.Context, bool) (meshStateResponse, error)
+	requestPairing   func(context.Context, string) (controllercore.PairingSignal, error)
+	managedTransport func() *controllercore.ManagedTransport
 }
 
 func (a *app) newControllerCore() *controllercore.Controller {
-	return controllercore.New(daemonControllerTransport{app: a})
+	return controllercore.New(daemonControllerTransport{deps: a.controllerTransportDeps()})
+}
+
+func (a *app) controllerTransportDeps() controllerTransportDeps {
+	return controllerTransportDeps{
+		meshState: func(ctx context.Context, discover bool) (meshStateResponse, error) {
+			if a.mesh != nil {
+				return a.mesh.refresh(ctx, discover)
+			}
+			return newMeshStateManager(meshStateDepsFromApp(a)).build(ctx, discover), nil
+		},
+		requestPairing:   a.requestControllerPairing,
+		managedTransport: a.controllerManagedTransport,
+	}
 }
 
 func (a *app) controllerManagedTransport() *controllercore.ManagedTransport {
@@ -181,16 +200,10 @@ func (a *app) controllerCoreAttachTerminal(ctx context.Context, hostDeviceID, te
 }
 
 func (t daemonControllerTransport) MeshState(ctx context.Context, discover bool) (controllercore.MeshState, error) {
-	if t.app == nil {
+	if t.deps.meshState == nil {
 		return controllercore.MeshState{}, controllercore.NewActionError(http.StatusServiceUnavailable, "daemon_unavailable", "daemon is not initialized")
 	}
-	var state meshStateResponse
-	var err error
-	if t.app.mesh != nil {
-		state, err = t.app.mesh.refresh(ctx, discover)
-	} else {
-		state = newMeshStateManager(t.app).build(ctx, discover)
-	}
+	state, err := t.deps.meshState(ctx, discover)
 	if err != nil {
 		return controllercore.MeshState{}, toCoreError(err)
 	}
@@ -198,14 +211,21 @@ func (t daemonControllerTransport) MeshState(ctx context.Context, discover bool)
 }
 
 func (t daemonControllerTransport) RequestPairing(ctx context.Context, hostDeviceID string) (controllercore.PairingSignal, error) {
-	if t.app == nil || t.app.store == nil {
+	if t.deps.requestPairing == nil {
+		return controllercore.PairingSignal{}, controllercore.NewActionError(http.StatusServiceUnavailable, "daemon_unavailable", "daemon is not initialized")
+	}
+	return t.deps.requestPairing(ctx, hostDeviceID)
+}
+
+func (a *app) requestControllerPairing(ctx context.Context, hostDeviceID string) (controllercore.PairingSignal, error) {
+	if a == nil || a.store == nil {
 		return controllercore.PairingSignal{}, controllercore.NewActionError(http.StatusServiceUnavailable, "daemon_unavailable", "daemon is not initialized")
 	}
 	hostDeviceID = strings.TrimSpace(hostDeviceID)
 	if hostDeviceID == "" {
 		return controllercore.PairingSignal{}, controllercore.NewActionError(http.StatusBadRequest, "remote_host_required", "remote Host device id is required")
 	}
-	client, err := t.app.cloudClientFromSettings()
+	client, err := a.cloudClientFromSettings()
 	if err != nil {
 		return controllercore.PairingSignal{}, toCoreError(err)
 	}
@@ -215,8 +235,8 @@ func (t daemonControllerTransport) RequestPairing(ctx context.Context, hostDevic
 	if err != nil {
 		return controllercore.PairingSignal{}, controllercore.NewActionError(http.StatusBadGateway, "cloud_request_failed", err.Error())
 	}
-	self := t.app.store.hostInfo().Identity
-	settings := t.app.currentSettings()
+	self := a.store.hostInfo().Identity
+	settings := a.currentSettings()
 	if _, err := client.RegisterDevice(reqCtx, self, settings.RemoteControl.Enabled, true, relayURL); err != nil {
 		return controllercore.PairingSignal{}, controllercore.NewActionError(http.StatusBadGateway, "cloud_request_failed", err.Error())
 	}
@@ -234,7 +254,10 @@ func (t daemonControllerTransport) RequestPairing(ctx context.Context, hostDevic
 }
 
 func (t daemonControllerTransport) ControlState(hostDeviceID string) controllercore.ControlState {
-	manager := t.app.controllerManagedTransport()
+	if t.deps.managedTransport == nil {
+		return controllercore.ControlState{State: controllercore.StateIdle}
+	}
+	manager := t.deps.managedTransport()
 	if manager == nil {
 		return controllercore.ControlState{State: controllercore.StateIdle}
 	}
@@ -242,23 +265,42 @@ func (t daemonControllerTransport) ControlState(hostDeviceID string) controllerc
 }
 
 func (t daemonControllerTransport) Request(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (controllercore.ControlResponse, error) {
-	return t.app.controllerManagedTransport().Request(ctx, hostDeviceID, capability, action, params)
+	manager := t.deps.managedTransport()
+	if manager == nil {
+		return controllercore.ControlResponse{}, controllercore.NewActionError(http.StatusServiceUnavailable, "controller_unavailable", "controller transport is not initialized")
+	}
+	return manager.Request(ctx, hostDeviceID, capability, action, params)
 }
 
 func (t daemonControllerTransport) SubscribeEvents(ctx context.Context, hostDeviceID string, params controllercore.EventSubscriptionParams) (controllercore.EventStream, error) {
-	return t.app.controllerManagedTransport().SubscribeEvents(ctx, hostDeviceID, params)
+	manager := t.deps.managedTransport()
+	if manager == nil {
+		return controllercore.EventStream{}, controllercore.NewActionError(http.StatusServiceUnavailable, "controller_unavailable", "controller transport is not initialized")
+	}
+	return manager.SubscribeEvents(ctx, hostDeviceID, params)
 }
 
 func (t daemonControllerTransport) OpenTerminal(ctx context.Context, hostDeviceID, workspaceID string, afterSeq int64) (controllercore.TerminalStream, error) {
-	return t.app.controllerManagedTransport().OpenTerminal(ctx, hostDeviceID, workspaceID, afterSeq)
+	manager := t.deps.managedTransport()
+	if manager == nil {
+		return nil, controllercore.NewActionError(http.StatusServiceUnavailable, "controller_unavailable", "controller transport is not initialized")
+	}
+	return manager.OpenTerminal(ctx, hostDeviceID, workspaceID, afterSeq)
 }
 
 func (t daemonControllerTransport) AttachTerminal(ctx context.Context, hostDeviceID, terminalID string, afterSeq int64) (controllercore.TerminalStream, error) {
-	return t.app.controllerManagedTransport().AttachTerminal(ctx, hostDeviceID, terminalID, afterSeq)
+	manager := t.deps.managedTransport()
+	if manager == nil {
+		return nil, controllercore.NewActionError(http.StatusServiceUnavailable, "controller_unavailable", "controller transport is not initialized")
+	}
+	return manager.AttachTerminal(ctx, hostDeviceID, terminalID, afterSeq)
 }
 
 func (t daemonControllerTransport) Invalidate(hostDeviceID, reason string) {
-	if manager := t.app.controllerManagedTransport(); manager != nil {
+	if t.deps.managedTransport == nil {
+		return
+	}
+	if manager := t.deps.managedTransport(); manager != nil {
 		manager.Invalidate(hostDeviceID, reason)
 	}
 }

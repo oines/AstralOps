@@ -4,51 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/oines/astralops/pkg/protocol"
 )
 
-type sessionView struct {
-	Session             Session                  `json:"session"`
-	Title               string                   `json:"title,omitempty"`
-	Status              string                   `json:"status"`
-	PendingInteraction  *pendingInteractionView  `json:"pending_interaction,omitempty"`
-	QueuedInputs        []queuedInputView        `json:"queued_inputs,omitempty"`
-	EditableUserMessage *editableUserMessageView `json:"editable_user_message,omitempty"`
-}
-
-type pendingInteractionView struct {
-	ID         string                  `json:"id"`
-	Kind       string                  `json:"kind"`
-	Title      string                  `json:"title"`
-	DetailRows []interactionDetailRow  `json:"detail_rows,omitempty"`
-	Actions    []interactionActionView `json:"actions"`
-	Form       map[string]any          `json:"form,omitempty"`
-}
-
-type interactionDetailRow struct {
-	Key   string `json:"key,omitempty"`
-	Label string `json:"label"`
-	Value string `json:"value"`
-	Mono  bool   `json:"mono,omitempty"`
-}
-
-type interactionActionView struct {
-	ID               string `json:"id"`
-	Label            string `json:"label"`
-	Description      string `json:"description,omitempty"`
-	Role             string `json:"role,omitempty"`
-	RequiresFeedback bool   `json:"requires_feedback,omitempty"`
-}
-
-type queuedInputView struct {
-	ID        string `json:"id"`
-	SessionID string `json:"session_id"`
-	Text      string `json:"text"`
-}
-
-type editableUserMessageView struct {
-	EventSeq int64  `json:"event_seq"`
-	Text     string `json:"text"`
-}
+type sessionView = protocol.SessionView
+type pendingInteractionView = protocol.PendingInteractionView
+type interactionDetailRow = protocol.InteractionDetailRow
+type interactionActionView = protocol.InteractionActionView
+type queuedInputView = protocol.QueuedInputView
+type editableUserMessageView = protocol.EditableUserMessageView
 
 func (a *app) buildSessionView(sessionID string) (sessionView, bool) {
 	ss, ok := a.store.getSession(sessionID)

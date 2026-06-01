@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 const (
@@ -38,10 +39,39 @@ const (
 )
 
 type terminalManager struct {
-	app              *app
+	deps             terminalDeps
 	mu               sync.Mutex
 	sessions         map[string]*terminalSession
 	retentionTimeout time.Duration
+}
+
+type terminalDeps struct {
+	workspaces terminalWorkspaceReader
+	events     terminalEventPublisher
+	ssh        terminalSSH
+}
+
+type terminalWorkspaceReader interface {
+	getWorkspace(string) (Workspace, bool)
+}
+
+type terminalEventPublisher interface {
+	emit(AstralEvent)
+}
+
+type terminalSSH interface {
+	startPTY(context.Context, Workspace, string, map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error)
+	call(context.Context, Workspace, string, any, any) error
+}
+
+type terminalEventEmitter struct {
+	emitFn func(AstralEvent)
+}
+
+func (e terminalEventEmitter) emit(ev AstralEvent) {
+	if e.emitFn != nil {
+		e.emitFn(ev)
+	}
 }
 
 type terminalSession struct {
@@ -73,95 +103,17 @@ type terminalSession struct {
 	sshTerminalOpen bool
 }
 
-type terminalOpenParams struct {
-	WorkspaceID string `json:"workspace_id"`
-	CWD         string `json:"cwd,omitempty"`
-	Cols        uint16 `json:"cols,omitempty"`
-	Rows        uint16 `json:"rows,omitempty"`
-}
-
-type terminalInputParams struct {
-	TerminalID   string `json:"terminal_id"`
-	ViewerID     string `json:"viewer_id,omitempty"`
-	InputLeaseID string `json:"input_lease_id,omitempty"`
-	Data         string `json:"data,omitempty"`
-}
-
-type terminalAttachParams struct {
-	TerminalID string `json:"terminal_id"`
-	AfterSeq   int64  `json:"after_seq,omitempty"`
-}
-
-type terminalDetachParams struct {
-	TerminalID string `json:"terminal_id"`
-}
-
-type terminalResizeParams struct {
-	TerminalID   string `json:"terminal_id"`
-	ViewerID     string `json:"viewer_id,omitempty"`
-	InputLeaseID string `json:"input_lease_id,omitempty"`
-	Cols         uint16 `json:"cols"`
-	Rows         uint16 `json:"rows"`
-}
-
-type terminalCloseParams struct {
-	TerminalID string `json:"terminal_id"`
-}
-
-type terminalHeartbeatAckParams struct {
-	TerminalID   string `json:"terminal_id"`
-	ViewerID     string `json:"viewer_id"`
-	InputLeaseID string `json:"input_lease_id"`
-	HeartbeatSeq int64  `json:"heartbeat_seq"`
-	RenderedSeq  int64  `json:"rendered_seq,omitempty"`
-}
-
-type terminalOpenResult struct {
-	TerminalID     string `json:"terminal_id"`
-	WorkspaceID    string `json:"workspace_id"`
-	Target         string `json:"target"`
-	Shell          string `json:"shell,omitempty"`
-	CWD            string `json:"cwd,omitempty"`
-	Status         string `json:"status"`
-	WriterDeviceID string `json:"writer_device_id,omitempty"`
-	OutputSeq      int64  `json:"output_seq"`
-}
-
-type terminalAckResult struct {
-	TerminalID     string `json:"terminal_id"`
-	Status         string `json:"status"`
-	OutputSeq      int64  `json:"output_seq"`
-	WriterDeviceID string `json:"writer_device_id,omitempty"`
-	CanInput       bool   `json:"can_input,omitempty"`
-}
-
-type terminalTab struct {
-	TerminalID     string `json:"terminal_id"`
-	WorkspaceID    string `json:"workspace_id"`
-	Agent          string `json:"agent"`
-	Target         string `json:"target"`
-	Shell          string `json:"shell,omitempty"`
-	CWD            string `json:"cwd,omitempty"`
-	Status         string `json:"status"`
-	WriterDeviceID string `json:"writer_device_id,omitempty"`
-	OutputSeq      int64  `json:"output_seq"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
-}
-
-type terminalAttachResult struct {
-	TerminalID     string `json:"terminal_id"`
-	WorkspaceID    string `json:"workspace_id"`
-	Target         string `json:"target"`
-	Status         string `json:"status"`
-	ViewerDeviceID string `json:"viewer_device_id"`
-	ViewerID       string `json:"viewer_id"`
-	InputLeaseID   string `json:"input_lease_id"`
-	ConnectionID   string `json:"connection_id"`
-	WriterDeviceID string `json:"writer_device_id,omitempty"`
-	OutputSeq      int64  `json:"output_seq"`
-	CanInput       bool   `json:"can_input"`
-}
+type terminalOpenParams = protocol.TerminalOpenParams
+type terminalInputParams = protocol.TerminalInputParams
+type terminalAttachParams = protocol.TerminalAttachParams
+type terminalDetachParams = protocol.TerminalDetachParams
+type terminalResizeParams = protocol.TerminalResizeParams
+type terminalCloseParams = protocol.TerminalCloseParams
+type terminalHeartbeatAckParams = protocol.TerminalHeartbeatAckParams
+type terminalOpenResult = protocol.TerminalOpenResult
+type terminalAckResult = protocol.TerminalAckResult
+type terminalTab = protocol.TerminalTab
+type terminalAttachResult = protocol.TerminalAttachResult
 
 type terminalStreamFrame struct {
 	frameType    string `json:"-"`
@@ -208,16 +160,29 @@ func (a *app) terminalManager() *terminalManager {
 	a.terminalMu.Lock()
 	defer a.terminalMu.Unlock()
 	if a.terminals == nil {
-		a.terminals = &terminalManager{app: a, sessions: map[string]*terminalSession{}, retentionTimeout: defaultTerminalRetentionTimeout}
+		a.terminals = newTerminalManager(terminalDeps{workspaces: a.store, events: terminalEventEmitter{emitFn: a.emit}, ssh: a.ssh})
 	}
+	a.terminals.deps.workspaces = a.store
+	a.terminals.deps.events = terminalEventEmitter{emitFn: a.emit}
+	a.terminals.deps.ssh = a.ssh
 	return a.terminals
+}
+
+func newTerminalManager(deps terminalDeps) *terminalManager {
+	return &terminalManager{deps: deps, sessions: map[string]*terminalSession{}, retentionTimeout: defaultTerminalRetentionTimeout}
+}
+
+func (m *terminalManager) emit(ev AstralEvent) {
+	if m != nil && m.deps.events != nil {
+		m.deps.events.emit(ev)
+	}
 }
 
 func (m *terminalManager) open(ctx context.Context, controllerDeviceID string, params terminalOpenParams) (terminalOpenResult, error) {
 	if !terminalAvailableOnHost() {
 		return terminalOpenResult{}, newActionError(http.StatusBadRequest, windowsTerminalDisabledReason, "terminal is not available on this Host")
 	}
-	ws, ok := m.app.store.getWorkspace(params.WorkspaceID)
+	ws, ok := m.deps.workspaces.getWorkspace(params.WorkspaceID)
 	if !ok {
 		return terminalOpenResult{}, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found")
 	}
@@ -252,14 +217,14 @@ func (m *terminalManager) openLocal(_ context.Context, controllerDeviceID string
 	session.localCmd = cmd
 	session.localPTY = ptmx
 	m.register(session)
-	session.scheduleRetention(m.app, m.retentionTimeout)
-	m.app.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: session.lifecycle("opened")})
-	go session.readLocalOutput(m.app)
+	session.scheduleRetention(m, m.retentionTimeout)
+	m.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: session.lifecycle("opened")})
+	go session.readLocalOutput(m)
 	return session.openResult(), nil
 }
 
 func (m *terminalManager) openSSH(ctx context.Context, controllerDeviceID string, ws Workspace, requestedCWD string, cols, rows uint16) (terminalOpenResult, error) {
-	if m.app.ssh == nil {
+	if m.deps.ssh == nil {
 		return terminalOpenResult{}, newActionError(http.StatusServiceUnavailable, "ssh_unavailable", "SSH manager is not available")
 	}
 	if ws.SSH == nil {
@@ -277,7 +242,7 @@ func (m *terminalManager) openSSH(ctx context.Context, controllerDeviceID string
 	session := newTerminalSession(ws.ID, ws.Agent, ws.Target, displayCWD, "")
 	session.sshWorkspace = &ws
 	session.sshTerminalID = session.id
-	_, events, unsubscribe, started, err := m.app.ssh.startPTY(ctx, ws, session.id, map[string]any{"cwd": cwd, "cols": cols, "rows": rows})
+	_, events, unsubscribe, started, err := m.deps.ssh.startPTY(ctx, ws, session.id, map[string]any{"cwd": cwd, "cols": cols, "rows": rows})
 	if err != nil {
 		return terminalOpenResult{}, err
 	}
@@ -285,9 +250,9 @@ func (m *terminalManager) openSSH(ctx context.Context, controllerDeviceID string
 	session.sshTerminalOpen = true
 	session.shell = stringValue(started["shell"])
 	m.register(session)
-	session.scheduleRetention(m.app, m.retentionTimeout)
-	m.app.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: session.lifecycle("opened")})
-	go session.readSSHOutput(m.app, events)
+	session.scheduleRetention(m, m.retentionTimeout)
+	m.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: session.lifecycle("opened")})
+	go session.readSSHOutput(m, events)
 	return session.openResult(), nil
 }
 
@@ -314,7 +279,7 @@ func (m *terminalManager) attach(controllerDeviceID string, conn controlConnecti
 			break
 		}
 	}
-	m.app.emit(AstralEvent{
+	m.emit(AstralEvent{
 		WorkspaceID: session.workspaceID,
 		Agent:       session.agent,
 		Kind:        "control.terminal.attached",
@@ -334,8 +299,8 @@ func (m *terminalManager) detach(controllerDeviceID string, conn controlConnecti
 	result, removed := session.detachViewer(conn.connectionID())
 	if removed != nil {
 		removed.close()
-		session.scheduleRetention(m.app, m.retentionTimeout)
-		m.app.emit(AstralEvent{
+		session.scheduleRetention(m, m.retentionTimeout)
+		m.emit(AstralEvent{
 			WorkspaceID: session.workspaceID,
 			Agent:       session.agent,
 			Kind:        "control.terminal.detached",
@@ -360,10 +325,10 @@ func (m *terminalManager) input(ctx context.Context, controllerDeviceID string, 
 		return session.ack(), nil
 	}
 	if session.sshTerminalOpen {
-		if session.sshWorkspace == nil || m.app.ssh == nil {
+		if session.sshWorkspace == nil || m.deps.ssh == nil {
 			return terminalAckResult{}, newActionError(http.StatusServiceUnavailable, "ssh_unavailable", "SSH manager is not available")
 		}
-		if err := m.app.ssh.call(ctx, *session.sshWorkspace, "pty_write", map[string]any{"id": session.sshTerminalID, "data": params.Data}, nil); err != nil {
+		if err := m.deps.ssh.call(ctx, *session.sshWorkspace, "pty_write", map[string]any{"id": session.sshTerminalID, "data": params.Data}, nil); err != nil {
 			return terminalAckResult{}, err
 		}
 		return session.ack(), nil
@@ -392,10 +357,10 @@ func (m *terminalManager) resize(ctx context.Context, controllerDeviceID string,
 		return terminalAckResult{}, err
 	}
 	if session.sshTerminalOpen {
-		if session.sshWorkspace == nil || m.app.ssh == nil {
+		if session.sshWorkspace == nil || m.deps.ssh == nil {
 			return terminalAckResult{}, newActionError(http.StatusServiceUnavailable, "ssh_unavailable", "SSH manager is not available")
 		}
-		if err := m.app.ssh.call(ctx, *session.sshWorkspace, "pty_resize", map[string]any{"id": session.sshTerminalID, "cols": params.Cols, "rows": params.Rows}, nil); err != nil {
+		if err := m.deps.ssh.call(ctx, *session.sshWorkspace, "pty_resize", map[string]any{"id": session.sshTerminalID, "cols": params.Cols, "rows": params.Rows}, nil); err != nil {
 			return terminalAckResult{}, err
 		}
 		return session.ack(), nil
@@ -425,7 +390,7 @@ func (m *terminalManager) close(ctx context.Context, controllerDeviceID string, 
 	if err != nil {
 		return terminalAckResult{}, err
 	}
-	session.close(ctx, m.app, "closed")
+	session.close(ctx, m, "closed")
 	return session.ack(), nil
 }
 
@@ -449,7 +414,7 @@ func (m *terminalManager) closeWorkspace(ctx context.Context, workspaceID, reaso
 	}
 	m.mu.Unlock()
 	for _, session := range sessions {
-		session.close(ctx, m.app, reason)
+		session.close(ctx, m, reason)
 	}
 }
 
@@ -512,8 +477,8 @@ func (m *terminalManager) detachConnection(connectionID, reason string) {
 			continue
 		}
 		removed.close()
-		session.scheduleRetention(m.app, m.retentionTimeout)
-		m.app.emit(AstralEvent{
+		session.scheduleRetention(m, m.retentionTimeout)
+		m.emit(AstralEvent{
 			WorkspaceID: session.workspaceID,
 			Agent:       session.agent,
 			Kind:        "control.terminal.detached",
@@ -573,7 +538,7 @@ func newTerminalSession(workspaceID string, agent AgentKind, target, cwd, shell 
 	}
 }
 
-func (s *terminalSession) readLocalOutput(app *app) {
+func (s *terminalSession) readLocalOutput(manager *terminalManager) {
 	buf := make([]byte, 4096)
 	for {
 		s.mu.Lock()
@@ -587,23 +552,23 @@ func (s *terminalSession) readLocalOutput(app *app) {
 			s.appendOutput(string(buf[:n]))
 		}
 		if err != nil {
-			s.markClosed(app, "exited")
+			s.markClosed(manager, "exited")
 			return
 		}
 	}
 }
 
-func (s *terminalSession) readSSHOutput(app *app, events <-chan proxyEvent) {
+func (s *terminalSession) readSSHOutput(manager *terminalManager, events <-chan proxyEvent) {
 	for event := range events {
 		switch event.Event {
 		case "output":
 			s.appendOutput(stringValue(event.Result["data"]))
 		case "exit":
-			s.markClosed(app, "exited")
+			s.markClosed(manager, "exited")
 			return
 		}
 	}
-	s.markClosed(app, "exited")
+	s.markClosed(manager, "exited")
 }
 
 func (s *terminalSession) appendOutput(data string) {
@@ -826,7 +791,7 @@ func (s *terminalSession) attachResultLocked(connectionID, viewerDeviceID string
 	}
 }
 
-func (s *terminalSession) scheduleRetention(app *app, timeout time.Duration) {
+func (s *terminalSession) scheduleRetention(manager *terminalManager, timeout time.Duration) {
 	if timeout <= 0 {
 		return
 	}
@@ -838,7 +803,7 @@ func (s *terminalSession) scheduleRetention(app *app, timeout time.Duration) {
 	s.cancelRetentionLocked()
 	s.retentionUntil = time.Now().UTC().Add(timeout)
 	s.retentionTimer = time.AfterFunc(timeout, func() {
-		s.closeIfRetentionExpired(app)
+		s.closeIfRetentionExpired(manager)
 	})
 }
 
@@ -850,7 +815,7 @@ func (s *terminalSession) cancelRetentionLocked() {
 	s.retentionUntil = time.Time{}
 }
 
-func (s *terminalSession) closeIfRetentionExpired(app *app) {
+func (s *terminalSession) closeIfRetentionExpired(manager *terminalManager) {
 	now := time.Now().UTC()
 	s.mu.Lock()
 	expired := s.status == terminalStatusOpen && len(s.viewers) == 0 && !s.retentionUntil.IsZero() && !now.Before(s.retentionUntil)
@@ -860,11 +825,11 @@ func (s *terminalSession) closeIfRetentionExpired(app *app) {
 	}
 	s.mu.Unlock()
 	if expired {
-		s.close(context.Background(), app, "retention_timeout")
+		s.close(context.Background(), manager, "retention_timeout")
 	}
 }
 
-func (s *terminalSession) close(ctx context.Context, app *app, reason string) {
+func (s *terminalSession) close(ctx context.Context, manager *terminalManager, reason string) {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		localCmd := s.localCmd
@@ -883,8 +848,8 @@ func (s *terminalSession) close(ctx context.Context, app *app, reason string) {
 		viewers := s.takeViewersLocked()
 		s.mu.Unlock()
 
-		if sshOpen && sshWorkspace != nil && app.ssh != nil {
-			_ = app.ssh.call(ctx, *sshWorkspace, "pty_kill", map[string]any{"id": sshTerminalID}, nil)
+		if sshOpen && sshWorkspace != nil && manager != nil && manager.deps.ssh != nil {
+			_ = manager.deps.ssh.call(ctx, *sshWorkspace, "pty_kill", map[string]any{"id": sshTerminalID}, nil)
 		}
 		if sshUnsubscribe != nil {
 			sshUnsubscribe()
@@ -899,11 +864,11 @@ func (s *terminalSession) close(ctx context.Context, app *app, reason string) {
 			_, _ = localCmd.Process.Wait()
 		}
 		closeViewersAfterFrame(closedFrame, viewers)
-		app.emit(AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: s.lifecycle(reason)})
+		manager.emit(AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: s.lifecycle(reason)})
 	})
 }
 
-func (s *terminalSession) markClosed(app *app, reason string) {
+func (s *terminalSession) markClosed(manager *terminalManager, reason string) {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		localCmd := s.localCmd
@@ -929,7 +894,7 @@ func (s *terminalSession) markClosed(app *app, reason string) {
 			_, _ = localCmd.Process.Wait()
 		}
 		closeViewersAfterFrame(closedFrame, viewers)
-		app.emit(AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: s.lifecycle(reason)})
+		manager.emit(AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: s.lifecycle(reason)})
 	})
 }
 

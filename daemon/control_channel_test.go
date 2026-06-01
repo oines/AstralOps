@@ -2199,7 +2199,7 @@ func TestControlWebSocketRemoteWorkspaceFileStreamUsesProxyReadRange(t *testing.
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},
@@ -2287,7 +2287,7 @@ func TestControlWebSocketRemoteWorkspaceFileStreamReportsTruncatedReadRange(t *t
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},
@@ -2417,7 +2417,7 @@ func TestControlWebSocketRemoteWorkspaceFileWriteUsesProxyOverEncryptedChannel(t
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},
@@ -2509,7 +2509,7 @@ func TestControlWebSocketRemoteWorkspacePatchUsesProxyOverEncryptedChannel(t *te
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},
@@ -2598,7 +2598,7 @@ func TestControlWebSocketRemoteWorkspaceExecUsesProxyOverEncryptedChannel(t *tes
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},

@@ -70,6 +70,10 @@ func (c *sessionProjectionCache) apply(ev AstralEvent) {
 	c.sessions[ev.SessionID] = projection
 }
 
+func (c *sessionProjectionCache) Apply(ev AstralEvent) {
+	c.apply(ev)
+}
+
 func mergeProjectedContext(existing map[string]any, next map[string]any, compacted bool) map[string]any {
 	if len(next) == 0 {
 		return existing

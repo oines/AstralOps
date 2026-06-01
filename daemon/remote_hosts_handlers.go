@@ -69,7 +69,7 @@ func (a *app) handleRemoteHosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, remoteHostsResponse{Hosts: a.buildRemoteHostRecords(r.Context(), truthyQuery(r.URL.Query().Get("discover")))})
 }
 
-func (a *app) buildRemoteHostRecords(ctx context.Context, discover bool) []remoteHostRecord {
+func (a *remoteControlService) buildRemoteHostRecords(ctx context.Context, discover bool) []remoteHostRecord {
 	hosts := map[string]remoteHostRecord{}
 	if !a.cloudMeshActiveFor(cloudMembershipRole{CanControl: true}) {
 		return []remoteHostRecord{}
@@ -82,8 +82,8 @@ func (a *app) buildRemoteHostRecords(ctx context.Context, discover bool) []remot
 	for _, host := range hosts {
 		if manager := a.hostRemoteSessionManager(); manager != nil {
 			host.Control = manager.ControlState(host.DeviceID)
-		} else if a.remoteManager != nil {
-			host.Control = a.remoteManager.controlState(host.DeviceID)
+		} else if manager := a.remoteManager(); manager != nil {
+			host.Control = manager.controlState(host.DeviceID)
 		}
 		host = remoteHostRecordWithControlState(host, host.Control)
 		out = append(out, host)
@@ -99,7 +99,7 @@ func (a *app) buildRemoteHostRecords(ctx context.Context, discover bool) []remot
 	return out
 }
 
-func (a *app) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remoteHostRecord) {
+func (a *remoteControlService) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remoteHostRecord) {
 	if a == nil || a.store == nil {
 		return
 	}
@@ -137,7 +137,7 @@ func (a *app) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remote
 	}
 }
 
-func (a *app) remoteHostPairingSignalsByHost(ctx context.Context, client CloudClient, controllerDeviceID string) map[string]CloudPairingSignal {
+func (a *remoteControlService) remoteHostPairingSignalsByHost(ctx context.Context, client CloudClient, controllerDeviceID string) map[string]CloudPairingSignal {
 	controllerDeviceID = strings.TrimSpace(controllerDeviceID)
 	if controllerDeviceID == "" {
 		return nil
@@ -172,7 +172,7 @@ func cloudPairingSignalNewer(left, right CloudPairingSignal) bool {
 	return leftTime > rightTime
 }
 
-func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
+func (a *remoteControlService) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 	candidates, err := discoverRemoteControlHostsWithTimeout(remoteHostDiscoveryTTL, defaultRemoteControlDiscoveryPort)
 	if err != nil {
 		return
@@ -198,8 +198,8 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 			continue
 		}
 		known = a.rememberRemoteHostLANRoute(hostInfo, candidate.BaseURL, known)
-		if a.remoteManager != nil {
-			a.remoteManager.clearLANFailure(candidate.DeviceID)
+		if manager := a.remoteManager(); manager != nil {
+			manager.clearLANFailure(candidate.DeviceID)
 		}
 		if transport := a.controllerManagedTransport(); transport != nil {
 			transport.ClearLANFailure(candidate.DeviceID)
@@ -837,14 +837,14 @@ func controlResponseMessage(response ControlResponse) string {
 	return "remote control request failed"
 }
 
-func (a *app) remoteHostTarget(hostDeviceID string) (controlClientTarget, error) {
+func (a *remoteControlService) remoteHostTarget(hostDeviceID string) (controlClientTarget, error) {
 	if !a.cloudMeshActiveFor(cloudMembershipRole{CanControl: true}) {
 		return controlClientTarget{}, cloudMeshInactiveError()
 	}
 	return a.remoteTargetResolver().ResolveKnownHost(hostDeviceID)
 }
 
-func (a *app) rememberRemoteHostLANRoute(hostInfo HostInfo, baseURL string, fallback KnownHost) KnownHost {
+func (a *remoteControlService) rememberRemoteHostLANRoute(hostInfo HostInfo, baseURL string, fallback KnownHost) KnownHost {
 	known, err := a.store.rememberKnownHost(hostInfo, baseURL)
 	if err != nil {
 		return fallback
@@ -852,7 +852,7 @@ func (a *app) rememberRemoteHostLANRoute(hostInfo HostInfo, baseURL string, fall
 	return known
 }
 
-func (a *app) remoteTargetResolver() remoteTargetResolver {
+func (a *remoteControlService) remoteTargetResolver() remoteTargetResolver {
 	return remoteTargetResolver{
 		store:                     a.store,
 		cloudClient:               a.cloudClientFromSettings,
@@ -888,7 +888,7 @@ func (a *app) writeRemoteWorkspaceFilesResult(w http.ResponseWriter, hostDeviceI
 	})
 }
 
-func (a *app) remoteControlResponse(hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
+func (a *remoteControlService) remoteControlResponse(hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
 	manager := a.hostRemoteSessionManager()
 	if manager == nil {
 		return ControlResponse{}, errors.New("remote Host session manager is not initialized")

@@ -42,11 +42,23 @@ const (
 )
 
 type hostRemoteSessionManager struct {
-	app   *app
+	deps  hostRemoteSessionDeps
 	lower *remoteControlManager
 
 	mu       sync.Mutex
 	sessions map[string]*hostRemoteSession
+}
+
+type hostRemoteSessionDeps struct {
+	controlState     func(string) remoteHostControlState
+	hasActiveSession func(string) bool
+	request          func(context.Context, string, string, string, map[string]any) (ControlResponse, error)
+	subscribeEvents  func(context.Context, string, eventSubscriptionParams) (remoteControlEventStream, error)
+	openTerminal     func(context.Context, string, string, int64) (remoteHostTerminalStream, error)
+	attachTerminal   func(context.Context, string, string, int64) (remoteHostTerminalStream, error)
+	invalidate       func(string, string)
+	clearLANFailure  func(string)
+	refreshMesh      func(bool)
 }
 
 type hostRemoteSession struct {
@@ -103,8 +115,45 @@ type remoteHostEventStream struct {
 	Close    func()
 }
 
-func newHostRemoteSessionManager(a *app, lower *remoteControlManager) *hostRemoteSessionManager {
-	return &hostRemoteSessionManager{app: a, lower: lower, sessions: map[string]*hostRemoteSession{}}
+func newHostRemoteSessionManager(deps hostRemoteSessionDeps, lower *remoteControlManager) *hostRemoteSessionManager {
+	return &hostRemoteSessionManager{
+		deps:     deps,
+		lower:    lower,
+		sessions: map[string]*hostRemoteSession{},
+	}
+}
+
+func hostRemoteSessionDepsFromApp(a *app) hostRemoteSessionDeps {
+	if a == nil {
+		return hostRemoteSessionDeps{}
+	}
+	return hostRemoteSessionDeps{
+		controlState: func(hostDeviceID string) remoteHostControlState {
+			if transport := a.controllerManagedTransport(); transport != nil {
+				return fromCoreControlState(transport.ControlState(hostDeviceID))
+			}
+			return remoteHostControlState{State: remoteControlStateIdle}
+		},
+		hasActiveSession: func(hostDeviceID string) bool {
+			transport := a.controllerManagedTransport()
+			return transport != nil && transport.HasActiveSession(hostDeviceID)
+		},
+		request:         a.controllerCoreRequest,
+		subscribeEvents: a.controllerCoreSubscribeEvents,
+		openTerminal:    a.controllerCoreOpenTerminal,
+		attachTerminal:  a.controllerCoreAttachTerminal,
+		invalidate: func(hostDeviceID, reason string) {
+			if transport := a.controllerManagedTransport(); transport != nil {
+				transport.Invalidate(hostDeviceID, reason)
+			}
+		},
+		clearLANFailure: func(hostDeviceID string) {
+			if transport := a.controllerManagedTransport(); transport != nil {
+				transport.ClearLANFailure(hostDeviceID)
+			}
+		},
+		refreshMesh: a.refreshMeshStateAsync,
+	}
 }
 
 func (a *app) hostRemoteSessionManager() *hostRemoteSessionManager {
@@ -112,7 +161,7 @@ func (a *app) hostRemoteSessionManager() *hostRemoteSessionManager {
 		return nil
 	}
 	if a.hostRemoteSessions == nil {
-		a.hostRemoteSessions = newHostRemoteSessionManager(a, a.remoteControlManager())
+		a.hostRemoteSessions = newHostRemoteSessionManager(hostRemoteSessionDepsFromApp(a), a.remoteControlManager())
 	}
 	return a.hostRemoteSessions
 }
@@ -228,8 +277,8 @@ func (m *hostRemoteSessionManager) ControlState(hostDeviceID string) remoteHostC
 	}
 	state := session.State()
 	lower := remoteHostControlState{}
-	if m.app != nil {
-		lower = fromCoreControlState(m.app.controllerManagedTransport().ControlState(hostDeviceID))
+	if m.deps.controlState != nil {
+		lower = m.deps.controlState(hostDeviceID)
 	} else if m.lower != nil {
 		lower = m.lower.controlState(hostDeviceID)
 	}
@@ -301,7 +350,7 @@ func (s *hostRemoteSession) healthLoop() {
 }
 
 func (s *hostRemoteSession) shouldProbeHealth() bool {
-	if s == nil || s.manager == nil || s.manager.app == nil {
+	if s == nil || s.manager == nil || s.manager.deps.request == nil {
 		return false
 	}
 	s.mu.Lock()
@@ -319,14 +368,14 @@ func (s *hostRemoteSession) shouldProbeHealth() bool {
 
 func (s *hostRemoteSession) probeHealth() {
 	timeout := hostRemotePingTimeout
-	if s.manager != nil && s.manager.app != nil {
-		if transport := s.manager.app.controllerManagedTransport(); transport == nil || !transport.HasActiveSession(s.hostDeviceID) {
+	if s.manager != nil && s.manager.deps.hasActiveSession != nil {
+		if !s.manager.deps.hasActiveSession(s.hostDeviceID) {
 			timeout = hostRemoteReconnectTimeout
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	response, err := s.manager.app.controllerCoreRequest(ctx, s.hostDeviceID, CapabilityCoreRead, ControlActionPing, nil)
+	response, err := s.manager.deps.request(ctx, s.hostDeviceID, CapabilityCoreRead, ControlActionPing, nil)
 	if err != nil {
 		s.recordPingFailure(err)
 		return
@@ -411,7 +460,7 @@ func (s *hostRemoteSession) markConnectionUntrusted(reason string, err error) {
 	s.state.Terminals = cloneRemoteHostTerminalStates(s.terminals)
 	s.mu.Unlock()
 	s.setHostState(hostRemoteStateReconnecting, "", err)
-	if s.manager != nil && s.manager.app != nil {
+	if s.manager != nil && (s.manager.deps.invalidate != nil || s.manager.lower != nil) {
 		s.invalidateControlSession(reason)
 	}
 }
@@ -420,12 +469,12 @@ func (s *hostRemoteSession) invalidateControlSession(reason string) {
 	if s == nil || s.manager == nil {
 		return
 	}
-	if s.manager.app != nil {
-		if transport := s.manager.app.controllerManagedTransport(); transport != nil {
-			transport.ClearLANFailure(s.hostDeviceID)
-			transport.Invalidate(s.hostDeviceID, reason)
-			return
-		}
+	if s.manager.deps.clearLANFailure != nil {
+		s.manager.deps.clearLANFailure(s.hostDeviceID)
+	}
+	if s.manager.deps.invalidate != nil {
+		s.manager.deps.invalidate(s.hostDeviceID, reason)
+		return
 	}
 	if s.manager.lower != nil {
 		s.manager.lower.Invalidate(s.hostDeviceID, reason)
@@ -448,12 +497,12 @@ func (s *hostRemoteSession) pauseTerminalViewers(err error) {
 }
 
 func (s *hostRemoteSession) Request(ctx context.Context, capability, action string, params map[string]any) (ControlResponse, error) {
-	if s == nil || s.manager == nil || s.manager.app == nil || s.manager.lower == nil {
+	if s == nil || s.manager == nil || s.manager.deps.request == nil {
 		return ControlResponse{}, errors.New("remote control manager is not initialized")
 	}
 	s.activate()
 	s.setConnectingIfNotLive()
-	response, err := s.manager.app.controllerCoreRequest(ctx, s.hostDeviceID, capability, action, params)
+	response, err := s.manager.deps.request(ctx, s.hostDeviceID, capability, action, params)
 	if err != nil {
 		s.setHostState(hostRemoteRequestFailureState(err), "", err)
 		return ControlResponse{}, err
@@ -646,11 +695,11 @@ func (s *hostRemoteSession) SubscribeEvents(ctx context.Context, params eventSub
 }
 
 func (s *hostRemoteSession) subscribeEventsOnce(ctx context.Context, params eventSubscriptionParams) (remoteControlEventStream, error) {
-	if s == nil || s.manager == nil || s.manager.app == nil || s.manager.lower == nil {
+	if s == nil || s.manager == nil || s.manager.deps.subscribeEvents == nil {
 		return remoteControlEventStream{}, errors.New("remote control manager is not initialized")
 	}
 	s.setConnectingIfNotLive()
-	stream, err := s.manager.app.controllerCoreSubscribeEvents(ctx, s.hostDeviceID, params)
+	stream, err := s.manager.deps.subscribeEvents(ctx, s.hostDeviceID, params)
 	if err != nil {
 		s.setHostState(hostRemoteStateReconnecting, "", err)
 		return remoteControlEventStream{}, err
@@ -675,8 +724,8 @@ func (s *hostRemoteSession) setHostState(state, transport string, err error) {
 	if s == nil {
 		return
 	}
-	if transport == "" && s.manager != nil && s.manager.app != nil {
-		transport = fromCoreControlState(s.manager.app.controllerManagedTransport().ControlState(s.hostDeviceID)).Transport
+	if transport == "" && s.manager != nil && s.manager.deps.controlState != nil {
+		transport = s.manager.deps.controlState(s.hostDeviceID).Transport
 	} else if transport == "" && s.manager != nil && s.manager.lower != nil {
 		transport = s.manager.lower.controlState(s.hostDeviceID).Transport
 	}
@@ -803,8 +852,8 @@ func (s *hostRemoteSession) notify() {
 		default:
 		}
 	}
-	if s.manager != nil && s.manager.app != nil {
-		s.manager.app.refreshMeshStateAsync(false)
+	if s.manager != nil && s.manager.deps.refreshMesh != nil {
+		s.manager.deps.refreshMesh(false)
 	}
 }
 
@@ -1044,16 +1093,22 @@ func (v *remoteHostTerminalViewer) liveStream() (remoteHostTerminalStream, error
 }
 
 func (v *remoteHostTerminalViewer) attach(ctx context.Context) error {
-	if v == nil || v.session == nil || v.session.manager == nil || v.session.manager.app == nil {
+	if v == nil || v.session == nil || v.session.manager == nil {
 		return errors.New("remote control manager is not initialized")
 	}
 	v.setState(hostTerminalStateAttaching, false, nil)
 	var stream remoteHostTerminalStream
 	var err error
 	if strings.TrimSpace(v.terminalID) != "" {
-		stream, err = v.session.manager.app.controllerCoreAttachTerminal(ctx, v.session.hostDeviceID, v.terminalID, v.outputSeq)
+		if v.session.manager.deps.attachTerminal == nil {
+			return errors.New("remote terminal attach is not initialized")
+		}
+		stream, err = v.session.manager.deps.attachTerminal(ctx, v.session.hostDeviceID, v.terminalID, v.outputSeq)
 	} else {
-		stream, err = v.session.manager.app.controllerCoreOpenTerminal(ctx, v.session.hostDeviceID, v.workspaceID, v.outputSeq)
+		if v.session.manager.deps.openTerminal == nil {
+			return errors.New("remote terminal open is not initialized")
+		}
+		stream, err = v.session.manager.deps.openTerminal(ctx, v.session.hostDeviceID, v.workspaceID, v.outputSeq)
 	}
 	if err != nil {
 		v.setState(hostTerminalStateFailed, false, err)

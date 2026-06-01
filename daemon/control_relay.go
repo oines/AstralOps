@@ -38,7 +38,7 @@ type relayEnvelopeReadTransport interface {
 }
 
 type controlRelaySession struct {
-	app                *app
+	control            *remoteControlService
 	id                 string
 	controllerDeviceID string
 	cipher             *controlCipher
@@ -52,11 +52,14 @@ type controlRelaySession struct {
 	lastSeen           time.Time
 }
 
-func (a *app) cloudPollRelayEnvelopes(ctx context.Context, client RelayClient) error {
+func (a *cloudmeshService) cloudPollRelayEnvelopes(ctx context.Context, client RelayClient) error {
 	if a == nil || a.store == nil {
 		return nil
 	}
-	if !a.hostRoleEnabled() {
+	if a.hostRoleEnabled == nil || !a.hostRoleEnabled() {
+		return nil
+	}
+	if a.currentSettings == nil {
 		return nil
 	}
 	settings := a.currentSettings()
@@ -71,9 +74,14 @@ func (a *app) cloudPollRelayEnvelopes(ctx context.Context, client RelayClient) e
 	if err != nil {
 		return err
 	}
-	a.expireIdleControlRelaySessions(time.Now().UTC())
+	if a.expireIdleControlRelaySessions != nil {
+		a.expireIdleControlRelaySessions(time.Now().UTC())
+	}
 	for _, envelope := range envelopes {
 		if strings.TrimSpace(envelope.ToDeviceID) != deviceID {
+			continue
+		}
+		if a.handleControlRelayEnvelope == nil {
 			continue
 		}
 		if err := a.handleControlRelayEnvelope(ctx, client, envelope); err != nil {
@@ -83,11 +91,14 @@ func (a *app) cloudPollRelayEnvelopes(ctx context.Context, client RelayClient) e
 	return nil
 }
 
-func (a *app) cloudRunRelayWebSocket(ctx context.Context, client RelayClient) error {
+func (a *cloudmeshService) cloudRunRelayWebSocket(ctx context.Context, client RelayClient) error {
 	if a == nil || a.store == nil {
 		return nil
 	}
-	if !a.hostRoleEnabled() {
+	if a.hostRoleEnabled == nil || !a.hostRoleEnabled() {
+		return nil
+	}
+	if a.currentSettings == nil {
 		return nil
 	}
 	settings := a.currentSettings()
@@ -128,36 +139,48 @@ func (a *app) cloudRunRelayWebSocket(ctx context.Context, client RelayClient) er
 		if strings.TrimSpace(envelope.ToDeviceID) != deviceID {
 			continue
 		}
-		a.expireIdleControlRelaySessions(time.Now().UTC())
-		if err := a.handleControlRelayEnvelope(ctx, relay, envelope); err != nil {
-			return err
+		if a.expireIdleControlRelaySessions != nil {
+			a.expireIdleControlRelaySessions(time.Now().UTC())
+		}
+		if a.handleControlRelayEnvelope != nil {
+			if err := a.handleControlRelayEnvelope(ctx, relay, envelope); err != nil {
+				return err
+			}
 		}
 	}
 }
 
 func (a *app) handleControlRelayEnvelope(ctx context.Context, relay relayEnvelopeTransport, envelope RelayEnvelope) error {
+	return a.remoteControlService().handleControlRelayEnvelope(ctx, relay, envelope)
+}
+
+func (s *remoteControlService) handleControlRelayEnvelope(ctx context.Context, relay relayEnvelopeTransport, envelope RelayEnvelope) error {
 	switch strings.TrimSpace(envelope.PayloadKind) {
 	case relayPayloadKindControlHello:
-		return a.handleControlRelayHello(ctx, relay, envelope)
+		return s.handleControlRelayHello(ctx, relay, envelope)
 	case relayPayloadKindControlSealedFrame:
-		return a.handleControlRelaySealedFrame(ctx, relay, envelope)
+		return s.handleControlRelaySealedFrame(ctx, relay, envelope)
 	case relayPayloadKindControlHelloAck:
-		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, s.store.hostInfo().Identity.DeviceID)
 	default:
-		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, s.store.hostInfo().Identity.DeviceID)
 	}
 }
 
 func (a *app) handleControlRelayHello(ctx context.Context, relay relayEnvelopeTransport, envelope RelayEnvelope) error {
+	return a.remoteControlService().handleControlRelayHello(ctx, relay, envelope)
+}
+
+func (s *remoteControlService) handleControlRelayHello(ctx context.Context, relay relayEnvelopeTransport, envelope RelayEnvelope) error {
 	payload, err := relayEnvelopePayload(envelope, controlRelayHelloPayloadBytes)
 	if err != nil {
-		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, s.store.hostInfo().Identity.DeviceID)
 	}
 	var hello controlHelloFrame
 	if err := json.Unmarshal(payload, &hello); err != nil {
-		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, s.store.hostInfo().Identity.DeviceID)
 	}
-	session, ack, err := a.acceptControlRelayHello(hello)
+	session, ack, err := s.acceptControlRelayHello(hello)
 	if err != nil {
 		if closeFrame, ok := controlRelayHelloCloseFrame(err); ok {
 			body, marshalErr := json.Marshal(closeFrame)
@@ -165,20 +188,20 @@ func (a *app) handleControlRelayHello(ctx context.Context, relay relayEnvelopeTr
 				_, _ = relay.EnqueueRelayEnvelope(ctx, RelayEnvelope{
 					Version:       relayEnvelopeVersion,
 					ConnectionID:  "rejected_" + randomID(12),
-					FromDeviceID:  a.store.hostInfo().Identity.DeviceID,
+					FromDeviceID:  s.store.hostInfo().Identity.DeviceID,
 					ToDeviceID:    hello.ControllerDeviceID,
 					PayloadKind:   relayPayloadKindControlHelloAck,
 					PayloadBase64: base64.StdEncoding.EncodeToString(body),
 				})
 			}
 		}
-		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, s.store.hostInfo().Identity.DeviceID)
 	}
 	session.relay = relay
 	body, err := json.Marshal(ack)
 	if err != nil {
 		session.cancelControlSession()
-		a.unregisterControlRelaySession(session.id)
+		s.unregisterControlRelaySession(session.id)
 		return err
 	}
 	if _, err := relay.EnqueueRelayEnvelope(ctx, RelayEnvelope{
@@ -190,17 +213,21 @@ func (a *app) handleControlRelayHello(ctx context.Context, relay relayEnvelopeTr
 		PayloadBase64: base64.StdEncoding.EncodeToString(body),
 	}); err != nil {
 		session.cancelControlSession()
-		a.unregisterControlRelaySession(session.id)
+		s.unregisterControlRelaySession(session.id)
 		return err
 	}
-	return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+	return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, s.store.hostInfo().Identity.DeviceID)
 }
 
 func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySession, controlHelloAckFrame, error) {
-	if !a.cloudMeshActive() {
+	return a.remoteControlService().acceptControlRelayHello(hello)
+}
+
+func (s *remoteControlService) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySession, controlHelloAckFrame, error) {
+	if !s.cloudMeshActive() {
 		return nil, controlHelloAckFrame{}, errors.New("cloud mesh is not active")
 	}
-	core := a.hostCoreManager()
+	core := s.hostCoreManager()
 	if core == nil {
 		return nil, controlHelloAckFrame{}, errors.New("host core is not enabled")
 	}
@@ -210,7 +237,7 @@ func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySes
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	session := &controlRelaySession{
-		app:                a,
+		control:            s,
 		id:                 hostSession.ConnectionID,
 		controllerDeviceID: hostSession.ControllerDeviceID,
 		cipher:             hostCoreCipher(cipher),
@@ -220,7 +247,7 @@ func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySes
 		lastSeen:           time.Now().UTC(),
 	}
 	session.hostSession.Connection = session
-	a.registerControlRelaySession(session)
+	s.registerControlRelaySession(session)
 	return session, ack, nil
 }
 
@@ -238,31 +265,35 @@ func controlRelayHelloCloseFrame(err error) (controlPlainFrame, bool) {
 }
 
 func (a *app) handleControlRelaySealedFrame(ctx context.Context, relay relayEnvelopeTransport, envelope RelayEnvelope) error {
-	session := a.controlRelaySession(envelope.ConnectionID)
+	return a.remoteControlService().handleControlRelaySealedFrame(ctx, relay, envelope)
+}
+
+func (s *remoteControlService) handleControlRelaySealedFrame(ctx context.Context, relay relayEnvelopeTransport, envelope RelayEnvelope) error {
+	session := s.controlRelaySession(envelope.ConnectionID)
 	if session == nil || session.controllerDeviceID != strings.TrimSpace(envelope.FromDeviceID) {
-		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, s.store.hostInfo().Identity.DeviceID)
 	}
 	payload, err := relayEnvelopePayload(envelope, controlRelayPayloadMaxBytes)
 	if err != nil {
 		session.close("invalid_frame")
-		a.unregisterControlRelaySession(session.id)
-		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		s.unregisterControlRelaySession(session.id)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, s.store.hostInfo().Identity.DeviceID)
 	}
 	var sealed controlSealedFrame
 	if err := json.Unmarshal(payload, &sealed); err != nil {
 		session.close("invalid_frame")
-		a.unregisterControlRelaySession(session.id)
-		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		s.unregisterControlRelaySession(session.id)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, s.store.hostInfo().Identity.DeviceID)
 	}
 	plain, err := session.cipher.open(sealed)
 	if err != nil {
 		session.close("invalid_frame")
-		a.unregisterControlRelaySession(session.id)
-		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID)
+		s.unregisterControlRelaySession(session.id)
+		return relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, s.store.hostInfo().Identity.DeviceID)
 	}
 	session.touch()
 	session.relay = relay
-	if err := relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, a.store.hostInfo().Identity.DeviceID); err != nil {
+	if err := relay.AckRelayEnvelope(ctx, envelope.EnvelopeID, s.store.hostInfo().Identity.DeviceID); err != nil {
 		return err
 	}
 	switch plain.Type {
@@ -280,7 +311,7 @@ func (a *app) handleControlRelaySealedFrame(ctx context.Context, relay relayEnve
 		return nil
 	case "close":
 		session.close("connection_closed")
-		a.unregisterControlRelaySession(session.id)
+		s.unregisterControlRelaySession(session.id)
 		return nil
 	default:
 		return session.writeRelayPlain(ctx, relay, controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_frame", "unsupported control frame type")})
@@ -290,13 +321,13 @@ func (a *app) handleControlRelaySealedFrame(ctx context.Context, relay relayEnve
 func (s *controlRelaySession) handleRequest(req ControlRequest) (*ControlResponse, func()) {
 	session := s.hostSession
 	session.Connection = s
-	core := s.app.hostCoreManager()
+	core := s.control.hostCoreManager()
 	if core == nil {
 		return controlResponseError(req.RequestID, http.StatusServiceUnavailable, "host_service_unavailable", "host core is not enabled"), nil
 	}
 	response, err := core.Dispatch(s.requestContext(), session, req)
 	if err == nil {
-		return &response, s.app.afterControlResponse(s, req, response)
+		return &response, s.control.afterControlResponse(s, req, response)
 	}
 	return controlResponseFromError(req.RequestID, err), nil
 }
@@ -318,7 +349,7 @@ func (s *controlRelaySession) writeRelayPlain(ctx context.Context, relay relayEn
 	_, err = relay.EnqueueRelayEnvelope(ctx, RelayEnvelope{
 		Version:       relayEnvelopeVersion,
 		ConnectionID:  s.id,
-		FromDeviceID:  s.app.store.hostInfo().Identity.DeviceID,
+		FromDeviceID:  s.control.store.hostInfo().Identity.DeviceID,
 		ToDeviceID:    s.controllerDeviceID,
 		PayloadKind:   relayPayloadKindControlSealedFrame,
 		PayloadBase64: base64.StdEncoding.EncodeToString(body),
@@ -427,8 +458,8 @@ func (s *controlRelaySession) close(reason string) {
 	}
 	s.cancelControlSession()
 	s.cancelAllControlStreams()
-	if s.app != nil {
-		s.app.detachTerminalViewersForControlSession(s.id, reason)
+	if s.control != nil {
+		s.control.detachTerminalViewersForControlSession(s.id, reason)
 	}
 }
 
@@ -440,51 +471,69 @@ func (s *controlRelaySession) touch() {
 }
 
 func (a *app) registerControlRelaySession(session *controlRelaySession) {
+	a.remoteControlService().registerControlRelaySession(session)
+}
+
+func (s *remoteControlService) registerControlRelaySession(session *controlRelaySession) {
 	if session == nil || strings.TrimSpace(session.id) == "" {
 		return
 	}
-	a.controlMu.Lock()
-	defer a.controlMu.Unlock()
-	if a.controlRelaySessions == nil {
-		a.controlRelaySessions = map[string]*controlRelaySession{}
-	}
-	a.controlRelaySessions[session.id] = session
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	s.relaySessions()[session.id] = session
 }
 
 func (a *app) controlRelaySession(connectionID string) *controlRelaySession {
+	return a.remoteControlService().controlRelaySession(connectionID)
+}
+
+func (s *remoteControlService) controlRelaySession(connectionID string) *controlRelaySession {
 	connectionID = strings.TrimSpace(connectionID)
 	if connectionID == "" {
 		return nil
 	}
-	a.controlMu.Lock()
-	defer a.controlMu.Unlock()
-	return a.controlRelaySessions[connectionID]
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	return s.relaySessions()[connectionID]
 }
 
 func (a *app) unregisterControlRelaySession(connectionID string) {
+	a.remoteControlService().unregisterControlRelaySession(connectionID)
+}
+
+func (s *remoteControlService) unregisterControlRelaySession(connectionID string) {
 	connectionID = strings.TrimSpace(connectionID)
 	if connectionID == "" {
 		return
 	}
-	a.controlMu.Lock()
-	defer a.controlMu.Unlock()
-	delete(a.controlRelaySessions, connectionID)
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	delete(s.relaySessions(), connectionID)
 }
 
 func (a *app) closeControlRelaySessionsForDevice(controllerDeviceID string) int {
-	return a.closeControlRelaySessionsForDeviceExcept(controllerDeviceID, "trust_revoked", "")
+	return a.remoteControlService().closeControlRelaySessionsForDevice(controllerDeviceID)
+}
+
+func (s *remoteControlService) closeControlRelaySessionsForDevice(controllerDeviceID string) int {
+	return s.closeControlRelaySessionsForDeviceExcept(controllerDeviceID, "trust_revoked", "")
 }
 
 func (a *app) closeControlRelaySessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID string) int {
-	a.controlMu.Lock()
+	return a.remoteControlService().closeControlRelaySessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID)
+}
+
+func (s *remoteControlService) closeControlRelaySessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID string) int {
+	s.controlMu.Lock()
 	sessions := []*controlRelaySession{}
-	for id, session := range a.controlRelaySessions {
+	relaySessions := s.relaySessions()
+	for id, session := range relaySessions {
 		if session.controllerDeviceID == controllerDeviceID && id != exceptConnectionID {
 			sessions = append(sessions, session)
-			delete(a.controlRelaySessions, id)
+			delete(relaySessions, id)
 		}
 	}
-	a.controlMu.Unlock()
+	s.controlMu.Unlock()
 	for _, session := range sessions {
 		session.writePlain(controlPlainFrame{Type: "close", Code: reason, Reason: reason})
 		session.close(reason)
@@ -493,10 +542,14 @@ func (a *app) closeControlRelaySessionsForDeviceExcept(controllerDeviceID, reaso
 }
 
 func (a *app) activeControlRelaySessionCountForDevice(controllerDeviceID string) int {
-	a.controlMu.Lock()
-	defer a.controlMu.Unlock()
+	return a.remoteControlService().activeControlRelaySessionCountForDevice(controllerDeviceID)
+}
+
+func (s *remoteControlService) activeControlRelaySessionCountForDevice(controllerDeviceID string) int {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
 	count := 0
-	for _, session := range a.controlRelaySessions {
+	for _, session := range s.relaySessions() {
 		if session.controllerDeviceID == controllerDeviceID {
 			count++
 		}
@@ -505,18 +558,23 @@ func (a *app) activeControlRelaySessionCountForDevice(controllerDeviceID string)
 }
 
 func (a *app) expireIdleControlRelaySessions(now time.Time) {
+	a.remoteControlService().expireIdleControlRelaySessions(now)
+}
+
+func (s *remoteControlService) expireIdleControlRelaySessions(now time.Time) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	a.controlMu.Lock()
+	s.controlMu.Lock()
 	sessions := []*controlRelaySession{}
-	for id, session := range a.controlRelaySessions {
+	relaySessions := s.relaySessions()
+	for id, session := range relaySessions {
 		if !session.lastSeen.IsZero() && now.Sub(session.lastSeen) > controlRelaySessionMaxIdle {
 			sessions = append(sessions, session)
-			delete(a.controlRelaySessions, id)
+			delete(relaySessions, id)
 		}
 	}
-	a.controlMu.Unlock()
+	s.controlMu.Unlock()
 	for _, session := range sessions {
 		session.writePlain(controlPlainFrame{Type: "close", Code: "connection_idle", Reason: "connection_idle"})
 		session.close("connection_idle")
