@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/oines/astralops/pkg/controlwire"
 )
 
 const (
@@ -79,26 +81,9 @@ const (
 	ControlActionHostPairingDeny            = "host.pairing.deny"
 )
 
-type ControlRequest struct {
-	RequestID          string         `json:"request_id,omitempty"`
-	ControllerDeviceID string         `json:"controller_device_id"`
-	Capability         string         `json:"capability"`
-	Action             string         `json:"action"`
-	Params             map[string]any `json:"params,omitempty"`
-}
-
-type ControlResponse struct {
-	RequestID string        `json:"request_id,omitempty"`
-	OK        bool          `json:"ok"`
-	Result    any           `json:"result,omitempty"`
-	Error     *ControlError `json:"error,omitempty"`
-}
-
-type ControlError struct {
-	Status  int    `json:"status,omitempty"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
+type ControlRequest = controlwire.ControlRequest
+type ControlResponse = controlwire.ControlResponse
+type ControlError = controlwire.ControlError
 
 func (a *app) executeControlRequest(req ControlRequest) (ControlResponse, error) {
 	return a.executeControlRequestWithConnection(req, nil)
@@ -136,6 +121,22 @@ func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlR
 		return ControlResponse{RequestID: req.RequestID}, newActionError(http.StatusForbidden, "capability_denied", "controller is not allowed to use capability")
 	}
 
+	return a.dispatchAuthorizedControlRequest(ctx, req, conn, grant)
+}
+
+func (a *app) executeAuthorizedControlRequestWithContext(ctx context.Context, req ControlRequest, conn controlConnection, grant TrustGrant) (response ControlResponse, err error) {
+	startedAt := logControlActionStart(req)
+	defer func() {
+		if err != nil {
+			logControlActionFailed(req, startedAt, err)
+			return
+		}
+		logControlActionCompleted(req, startedAt)
+	}()
+	return a.dispatchAuthorizedControlRequest(ctx, req, conn, grant)
+}
+
+func (a *app) dispatchAuthorizedControlRequest(ctx context.Context, req ControlRequest, conn controlConnection, grant TrustGrant) (ControlResponse, error) {
 	result, err := a.dispatchControlAction(ctx, req, conn, grant)
 	if err != nil {
 		return ControlResponse{RequestID: req.RequestID}, err

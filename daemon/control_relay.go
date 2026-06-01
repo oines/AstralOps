@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oines/astralops/pkg/hostcore"
 )
 
 const (
@@ -40,6 +42,7 @@ type controlRelaySession struct {
 	id                 string
 	controllerDeviceID string
 	cipher             *controlCipher
+	hostSession        hostcore.Session
 	relay              relayEnvelopeTransport
 	ctx                context.Context
 	cancel             context.CancelFunc
@@ -51,6 +54,9 @@ type controlRelaySession struct {
 
 func (a *app) cloudPollRelayEnvelopes(ctx context.Context, client RelayClient) error {
 	if a == nil || a.store == nil {
+		return nil
+	}
+	if !a.hostRoleEnabled() {
 		return nil
 	}
 	settings := a.currentSettings()
@@ -79,6 +85,9 @@ func (a *app) cloudPollRelayEnvelopes(ctx context.Context, client RelayClient) e
 
 func (a *app) cloudRunRelayWebSocket(ctx context.Context, client RelayClient) error {
 	if a == nil || a.store == nil {
+		return nil
+	}
+	if !a.hostRoleEnabled() {
 		return nil
 	}
 	settings := a.currentSettings()
@@ -191,85 +200,36 @@ func (a *app) acceptControlRelayHello(hello controlHelloFrame) (*controlRelaySes
 	if !a.cloudMeshActive() {
 		return nil, controlHelloAckFrame{}, errors.New("cloud mesh is not active")
 	}
-	if hello.Type != "hello" || hello.Version != controlProtocolVersion {
-		return nil, controlHelloAckFrame{}, errors.New("invalid control hello")
+	core := a.hostCoreManager()
+	if core == nil {
+		return nil, controlHelloAckFrame{}, errors.New("host core is not enabled")
 	}
-	grant, ok := a.store.trustedControlGrant(hello.ControllerDeviceID)
-	if !ok {
-		return nil, controlHelloAckFrame{}, newActionError(http.StatusForbidden, controlAuthorizationRequiredCode, "controller is not trusted")
-	}
-	controllerPublicKey, err := validateControlControllerPublicKey(grant, hello.ControllerPublicKey)
-	if err != nil {
-		return nil, controlHelloAckFrame{}, err
-	}
-	membership, err := a.store.currentCloudMembership(cloudMembershipRole{CanHost: true})
-	if err != nil {
-		return nil, controlHelloAckFrame{}, err
-	}
-	if err := validateCloudMembershipLease(firstNonNilMembershipLease(hello.MembershipLease), membership.SigningPublicKey, membership.AccountIDHash, hello.ControllerDeviceID, devicePublicKeyFingerprint(controllerPublicKey), cloudMembershipRole{CanControl: true}, time.Now().UTC()); err != nil {
-		return nil, controlHelloAckFrame{}, err
-	}
-	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(hello.Signature))
-	if err != nil || !ed25519.Verify(controllerPublicKey, controlClientSignaturePayload(a.store.deviceIdentity.DeviceID, hello), signature) {
-		return nil, controlHelloAckFrame{}, errors.New("invalid control hello signature")
-	}
-
-	curve := ecdh.X25519()
-	hostEphemeral, err := curve.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, controlHelloAckFrame{}, err
-	}
-	controllerEphemeralBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(hello.ControllerEphemeralKey))
-	if err != nil {
-		return nil, controlHelloAckFrame{}, errors.New("invalid controller ephemeral key")
-	}
-	controllerEphemeral, err := curve.NewPublicKey(controllerEphemeralBytes)
-	if err != nil {
-		return nil, controlHelloAckFrame{}, errors.New("invalid controller ephemeral key")
-	}
-	sharedSecret, err := hostEphemeral.ECDH(controllerEphemeral)
-	if err != nil {
-		return nil, controlHelloAckFrame{}, err
-	}
-	serverNonce, err := randomBase64(32)
-	if err != nil {
-		return nil, controlHelloAckFrame{}, err
-	}
-	connectionID := "ctrl_" + randomID(16)
-	hostEphemeralKey := base64.StdEncoding.EncodeToString(hostEphemeral.PublicKey().Bytes())
-	cipher, err := newControlHostCipher(sharedSecret, hello, a.store.deviceIdentity.DeviceID, a.store.deviceIdentity.PublicKey, hostEphemeralKey, serverNonce, connectionID)
+	hostSession, ack, cipher, err := core.AcceptHello(context.Background(), hello, hostcore.Transport{Kind: hostcore.TransportRelay})
 	if err != nil {
 		return nil, controlHelloAckFrame{}, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	session := &controlRelaySession{
 		app:                a,
-		id:                 connectionID,
-		controllerDeviceID: hello.ControllerDeviceID,
-		cipher:             cipher,
+		id:                 hostSession.ConnectionID,
+		controllerDeviceID: hostSession.ControllerDeviceID,
+		cipher:             hostCoreCipher(cipher),
+		hostSession:        hostSession,
 		ctx:                ctx,
 		cancel:             cancel,
 		lastSeen:           time.Now().UTC(),
 	}
+	session.hostSession.Connection = session
 	a.registerControlRelaySession(session)
-	ack := controlHelloAckFrame{
-		Type:               "hello_ack",
-		Version:            controlProtocolVersion,
-		ConnectionID:       connectionID,
-		HostDeviceID:       a.store.deviceIdentity.DeviceID,
-		HostPublicKey:      a.store.deviceIdentity.PublicKey,
-		HostEphemeralKey:   hostEphemeralKey,
-		ClientNonce:        hello.ClientNonce,
-		ServerNonce:        serverNonce,
-		Encryption:         "x25519-aes-256-gcm",
-		SignatureAlgorithm: "ed25519",
-		MembershipLease:    membership.Lease,
-	}
-	ack.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(a.store.devicePrivateKey), controlHostSignaturePayload(hello, ack)))
 	return session, ack, nil
 }
 
 func controlRelayHelloCloseFrame(err error) (controlPlainFrame, bool) {
+	var coreErr *hostcore.Error
+	if errors.As(err, &coreErr) {
+		frame := controlHelloCloseFrame(err)
+		return frame, true
+	}
 	var actionErr *actionError
 	if errors.As(err, &actionErr) && actionErr.Code == controlAuthorizationRequiredCode {
 		return controlPlainFrame{Type: "close", Code: "capability_denied", Reason: "controller is not trusted"}, true
@@ -328,11 +288,13 @@ func (a *app) handleControlRelaySealedFrame(ctx context.Context, relay relayEnve
 }
 
 func (s *controlRelaySession) handleRequest(req ControlRequest) (*ControlResponse, func()) {
-	if strings.TrimSpace(req.ControllerDeviceID) != "" && req.ControllerDeviceID != s.controllerDeviceID {
-		return controlResponseError(req.RequestID, http.StatusForbidden, "controller_device_mismatch", "request controller_device_id does not match control session"), nil
+	session := s.hostSession
+	session.Connection = s
+	core := s.app.hostCoreManager()
+	if core == nil {
+		return controlResponseError(req.RequestID, http.StatusServiceUnavailable, "host_service_unavailable", "host core is not enabled"), nil
 	}
-	req.ControllerDeviceID = s.controllerDeviceID
-	response, err := s.app.executeControlRequestWithContext(s.requestContext(), req, s)
+	response, err := core.Dispatch(s.requestContext(), session, req)
 	if err == nil {
 		return &response, s.app.afterControlResponse(s, req, response)
 	}

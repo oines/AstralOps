@@ -80,6 +80,9 @@ func (a *app) controllerCoreManager() *controllercore.Controller {
 	if a == nil {
 		return nil
 	}
+	if !a.controllerRoleEnabled() {
+		return nil
+	}
 	a.remoteControlMu.Lock()
 	defer a.remoteControlMu.Unlock()
 	if a.controllerCore == nil {

@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/ecdh"
-	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -15,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/oines/astralops/pkg/controlwire"
+	"github.com/oines/astralops/pkg/hostcore"
 )
 
 const (
@@ -63,6 +62,7 @@ type controlWSConn struct {
 	id                 string
 	controllerDeviceID string
 	cipher             *controlCipher
+	hostSession        hostcore.Session
 	ctx                context.Context
 	cancel             context.CancelFunc
 	writeMu            sync.Mutex
@@ -75,6 +75,10 @@ type controlCipher struct {
 }
 
 func (a *app) handleControlWS(w http.ResponseWriter, r *http.Request) {
+	if !a.hostRoleEnabled() {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 	if r.Method != http.MethodGet || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -120,95 +124,25 @@ func (c *controlWSConn) acceptHello() error {
 		c.writeUnsealedClose("invalid_hello", "invalid control hello")
 		return err
 	}
-	if hello.Type != "hello" || hello.Version != controlProtocolVersion {
-		c.writeUnsealedClose("invalid_hello", "invalid control hello")
-		return errors.New("invalid control hello")
+	core := c.app.hostCoreManager()
+	if core == nil {
+		c.writeUnsealedClose("host_service_unavailable", "host core is not enabled")
+		return errors.New("host core is not enabled")
 	}
-
-	grant, ok := c.app.store.trustedControlGrant(hello.ControllerDeviceID)
-	if !ok {
-		c.writeUnsealedClose("capability_denied", "controller is not trusted")
-		return errors.New("controller is not trusted")
-	}
-	controllerPublicKey, err := c.validateControllerPublicKey(grant, hello.ControllerPublicKey)
+	session, ack, cipher, err := core.AcceptHello(c.requestContext(), hello, hostcore.Transport{Kind: hostcore.TransportDirect, RemoteAddr: c.socket.RemoteAddr().String()})
 	if err != nil {
-		c.writeUnsealedClose("invalid_identity", err.Error())
+		c.writeUnsealedClose(controlHelloCloseCode(err), controlHelloCloseReason(err))
 		return err
 	}
-	membership, err := c.app.store.currentCloudMembership(cloudMembershipRole{CanHost: true})
-	if err != nil {
-		c.writeUnsealedClose("membership_required", err.Error())
-		return err
-	}
-	if err := validateCloudMembershipLease(firstNonNilMembershipLease(hello.MembershipLease), membership.SigningPublicKey, membership.AccountIDHash, hello.ControllerDeviceID, devicePublicKeyFingerprint(controllerPublicKey), cloudMembershipRole{CanControl: true}, time.Now().UTC()); err != nil {
-		c.writeUnsealedClose("membership_invalid", err.Error())
-		return err
-	}
-	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(hello.Signature))
-	if err != nil || !ed25519.Verify(controllerPublicKey, controlClientSignaturePayload(c.app.store.deviceIdentity.DeviceID, hello), signature) {
-		c.writeUnsealedClose("invalid_signature", "invalid control hello signature")
-		return errors.New("invalid control hello signature")
-	}
-
-	curve := ecdh.X25519()
-	hostEphemeral, err := curve.GenerateKey(rand.Reader)
-	if err != nil {
-		c.writeUnsealedClose("handshake_failed", "failed to create host ephemeral key")
-		return err
-	}
-	controllerEphemeralBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(hello.ControllerEphemeralKey))
-	if err != nil {
-		c.writeUnsealedClose("invalid_ephemeral_key", "invalid controller ephemeral key")
-		return err
-	}
-	controllerEphemeral, err := curve.NewPublicKey(controllerEphemeralBytes)
-	if err != nil {
-		c.writeUnsealedClose("invalid_ephemeral_key", "invalid controller ephemeral key")
-		return err
-	}
-	sharedSecret, err := hostEphemeral.ECDH(controllerEphemeral)
-	if err != nil {
-		c.writeUnsealedClose("handshake_failed", "failed to create shared secret")
-		return err
-	}
-
-	serverNonce, err := randomBase64(32)
-	if err != nil {
-		c.writeUnsealedClose("handshake_failed", "failed to create server nonce")
-		return err
-	}
-	c.id = "ctrl_" + randomID(16)
-	c.controllerDeviceID = hello.ControllerDeviceID
-	hostEphemeralKey := base64.StdEncoding.EncodeToString(hostEphemeral.PublicKey().Bytes())
-	cipher, err := newControlHostCipher(sharedSecret, hello, c.app.store.deviceIdentity.DeviceID, c.app.store.deviceIdentity.PublicKey, hostEphemeralKey, serverNonce, c.id)
-	if err != nil {
-		c.writeUnsealedClose("handshake_failed", "failed to create control cipher")
-		return err
-	}
-	c.cipher = cipher
-
-	ack := controlHelloAckFrame{
-		Type:               "hello_ack",
-		Version:            controlProtocolVersion,
-		ConnectionID:       c.id,
-		HostDeviceID:       c.app.store.deviceIdentity.DeviceID,
-		HostPublicKey:      c.app.store.deviceIdentity.PublicKey,
-		HostEphemeralKey:   hostEphemeralKey,
-		ClientNonce:        hello.ClientNonce,
-		ServerNonce:        serverNonce,
-		Encryption:         "x25519-aes-256-gcm",
-		SignatureAlgorithm: "ed25519",
-		MembershipLease:    membership.Lease,
-	}
-	ack.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(c.app.store.devicePrivateKey), controlHostSignaturePayload(hello, ack)))
+	session.Connection = c
+	c.id = session.ConnectionID
+	c.controllerDeviceID = session.ControllerDeviceID
+	c.hostSession = session
+	c.cipher = hostCoreCipher(cipher)
 	if err := c.socket.WriteJSON(ack); err != nil {
 		return err
 	}
 	return nil
-}
-
-func (c *controlWSConn) validateControllerPublicKey(grant TrustGrant, value string) (ed25519.PublicKey, error) {
-	return validateControlControllerPublicKey(grant, value)
 }
 
 func (c *controlWSConn) serve() {
@@ -287,11 +221,13 @@ func (c *controlWSConn) sendControlFrameRead(frames chan<- controlFrameRead, fra
 }
 
 func (c *controlWSConn) handleRequest(req ControlRequest) (*ControlResponse, func()) {
-	if strings.TrimSpace(req.ControllerDeviceID) != "" && req.ControllerDeviceID != c.controllerDeviceID {
-		return controlResponseError(req.RequestID, http.StatusForbidden, "controller_device_mismatch", "request controller_device_id does not match control session"), nil
+	session := c.hostSession
+	session.Connection = c
+	core := c.app.hostCoreManager()
+	if core == nil {
+		return controlResponseError(req.RequestID, http.StatusServiceUnavailable, "host_service_unavailable", "host core is not enabled"), nil
 	}
-	req.ControllerDeviceID = c.controllerDeviceID
-	response, err := c.app.executeControlRequestWithConnection(req, c)
+	response, err := core.Dispatch(c.requestContext(), session, req)
 	if err == nil {
 		return &response, c.app.afterControlResponse(c, req, response)
 	}
@@ -674,6 +610,10 @@ func randomBase64(n int) (string, error) {
 }
 
 func controlResponseFromError(requestID string, err error) *ControlResponse {
+	var coreErr *hostcore.Error
+	if errors.As(err, &coreErr) {
+		return controlResponseError(requestID, coreErr.Status, coreErr.Code, coreErr.Message)
+	}
 	var actionErr *actionError
 	if errors.As(err, &actionErr) {
 		return controlResponseError(requestID, actionErr.Status, actionErr.Code, actionErr.Message)

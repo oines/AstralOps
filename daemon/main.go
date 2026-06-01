@@ -19,6 +19,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/oines/astralops/pkg/controllercore"
+	"github.com/oines/astralops/pkg/hostcore"
 )
 
 var version = "dev"
@@ -55,6 +56,8 @@ type app struct {
 	remoteControl        *remoteControlRuntime
 	controllerCore       *controllercore.Controller
 	controllerTransport  *controllercore.ManagedTransport
+	hostCore             *hostcore.Core
+	role                 appRole
 	mesh                 *meshStateManager
 	cloudMu              sync.Mutex
 	cloudCancel          context.CancelFunc
