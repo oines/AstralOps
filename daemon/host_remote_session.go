@@ -1085,7 +1085,9 @@ func (v *remoteHostTerminalViewer) pump(ctx context.Context) {
 		}
 		for frame := range stream.Frames() {
 			if frame.Response != nil && !frame.Response.OK {
-				v.send(map[string]any{"type": "error", "message": controlResponseMessage(*frame.Response)})
+				if !v.send(map[string]any{"type": "error", "message": controlResponseMessage(*frame.Response)}) {
+					return
+				}
 				continue
 			}
 			if frame.Terminal == nil || frame.Terminal.TerminalID != v.terminalID {
@@ -1095,14 +1097,20 @@ func (v *remoteHostTerminalViewer) pump(ctx context.Context) {
 			switch frame.Type {
 			case terminalFrameOutput:
 				if payload := terminalOutputSocketPayload(frame.Terminal); payload != nil {
-					v.send(payload)
+					if !v.send(payload) {
+						return
+					}
 				}
 			case terminalFrameHeartbeat:
 				if payload := terminalHeartbeatSocketPayload(frame.Terminal); payload != nil {
-					v.send(payload)
+					if !v.send(payload) {
+						return
+					}
 				}
 			case terminalFrameClosed:
-				v.send(terminalExitSocketPayload(frame.Terminal))
+				if !v.send(terminalExitSocketPayload(frame.Terminal)) {
+					return
+				}
 				v.mu.Lock()
 				v.explicitClosed = true
 				v.state = hostTerminalStateClosed
@@ -1209,11 +1217,16 @@ func (v *remoteHostTerminalViewer) send(payload map[string]any) bool {
 	if payload == nil {
 		return true
 	}
+	timer := time.NewTimer(terminalLocalSocketWriteTimeout)
+	defer timer.Stop()
 	select {
 	case <-v.done:
 		return false
 	case v.messages <- payload:
 		return true
+	case <-timer.C:
+		v.closeDone()
+		return false
 	}
 }
 

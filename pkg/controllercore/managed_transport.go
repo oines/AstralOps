@@ -66,7 +66,7 @@ type managedSession struct {
 
 	mu            sync.Mutex
 	pending       map[string]chan controlwire.PlainFrame
-	streams       map[string]chan controlwire.PlainFrame
+	streams       map[string][]chan controlwire.PlainFrame
 	orphanStreams map[string][]controlwire.PlainFrame
 }
 
@@ -350,7 +350,7 @@ func (m *ManagedTransport) getSession(ctx context.Context, hostDeviceID string) 
 		target:        target,
 		closed:        make(chan struct{}),
 		pending:       map[string]chan controlwire.PlainFrame{},
-		streams:       map[string]chan controlwire.PlainFrame{},
+		streams:       map[string][]chan controlwire.PlainFrame{},
 		orphanStreams: map[string][]controlwire.PlainFrame{},
 	}
 
@@ -715,14 +715,23 @@ func (s *managedSession) registerStream(streamID string) (<-chan controlwire.Pla
 		}
 		delete(s.orphanStreams, streamID)
 	}
-	s.streams[streamID] = ch
+	s.streams[streamID] = append(s.streams[streamID], ch)
 	s.mu.Unlock()
 	var once sync.Once
 	return ch, func() {
 		once.Do(func() {
 			s.mu.Lock()
-			if current := s.streams[streamID]; current == ch {
+			current := s.streams[streamID]
+			next := current[:0]
+			for _, existing := range current {
+				if existing != ch {
+					next = append(next, existing)
+				}
+			}
+			if len(next) == 0 {
 				delete(s.streams, streamID)
+			} else {
+				s.streams[streamID] = next
 			}
 			s.mu.Unlock()
 			safeCloseFrameChan(ch)
@@ -750,8 +759,8 @@ func (s *managedSession) routeFrame(frame controlwire.PlainFrame) {
 		return
 	}
 	s.mu.Lock()
-	ch := s.streams[streamID]
-	if ch == nil {
+	streams := append([]chan controlwire.PlainFrame(nil), s.streams[streamID]...)
+	if len(streams) == 0 {
 		orphaned := append(s.orphanStreams[streamID], frame)
 		if len(orphaned) > orphanFrameLimit {
 			orphaned = orphaned[len(orphaned)-orphanFrameLimit:]
@@ -761,7 +770,9 @@ func (s *managedSession) routeFrame(frame controlwire.PlainFrame) {
 		return
 	}
 	s.mu.Unlock()
-	safeFrameSend(ch, frame)
+	for _, ch := range streams {
+		safeFrameSend(ch, frame)
+	}
 }
 
 func (s *managedSession) unregisterRequest(requestID string) {
@@ -795,9 +806,11 @@ func (s *managedSession) closeWithError(err error) {
 			delete(s.pending, requestID)
 			safeCloseFrameChan(ch)
 		}
-		for streamID, ch := range s.streams {
+		for streamID, streams := range s.streams {
 			delete(s.streams, streamID)
-			safeCloseFrameChan(ch)
+			for _, ch := range streams {
+				safeCloseFrameChan(ch)
+			}
 		}
 		s.orphanStreams = map[string][]controlwire.PlainFrame{}
 		s.mu.Unlock()

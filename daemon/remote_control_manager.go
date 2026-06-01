@@ -45,7 +45,7 @@ type remoteControlManagedSession struct {
 
 	mu            sync.Mutex
 	pending       map[string]chan controlPlainFrame
-	streams       map[string]chan controlPlainFrame
+	streams       map[string][]chan controlPlainFrame
 	orphanStreams map[string][]controlPlainFrame
 }
 
@@ -562,7 +562,7 @@ func (m *remoteControlManager) getSession(ctx context.Context, hostDeviceID stri
 		target:        activeTarget,
 		closed:        make(chan struct{}),
 		pending:       map[string]chan controlPlainFrame{},
-		streams:       map[string]chan controlPlainFrame{},
+		streams:       map[string][]chan controlPlainFrame{},
 		orphanStreams: map[string][]controlPlainFrame{},
 	}
 
@@ -689,14 +689,23 @@ func (s *remoteControlManagedSession) registerStream(streamID string) (<-chan co
 		}
 		delete(s.orphanStreams, streamID)
 	}
-	s.streams[streamID] = ch
+	s.streams[streamID] = append(s.streams[streamID], ch)
 	s.mu.Unlock()
 	var once sync.Once
 	return ch, func() {
 		once.Do(func() {
 			s.mu.Lock()
-			if current := s.streams[streamID]; current == ch {
+			current := s.streams[streamID]
+			next := current[:0]
+			for _, existing := range current {
+				if existing != ch {
+					next = append(next, existing)
+				}
+			}
+			if len(next) == 0 {
 				delete(s.streams, streamID)
+			} else {
+				s.streams[streamID] = next
 			}
 			s.mu.Unlock()
 			safeCloseControlFrameChan(ch)
@@ -724,8 +733,8 @@ func (s *remoteControlManagedSession) routeFrame(frame controlPlainFrame) {
 		return
 	}
 	s.mu.Lock()
-	ch := s.streams[streamID]
-	if ch == nil {
+	streams := append([]chan controlPlainFrame(nil), s.streams[streamID]...)
+	if len(streams) == 0 {
 		orphaned := append(s.orphanStreams[streamID], frame)
 		if len(orphaned) > remoteControlOrphanFrameLimit {
 			orphaned = orphaned[len(orphaned)-remoteControlOrphanFrameLimit:]
@@ -735,7 +744,9 @@ func (s *remoteControlManagedSession) routeFrame(frame controlPlainFrame) {
 		return
 	}
 	s.mu.Unlock()
-	safeControlFrameSend(ch, frame)
+	for _, ch := range streams {
+		safeControlFrameSend(ch, frame)
+	}
 }
 
 func safeControlFrameSend(ch chan controlPlainFrame, frame controlPlainFrame) {
@@ -784,9 +795,11 @@ func (s *remoteControlManagedSession) closeWithError(err error) {
 			delete(s.pending, requestID)
 			safeCloseControlFrameChan(ch)
 		}
-		for streamID, ch := range s.streams {
+		for streamID, streams := range s.streams {
 			delete(s.streams, streamID)
-			safeCloseControlFrameChan(ch)
+			for _, ch := range streams {
+				safeCloseControlFrameChan(ch)
+			}
 		}
 		s.orphanStreams = map[string][]controlPlainFrame{}
 		s.mu.Unlock()

@@ -20,6 +20,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const terminalLocalSocketWriteTimeout = 2 * time.Second
+
 func (a *app) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("token") == a.token {
@@ -577,22 +579,38 @@ func (c *localPTYControlConnection) writePlain(frame controlPlainFrame) {
 	switch frame.Type {
 	case terminalFrameOutput:
 		if payload := terminalOutputSocketPayload(frame.Terminal); payload != nil {
-			_ = c.socket.WriteJSON(payload)
+			_ = c.writeJSON(payload)
 		}
 	case terminalFrameHeartbeat:
 		if payload := terminalHeartbeatSocketPayload(frame.Terminal); payload != nil {
-			_ = c.socket.WriteJSON(payload)
+			_ = c.writeJSON(payload)
 		}
 	case terminalFrameClosed:
-		_ = c.socket.WriteJSON(terminalExitSocketPayload(frame.Terminal))
+		_ = c.writeJSON(terminalExitSocketPayload(frame.Terminal))
 		if c.cancel != nil {
 			c.cancel()
 		}
 	case "response":
 		if frame.Response != nil && !frame.Response.OK {
-			_ = c.socket.WriteJSON(map[string]any{"type": "error", "message": controlResponseMessage(*frame.Response)})
+			_ = c.writeJSON(map[string]any{"type": "error", "message": controlResponseMessage(*frame.Response)})
 		}
 	}
+}
+
+func (c *localPTYControlConnection) writeJSON(payload any) error {
+	if c == nil || c.socket == nil {
+		return errors.New("terminal socket is closed")
+	}
+	_ = c.socket.SetWriteDeadline(time.Now().Add(terminalLocalSocketWriteTimeout))
+	err := c.socket.WriteJSON(payload)
+	_ = c.socket.SetWriteDeadline(time.Time{})
+	if err != nil {
+		if c.cancel != nil {
+			c.cancel()
+		}
+		_ = c.socket.Close()
+	}
+	return err
 }
 
 func (c *localPTYControlConnection) registerControlStream(string, context.CancelFunc) {}

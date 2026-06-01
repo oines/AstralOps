@@ -40,7 +40,7 @@ func TestManagedControlRequestTimeoutClosesCachedSession(t *testing.T) {
 		conn:          conn,
 		target:        controlClientTarget{Timeout: 5 * time.Millisecond},
 		pending:       map[string]chan controlPlainFrame{},
-		streams:       map[string]chan controlPlainFrame{},
+		streams:       map[string][]chan controlPlainFrame{},
 		orphanStreams: map[string][]controlPlainFrame{},
 		closed:        make(chan struct{}),
 	}

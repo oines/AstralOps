@@ -732,7 +732,9 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 	defer terminal.Detach()
 
 	localWriter := &remotePTYLocalWriter{}
-	localWriter.write(local, terminal.ReadyPayload())
+	if !localWriter.write(local, terminal.ReadyPayload()) {
+		return
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -794,10 +796,16 @@ type remotePTYLocalWriter struct {
 	mu sync.Mutex
 }
 
-func (w *remotePTYLocalWriter) write(conn interface{ WriteJSON(any) error }, payload map[string]any) bool {
+func (w *remotePTYLocalWriter) write(conn interface {
+	SetWriteDeadline(time.Time) error
+	WriteJSON(any) error
+}, payload map[string]any) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return conn.WriteJSON(payload) == nil
+	_ = conn.SetWriteDeadline(time.Now().Add(terminalLocalSocketWriteTimeout))
+	err := conn.WriteJSON(payload)
+	_ = conn.SetWriteDeadline(time.Time{})
+	return err == nil
 }
 
 func remoteTerminalHandleHostViewerClientMessage(terminal *remoteHostTerminalViewer, message ptyClientMessage) error {

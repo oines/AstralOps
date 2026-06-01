@@ -106,6 +106,36 @@ func TestManagedTransportRoutesTerminalFramesAndInput(t *testing.T) {
 	}
 }
 
+func TestManagedTransportRoutesTerminalFramesToMultipleViewers(t *testing.T) {
+	opener := &fakeManagedOpener{}
+	manager := NewManagedTransport(ManagedTransportConfig{OpenFrameConn: opener.open})
+
+	left, err := manager.AttachTerminal(context.Background(), "dev_host", "term_1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer left.Detach()
+	right, err := manager.AttachTerminal(context.Background(), "dev_host", "term_1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer right.Detach()
+
+	leftFrames := left.Frames()
+	rightFrames := right.Frames()
+	opener.conn(0).sendTerminalFrame(TerminalFrameOutput, TerminalPayload{TerminalID: "term_1", Data: "shared", OutputSeq: 2})
+	for name, frames := range map[string]<-chan TerminalFrame{"left": leftFrames, "right": rightFrames} {
+		select {
+		case frame := <-frames:
+			if frame.Terminal == nil || frame.Terminal.Data != "shared" {
+				t.Fatalf("%s terminal frame = %#v, want shared output", name, frame.Terminal)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s terminal output", name)
+		}
+	}
+}
+
 func TestManagedTransportAttachTerminalPreservesAfterSeqForReplay(t *testing.T) {
 	opener := &fakeManagedOpener{}
 	manager := NewManagedTransport(ManagedTransportConfig{OpenFrameConn: opener.open})
