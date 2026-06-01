@@ -6,7 +6,7 @@ import { createLocalCoreClient, createRemoteCoreClient, isCoreRequestError, read
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
 import { SettingsView } from "./components/SettingsView";
-import { Sidebar } from "./components/Sidebar";
+import { Sidebar, type SidebarHost } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { Transcript } from "./components/Transcript";
 import { WorkspaceModal } from "./components/WorkspaceModal";
@@ -154,8 +154,15 @@ export function App(): React.JSX.Element {
   const sessionViewRefreshGenerationRef = useRef(0);
   const hostStateGenerationRef = useRef(0);
   const sessionsRef = useRef<Session[]>([]);
+  const remoteHostCacheRef = useRef<Record<string, RemoteHostRecord>>({});
 
   const commitRemoteHosts = useCallback((hosts: RemoteHostRecord[]) => {
+    if (hosts.length > 0) {
+      remoteHostCacheRef.current = {
+        ...remoteHostCacheRef.current,
+        ...Object.fromEntries(hosts.map((host) => [host.device_id, host])),
+      };
+    }
     setRemoteHosts(hosts);
     setHostAuthorizationOverrides((current) => prunePendingAuthorizationOverrides(current, hosts));
   }, []);
@@ -1037,10 +1044,17 @@ export function App(): React.JSX.Element {
   const composerVisible = Boolean(activeWorkspace && activeSession);
   const nativeVibrancy = isMacDesktop && appSettings.appearance.mac_sidebar_effect;
   const preferredSessionAgent: AgentKind = appSettings.session.default_agent === "remember" ? lastSessionAgent : appSettings.session.default_agent;
-  const hostOptions = useMemo(
+  const localHostDeviceId = localHostInfo?.identity.device_id || LOCAL_HOST_ID;
+  const selectedHostIsLocal = selectedHostId === LOCAL_HOST_ID || selectedHostId === localHostDeviceId;
+  const visibleRemoteHosts = useMemo(() => {
+    if (selectedHostIsLocal || remoteHosts.some((host) => host.device_id === selectedHostId)) return remoteHosts;
+    const cached = remoteHostCacheRef.current[selectedHostId];
+    return cached ? [...remoteHosts, stickySelectedRemoteHost(cached, connection)] : remoteHosts;
+  }, [connection, remoteHosts, selectedHostId, selectedHostIsLocal]);
+  const hostOptions: SidebarHost[] = useMemo(
     () => [
       {
-        id: localHostInfo?.identity.device_id || LOCAL_HOST_ID,
+        id: localHostDeviceId,
         name: localHostInfo?.identity.device_name || t("desktop:host.local"),
         kind: localHostInfo?.identity.device_kind || "desktop",
         subtitle: daemonInfo?.remote_control?.listen_addr ? t("desktop:host.localHost") : t("desktop:host.localAvailable"),
@@ -1050,7 +1064,7 @@ export function App(): React.JSX.Element {
         controlLabel: "",
         controlTone: "muted" as const,
       },
-      ...remoteHosts.map((host) => ({
+      ...visibleRemoteHosts.map((host) => ({
         id: host.device_id,
         name: host.device_name || host.device_id,
         kind: host.device_kind || "desktop",
@@ -1062,12 +1076,15 @@ export function App(): React.JSX.Element {
         controlTone: remoteHostControlTone(host, hostAuthorizationOverrides[host.device_id]),
       })),
     ],
-    [daemonInfo?.remote_control?.listen_addr, hostAuthorizationOverrides, localHostInfo, remoteHosts, t],
+    [daemonInfo?.remote_control?.listen_addr, hostAuthorizationOverrides, localHostDeviceId, localHostInfo, visibleRemoteHosts, t],
   );
-  const activeHostId = hostOptions.some((host) => host.id === selectedHostId) ? selectedHostId : hostOptions[0]?.id || LOCAL_HOST_ID;
+  const activeHostId = selectedHostIsLocal ? localHostDeviceId : selectedHostId;
   const activeHostOption = hostOptions.find((host) => host.id === activeHostId) ?? hostOptions[0] ?? null;
-  const activeHostIsLocal = activeHostId === (localHostInfo?.identity.device_id || LOCAL_HOST_ID);
-  const activeRemoteHost = useMemo(() => remoteHosts.find((host) => host.device_id === activeHostId) ?? null, [activeHostId, remoteHosts]);
+  const activeHostIsLocal = selectedHostIsLocal;
+  const activeRemoteHost = useMemo(
+    () => remoteHosts.find((host) => host.device_id === activeHostId) ?? (!activeHostIsLocal ? remoteHostCacheRef.current[activeHostId] ?? null : null),
+    [activeHostId, activeHostIsLocal, remoteHosts],
+  );
   const activeHostAuthorizationOverride = activeRemoteHost ? hostAuthorizationOverrides[activeRemoteHost.device_id] : undefined;
   const activeHostNeedsPairing = Boolean(activeRemoteHost && remoteHostNeedsPairing(activeRemoteHost, activeHostAuthorizationOverride));
   const activeHostPairingStatus = activeRemoteHost ? hostPairingStatus[activeRemoteHost.device_id] || "" : "";
@@ -1600,6 +1617,22 @@ function prunePendingAuthorizationOverrides(current: Record<string, RemoteAuthor
 function remoteHostNeedsPairing(host: RemoteHostRecord, override?: RemoteAuthorizationOverride): boolean {
   const state = remoteHostEffectiveAuthorizationState(host, override);
   return state === "needs_pairing" || state === "pending" || state === "denied" || state === "revoked";
+}
+
+function stickySelectedRemoteHost(host: RemoteHostRecord, connection: ConnectionState): RemoteHostRecord {
+  const controlState =
+    connection === "reconnecting" ? "reconnecting" :
+    connection === "failed" ? "failed" :
+    connection === "booting" ? "connecting" :
+    host.control?.state || "idle";
+  return {
+    ...host,
+    control: {
+      ...host.control,
+      route_generation: host.control?.route_generation ?? 0,
+      state: controlState,
+    },
+  };
 }
 
 function remoteHostSubtitle(host: RemoteHostRecord, override: RemoteAuthorizationOverride | undefined, t: TFunction): string {
