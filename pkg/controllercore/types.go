@@ -17,6 +17,7 @@ const (
 	CapabilityMediaRead          = "media.read"
 	CapabilityTerminalOpen       = "terminal.open"
 	CapabilityTerminalInput      = "terminal.input"
+	ActionPing                   = "core.read.ping"
 	ActionHostSnapshot           = "core.read.host_snapshot"
 	ActionSessionView            = "core.read.session_view"
 	ActionSessions               = "core.read.sessions"

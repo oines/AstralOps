@@ -20,9 +20,9 @@ const (
 	remoteHostStatusRelay   = "relay"
 	remoteHostStatusOnline  = "online"
 	remoteHostStatusOffline = "offline"
-	remoteHostDiscoveryTTL  = 1500 * time.Millisecond
+	remoteHostDiscoveryTTL  = 700 * time.Millisecond
 	remoteHostCloudTimeout  = 4 * time.Second
-	remoteHostLANTimeout    = 2 * time.Second
+	remoteHostLANTimeout    = 700 * time.Millisecond
 
 	remoteHostAuthorizationNeedsPairing = "needs_pairing"
 	remoteHostAuthorizationPending      = "pending"
@@ -198,11 +198,17 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 			continue
 		}
 		known = a.rememberRemoteHostLANRoute(hostInfo, candidate.BaseURL, known)
-		if a.remoteManager != nil && a.remoteManager.lanSuppressed(candidate.DeviceID) {
-			continue
-		}
 		if a.remoteManager != nil {
 			a.remoteManager.clearLANFailure(candidate.DeviceID)
+		}
+		if transport := a.controllerManagedTransport(); transport != nil {
+			transport.ClearLANFailure(candidate.DeviceID)
+			state := transport.ControlState(candidate.DeviceID)
+			if state.State == hostRemoteStateLive && state.Transport == remoteHostStatusRelay && transport.HasActiveSession(candidate.DeviceID) {
+				if manager := a.hostRemoteSessionManager(); manager == nil || !manager.InvalidateActiveSession(candidate.DeviceID, "lan_route_available") {
+					transport.Invalidate(candidate.DeviceID, "lan_route_available")
+				}
+			}
 		}
 		next := remoteHostRecordFromHostInfo(hostInfo, known, candidate.BaseURL)
 		if next.Capabilities == nil {

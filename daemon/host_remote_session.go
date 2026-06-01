@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oines/astralops/pkg/controllercore"
 )
 
 const (
@@ -30,6 +32,11 @@ const (
 	hostTerminalStateClosed      = "closed"
 	hostRemoteStateBufferSize    = 8
 	hostRemoteStreamBufferSize   = 64
+	hostRemotePingInterval       = 1 * time.Second
+	hostRemotePingTimeout        = 900 * time.Millisecond
+	hostRemoteReconnectTimeout   = 2 * time.Second
+	hostRemoteNoFrameTimeout     = 3 * time.Second
+	hostRemoteMissedPingLimit    = 2
 	hostTerminalViewerStaleAfter = 12 * time.Second
 	hostTerminalReconnectMax     = 4 * time.Second
 )
@@ -51,6 +58,14 @@ type hostRemoteSession struct {
 	workbench   workbenchState
 	terminals   map[string]remoteHostTerminalState
 	subscribers map[chan remoteHostSessionState]struct{}
+	viewers     map[*remoteHostTerminalViewer]struct{}
+
+	active                    bool
+	healthStarted             bool
+	lastSeenAt                time.Time
+	missedHeartbeatCount      int
+	activeTransport           string
+	reconnectAttemptStartedAt time.Time
 }
 
 type remoteHostSessionState struct {
@@ -124,6 +139,7 @@ func (m *hostRemoteSessionManager) session(hostDeviceID string) *hostRemoteSessi
 		},
 		terminals:   map[string]remoteHostTerminalState{},
 		subscribers: map[chan remoteHostSessionState]struct{}{},
+		viewers:     map[*remoteHostTerminalViewer]struct{}{},
 	}
 	m.sessions[hostDeviceID] = session
 	return session
@@ -134,7 +150,65 @@ func (m *hostRemoteSessionManager) Request(ctx context.Context, hostDeviceID, ca
 	if session == nil {
 		return ControlResponse{}, newActionError(http.StatusBadRequest, "remote_host_required", "remote Host device id is required")
 	}
+	session.activate()
 	return session.Request(ctx, capability, action, params)
+}
+
+func (m *hostRemoteSessionManager) MarkActivity(hostDeviceID string) {
+	hostDeviceID = strings.TrimSpace(hostDeviceID)
+	if m == nil || hostDeviceID == "" {
+		return
+	}
+	m.mu.Lock()
+	session := m.sessions[hostDeviceID]
+	m.mu.Unlock()
+	if session != nil {
+		session.markActivity("")
+		state := session.State().State
+		if state == hostRemoteStateConnecting || state == hostRemoteStateReconnecting {
+			session.setHostState(hostRemoteStateLive, "", nil)
+		}
+	}
+}
+
+func (m *hostRemoteSessionManager) ApplyControlState(hostDeviceID string, state controllercore.ControlState) {
+	hostDeviceID = strings.TrimSpace(hostDeviceID)
+	if m == nil || hostDeviceID == "" {
+		return
+	}
+	m.mu.Lock()
+	session := m.sessions[hostDeviceID]
+	m.mu.Unlock()
+	if session == nil || !session.isActive() {
+		return
+	}
+	switch state.State {
+	case controllercore.StateLive:
+		session.markActivity(state.Transport)
+		session.setHostState(hostRemoteStateLive, state.Transport, nil)
+	case controllercore.StateFailed, controllercore.StateReconnecting:
+		if session.State().State == hostRemoteStateReconnecting {
+			return
+		}
+		reason := firstString(state.LastErrorCode, state.State)
+		message := firstString(state.LastError, reason)
+		session.markConnectionUntrusted(reason, errors.New(message))
+	}
+}
+
+func (m *hostRemoteSessionManager) InvalidateActiveSession(hostDeviceID, reason string) bool {
+	hostDeviceID = strings.TrimSpace(hostDeviceID)
+	if m == nil || hostDeviceID == "" {
+		return false
+	}
+	m.mu.Lock()
+	session := m.sessions[hostDeviceID]
+	m.mu.Unlock()
+	if session == nil || !session.isActive() {
+		return false
+	}
+	session.markConnectionUntrusted(reason, nil)
+	return true
 }
 
 func (m *hostRemoteSessionManager) State(hostDeviceID string) remoteHostSessionState {
@@ -198,10 +272,173 @@ func (s *hostRemoteSession) State() remoteHostSessionState {
 	return s.snapshotLocked()
 }
 
+func (s *hostRemoteSession) activate() {
+	if s == nil {
+		return
+	}
+	start := false
+	s.mu.Lock()
+	s.active = true
+	if !s.healthStarted {
+		s.healthStarted = true
+		start = true
+	}
+	s.mu.Unlock()
+	if start {
+		go s.healthLoop()
+	}
+}
+
+func (s *hostRemoteSession) healthLoop() {
+	ticker := time.NewTicker(hostRemotePingInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		if !s.shouldProbeHealth() {
+			continue
+		}
+		s.probeHealth()
+	}
+}
+
+func (s *hostRemoteSession) shouldProbeHealth() bool {
+	if s == nil || s.manager == nil || s.manager.app == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.active {
+		return false
+	}
+	switch s.state.State {
+	case hostRemoteStateNeedsPairing, hostRemoteStateRevoked:
+		return false
+	default:
+		return true
+	}
+}
+
+func (s *hostRemoteSession) probeHealth() {
+	timeout := hostRemotePingTimeout
+	if s.manager != nil && s.manager.app != nil {
+		if transport := s.manager.app.controllerManagedTransport(); transport == nil || !transport.HasActiveSession(s.hostDeviceID) {
+			timeout = hostRemoteReconnectTimeout
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	response, err := s.manager.app.controllerCoreRequest(ctx, s.hostDeviceID, CapabilityCoreRead, ControlActionPing, nil)
+	if err != nil {
+		s.recordPingFailure(err)
+		return
+	}
+	if !response.OK {
+		s.recordPingFailure(controlResponseActionError(response, ControlActionPing))
+		return
+	}
+	s.markActivity("")
+	s.setHostState(hostRemoteStateLive, "", nil)
+}
+
+func (s *hostRemoteSession) markActivity(transport string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.lastSeenAt = time.Now()
+	s.missedHeartbeatCount = 0
+	if transport != "" {
+		s.activeTransport = transport
+	}
+	s.mu.Unlock()
+}
+
+func (s *hostRemoteSession) isActive() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active
+}
+
+func (s *hostRemoteSession) recordPingFailure(err error) {
+	if s == nil {
+		return
+	}
+	now := time.Now()
+	shouldInvalidate := false
+	s.mu.Lock()
+	s.missedHeartbeatCount++
+	missed := s.missedHeartbeatCount
+	lastSeenAt := s.lastSeenAt
+	if missed >= hostRemoteMissedPingLimit {
+		shouldInvalidate = true
+	}
+	if !lastSeenAt.IsZero() && now.Sub(lastSeenAt) > hostRemoteNoFrameTimeout {
+		shouldInvalidate = true
+	}
+	s.mu.Unlock()
+	if shouldInvalidate {
+		s.markConnectionUntrusted("control_ping_timeout", err)
+		return
+	}
+	if s.State().State != hostRemoteStateLive {
+		s.setHostState(hostRemoteStateReconnecting, "", err)
+	}
+}
+
+func (s *hostRemoteSession) markConnectionUntrusted(reason string, err error) {
+	if s == nil {
+		return
+	}
+	if err == nil {
+		err = errors.New(reason)
+	}
+	s.pauseTerminalViewers(err)
+	s.mu.Lock()
+	s.reconnectAttemptStartedAt = time.Now()
+	s.missedHeartbeatCount = 0
+	for terminalID, terminal := range s.terminals {
+		if terminal.State == hostTerminalStateClosed {
+			continue
+		}
+		terminal.State = hostTerminalStateResyncing
+		terminal.CanInput = false
+		terminal.LastError = err.Error()
+		terminal.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		s.terminals[terminalID] = terminal
+	}
+	s.state.Terminals = cloneRemoteHostTerminalStates(s.terminals)
+	s.mu.Unlock()
+	s.setHostState(hostRemoteStateReconnecting, "", err)
+	if s.manager != nil && s.manager.app != nil {
+		if transport := s.manager.app.controllerManagedTransport(); transport != nil {
+			transport.ClearLANFailure(s.hostDeviceID)
+			transport.Invalidate(s.hostDeviceID, reason)
+		}
+	}
+}
+
+func (s *hostRemoteSession) pauseTerminalViewers(err error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	viewers := make([]*remoteHostTerminalViewer, 0, len(s.viewers))
+	for viewer := range s.viewers {
+		viewers = append(viewers, viewer)
+	}
+	s.mu.Unlock()
+	for _, viewer := range viewers {
+		viewer.pauseForReconnect(err)
+	}
+}
+
 func (s *hostRemoteSession) Request(ctx context.Context, capability, action string, params map[string]any) (ControlResponse, error) {
 	if s == nil || s.manager == nil || s.manager.app == nil || s.manager.lower == nil {
 		return ControlResponse{}, errors.New("remote control manager is not initialized")
 	}
+	s.activate()
 	s.setConnectingIfNotLive()
 	response, err := s.manager.app.controllerCoreRequest(ctx, s.hostDeviceID, capability, action, params)
 	if err != nil {
@@ -212,11 +449,13 @@ func (s *hostRemoteSession) Request(ctx context.Context, capability, action stri
 		s.setHostState(hostRemoteStateNeedsPairing, "", controlResponseActionError(response, action))
 		return response, nil
 	}
+	s.markActivity("")
 	s.setHostState(hostRemoteStateLive, "", nil)
 	return response, nil
 }
 
 func (s *hostRemoteSession) Workbench(ctx context.Context) (workbenchState, error) {
+	s.activate()
 	response, err := s.Request(ctx, CapabilityCoreRead, ControlActionHostSnapshot, map[string]any{"event_limit": 1})
 	if err != nil {
 		s.setWorkbenchState(hostWorkbenchStateFailed, err)
@@ -242,6 +481,7 @@ func (s *hostRemoteSession) Workbench(ctx context.Context) (workbenchState, erro
 }
 
 func (s *hostRemoteSession) SubscribeWorkbench(ctx context.Context) remoteHostEventStream {
+	s.activate()
 	out := make(chan remoteHostStreamMessage, hostRemoteStreamBufferSize)
 	done := make(chan struct{})
 	go func() {
@@ -332,6 +572,7 @@ func hostRemoteRequestFailureState(err error) string {
 }
 
 func (s *hostRemoteSession) SubscribeEvents(ctx context.Context, params eventSubscriptionParams) remoteHostEventStream {
+	s.activate()
 	out := make(chan remoteHostStreamMessage, hostRemoteStreamBufferSize)
 	done := make(chan struct{})
 	go func() {
@@ -436,6 +677,9 @@ func (s *hostRemoteSession) setHostState(state, transport string, err error) {
 	s.state.HostDeviceID = s.hostDeviceID
 	s.state.State = state
 	s.state.Transport = transport
+	if transport != "" {
+		s.activeTransport = transport
+	}
 	s.state.CanRequest = state == hostRemoteStateLive
 	if s.state.Workbench.State == "" {
 		s.state.Workbench.State = hostWorkbenchStateLoading
@@ -496,6 +740,7 @@ func (s *hostRemoteSession) setTerminalState(terminalID, state string, canInput 
 }
 
 func (s *hostRemoteSession) subscribeState() (<-chan remoteHostSessionState, func()) {
+	s.activate()
 	ch := make(chan remoteHostSessionState, hostRemoteStateBufferSize)
 	s.mu.Lock()
 	s.subscribers[ch] = struct{}{}
@@ -624,6 +869,7 @@ type remoteHostTerminalStream interface {
 }
 
 func (s *hostRemoteSession) OpenTerminalViewer(ctx context.Context, workspaceID, terminalID string, afterSeq int64) (*remoteHostTerminalViewer, error) {
+	s.activate()
 	viewer := &remoteHostTerminalViewer{
 		session:     s,
 		workspaceID: workspaceID,
@@ -637,9 +883,31 @@ func (s *hostRemoteSession) OpenTerminalViewer(ctx context.Context, workspaceID,
 	if err := viewer.attach(ctx); err != nil {
 		return nil, err
 	}
+	s.registerViewer(viewer)
 	go viewer.pump(ctx)
 	go viewer.monitor(ctx)
 	return viewer, nil
+}
+
+func (s *hostRemoteSession) registerViewer(viewer *remoteHostTerminalViewer) {
+	if s == nil || viewer == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.viewers == nil {
+		s.viewers = map[*remoteHostTerminalViewer]struct{}{}
+	}
+	s.viewers[viewer] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *hostRemoteSession) unregisterViewer(viewer *remoteHostTerminalViewer) {
+	if s == nil || viewer == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.viewers, viewer)
+	s.mu.Unlock()
 }
 
 func (v *remoteHostTerminalViewer) ReadyPayload() map[string]any {
@@ -715,6 +983,9 @@ func (v *remoteHostTerminalViewer) Close() error {
 		v.session.setTerminalState(terminalID, hostTerminalStateClosed, false, outputSeq, nil)
 	}
 	v.closeDone()
+	if v.session != nil {
+		v.session.unregisterViewer(v)
+	}
 	if stream != nil {
 		return stream.Close()
 	}
@@ -723,6 +994,9 @@ func (v *remoteHostTerminalViewer) Close() error {
 
 func (v *remoteHostTerminalViewer) Detach() error {
 	v.closeDone()
+	if v.session != nil {
+		v.session.unregisterViewer(v)
+	}
 	v.mu.Lock()
 	stream := v.stream
 	v.stream = nil
@@ -731,6 +1005,17 @@ func (v *remoteHostTerminalViewer) Detach() error {
 		return stream.Detach()
 	}
 	return nil
+}
+
+func (v *remoteHostTerminalViewer) pauseForReconnect(err error) {
+	if v == nil {
+		return
+	}
+	if err == nil {
+		err = errors.New("remote control session is reconnecting")
+	}
+	v.setState(hostTerminalStateResyncing, false, err)
+	v.send(map[string]any{"type": "status", "state": hostTerminalStateResyncing, "can_input": false, "message": err.Error()})
 }
 
 func (v *remoteHostTerminalViewer) liveStream() (remoteHostTerminalStream, error) {

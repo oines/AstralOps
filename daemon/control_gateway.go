@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/oines/astralops/pkg/controlwire"
 )
@@ -29,6 +30,7 @@ const (
 
 const (
 	ControlActionHostSnapshot               = "core.read.host_snapshot"
+	ControlActionPing                       = "core.read.ping"
 	ControlActionSessionView                = "core.read.session_view"
 	ControlActionSessions                   = "core.read.sessions"
 	ControlActionWorkspaces                 = "core.read.workspaces"
@@ -146,7 +148,7 @@ func (a *app) dispatchAuthorizedControlRequest(ctx context.Context, req ControlR
 
 func controlActionCapability(action string) string {
 	switch action {
-	case ControlActionHostSnapshot, ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionWorkspaceConnection, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
+	case ControlActionHostSnapshot, ControlActionPing, ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionWorkspaceConnection, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
 		return CapabilityCoreRead
 	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionWorkspaceCreate, ControlActionWorkspaceConnect, ControlActionWorkspaceDisconnect, ControlActionWorkspaceDelete, ControlActionSessionCreate, ControlActionSessionFork, ControlActionSessionDelete:
 		return CapabilityCoreControl
@@ -183,6 +185,12 @@ func controlActionCapability(action string) string {
 
 func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, conn controlConnection, grant TrustGrant) (any, error) {
 	switch req.Action {
+	case ControlActionPing:
+		return map[string]any{
+			"ok":             true,
+			"ts":             time.Now().UTC().Format(time.RFC3339Nano),
+			"host_device_id": a.store.hostInfo().Identity.DeviceID,
+		}, nil
 	case ControlActionHostSnapshot:
 		var params hostSnapshotParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

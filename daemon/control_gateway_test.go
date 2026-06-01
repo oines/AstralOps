@@ -93,6 +93,51 @@ func TestControlGatewayRejectsCapabilityMismatch(t *testing.T) {
 	assertActionError(t, err, http.StatusForbidden, "capability_mismatch")
 }
 
+func TestControlGatewayPingUsesCoreReadOnly(t *testing.T) {
+	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		RequestID:          "req_ping",
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionPing,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := mapValue(response.Result)
+	if !response.OK || result["ok"] != true {
+		t.Fatalf("ping response = %#v, want ok", response)
+	}
+	if got := stringValue(result["host_device_id"]); got != app.store.hostInfo().Identity.DeviceID {
+		t.Fatalf("ping host_device_id = %q, want self", got)
+	}
+	if stringValue(result["ts"]) == "" {
+		t.Fatalf("ping response missing timestamp: %#v", result)
+	}
+
+	_, err = app.executeControlRequest(ControlRequest{
+		RequestID:          "req_ping_control",
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreControl,
+		Action:             ControlActionPing,
+	})
+	assertActionError(t, err, http.StatusForbidden, "capability_mismatch")
+}
+
+func TestControlGatewayPingRejectsUntrustedController(t *testing.T) {
+	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+
+	_, err := app.executeControlRequest(ControlRequest{
+		RequestID:          "req_ping",
+		ControllerDeviceID: "device_untrusted",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionPing,
+	})
+	assertActionError(t, err, http.StatusForbidden, "capability_denied")
+}
+
 func TestControlGatewayReadsSessionView(t *testing.T) {
 	app, _, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	session.NativeSessionID = "native-session-secret"

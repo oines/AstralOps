@@ -106,10 +106,68 @@ func TestManagedTransportRoutesTerminalFramesAndInput(t *testing.T) {
 	}
 }
 
+func TestManagedTransportReportsActivityForInboundFrames(t *testing.T) {
+	opener := &fakeManagedOpener{}
+	var mu sync.Mutex
+	activity := map[string]int{}
+	manager := NewManagedTransport(ManagedTransportConfig{
+		OpenFrameConn: opener.open,
+		Activity: func(hostDeviceID string) {
+			mu.Lock()
+			defer mu.Unlock()
+			activity[hostDeviceID]++
+		},
+	})
+
+	if _, err := manager.Request(context.Background(), "dev_host", CapabilityCoreRead, ActionHostSnapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	got := activity["dev_host"]
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("activity count = %d, want 1", got)
+	}
+}
+
+func TestManagedTransportClearLANFailureRestoresLANPreference(t *testing.T) {
+	opener := &fakeManagedOpener{
+		transport: func(index int, _ bool) string {
+			if index < 2 {
+				return TransportRelay
+			}
+			return TransportLAN
+		},
+	}
+	manager := NewManagedTransport(ManagedTransportConfig{OpenFrameConn: opener.open})
+
+	if _, err := manager.Request(context.Background(), "dev_host", CapabilityCoreRead, ActionHostSnapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	manager.Invalidate("dev_host", "test")
+	if _, err := manager.Request(context.Background(), "dev_host", CapabilityCoreRead, ActionHostSnapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !opener.preferRelayAt(1) {
+		t.Fatalf("second connection did not prefer relay after relay fallback marked LAN failed")
+	}
+
+	manager.ClearLANFailure("dev_host")
+	manager.Invalidate("dev_host", "test")
+	if _, err := manager.Request(context.Background(), "dev_host", CapabilityCoreRead, ActionHostSnapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	if opener.preferRelayAt(2) {
+		t.Fatalf("third connection still preferred relay after LAN failure was cleared")
+	}
+}
+
 type fakeManagedOpener struct {
 	mu        sync.Mutex
 	conns     []*fakeManagedFrameConn
+	prefer    []bool
 	configure func(index int, conn *fakeManagedFrameConn)
+	transport func(index int, preferRelay bool) string
 }
 
 func (o *fakeManagedOpener) open(_ context.Context, hostDeviceID string, preferRelay bool) (FrameConn, ResolvedTarget, error) {
@@ -119,10 +177,15 @@ func (o *fakeManagedOpener) open(_ context.Context, hostDeviceID string, preferR
 	if o.configure != nil {
 		o.configure(len(o.conns), conn)
 	}
+	index := len(o.conns)
 	o.conns = append(o.conns, conn)
+	o.prefer = append(o.prefer, preferRelay)
 	transport := TransportLAN
 	if preferRelay {
 		transport = TransportRelay
+	}
+	if o.transport != nil {
+		transport = o.transport(index, preferRelay)
 	}
 	return conn, ResolvedTarget{HostDeviceID: hostDeviceID, Transport: transport, Timeout: 25 * time.Millisecond, HasRelay: true}, nil
 }
@@ -137,6 +200,15 @@ func (o *fakeManagedOpener) conn(index int) *fakeManagedFrameConn {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.conns[index]
+}
+
+func (o *fakeManagedOpener) preferRelayAt(index int) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if index < 0 || index >= len(o.prefer) {
+		return false
+	}
+	return o.prefer[index]
 }
 
 type fakeManagedFrameConn struct {

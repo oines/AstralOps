@@ -531,6 +531,9 @@ func (r remoteTargetResolver) ResolveKnownHost(hostDeviceID string) (controlClie
 	if err == nil {
 		return r.attachCloudRelayFallback(known, target), nil
 	}
+	if relay, relayErr := r.cachedRelayKnownHostTarget(known); relayErr == nil {
+		return relay, nil
+	}
 	if relay, relayErr := r.cloudRelayKnownHostTarget(known); relayErr == nil {
 		return relay, nil
 	}
@@ -641,6 +644,18 @@ func (r remoteTargetResolver) attachCloudRelayFallback(known KnownHost, target c
 	if target.UseRelay || strings.TrimSpace(target.RelayClient.BaseURL) != "" {
 		return target
 	}
+	if relay, err := r.cachedRelayKnownHostTarget(known); err == nil {
+		target.RelayClient = relay.RelayClient
+		target.ControllerDeviceID = relay.ControllerDeviceID
+		if target.HostInfo.Identity.DeviceID == "" {
+			target.HostInfo = relay.HostInfo
+		}
+		if !target.HasExpectedHost {
+			target.ExpectedHost = relay.ExpectedHost
+			target.HasExpectedHost = relay.HasExpectedHost
+		}
+		return target
+	}
 	relay, err := r.cloudRelayKnownHostTarget(known)
 	if err != nil {
 		return target
@@ -655,6 +670,34 @@ func (r remoteTargetResolver) attachCloudRelayFallback(known KnownHost, target c
 		target.HasExpectedHost = relay.HasExpectedHost
 	}
 	return target
+}
+
+func (r remoteTargetResolver) cachedRelayKnownHostTarget(known KnownHost) (controlClientTarget, error) {
+	if r.store == nil {
+		return controlClientTarget{}, fmt.Errorf("controller store required")
+	}
+	relayClient, _, ok := r.store.cachedCloudRelayClient()
+	if !ok {
+		return controlClientTarget{}, fmt.Errorf("cached cloud relay is not configured")
+	}
+	known = normalizeKnownHost(known)
+	if known.DeviceID == "" || known.PublicKey == "" || known.PublicKeyFingerprint == "" {
+		return controlClientTarget{}, fmt.Errorf("known Host identity is incomplete")
+	}
+	return controlClientTarget{
+		HostInfo: HostInfo{Identity: DeviceIdentity{
+			DeviceID:             known.DeviceID,
+			DeviceName:           known.DeviceName,
+			PublicKey:            known.PublicKey,
+			PublicKeyFingerprint: known.PublicKeyFingerprint,
+		}},
+		Timeout:            controlRelayRoundTripTimeout,
+		UseRelay:           true,
+		RelayClient:        relayClient,
+		ControllerDeviceID: r.store.hostInfo().Identity.DeviceID,
+		ExpectedHost:       known,
+		HasExpectedHost:    true,
+	}, nil
 }
 
 func (r remoteTargetResolver) cloudDeviceTarget(known KnownHost, devices []CloudDeviceRecord, relayClient RelayClient, timeout time.Duration, requireFound bool) (controlClientTarget, error) {
@@ -2461,6 +2504,11 @@ func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, tim
 	if err != nil {
 		return nil, nil, err
 	}
+	if timeout > 0 {
+		deadline := time.Now().Add(timeout)
+		_ = socket.SetWriteDeadline(deadline)
+		_ = socket.SetReadDeadline(deadline)
+	}
 	curve := ecdh.X25519()
 	controllerEphemeral, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
@@ -2486,10 +2534,17 @@ func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, tim
 		socket.Close()
 		return nil, nil, err
 	}
+	if timeout > 0 {
+		_ = socket.SetWriteDeadline(time.Time{})
+		_ = socket.SetReadDeadline(time.Now().Add(timeout))
+	}
 	_, ackBody, err := socket.ReadMessage()
 	if err != nil {
 		socket.Close()
 		return nil, nil, err
+	}
+	if timeout > 0 {
+		_ = socket.SetReadDeadline(time.Time{})
 	}
 	var closeFrame controlPlainFrame
 	if err := json.Unmarshal(ackBody, &closeFrame); err == nil && closeFrame.Type == "close" {

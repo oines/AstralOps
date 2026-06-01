@@ -22,6 +22,7 @@ type cloudMembershipState struct {
 	SigningKeyID     string                `json:"signing_key_id,omitempty"`
 	SigningPublicKey string                `json:"signing_public_key"`
 	Lease            *CloudMembershipLease `json:"lease,omitempty"`
+	Relay            *CloudRelayConfig     `json:"relay,omitempty"`
 	UpdatedAt        string                `json:"updated_at,omitempty"`
 }
 
@@ -54,7 +55,28 @@ func normalizeCloudMembershipState(state cloudMembershipState) cloudMembershipSt
 	state.SigningKeyID = strings.TrimSpace(state.SigningKeyID)
 	state.SigningPublicKey = strings.TrimSpace(state.SigningPublicKey)
 	state.UpdatedAt = strings.TrimSpace(state.UpdatedAt)
+	if state.Relay != nil {
+		relay := normalizeCloudMembershipRelay(*state.Relay)
+		if relay.RelayURL == "" || relay.Credential == "" {
+			state.Relay = nil
+		} else {
+			state.Relay = &relay
+		}
+	}
 	return state
+}
+
+func normalizeCloudMembershipRelay(relay CloudRelayConfig) CloudRelayConfig {
+	relay.RelayID = strings.TrimSpace(relay.RelayID)
+	relay.RelayURL = strings.TrimSpace(relay.RelayURL)
+	relay.Region = strings.TrimSpace(relay.Region)
+	relay.Name = strings.TrimSpace(relay.Name)
+	relay.Credential = strings.TrimSpace(relay.Credential)
+	relay.CredentialExpiresAt = strings.TrimSpace(relay.CredentialExpiresAt)
+	if relay.RelayID == "" {
+		relay.RelayID = "default"
+	}
+	return relay
 }
 
 func (s *store) updateCloudMembership(account CloudAccount, device CloudDeviceRecord) error {
@@ -85,6 +107,10 @@ func (s *store) updateCloudMembership(account CloudAccount, device CloudDeviceRe
 		SigningPublicKey: publicKey,
 		Lease:            lease,
 		UpdatedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if _, relay, ok := relayClientFromCloudAccount(account, nil); ok {
+		relay = normalizeCloudMembershipRelay(relay)
+		state.Relay = &relay
 	}
 	if err := writeJSONFile(cloudMembershipPath(s.dataDir), state, defaultHostFileMode); err != nil {
 		return err
@@ -124,6 +150,32 @@ func (s *store) currentCloudMembership(role cloudMembershipRole) (cloudMembershi
 		return cloudMembershipState{}, newActionError(http.StatusConflict, "cloud_membership_lease_invalid", err.Error())
 	}
 	return state, nil
+}
+
+func (s *store) cachedCloudRelayClient() (RelayClient, CloudRelayConfig, bool) {
+	if s == nil {
+		return RelayClient{}, CloudRelayConfig{}, false
+	}
+	s.mu.Lock()
+	state := normalizeCloudMembershipState(s.cloudMembership)
+	s.mu.Unlock()
+	if state.Relay == nil {
+		return RelayClient{}, CloudRelayConfig{}, false
+	}
+	relay := normalizeCloudMembershipRelay(*state.Relay)
+	if relay.RelayURL == "" || relay.Credential == "" {
+		return RelayClient{}, CloudRelayConfig{}, false
+	}
+	if relay.CredentialExpiresAt != "" {
+		expiresAt, err := time.Parse(time.RFC3339, relay.CredentialExpiresAt)
+		if err != nil {
+			expiresAt, err = time.Parse(time.RFC3339Nano, relay.CredentialExpiresAt)
+		}
+		if err == nil && time.Now().UTC().After(expiresAt) {
+			return RelayClient{}, CloudRelayConfig{}, false
+		}
+	}
+	return RelayClient{BaseURL: relay.RelayURL, Token: relay.Credential}, relay, true
 }
 
 func validateCloudMembershipLease(lease CloudMembershipLease, signingPublicKey, accountIDHash, deviceID, publicKeyFingerprint string, role cloudMembershipRole, now time.Time) error {

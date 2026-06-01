@@ -65,7 +65,18 @@ func (a *app) newControllerManagedTransport() *controllercore.ManagedTransport {
 		},
 		StateChanged: func(hostDeviceID string, state controllercore.ControlState) {
 			if a != nil {
+				if manager := a.hostRemoteSessionManager(); manager != nil {
+					manager.ApplyControlState(hostDeviceID, state)
+				}
 				a.refreshMeshStateAsync(true)
+			}
+		},
+		Activity: func(hostDeviceID string) {
+			if a == nil {
+				return
+			}
+			if manager := a.hostRemoteSessionManager(); manager != nil {
+				manager.MarkActivity(hostDeviceID)
 			}
 		},
 		RefreshMesh: func(discover bool) {

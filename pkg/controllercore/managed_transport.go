@@ -40,6 +40,7 @@ type ManagedTransportConfig struct {
 	SelfDeviceID  func() string
 	DecodeEvent   func(json.RawMessage) (EventEnvelope, bool)
 	StateChanged  func(hostDeviceID string, state ControlState)
+	Activity      func(hostDeviceID string)
 	RefreshMesh   func(discover bool)
 }
 
@@ -135,6 +136,10 @@ func (m *ManagedTransport) HasActiveSession(hostDeviceID string) bool {
 	session := m.sessions[hostDeviceID]
 	m.mu.Unlock()
 	return session != nil && !session.isClosed()
+}
+
+func (m *ManagedTransport) ClearLANFailure(hostDeviceID string) {
+	m.clearLANFailure(hostDeviceID)
 }
 
 func (m *ManagedTransport) Request(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
@@ -529,6 +534,9 @@ func (s *managedSession) readLoop() {
 			}
 			s.closeWithError(err)
 			return
+		}
+		if s.manager != nil && s.manager.config.Activity != nil {
+			s.manager.config.Activity(s.hostDeviceID)
 		}
 		s.routeFrame(frame)
 	}
