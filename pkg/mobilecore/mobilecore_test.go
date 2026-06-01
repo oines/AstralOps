@@ -196,9 +196,9 @@ func (f *fakeMobileCoreTerminal) Resize(cols, rows int) error {
 	f.rows = rows
 	return nil
 }
-func (f *fakeMobileCoreTerminal) AckHeartbeat(int64) error { return nil }
-func (f *fakeMobileCoreTerminal) Close() error             { return nil }
-func (f *fakeMobileCoreTerminal) Detach() error            { return nil }
+func (f *fakeMobileCoreTerminal) AckHeartbeat(int64, int64) error { return nil }
+func (f *fakeMobileCoreTerminal) Close() error                    { return nil }
+func (f *fakeMobileCoreTerminal) Detach() error                   { return nil }
 
 func TestRequestPairingUsesCloudMeshClient(t *testing.T) {
 	stored := testMobileStoredIdentity(t)

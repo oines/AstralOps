@@ -105,6 +105,7 @@ export type TerminalReadyPayload = {
   shell?: string;
   cwd?: string;
   output_seq?: number;
+  can_input?: boolean;
 };
 
 export type TerminalStatusPayload = {
@@ -119,8 +120,8 @@ export type TerminalHandlers = {
   onOpen?: () => void;
   onReady?: (payload: TerminalReadyPayload) => void;
   onStatus?: (payload: TerminalStatusPayload) => void;
-  onHeartbeat?: (payload: { terminal_id?: string; viewer_id?: string; input_lease_id?: string; heartbeat_seq?: number; output_seq?: number }) => void;
-  onOutput?: (data: string, outputSeq?: number) => void;
+  onHeartbeat?: (payload: { terminal_id?: string; viewer_id?: string; input_lease_id?: string; heartbeat_seq?: number; output_seq?: number; can_input?: boolean }) => void;
+  onOutput?: (data: string, outputSeq?: number, canInput?: boolean) => void;
   onExit?: (payload: Record<string, unknown>) => void;
   onError?: (message: string) => void;
   onConnectionError?: (message: string) => void;
@@ -130,6 +131,7 @@ export type TerminalHandlers = {
 export type TerminalConnection = {
   input: (data: string) => void;
   resize: (cols: number, rows: number) => void;
+  ackRendered: (outputSeq: number) => void;
   close: () => void;
 };
 
@@ -996,6 +998,12 @@ class LocalTerminalClient implements TerminalClient {
 }
 
 class WebSocketTerminalConnection implements TerminalConnection {
+  private terminalId = "";
+  private viewerId = "";
+  private inputLeaseId = "";
+  private heartbeatSeq = 0;
+  private renderedSeq = 0;
+
   constructor(private readonly socket: WebSocket, handlers: TerminalHandlers) {
     socket.onopen = () => {
       logClientEvent("terminal.open.completed");
@@ -1009,6 +1017,7 @@ class WebSocketTerminalConnection implements TerminalConnection {
           viewer_id?: string;
           input_lease_id?: string;
           heartbeat_seq?: number;
+          can_input?: boolean;
           data?: string;
           message?: string;
           shell?: string;
@@ -1017,7 +1026,8 @@ class WebSocketTerminalConnection implements TerminalConnection {
         };
         if (message.type === "ready") {
           logClientEvent("terminal.ready", { terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
-          handlers.onReady?.({ terminal_id: message.terminal_id, viewer_id: message.viewer_id, input_lease_id: message.input_lease_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
+          this.updateLease(message);
+          handlers.onReady?.({ terminal_id: message.terminal_id, viewer_id: message.viewer_id, input_lease_id: message.input_lease_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq, can_input: message.can_input });
         }
         if (message.type === "status") {
           const raw = message as Record<string, unknown>;
@@ -1030,8 +1040,10 @@ class WebSocketTerminalConnection implements TerminalConnection {
           });
         }
         if (message.type === "heartbeat") {
+          this.updateLease(message);
+          if (typeof message.heartbeat_seq === "number") this.heartbeatSeq = message.heartbeat_seq;
           if (message.viewer_id && message.input_lease_id && typeof message.heartbeat_seq === "number") {
-            this.send({ type: "heartbeat_ack", terminal_id: message.terminal_id, viewer_id: message.viewer_id, input_lease_id: message.input_lease_id, heartbeat_seq: message.heartbeat_seq });
+            this.sendAck();
           }
           handlers.onHeartbeat?.({
             terminal_id: message.terminal_id,
@@ -1039,9 +1051,10 @@ class WebSocketTerminalConnection implements TerminalConnection {
             input_lease_id: message.input_lease_id,
             heartbeat_seq: message.heartbeat_seq,
             output_seq: message.output_seq,
+            can_input: message.can_input,
           });
         }
-        if (message.type === "output" && message.data) handlers.onOutput?.(message.data, message.output_seq);
+        if (message.type === "output" && message.data) handlers.onOutput?.(message.data, message.output_seq, message.can_input);
         if (message.type === "exit") {
           const exitPayload = message as unknown as Record<string, unknown>;
           logClientEvent("terminal.exit", { code: exitPayload.code, exit_code: exitPayload.exit_code });
@@ -1075,9 +1088,34 @@ class WebSocketTerminalConnection implements TerminalConnection {
     this.send({ type: "resize", cols, rows });
   }
 
+  ackRendered(outputSeq: number): void {
+    if (Number.isFinite(outputSeq) && outputSeq > this.renderedSeq) {
+      this.renderedSeq = outputSeq;
+    }
+    this.sendAck();
+  }
+
   close(): void {
     logClientEvent("terminal.close");
     this.socket.close();
+  }
+
+  private updateLease(message: { terminal_id?: string; viewer_id?: string; input_lease_id?: string }): void {
+    if (message.terminal_id) this.terminalId = message.terminal_id;
+    if (message.viewer_id) this.viewerId = message.viewer_id;
+    if (message.input_lease_id) this.inputLeaseId = message.input_lease_id;
+  }
+
+  private sendAck(): void {
+    if (!this.viewerId || !this.inputLeaseId) return;
+    this.send({
+      type: "heartbeat_ack",
+      terminal_id: this.terminalId || undefined,
+      viewer_id: this.viewerId,
+      input_lease_id: this.inputLeaseId,
+      heartbeat_seq: this.heartbeatSeq,
+      rendered_seq: this.renderedSeq,
+    });
   }
 
   private send(payload: Record<string, unknown>): void {

@@ -876,7 +876,7 @@ type remoteHostTerminalStream interface {
 	Frames() <-chan controlPlainFrame
 	Input(data string) error
 	Resize(cols, rows int) error
-	AckHeartbeat(seq int64) error
+	AckHeartbeat(seq, renderedSeq int64) error
 	Close() error
 	Detach() error
 }
@@ -929,7 +929,7 @@ func (v *remoteHostTerminalViewer) ReadyPayload() map[string]any {
 	if v.stream == nil {
 		return map[string]any{"type": "status", "state": hostTerminalStateAttaching, "can_input": false}
 	}
-	return terminalReadySocketPayload(v.terminalID, v.shell, v.cwd, v.outputSeq, v.stream.ViewerID(), v.stream.InputLeaseID())
+	return terminalReadySocketPayload(v.terminalID, v.shell, v.cwd, v.outputSeq, v.stream.ViewerID(), v.stream.InputLeaseID(), true)
 }
 
 func (v *remoteHostTerminalViewer) Messages() <-chan map[string]any {
@@ -968,7 +968,7 @@ func (v *remoteHostTerminalViewer) Resize(cols, rows int) error {
 	return nil
 }
 
-func (v *remoteHostTerminalViewer) AckHeartbeat(seq int64) error {
+func (v *remoteHostTerminalViewer) AckHeartbeat(seq, renderedSeq int64) error {
 	stream, err := v.liveStream()
 	if err != nil {
 		var actionErr *actionError
@@ -977,7 +977,7 @@ func (v *remoteHostTerminalViewer) AckHeartbeat(seq int64) error {
 		}
 		return err
 	}
-	if err := stream.AckHeartbeat(seq); err != nil {
+	if err := stream.AckHeartbeat(seq, renderedSeq); err != nil {
 		v.markStreamFailure(err)
 		return err
 	}
@@ -1142,12 +1142,7 @@ func (v *remoteHostTerminalViewer) monitor(ctx context.Context) {
 			if !stale {
 				continue
 			}
-			err := errors.New("terminal viewer heartbeat timed out")
-			v.setState(hostTerminalStateResyncing, false, err)
-			v.send(map[string]any{"type": "status", "state": hostTerminalStateResyncing, "can_input": false, "message": err.Error()})
-			if v.session != nil {
-				v.session.invalidateControlSession("terminal_viewer_stale")
-			}
+			v.resetStreamForReconnect(errors.New("terminal viewer heartbeat timed out"))
 		}
 	}
 }
@@ -1195,10 +1190,29 @@ func (v *remoteHostTerminalViewer) markFrame(outputSeq int64) {
 }
 
 func (v *remoteHostTerminalViewer) markStreamFailure(err error) {
-	v.setState(hostTerminalStateResyncing, false, err)
+	v.resetStreamForReconnect(err)
+}
+
+func (v *remoteHostTerminalViewer) resetStreamForReconnect(err error) {
+	if v == nil {
+		return
+	}
+	if err == nil {
+		err = errors.New("remote terminal stream unavailable")
+	}
+	v.mu.Lock()
+	stream := v.stream
+	v.stream = nil
+	v.state = hostTerminalStateResyncing
+	terminalID := v.terminalID
+	outputSeq := v.outputSeq
+	v.mu.Unlock()
+	if terminalID != "" && v.session != nil {
+		v.session.setTerminalState(terminalID, hostTerminalStateResyncing, false, outputSeq, err)
+	}
 	v.send(map[string]any{"type": "status", "state": hostTerminalStateResyncing, "can_input": false, "message": err.Error()})
-	if v.session != nil {
-		v.session.invalidateControlSession("terminal_stream_error")
+	if stream != nil {
+		_ = stream.Detach()
 	}
 }
 

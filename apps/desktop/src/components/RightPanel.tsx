@@ -624,8 +624,9 @@ function TerminalTab({
         onReadyRef.current(message.terminal_id, title);
         onTitleChangeRef.current(title);
       },
-      onOutput: (data) => {
-        if (isCurrent()) term.write(data);
+      onOutput: (data, done) => {
+        if (!isCurrent()) return;
+        term.write(data, done);
       },
       onExit: () => {
         if (!isCurrent()) return;

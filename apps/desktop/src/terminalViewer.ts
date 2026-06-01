@@ -10,7 +10,7 @@ type TerminalViewerControllerOptions = {
   terminalId: string;
   onOpen?: () => void;
   onReady?: (payload: TerminalReadyPayload) => void;
-  onOutput?: (data: string) => void;
+  onOutput?: (data: string, done: () => void, outputSeq?: number) => void;
   onExit?: (payload: Record<string, unknown>) => void;
   onError?: (message: string) => void;
   onHealthChange?: (health: TerminalViewerHealth) => void;
@@ -29,6 +29,7 @@ export class TerminalViewerController {
   private health: TerminalViewerHealth = "connecting";
   private lastBlockedNoticeAt = 0;
   private canInput = false;
+  private hostAllowsInput = false;
 
   constructor(private readonly options: TerminalViewerControllerOptions) {}
 
@@ -82,25 +83,47 @@ export class TerminalViewerController {
         },
         onReady: (payload) => {
           if (this.disposed || this.exited) return;
-          this.markHealthy();
+          this.hostAllowsInput = payload.can_input === true;
+          this.markHealthy(this.hostAllowsInput);
           if (this.lastCols > 0 && this.lastRows > 0) {
             this.resize(this.lastCols, this.lastRows);
           }
           this.options.onReady?.(payload);
         },
-        onHeartbeat: () => {
+        onHeartbeat: (payload) => {
           if (this.disposed || this.exited) return;
-          this.markHealthy();
+          if (payload.can_input !== undefined) {
+            this.hostAllowsInput = payload.can_input === true;
+          }
+          this.markHealthy(this.hostAllowsInput);
         },
         onStatus: (payload) => {
           if (this.disposed || this.exited) return;
           this.applyStatus(payload);
         },
-        onOutput: (data, outputSeq) => {
+        onOutput: (data, outputSeq, canInput) => {
           if (this.disposed || this.exited) return;
           if (!this.shouldAcceptOutput(outputSeq)) return;
-          this.markHealthy();
-          this.options.onOutput?.(data);
+          if (canInput !== undefined) {
+            this.hostAllowsInput = canInput === true;
+          }
+          this.canInput = false;
+          this.setHealth("degraded");
+          const renderedSeq = outputSeq ?? this.lastOutputSeq;
+          const markRendered = (): void => {
+            if (this.disposed || this.exited) return;
+            this.connection?.ackRendered(renderedSeq);
+            this.markHealthy(this.hostAllowsInput);
+          };
+          if (!this.options.onOutput) {
+            markRendered();
+            return;
+          }
+          this.options.onOutput?.(
+            data,
+            markRendered,
+            outputSeq,
+          );
         },
         onExit: (payload) => {
           if (this.disposed) return;
@@ -155,16 +178,19 @@ export class TerminalViewerController {
     return true;
   }
 
-  private markHealthy(): void {
-    this.canInput = true;
-    this.setHealth("healthy");
+  private markHealthy(canInput = true): void {
+    this.canInput = canInput;
+    this.setHealth(canInput ? "healthy" : "degraded");
   }
 
   private applyStatus(payload: TerminalStatusPayload): void {
-    this.canInput = payload.can_input === true;
+    if (payload.can_input !== undefined) {
+      this.hostAllowsInput = payload.can_input === true;
+      this.canInput = payload.can_input === true;
+    }
     switch (payload.state) {
       case "live":
-        this.markHealthy();
+        this.markHealthy(this.hostAllowsInput);
         break;
       case "attaching":
         this.setHealth("connecting");

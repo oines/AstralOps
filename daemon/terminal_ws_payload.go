@@ -1,12 +1,13 @@
 package main
 
-func terminalReadySocketPayload(terminalID, shell, cwd string, outputSeq int64, viewerID, inputLeaseID string) map[string]any {
+func terminalReadySocketPayload(terminalID, shell, cwd string, outputSeq int64, viewerID, inputLeaseID string, canInput bool) map[string]any {
 	payload := map[string]any{
 		"type":        "ready",
 		"terminal_id": terminalID,
 		"shell":       shell,
 		"cwd":         cwd,
 		"output_seq":  outputSeq,
+		"can_input":   canInput,
 	}
 	if viewerID != "" {
 		payload["viewer_id"] = viewerID
@@ -28,6 +29,7 @@ func terminalHeartbeatSocketPayload(frame *terminalStreamFrame) map[string]any {
 		"input_lease_id": frame.InputLeaseID,
 		"heartbeat_seq":  frame.HeartbeatSeq,
 		"output_seq":     frame.OutputSeq,
+		"can_input":      frame.CanInput,
 	}
 }
 
@@ -39,6 +41,7 @@ func terminalOutputSocketPayload(frame *terminalStreamFrame) map[string]any {
 		"type":       "output",
 		"data":       frame.Data,
 		"output_seq": frame.OutputSeq,
+		"can_input":  frame.CanInput,
 	}
 }
 

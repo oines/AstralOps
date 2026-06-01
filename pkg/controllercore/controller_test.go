@@ -234,7 +234,7 @@ func (f *fakeTerminalStream) Resize(int, int) error {
 	return nil
 }
 
-func (f *fakeTerminalStream) AckHeartbeat(int64) error {
+func (f *fakeTerminalStream) AckHeartbeat(int64, int64) error {
 	return nil
 }
 

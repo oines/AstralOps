@@ -140,7 +140,7 @@ func (s *fakeRemoteHostTerminalStream) Resize(int, int) error {
 	return nil
 }
 
-func (s *fakeRemoteHostTerminalStream) AckHeartbeat(int64) error {
+func (s *fakeRemoteHostTerminalStream) AckHeartbeat(int64, int64) error {
 	return nil
 }
 

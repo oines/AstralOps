@@ -815,7 +815,7 @@ func remoteTerminalHandleHostViewerClientMessage(terminal *remoteHostTerminalVie
 	case "resize":
 		return terminal.Resize(int(message.Cols), int(message.Rows))
 	case "heartbeat_ack":
-		return terminal.AckHeartbeat(message.HeartbeatSeq)
+		return terminal.AckHeartbeat(message.HeartbeatSeq, message.RenderedSeq)
 	case "close":
 		return terminal.Close()
 	case "detach":

@@ -452,6 +452,7 @@ type ptyClientMessage struct {
 	ViewerID     string `json:"viewer_id,omitempty"`
 	InputLeaseID string `json:"input_lease_id,omitempty"`
 	HeartbeatSeq int64  `json:"heartbeat_seq,omitempty"`
+	RenderedSeq  int64  `json:"rendered_seq,omitempty"`
 }
 
 func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Workspace) {
@@ -493,7 +494,7 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 		_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
-	_ = conn.WriteJSON(terminalReadySocketPayload(open.TerminalID, open.Shell, open.CWD, attach.OutputSeq, attach.ViewerID, attach.InputLeaseID))
+	_ = localControl.writeJSON(terminalReadySocketPayload(open.TerminalID, open.Shell, open.CWD, attach.OutputSeq, attach.ViewerID, attach.InputLeaseID, attach.CanInput))
 	defer func() {
 		_, _ = terminals.detach(controllerID, localControl, terminalDetachParams{TerminalID: open.TerminalID})
 	}()
@@ -511,16 +512,18 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 		switch message.Type {
 		case "input":
 			if _, err := terminals.input(r.Context(), controllerID, terminalInputParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, Data: message.Data}); err != nil {
-				_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+				_ = localControl.writeJSON(map[string]any{"type": "error", "message": err.Error()})
 			}
 		case "resize":
 			if message.Cols > 0 && message.Rows > 0 {
 				if _, err := terminals.resize(r.Context(), controllerID, terminalResizeParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, Cols: message.Cols, Rows: message.Rows}); err != nil {
-					_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+					_ = localControl.writeJSON(map[string]any{"type": "error", "message": err.Error()})
 				}
 			}
 		case "heartbeat_ack":
-			_, _ = terminals.heartbeatAck(controllerID, terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: message.HeartbeatSeq})
+			if ack, err := terminals.heartbeatAck(controllerID, terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: message.HeartbeatSeq, RenderedSeq: message.RenderedSeq}); err == nil {
+				_ = localControl.writeJSON(map[string]any{"type": "status", "terminal_id": ack.TerminalID, "state": "live", "can_input": ack.CanInput, "output_seq": ack.OutputSeq})
+			}
 		case "close":
 			_, _ = terminals.close(r.Context(), controllerID, terminalCloseParams{TerminalID: open.TerminalID})
 			return

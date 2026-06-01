@@ -173,6 +173,7 @@ type TerminalPayload struct {
 	HeartbeatSeq int64  `json:"heartbeat_seq,omitempty"`
 	Data         string `json:"data,omitempty"`
 	Reason       string `json:"reason,omitempty"`
+	CanInput     bool   `json:"can_input,omitempty"`
 }
 
 type TerminalStream interface {
@@ -185,7 +186,7 @@ type TerminalStream interface {
 	Frames() <-chan TerminalFrame
 	Input(data string) error
 	Resize(cols, rows int) error
-	AckHeartbeat(seq int64) error
+	AckHeartbeat(seq, renderedSeq int64) error
 	Close() error
 	Detach() error
 }

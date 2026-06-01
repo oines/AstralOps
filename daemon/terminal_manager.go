@@ -113,6 +113,7 @@ type terminalHeartbeatAckParams struct {
 	ViewerID     string `json:"viewer_id"`
 	InputLeaseID string `json:"input_lease_id"`
 	HeartbeatSeq int64  `json:"heartbeat_seq"`
+	RenderedSeq  int64  `json:"rendered_seq,omitempty"`
 }
 
 type terminalOpenResult struct {
@@ -131,6 +132,7 @@ type terminalAckResult struct {
 	Status         string `json:"status"`
 	OutputSeq      int64  `json:"output_seq"`
 	WriterDeviceID string `json:"writer_device_id,omitempty"`
+	CanInput       bool   `json:"can_input,omitempty"`
 }
 
 type terminalTab struct {
@@ -158,6 +160,7 @@ type terminalAttachResult struct {
 	ConnectionID   string `json:"connection_id"`
 	WriterDeviceID string `json:"writer_device_id,omitempty"`
 	OutputSeq      int64  `json:"output_seq"`
+	CanInput       bool   `json:"can_input"`
 }
 
 type terminalStreamFrame struct {
@@ -172,6 +175,7 @@ type terminalStreamFrame struct {
 	HeartbeatSeq int64  `json:"heartbeat_seq,omitempty"`
 	Data         string `json:"data,omitempty"`
 	Reason       string `json:"reason,omitempty"`
+	CanInput     bool   `json:"can_input,omitempty"`
 }
 
 type terminalViewer struct {
@@ -186,6 +190,8 @@ type terminalViewer struct {
 	target             string
 	status             string
 	outputSeq          int64
+	deliveredSeq       int64
+	renderedSeq        int64
 	heartbeatSeq       int64
 	lastAckSeq         int64
 	lastAckAt          time.Time
@@ -628,7 +634,7 @@ func (s *terminalSession) attachViewer(viewer *terminalViewer, afterSeq int64) (
 		return terminalAttachResult{}, nil, nil, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
 	}
 	s.cancelRetentionLocked()
-	viewer.bindTerminalLocked(s)
+	viewer.bindTerminalLocked(s, afterSeq)
 	replaced := s.viewers[viewer.connectionID]
 	s.viewers[viewer.connectionID] = viewer
 	return s.attachResultLocked(viewer.connectionID, viewer.controllerDeviceID), replaced, s.outputHistoryAfterLocked(afterSeq), nil
@@ -684,6 +690,9 @@ func (s *terminalSession) validateViewerLease(controllerDeviceID, viewerID, inpu
 	if viewer.lastAckAt.IsZero() || time.Since(viewer.lastAckAt) > terminalViewerAckTTL {
 		return newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal output is not synchronized; input is paused")
 	}
+	if viewer.renderedSeq < viewer.deliveredSeq {
+		return newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal output is not synchronized; input is paused")
+	}
 	return nil
 }
 
@@ -715,7 +724,11 @@ func (s *terminalSession) heartbeatAck(controllerDeviceID string, params termina
 	if params.HeartbeatSeq > 0 && params.HeartbeatSeq >= viewer.lastAckSeq {
 		viewer.lastAckSeq = params.HeartbeatSeq
 	}
+	if params.RenderedSeq > viewer.renderedSeq {
+		viewer.renderedSeq = params.RenderedSeq
+	}
 	viewer.lastAckAt = time.Now().UTC()
+	ack.CanInput = viewer.canInputLocked(time.Now())
 	return ack, nil
 }
 
@@ -790,9 +803,13 @@ func (s *terminalSession) streamFrameLocked(frameType, data, reason string) term
 func (s *terminalSession) attachResultLocked(connectionID, viewerDeviceID string) terminalAttachResult {
 	viewerID := ""
 	inputLeaseID := ""
+	canInput := false
 	if viewer := s.viewers[connectionID]; viewer != nil {
 		viewerID = viewer.viewerID
 		inputLeaseID = viewer.inputLeaseID
+		viewer.mu.Lock()
+		canInput = viewer.canInputLocked(time.Now())
+		viewer.mu.Unlock()
 	}
 	return terminalAttachResult{
 		TerminalID:     s.id,
@@ -805,6 +822,7 @@ func (s *terminalSession) attachResultLocked(connectionID, viewerDeviceID string
 		ConnectionID:   connectionID,
 		WriterDeviceID: s.writerDeviceID,
 		OutputSeq:      s.outputSeq,
+		CanInput:       canInput,
 	}
 }
 
@@ -1045,7 +1063,7 @@ func (v *terminalViewer) run() {
 	}
 }
 
-func (v *terminalViewer) bindTerminalLocked(session *terminalSession) {
+func (v *terminalViewer) bindTerminalLocked(session *terminalSession, afterSeq int64) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.terminalID = session.id
@@ -1053,6 +1071,12 @@ func (v *terminalViewer) bindTerminalLocked(session *terminalSession) {
 	v.target = session.target
 	v.status = session.status
 	v.outputSeq = session.outputSeq
+	if afterSeq > v.renderedSeq {
+		v.renderedSeq = afterSeq
+	}
+	if afterSeq > v.deliveredSeq {
+		v.deliveredSeq = afterSeq
+	}
 }
 
 func (v *terminalViewer) writeFrame(frame terminalStreamFrame) {
@@ -1084,6 +1108,7 @@ func (v *terminalViewer) heartbeatFrame() (terminalStreamFrame, bool) {
 		ViewerID:     v.viewerID,
 		InputLeaseID: v.inputLeaseID,
 		HeartbeatSeq: v.heartbeatSeq,
+		CanInput:     v.canInputLocked(time.Now()),
 	}, true
 }
 
@@ -1132,6 +1157,10 @@ func (v *terminalViewer) enqueue(frame terminalStreamFrame) bool {
 		if frame.OutputSeq > v.outputSeq {
 			v.outputSeq = frame.OutputSeq
 		}
+		if frame.frameType == terminalFrameOutput && frame.OutputSeq > v.deliveredSeq {
+			v.deliveredSeq = frame.OutputSeq
+		}
+		frame.CanInput = v.canInputLocked(time.Now())
 	}
 	select {
 	case v.frames <- frame:
@@ -1152,6 +1181,16 @@ func (v *terminalViewer) enqueue(frame terminalStreamFrame) bool {
 	case <-timer.C:
 		return false
 	}
+}
+
+func (v *terminalViewer) canInputLocked(now time.Time) bool {
+	if v == nil || v.closed || v.viewerID == "" || v.inputLeaseID == "" {
+		return false
+	}
+	if v.lastAckAt.IsZero() || now.Sub(v.lastAckAt) > terminalViewerAckTTL {
+		return false
+	}
+	return v.renderedSeq >= v.deliveredSeq
 }
 
 func (v *terminalViewer) close() {

@@ -238,11 +238,11 @@ func (t *hostSessionTerminalStream) Resize(cols, rows int) error {
 	return nil
 }
 
-func (t *hostSessionTerminalStream) AckHeartbeat(seq int64) error {
+func (t *hostSessionTerminalStream) AckHeartbeat(seq, renderedSeq int64) error {
 	if err := t.requireLive(); err != nil {
 		return err
 	}
-	if err := t.inner.AckHeartbeat(seq); err != nil {
+	if err := t.inner.AckHeartbeat(seq, renderedSeq); err != nil {
 		t.markStreamFailure(err)
 		return err
 	}

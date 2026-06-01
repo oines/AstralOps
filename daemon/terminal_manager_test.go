@@ -44,6 +44,22 @@ func TestControlGatewayTerminalOpenInputResizeAndClose(t *testing.T) {
 		t.Fatalf("input response = %#v, want ok", response)
 	}
 	waitForFileContent(t, marker, "terminal-ok")
+	session, ok := app.terminalManager().session(open.TerminalID)
+	if !ok {
+		t.Fatal("terminal session missing")
+	}
+	session.mu.Lock()
+	viewer := session.viewerByIDLocked(attach.ViewerID)
+	session.mu.Unlock()
+	if viewer == nil {
+		t.Fatal("viewer missing")
+	}
+	viewer.mu.Lock()
+	renderedSeq := viewer.deliveredSeq
+	viewer.mu.Unlock()
+	if _, err := app.terminalManager().heartbeatAck("device_mobile", terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, RenderedSeq: renderedSeq}); err != nil {
+		t.Fatal(err)
+	}
 
 	response, err = app.executeControlRequest(ControlRequest{
 		ControllerDeviceID: "device_mobile",
@@ -247,6 +263,32 @@ func TestControlGatewayTerminalInputRequiresHealthyViewerLease(t *testing.T) {
 	}
 	if ack.TerminalID != open.TerminalID {
 		t.Fatalf("heartbeat ack = %#v", ack)
+	}
+
+	viewer.mu.Lock()
+	viewer.deliveredSeq = 2
+	viewer.renderedSeq = 1
+	viewer.lastAckAt = time.Now()
+	viewer.mu.Unlock()
+	_, err = app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityTerminalInput,
+		Action:             ControlActionTerminalInput,
+		Params: map[string]any{
+			"terminal_id":    open.TerminalID,
+			"viewer_id":      attach.ViewerID,
+			"input_lease_id": attach.InputLeaseID,
+			"data":           "",
+		},
+	})
+	assertActionError(t, err, http.StatusConflict, terminalViewerNotReadyCode)
+
+	ack, err = app.terminalManager().heartbeatAck("device_mobile", terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: 2, RenderedSeq: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ack.CanInput {
+		t.Fatalf("heartbeat ack can_input = false, want true")
 	}
 }
 

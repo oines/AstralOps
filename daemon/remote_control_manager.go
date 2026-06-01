@@ -841,12 +841,12 @@ func (s *remoteControlManagedSession) remoteTerminalResize(terminalID, viewerID,
 	})
 }
 
-func (s *remoteControlManagedSession) remoteTerminalHeartbeatAck(terminalID, viewerID, inputLeaseID string, heartbeatSeq int64) error {
+func (s *remoteControlManagedSession) remoteTerminalHeartbeatAck(terminalID, viewerID, inputLeaseID string, heartbeatSeq, renderedSeq int64) error {
 	return s.writeTerminalRequest(ControlRequest{
 		RequestID:  remoteControlManagedRequestPrefix + "pty_heartbeat_ack_" + randomID(8),
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalHeartbeatAck,
-		Params:     map[string]any{"terminal_id": terminalID, "viewer_id": viewerID, "input_lease_id": inputLeaseID, "heartbeat_seq": heartbeatSeq},
+		Params:     map[string]any{"terminal_id": terminalID, "viewer_id": viewerID, "input_lease_id": inputLeaseID, "heartbeat_seq": heartbeatSeq, "rendered_seq": renderedSeq},
 	})
 }
 
@@ -951,11 +951,11 @@ func (t *remoteManagedTerminalStream) Resize(cols, rows int) error {
 	return t.session.remoteTerminalResize(t.terminalID, t.viewerID, t.inputLeaseID, cols, rows)
 }
 
-func (t *remoteManagedTerminalStream) AckHeartbeat(heartbeatSeq int64) error {
+func (t *remoteManagedTerminalStream) AckHeartbeat(heartbeatSeq, renderedSeq int64) error {
 	if t == nil || t.session == nil {
 		return errors.New("remote terminal is closed")
 	}
-	return t.session.remoteTerminalHeartbeatAck(t.terminalID, t.viewerID, t.inputLeaseID, heartbeatSeq)
+	return t.session.remoteTerminalHeartbeatAck(t.terminalID, t.viewerID, t.inputLeaseID, heartbeatSeq, renderedSeq)
 }
 
 func (t *remoteManagedTerminalStream) Close() error {

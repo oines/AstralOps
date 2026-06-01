@@ -361,8 +361,8 @@ func (d daemonTerminalStreamAdapter) Resize(cols, rows int) error {
 	return d.stream.Resize(cols, rows)
 }
 
-func (d daemonTerminalStreamAdapter) AckHeartbeat(seq int64) error {
-	return d.stream.AckHeartbeat(seq)
+func (d daemonTerminalStreamAdapter) AckHeartbeat(seq, renderedSeq int64) error {
+	return d.stream.AckHeartbeat(seq, renderedSeq)
 }
 
 func (d daemonTerminalStreamAdapter) Close() error {
@@ -448,11 +448,11 @@ func (c coreTerminalStreamAdapter) Resize(cols, rows int) error {
 	return fromCoreError(c.stream.Resize(cols, rows))
 }
 
-func (c coreTerminalStreamAdapter) AckHeartbeat(seq int64) error {
+func (c coreTerminalStreamAdapter) AckHeartbeat(seq, renderedSeq int64) error {
 	if c.stream == nil {
 		return errors.New("remote terminal is closed")
 	}
-	return fromCoreError(c.stream.AckHeartbeat(seq))
+	return fromCoreError(c.stream.AckHeartbeat(seq, renderedSeq))
 }
 
 func (c coreTerminalStreamAdapter) Close() error {
@@ -835,6 +835,7 @@ func fromCoreTerminalPayload(frameType string, payload *controllercore.TerminalP
 		HeartbeatSeq: payload.HeartbeatSeq,
 		Data:         payload.Data,
 		Reason:       payload.Reason,
+		CanInput:     payload.CanInput,
 	}
 }
 
@@ -869,5 +870,6 @@ func toCoreTerminalPayload(frame *terminalStreamFrame) *controllercore.TerminalP
 		HeartbeatSeq: frame.HeartbeatSeq,
 		Data:         frame.Data,
 		Reason:       frame.Reason,
+		CanInput:     frame.CanInput,
 	}
 }
