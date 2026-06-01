@@ -18,6 +18,8 @@ type TerminalViewerControllerOptions = {
 };
 
 export class TerminalViewerController {
+  private static readonly maxQueuedInputBytes = 4096;
+
   private connection: TerminalConnection | null = null;
   private disposed = false;
   private exited = false;
@@ -30,6 +32,9 @@ export class TerminalViewerController {
   private lastBlockedNoticeAt = 0;
   private canInput = false;
   private hostAllowsInput = false;
+  private renderPending = false;
+  private awaitingHostInputResume = false;
+  private queuedInput = "";
 
   constructor(private readonly options: TerminalViewerControllerOptions) {}
 
@@ -42,6 +47,9 @@ export class TerminalViewerController {
       this.connect();
     }
     if (!this.canSendInput()) {
+      if (this.queueInputIfTransientlyPaused(data)) {
+        return;
+      }
       this.notifyInputBlocked();
       return;
     }
@@ -105,11 +113,17 @@ export class TerminalViewerController {
           if (this.disposed || this.exited) return;
           if (!this.shouldAcceptOutput(outputSeq)) return;
           this.canInput = false;
+          this.renderPending = true;
+          this.awaitingHostInputResume = false;
           this.setHealth("degraded");
           const renderedSeq = outputSeq ?? this.lastOutputSeq;
           const markRendered = (): void => {
             if (this.disposed || this.exited) return;
+            this.renderPending = false;
             this.connection?.ackRendered(renderedSeq);
+            if (!this.hostAllowsInput) {
+              this.awaitingHostInputResume = true;
+            }
             this.markHealthy(this.hostAllowsInput);
           };
           if (!this.options.onOutput) {
@@ -137,6 +151,7 @@ export class TerminalViewerController {
           const failedConnection = this.connection;
           this.connection = null;
           this.canInput = false;
+          this.clearQueuedInput();
           failedConnection?.close();
           this.setHealth("reconnecting");
           this.scheduleReconnect();
@@ -145,6 +160,7 @@ export class TerminalViewerController {
           this.connection = null;
           if (!this.disposed && !this.exited) {
             this.canInput = false;
+            this.clearQueuedInput();
             this.setHealth("reconnecting");
           }
           this.scheduleReconnect();
@@ -177,7 +193,13 @@ export class TerminalViewerController {
 
   private markHealthy(canInput = true): void {
     this.canInput = canInput;
+    if (canInput) {
+      this.awaitingHostInputResume = false;
+    }
     this.setHealth(canInput ? "healthy" : "degraded");
+    if (canInput) {
+      this.flushQueuedInput();
+    }
   }
 
   private applyStatus(payload: TerminalStatusPayload): void {
@@ -194,12 +216,15 @@ export class TerminalViewerController {
         break;
       case "resyncing":
       case "paused":
+        this.clearQueuedInput();
         this.setHealth("degraded");
         break;
       case "failed":
+        this.clearQueuedInput();
         this.setHealth("reconnecting");
         break;
       case "closed":
+        this.clearQueuedInput();
         this.exited = true;
         this.setHealth("exited");
         break;
@@ -216,6 +241,33 @@ export class TerminalViewerController {
 
   private canSendInput(): boolean {
     return this.connection !== null && this.health === "healthy" && this.canInput;
+  }
+
+  private queueInputIfTransientlyPaused(data: string): boolean {
+    if (!this.connection || (!this.renderPending && !this.awaitingHostInputResume)) {
+      return false;
+    }
+    if (this.queuedInput.length + data.length > TerminalViewerController.maxQueuedInputBytes) {
+      this.clearQueuedInput();
+      return false;
+    }
+    this.queuedInput += data;
+    return true;
+  }
+
+  private flushQueuedInput(): void {
+    if (!this.connection || this.renderPending || this.awaitingHostInputResume || !this.canSendInput() || this.queuedInput === "") {
+      return;
+    }
+    const data = this.queuedInput;
+    this.queuedInput = "";
+    this.connection.input(data);
+  }
+
+  private clearQueuedInput(): void {
+    this.queuedInput = "";
+    this.renderPending = false;
+    this.awaitingHostInputResume = false;
   }
 
   private notifyInputBlocked(): void {
