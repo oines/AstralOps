@@ -412,10 +412,23 @@ func (s *hostRemoteSession) markConnectionUntrusted(reason string, err error) {
 	s.mu.Unlock()
 	s.setHostState(hostRemoteStateReconnecting, "", err)
 	if s.manager != nil && s.manager.app != nil {
+		s.invalidateControlSession(reason)
+	}
+}
+
+func (s *hostRemoteSession) invalidateControlSession(reason string) {
+	if s == nil || s.manager == nil {
+		return
+	}
+	if s.manager.app != nil {
 		if transport := s.manager.app.controllerManagedTransport(); transport != nil {
 			transport.ClearLANFailure(s.hostDeviceID)
 			transport.Invalidate(s.hostDeviceID, reason)
+			return
 		}
+	}
+	if s.manager.lower != nil {
+		s.manager.lower.Invalidate(s.hostDeviceID, reason)
 	}
 }
 
@@ -1124,8 +1137,8 @@ func (v *remoteHostTerminalViewer) monitor(ctx context.Context) {
 			err := errors.New("terminal viewer heartbeat timed out")
 			v.setState(hostTerminalStateResyncing, false, err)
 			v.send(map[string]any{"type": "status", "state": hostTerminalStateResyncing, "can_input": false, "message": err.Error()})
-			if v.session != nil && v.session.manager != nil && v.session.manager.lower != nil {
-				v.session.manager.lower.Invalidate(v.session.hostDeviceID, "terminal_viewer_stale")
+			if v.session != nil {
+				v.session.invalidateControlSession("terminal_viewer_stale")
 			}
 		}
 	}
@@ -1176,8 +1189,8 @@ func (v *remoteHostTerminalViewer) markFrame(outputSeq int64) {
 func (v *remoteHostTerminalViewer) markStreamFailure(err error) {
 	v.setState(hostTerminalStateResyncing, false, err)
 	v.send(map[string]any{"type": "status", "state": hostTerminalStateResyncing, "can_input": false, "message": err.Error()})
-	if v.session != nil && v.session.manager != nil && v.session.manager.lower != nil {
-		v.session.manager.lower.Invalidate(v.session.hostDeviceID, "terminal_stream_error")
+	if v.session != nil {
+		v.session.invalidateControlSession("terminal_stream_error")
 	}
 }
 

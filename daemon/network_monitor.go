@@ -78,13 +78,10 @@ func (m *networkMonitor) handleChange(next string) {
 	if m.app == nil {
 		return
 	}
-	log.Printf("astralops network changed generation=%d", generation)
-	if m.app.remoteManager != nil {
-		m.app.remoteManager.InvalidateAll("network_changed")
-	}
-	if transport := m.app.controllerManagedTransport(); transport != nil {
-		transport.InvalidateAll("network_changed")
-	}
+	// Network changes are only hints. End-to-end HostRemoteSession health owns
+	// connection invalidation, otherwise transient interface/IP churn can kill a
+	// freshly recovered remote session a few seconds after reconnecting.
+	log.Printf("astralops network changed generation=%d hint=true", generation)
 	m.app.refreshMeshStateAsync(true)
 	m.app.syncCloudRegistrationSoon(m.app.currentSettings())
 }
