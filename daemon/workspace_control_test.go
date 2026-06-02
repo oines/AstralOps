@@ -512,7 +512,7 @@ func TestControlGatewayDeletesAndMovesRemoteWorkspacePaths(t *testing.T) {
 	defer cleanup()
 	app := &app{store: st, hub: newEventHub()}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},

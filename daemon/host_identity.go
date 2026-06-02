@@ -2,10 +2,6 @@ package main
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,10 +10,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/oines/astralops/pkg/cloudmesh"
+	"github.com/oines/astralops/pkg/deviceidentity"
 )
 
 const (
-	DeviceKindDesktop = "desktop"
+	DeviceKindDesktop = deviceidentity.DeviceKindDesktop
+	DeviceKindMobile  = deviceidentity.DeviceKindMobile
 
 	TrustScopeFull                     = "full"
 	TrustStatusTrusted                 = "trusted"
@@ -31,21 +31,9 @@ const (
 	defaultHostFileMode                = 0o600
 )
 
-type DeviceIdentity struct {
-	DeviceID             string   `json:"device_id"`
-	DeviceName           string   `json:"device_name"`
-	DeviceKind           string   `json:"device_kind"`
-	PublicKey            string   `json:"public_key"`
-	PublicKeyFingerprint string   `json:"public_key_fingerprint"`
-	Capabilities         []string `json:"capabilities"`
-	CreatedAt            string   `json:"created_at"`
-	UpdatedAt            string   `json:"updated_at"`
-}
+type DeviceIdentity = cloudmesh.DeviceIdentity
 
-type storedDeviceIdentity struct {
-	DeviceIdentity
-	PrivateKey string `json:"private_key"`
-}
+type storedDeviceIdentity = deviceidentity.StoredIdentity
 
 type TrustGrant struct {
 	HostDeviceID                   string   `json:"host_device_id"`
@@ -80,75 +68,28 @@ type HostInfo struct {
 }
 
 func loadDeviceIdentity(dataDir string) (DeviceIdentity, ed25519.PrivateKey, error) {
-	path := deviceIdentityPath(dataDir)
-	body, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		stored, createErr := newStoredDeviceIdentity()
-		if createErr != nil {
-			return DeviceIdentity{}, nil, createErr
-		}
-		if writeErr := writeJSONFile(path, stored, defaultHostFileMode); writeErr != nil {
-			return DeviceIdentity{}, nil, writeErr
-		}
-		privateKey, _ := base64.StdEncoding.DecodeString(stored.PrivateKey)
-		return stored.DeviceIdentity, ed25519.PrivateKey(privateKey), nil
-	}
-	if err != nil {
-		return DeviceIdentity{}, nil, err
-	}
-	var stored storedDeviceIdentity
-	if err := json.Unmarshal(body, &stored); err != nil {
-		return DeviceIdentity{}, nil, err
-	}
-	privateKey, err := validateStoredDeviceIdentity(stored)
-	if err != nil {
-		return DeviceIdentity{}, nil, err
-	}
-	identity := stored.DeviceIdentity
-	identity.Capabilities = normalizeCapabilities(identity.Capabilities)
-	if len(identity.Capabilities) == 0 {
-		identity.Capabilities = defaultHostCapabilities()
-	}
-	return identity, privateKey, nil
+	return deviceidentity.LoadOrCreateFile(deviceIdentityPath(dataDir), defaultHostFileMode, deviceIdentityOptions())
 }
 
 func newStoredDeviceIdentity() (storedDeviceIdentity, error) {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	stored, _, err := deviceidentity.NewStored(deviceIdentityOptions())
 	if err != nil {
 		return storedDeviceIdentity{}, err
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	return storedDeviceIdentity{
-		DeviceIdentity: DeviceIdentity{
-			DeviceID:             "dev_" + randomID(20),
-			DeviceName:           defaultDeviceName(),
-			DeviceKind:           DeviceKindDesktop,
-			PublicKey:            base64.StdEncoding.EncodeToString(publicKey),
-			PublicKeyFingerprint: devicePublicKeyFingerprint(publicKey),
-			Capabilities:         defaultHostCapabilities(),
-			CreatedAt:            now,
-			UpdatedAt:            now,
-		},
-		PrivateKey: base64.StdEncoding.EncodeToString(privateKey),
-	}, nil
+	return stored, nil
 }
 
 func validateStoredDeviceIdentity(stored storedDeviceIdentity) (ed25519.PrivateKey, error) {
-	if strings.TrimSpace(stored.DeviceID) == "" {
-		return nil, errors.New("device identity missing device_id")
+	_, privateKey, err := deviceidentity.ValidateStored(stored, defaultHostCapabilities())
+	return privateKey, err
+}
+
+func deviceIdentityOptions() deviceidentity.Options {
+	return deviceidentity.Options{
+		DeviceKind:   DeviceKindDesktop,
+		DeviceName:   defaultDeviceName(),
+		Capabilities: defaultHostCapabilities(),
 	}
-	publicKey, err := base64.StdEncoding.DecodeString(stored.PublicKey)
-	if err != nil || len(publicKey) != ed25519.PublicKeySize {
-		return nil, errors.New("device identity has invalid public_key")
-	}
-	privateKey, err := base64.StdEncoding.DecodeString(stored.PrivateKey)
-	if err != nil || len(privateKey) != ed25519.PrivateKeySize {
-		return nil, errors.New("device identity has invalid private_key")
-	}
-	if stored.PublicKeyFingerprint != devicePublicKeyFingerprint(publicKey) {
-		return nil, errors.New("device identity public_key_fingerprint mismatch")
-	}
-	return ed25519.PrivateKey(privateKey), nil
 }
 
 func defaultDeviceName() string {
@@ -161,16 +102,15 @@ func defaultDeviceName() string {
 }
 
 func devicePublicKeyFingerprint(publicKey []byte) string {
-	sum := sha256.Sum256(publicKey)
-	return "sha256:" + strings.ToUpper(hex.EncodeToString(sum[:]))
+	return deviceidentity.PublicKeyFingerprint(publicKey)
 }
 
 func decodeDevicePublicKey(value string) (ed25519.PublicKey, error) {
-	publicKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
-	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+	publicKey, err := deviceidentity.DecodePublicKey(value)
+	if err != nil {
 		return nil, newActionError(http.StatusBadRequest, "invalid_public_key", "invalid device public key")
 	}
-	return ed25519.PublicKey(publicKey), nil
+	return publicKey, nil
 }
 
 func deviceIdentityPath(dataDir string) string {
@@ -402,18 +342,7 @@ func normalizeTrustGrant(grant TrustGrant) TrustGrant {
 }
 
 func normalizeCapabilities(capabilities []string) []string {
-	seen := map[string]bool{}
-	out := []string{}
-	for _, capability := range capabilities {
-		capability = strings.TrimSpace(capability)
-		if capability == "" || seen[capability] {
-			continue
-		}
-		seen[capability] = true
-		out = append(out, capability)
-	}
-	sort.Strings(out)
-	return out
+	return cloudmesh.NormalizeCapabilities(capabilities)
 }
 
 func validateCapabilities(capabilities []string) error {

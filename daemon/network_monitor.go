@@ -16,15 +16,32 @@ const (
 )
 
 type networkMonitor struct {
-	app *app
+	deps networkMonitorDeps
 
 	mu          sync.Mutex
 	fingerprint string
 	generation  int64
 }
 
-func newNetworkMonitor(a *app) *networkMonitor {
-	return &networkMonitor{app: a, fingerprint: networkFingerprint()}
+type networkMonitorDeps struct {
+	refreshMeshStateAsync   func(bool)
+	syncCloudRegistration   func(AppSettings)
+	currentSettingsSnapshot func() AppSettings
+}
+
+func newNetworkMonitor(deps networkMonitorDeps) *networkMonitor {
+	return &networkMonitor{deps: deps, fingerprint: networkFingerprint()}
+}
+
+func networkMonitorDepsFromApp(a *app) networkMonitorDeps {
+	if a == nil {
+		return networkMonitorDeps{}
+	}
+	return networkMonitorDeps{
+		refreshMeshStateAsync:   a.refreshMeshStateAsync,
+		syncCloudRegistration:   a.syncCloudRegistrationSoon,
+		currentSettingsSnapshot: a.currentSettings,
+	}
 }
 
 func (m *networkMonitor) start(ctx context.Context) {
@@ -75,15 +92,15 @@ func (m *networkMonitor) handleChange(next string) {
 	generation := m.generation
 	m.mu.Unlock()
 
-	if m.app == nil {
+	if m.deps.refreshMeshStateAsync == nil || m.deps.syncCloudRegistration == nil || m.deps.currentSettingsSnapshot == nil {
 		return
 	}
-	log.Printf("astralops network changed generation=%d", generation)
-	if m.app.remoteManager != nil {
-		m.app.remoteManager.InvalidateAll("network_changed")
-	}
-	m.app.refreshMeshStateAsync(true)
-	m.app.syncCloudRegistrationSoon(m.app.currentSettings())
+	// Network changes are only hints. End-to-end HostRemoteSession health owns
+	// connection invalidation, otherwise transient interface/IP churn can kill a
+	// freshly recovered remote session a few seconds after reconnecting.
+	log.Printf("astralops network changed generation=%d hint=true", generation)
+	m.deps.refreshMeshStateAsync(true)
+	m.deps.syncCloudRegistration(m.deps.currentSettingsSnapshot())
 }
 
 func (m *networkMonitor) Generation() int64 {

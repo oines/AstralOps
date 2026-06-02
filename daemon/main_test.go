@@ -215,6 +215,45 @@ func TestHelperBinaryFreshUsesProxyAgentSources(t *testing.T) {
 	}
 }
 
+func TestRepoRootGuessStopsWhenParentDoesNotChange(t *testing.T) {
+	root := `C:\`
+	visited := []string{}
+	got := repoRootGuessFrom(root, func(dir string) bool {
+		visited = append(visited, dir)
+		return false
+	}, func(dir string) string {
+		return dir
+	})
+
+	if got != root {
+		t.Fatalf("repo root guess = %q, want %q", got, root)
+	}
+	if !reflect.DeepEqual(visited, []string{root}) {
+		t.Fatalf("visited = %#v, want only root", visited)
+	}
+}
+
+func TestRepoRootGuessFindsAncestorGoMod(t *testing.T) {
+	got := repoRootGuessFrom("/repo/app/daemon", func(dir string) bool {
+		return dir == "/repo"
+	}, func(dir string) string {
+		switch dir {
+		case "/repo/app/daemon":
+			return "/repo/app"
+		case "/repo/app":
+			return "/repo"
+		case "/repo":
+			return "/"
+		default:
+			return dir
+		}
+	})
+
+	if got != "/repo" {
+		t.Fatalf("repo root guess = %q, want /repo", got)
+	}
+}
+
 func TestProjectionRemoteIOUsesBase64ForBinary(t *testing.T) {
 	body := []byte{0, 1, 2, 0xff, '\n'}
 	params := remoteWriteParams("/root/blob.bin", body)
@@ -1830,7 +1869,7 @@ done
 	}
 	app := &app{store: st, hub: newEventHub()}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			ws.ID: {workspace: ws, proxy: proxy, state: initialSSHConnection(ws, connectionConnected)},
 		},
@@ -2055,7 +2094,7 @@ func newSilentSSHProxyTestApp(t *testing.T) (*app, Workspace, *proxyClient) {
 	}
 	app := &app{store: st, hub: newEventHub()}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			ws.ID: {workspace: ws, proxy: proxy, state: initialSSHConnection(ws, connectionConnected)},
 		},
@@ -3231,7 +3270,7 @@ func TestCodexExecServerTranslatesLocalShellWrapperToRemoteShell(t *testing.T) {
 	paramsCh := make(chan map[string]any, 1)
 	app := &app{}
 	conn := &execServerConn{
-		app:         app,
+		deps:        execServerDepsFromApp(app),
 		ws:          Workspace{SSH: &SSHConfig{RemoteCWD: "/tmp"}},
 		remoteShell: "/bin/bash",
 		processes:   map[string]*execServerProcess{},
@@ -3272,7 +3311,7 @@ func TestCodexExecServerStripsLocalSandboxWrapperForRemoteExec(t *testing.T) {
 	paramsCh := make(chan map[string]any, 1)
 	app := &app{}
 	conn := &execServerConn{
-		app:         app,
+		deps:        execServerDepsFromApp(app),
 		ws:          Workspace{ID: "ws_remote", SSH: &SSHConfig{RemoteCWD: "/tmp"}},
 		remoteShell: "/bin/bash",
 		processes:   map[string]*execServerProcess{},
@@ -3316,7 +3355,7 @@ func TestCodexRuntimeEnrichesRemoteCommandEventsWithEffectiveCommand(t *testing.
 	app := &app{codexExec: map[string]codexExecCommand{}}
 	app.recordCodexExecCommand("ws_remote", "proc_1", []string{"/bin/zsh", "-lc", "pwd"}, []string{"/bin/bash", "-lc", "pwd"})
 	client := &codexClient{
-		runtime:       &codexLocalRuntime{app: app},
+		runtime:       &codexLocalRuntime{deps: runtimeDepsFromApp(app)},
 		session:       Session{WorkspaceID: "ws_remote", Agent: AgentCodex},
 		execServerURL: "ws://127.0.0.1/v1/codex-exec/ws_remote",
 	}
@@ -3665,7 +3704,7 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
 		},
 	}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},
@@ -3911,7 +3950,7 @@ func TestClaudeRemoteRealClaudeE2E(t *testing.T) {
 	proxy, cleanup := newMutableClaudeRemoteProxy(t, ws, remoteStore)
 	defer cleanup()
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			ws.ID: {workspace: ws, proxy: proxy, state: initialSSHConnection(ws, connectionConnected)},
 		},
@@ -4319,7 +4358,7 @@ func TestClaudeForkArgsUseResumeSessionAtAndForkSession(t *testing.T) {
 		ForkedFromSessionID:    source.ID,
 		ForkedFromNativeAnchor: "msg-uuid",
 	}
-	runtime := newClaudeLocalRuntime(&app{store: st})
+	runtime := newClaudeLocalRuntime(runtimeDepsFromApp(&app{store: st}))
 	args, err := runtime.claudeArgs(fork, TurnOptions{}, claudeRemoteOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -5822,7 +5861,7 @@ func TestCodexSSHRuntimePreparesRemoteBundledSkills(t *testing.T) {
 	t.Setenv("CODEX_HOME", sourceHome)
 	app := &app{store: st, hub: newEventHub()}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},
@@ -6217,7 +6256,7 @@ for line in sys.stdin:
 	proxy.start()
 	app := &app{store: st, hub: newEventHub()}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			ws.ID: {workspace: ws, proxy: proxy, state: initialSSHConnection(ws, connectionConnected)},
 		},

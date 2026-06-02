@@ -36,15 +36,50 @@ type meshCloudState struct {
 }
 
 type meshStateManager struct {
-	app *app
+	deps meshStateDeps
 
 	mu          sync.Mutex
 	state       meshStateResponse
 	subscribers map[chan meshStateResponse]struct{}
 }
 
-func newMeshStateManager(a *app) *meshStateManager {
-	return &meshStateManager{app: a, subscribers: map[chan meshStateResponse]struct{}{}}
+type meshStateDeps struct {
+	hostInfo               func() HostInfo
+	currentSettings        func() AppSettings
+	cloudMeshActiveFor     func(cloudMembershipRole) bool
+	cloudMeshActive        func() bool
+	currentRelayConnected  func() bool
+	buildRemoteHostRecords func(context.Context, bool) []remoteHostRecord
+	pairingRequests        func() []PairingRequest
+	meshCloudState         func(context.Context, CloudSettings) *meshCloudState
+}
+
+func newMeshStateManager(deps meshStateDeps) *meshStateManager {
+	return &meshStateManager{
+		deps:        deps,
+		subscribers: map[chan meshStateResponse]struct{}{},
+	}
+}
+
+func meshStateDepsFromApp(a *app) meshStateDeps {
+	if a == nil {
+		return meshStateDeps{}
+	}
+	cloud := a.cloudmeshService()
+	remote := a.remoteControlService()
+	deps := meshStateDeps{
+		currentSettings:        a.currentSettings,
+		cloudMeshActiveFor:     cloud.cloudMeshActiveFor,
+		cloudMeshActive:        cloud.cloudMeshActive,
+		currentRelayConnected:  cloud.currentCloudRelayConnected,
+		buildRemoteHostRecords: remote.buildRemoteHostRecords,
+		meshCloudState:         cloud.meshCloudState,
+	}
+	if a.store != nil {
+		deps.hostInfo = func() HostInfo { return a.store.hostInfo() }
+		deps.pairingRequests = a.store.listPairingRequests
+	}
+	return deps
 }
 
 func (a *app) handleMeshState(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +104,7 @@ func (a *app) handleMeshState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *meshStateManager) refresh(ctx context.Context, discover bool) (meshStateResponse, error) {
-	if m == nil || m.app == nil {
+	if m == nil || m.deps.hostInfo == nil {
 		return meshStateResponse{}, nil
 	}
 	buildCtx, cancel := context.WithTimeout(ctx, meshStateRefreshTimeout)
@@ -92,24 +127,23 @@ func (m *meshStateManager) refresh(ctx context.Context, discover bool) (meshStat
 }
 
 func (m *meshStateManager) build(ctx context.Context, discover bool) meshStateResponse {
-	a := m.app
-	info := a.store.hostInfo()
-	settings := a.currentSettings()
+	info := m.deps.hostInfo()
+	settings := m.deps.currentSettings()
 	self := meshSelfState{
 		DeviceID:       info.Identity.DeviceID,
 		DeviceName:     info.Identity.DeviceName,
-		CanHost:        a.cloudMeshActiveFor(cloudMembershipRole{CanHost: true}) && settings.RemoteControl.Enabled,
-		CanControl:     a.cloudMeshActiveFor(cloudMembershipRole{CanControl: true}),
-		CloudActive:    a.cloudMeshActive(),
-		RelayConnected: a.currentCloudRelayConnected(),
+		CanHost:        m.deps.cloudMeshActiveFor(cloudMembershipRole{CanHost: true}) && settings.RemoteControl.Enabled,
+		CanControl:     m.deps.cloudMeshActiveFor(cloudMembershipRole{CanControl: true}),
+		CloudActive:    m.deps.cloudMeshActive(),
+		RelayConnected: m.deps.currentRelayConnected(),
 	}
 	state := meshStateResponse{
 		Self:                self,
-		Hosts:               a.buildRemoteHostRecords(ctx, discover),
-		PendingPairingCount: pendingPairingRequestCount(a.store.listPairingRequests()),
+		Hosts:               m.deps.buildRemoteHostRecords(ctx, discover),
+		PendingPairingCount: pendingPairingRequestCount(m.deps.pairingRequests()),
 		UpdatedAt:           time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	state.Cloud = a.meshCloudState(ctx, settings.Cloud)
+	state.Cloud = m.deps.meshCloudState(ctx, settings.Cloud)
 	return state
 }
 
@@ -168,8 +202,11 @@ func (a *app) refreshMeshStateAsync(discover bool) {
 	}()
 }
 
-func (a *app) meshCloudState(ctx context.Context, settings CloudSettings) *meshCloudState {
+func (a *cloudmeshService) meshCloudState(ctx context.Context, settings CloudSettings) *meshCloudState {
 	cloud := &meshCloudState{Enabled: settings.Enabled}
+	if a == nil || a.store == nil {
+		return cloud
+	}
 	if membership, err := a.store.currentCloudMembership(cloudMembershipRole{}); err == nil {
 		cloud.AccountIDHash = membership.AccountIDHash
 	}
@@ -207,24 +244,26 @@ func pendingPairingRequestCount(requests []PairingRequest) int {
 	return count
 }
 
-func (a *app) setCloudRelayConnected(connected bool) {
+func (a *cloudmeshService) setCloudRelayConnected(connected bool) {
 	if a == nil {
 		return
 	}
 	a.cloudMu.Lock()
-	changed := a.cloudRelayConnected != connected
-	a.cloudRelayConnected = connected
+	changed := a.cloudRelayConnected != nil && *a.cloudRelayConnected != connected
+	if a.cloudRelayConnected != nil {
+		*a.cloudRelayConnected = connected
+	}
 	a.cloudMu.Unlock()
-	if changed {
+	if changed && a.refreshMeshStateAsync != nil {
 		a.refreshMeshStateAsync(true)
 	}
 }
 
-func (a *app) currentCloudRelayConnected() bool {
+func (a *cloudmeshService) currentCloudRelayConnected() bool {
 	if a == nil {
 		return false
 	}
 	a.cloudMu.Lock()
 	defer a.cloudMu.Unlock()
-	return a.cloudRelayConnected
+	return a.cloudRelayConnected != nil && *a.cloudRelayConnected
 }

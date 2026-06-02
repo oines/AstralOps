@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"sync"
 
 	"github.com/gorilla/websocket"
+	"github.com/oines/astralops/daemon/internal/eventlog"
 )
 
 type eventHub struct {
@@ -18,25 +20,35 @@ type sseClient struct {
 }
 
 func (a *app) emit(ev AstralEvent) {
-	saved, err := a.store.appendEvent(ev)
-	if err != nil {
-		log.Printf("append event: %v", err)
-		return
+	_, _ = a.eventPublisher().Publish(context.Background(), ev)
+}
+
+func (a *app) eventPublisher() *eventlog.Service {
+	if a.eventLog == nil {
+		a.eventLog = eventlog.New(eventlog.Options{
+			Store:         a.store,
+			Projections:   a.sessionProjections(),
+			Broadcaster:   a.hub,
+			Notifications: appNotificationPolicy{target: a.notificationTarget},
+			Diagnostics:   logDiagnosticEvent,
+		})
 	}
-	a.sessionProjections().apply(saved)
-	logDiagnosticEvent(saved)
-	a.hub.broadcast(saved)
-	notificationTitle, targetSessionID := a.notificationTarget(saved)
-	if notification, ok := notificationEventForSource(saved, notificationTitle, targetSessionID, a.store.allEvents()); ok {
-		savedNotification, err := a.store.appendEvent(notification)
-		if err != nil {
-			log.Printf("append notification event: %v", err)
-			return
-		}
-		a.sessionProjections().apply(savedNotification)
-		logDiagnosticEvent(savedNotification)
-		a.hub.broadcast(savedNotification)
+	return a.eventLog
+}
+
+type appNotificationPolicy struct {
+	target func(AstralEvent) (string, string)
+}
+
+func (p appNotificationPolicy) Target(ev AstralEvent) (string, string) {
+	if p.target == nil {
+		return "", ""
 	}
+	return p.target(ev)
+}
+
+func (p appNotificationPolicy) Build(source AstralEvent, title string, targetSessionID string, events []AstralEvent) (AstralEvent, bool) {
+	return notificationEventForSource(source, title, targetSessionID, events)
 }
 
 func (a *app) notificationTarget(ev AstralEvent) (string, string) {
@@ -109,4 +121,12 @@ func (h *eventHub) broadcast(ev AstralEvent) {
 			close(client.ch)
 		}
 	}
+}
+
+func (h *eventHub) Broadcast(ev AstralEvent) {
+	if h == nil {
+		log.Printf("event broadcaster is not initialized")
+		return
+	}
+	h.broadcast(ev)
 }

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -205,7 +206,18 @@ func readEncryptedControlFrame(t *testing.T, client *websocket.Conn, cipher *con
 
 func readEncryptedControlFrameWithBody(t *testing.T, client *websocket.Conn, cipher *controlCipher) (controlPlainFrame, []byte) {
 	t.Helper()
-	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	return readEncryptedControlFrameWithBodyWithin(t, client, cipher, 3*time.Second)
+}
+
+func readEncryptedControlFrameWithin(t *testing.T, client *websocket.Conn, cipher *controlCipher, timeout time.Duration) controlPlainFrame {
+	t.Helper()
+	plain, _ := readEncryptedControlFrameWithBodyWithin(t, client, cipher, timeout)
+	return plain
+}
+
+func readEncryptedControlFrameWithBodyWithin(t *testing.T, client *websocket.Conn, cipher *controlCipher, timeout time.Duration) (controlPlainFrame, []byte) {
+	t.Helper()
+	_ = client.SetReadDeadline(time.Now().Add(timeout))
 	defer client.SetReadDeadline(time.Time{})
 	_, body, err := client.ReadMessage()
 	if err != nil {
@@ -1027,6 +1039,69 @@ func TestControlWebSocketSessionInputIsEncrypted(t *testing.T) {
 	}
 	if runtime.options[0].Model != "gpt-test" || runtime.options[0].ReasoningEffort != "low" || runtime.options[0].PermissionMode != "auto" {
 		t.Fatalf("runtime options = %#v", runtime.options[0])
+	}
+}
+
+type blockingRuntime struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingRuntime) StartTurn(Session, Workspace, string, TurnOptions) error {
+	r.once.Do(func() {
+		close(r.started)
+	})
+	<-r.release
+	return nil
+}
+
+func (r *blockingRuntime) Interrupt(string) error {
+	return nil
+}
+
+func TestControlWebSocketHandlesRequestsConcurrently(t *testing.T) {
+	app, _, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead, CapabilityCoreControl)
+	blocking := &blockingRuntime{started: make(chan struct{}), release: make(chan struct{})}
+	app.runtimes[AgentCodex] = blocking
+	defer close(blocking.release)
+
+	server := startControlChannelTestServer(t, app)
+	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
+	defer client.Close()
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "blocked_session_input",
+			Capability: CapabilityCoreControl,
+			Action:     ControlActionSessionInput,
+			Params: map[string]any{
+				"session_id": session.ID,
+				"input":      "block the first request",
+			},
+		},
+	})
+
+	select {
+	case <-blocking.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocking runtime did not receive the first request")
+	}
+
+	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
+		Type: "request",
+		Request: &ControlRequest{
+			RequestID:  "snapshot_while_blocked",
+			Capability: CapabilityCoreRead,
+			Action:     ControlActionHostSnapshot,
+			Params:     map[string]any{"event_limit": 1},
+		},
+	})
+
+	plain := readEncryptedControlFrameWithin(t, client, cipher, 500*time.Millisecond)
+	if plain.Type != "response" || plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "snapshot_while_blocked" {
+		t.Fatalf("concurrent snapshot response = %#v, want ok response while first request is still blocked", plain)
 	}
 }
 
@@ -2124,7 +2199,7 @@ func TestControlWebSocketRemoteWorkspaceFileStreamUsesProxyReadRange(t *testing.
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},
@@ -2212,7 +2287,7 @@ func TestControlWebSocketRemoteWorkspaceFileStreamReportsTruncatedReadRange(t *t
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},
@@ -2342,7 +2417,7 @@ func TestControlWebSocketRemoteWorkspaceFileWriteUsesProxyOverEncryptedChannel(t
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},
@@ -2434,7 +2509,7 @@ func TestControlWebSocketRemoteWorkspacePatchUsesProxyOverEncryptedChannel(t *te
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},
@@ -2523,7 +2598,7 @@ func TestControlWebSocketRemoteWorkspaceExecUsesProxyOverEncryptedChannel(t *tes
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 	app.ssh = &sshManager{
-		app: app,
+		deps: sshDepsFromApp(app),
 		by: map[string]*sshTarget{
 			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
 		},
@@ -3104,36 +3179,31 @@ func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *test
 	if plain.Response == nil || !plain.Response.OK {
 		t.Fatalf("attach response = %#v, want ok", plain)
 	}
+	attachResult := mapValue(plain.Response.Result)
+	viewerID := stringValue(attachResult["viewer_id"])
+	inputLeaseID := stringValue(attachResult["input_lease_id"])
 
 	secret := "stream-secret-" + randomID(8)
 	sealedInput := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
-		Type: "request",
-		Request: &ControlRequest{
-			RequestID:  "terminal_input",
-			Capability: CapabilityTerminalInput,
-			Action:     ControlActionTerminalInput,
-			Params: map[string]any{
-				"terminal_id": terminalID,
-				"data":        "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
-			},
+		Type: terminalFrameInput,
+		Terminal: &terminalStreamFrame{
+			TerminalID:   terminalID,
+			ViewerID:     viewerID,
+			InputLeaseID: inputLeaseID,
+			Data:         "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
 		},
 	})
 	if strings.Contains(string(sealedInput), secret) {
 		t.Fatalf("sealed terminal input leaked payload: %s", string(sealedInput))
 	}
 
-	sawInputResponse := false
 	sawOutput := false
-	for i := 0; i < 20 && (!sawInputResponse || !sawOutput); i++ {
+	for i := 0; i < 20 && !sawOutput; i++ {
 		plain, sealed := readEncryptedControlFrameWithBody(t, client, cipher)
 		if strings.Contains(string(sealed), secret) {
 			t.Fatalf("sealed terminal stream leaked payload: %s", string(sealed))
 		}
 		switch plain.Type {
-		case "response":
-			if plain.Response != nil && plain.Response.RequestID == "terminal_input" && plain.Response.OK {
-				sawInputResponse = true
-			}
 		case terminalFrameOutput:
 			if plain.Terminal == nil || plain.Terminal.TerminalID != terminalID {
 				t.Fatalf("terminal output frame = %#v, want terminal %s", plain, terminalID)
@@ -3143,8 +3213,8 @@ func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *test
 			}
 		}
 	}
-	if !sawInputResponse || !sawOutput {
-		t.Fatalf("saw input response=%v output=%v, want both", sawInputResponse, sawOutput)
+	if !sawOutput {
+		t.Fatal("terminal input did not produce output")
 	}
 
 	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
@@ -3234,33 +3304,22 @@ func TestControlWebSocketTerminalResizeAndDetachAreEncrypted(t *testing.T) {
 	if plain.Response == nil || !plain.Response.OK {
 		t.Fatalf("attach response = %#v, want ok", plain)
 	}
+	attachResult := mapValue(plain.Response.Result)
+	viewerID := stringValue(attachResult["viewer_id"])
+	inputLeaseID := stringValue(attachResult["input_lease_id"])
 
 	sealedResize := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
-		Type: "request",
-		Request: &ControlRequest{
-			RequestID:  "terminal_resize",
-			Capability: CapabilityTerminalInput,
-			Action:     ControlActionTerminalResize,
-			Params: map[string]any{
-				"terminal_id": terminalID,
-				"cols":        120,
-				"rows":        32,
-			},
+		Type: terminalFrameResize,
+		Terminal: &terminalStreamFrame{
+			TerminalID:   terminalID,
+			ViewerID:     viewerID,
+			InputLeaseID: inputLeaseID,
+			Cols:         120,
+			Rows:         32,
 		},
 	})
 	if strings.Contains(string(sealedResize), ControlActionTerminalResize) || strings.Contains(string(sealedResize), terminalID) {
-		t.Fatalf("sealed terminal resize request leaked payload: %s", string(sealedResize))
-	}
-	plain, sealedResizeResponse := readEncryptedControlFrameWithBody(t, client, cipher)
-	if strings.Contains(string(sealedResizeResponse), terminalID) {
-		t.Fatalf("sealed terminal resize response leaked payload: %s", string(sealedResizeResponse))
-	}
-	if plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "terminal_resize" {
-		t.Fatalf("resize response = %#v, want ok", plain)
-	}
-	resize := mapValue(plain.Response.Result)
-	if stringValue(resize["terminal_id"]) != terminalID || stringValue(resize["status"]) != terminalStatusOpen {
-		t.Fatalf("resize result = %#v", resize)
+		t.Fatalf("sealed terminal resize frame leaked payload: %s", string(sealedResize))
 	}
 
 	sealedDetach := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
@@ -3355,18 +3414,18 @@ func TestControlWebSocketTerminalReconnectAttachWithinRetention(t *testing.T) {
 	if plain.Response == nil || !plain.Response.OK {
 		t.Fatalf("reattach response = %#v, want ok", plain)
 	}
+	reattachResult := mapValue(plain.Response.Result)
+	viewerID := stringValue(reattachResult["viewer_id"])
+	inputLeaseID := stringValue(reattachResult["input_lease_id"])
 
 	secret := "reattach-secret-" + randomID(8)
 	writeEncryptedControlFrame(t, reconnected, reconnectedCipher, controlPlainFrame{
-		Type: "request",
-		Request: &ControlRequest{
-			RequestID:  "terminal_input_after_reattach",
-			Capability: CapabilityTerminalInput,
-			Action:     ControlActionTerminalInput,
-			Params: map[string]any{
-				"terminal_id": terminalID,
-				"data":        "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
-			},
+		Type: terminalFrameInput,
+		Terminal: &terminalStreamFrame{
+			TerminalID:   terminalID,
+			ViewerID:     viewerID,
+			InputLeaseID: inputLeaseID,
+			Data:         "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
 		},
 	})
 	sawOutput := false

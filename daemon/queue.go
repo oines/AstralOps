@@ -1,251 +1,108 @@
 package main
 
 import (
-	"errors"
-	"fmt"
-	"strings"
-	"time"
+	internalsessions "github.com/oines/astralops/daemon/internal/sessions"
+	"github.com/oines/astralops/daemon/internal/sessiontypes"
 )
 
-type queuedTurn struct {
-	ID        string
-	Input     string
-	Options   TurnOptions
-	CreatedAt string
+type queuedTurn = sessiontypes.QueuedTurn
+
+type sessionQueueStoreAdapter struct {
+	store *store
 }
 
-func (a *app) enqueueTurn(session Session, input string, options TurnOptions) queuedTurn {
-	turn := queuedTurn{
-		ID:        "queue_" + randomID(12),
-		Input:     input,
-		Options:   options,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+func (s sessionQueueStoreAdapter) GetSession(id string) (Session, bool) {
+	if s.store == nil {
+		return Session{}, false
 	}
-	a.queueMu.Lock()
-	if a.queues == nil {
-		a.queues = map[string][]queuedTurn{}
-	}
-	a.queues[session.ID] = append(a.queues[session.ID], turn)
-	position := len(a.queues[session.ID])
-	a.queueMu.Unlock()
-
-	normalized := map[string]any{
-		"queue_id": turn.ID,
-		"position": position,
-	}
-	if options.Internal {
-		normalized["internal"] = true
-	}
-	if text := turnDisplayInput(input, options); text != "" {
-		normalized["text"] = text
-	}
-	a.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "queue.queued", Normalized: normalized})
-	return turn
+	return s.store.getSession(id)
 }
 
-func (a *app) cancelQueuedTurn(sessionID, queueID string) {
-	session, _ := a.store.getSession(sessionID)
-	cancelled := false
-	a.queueMu.Lock()
-	queue := a.queues[sessionID]
-	next := queue[:0]
-	for _, turn := range queue {
-		if turn.ID == queueID {
-			cancelled = true
-			continue
-		}
-		next = append(next, turn)
+func (s sessionQueueStoreAdapter) GetWorkspace(id string) (Workspace, bool) {
+	if s.store == nil {
+		return Workspace{}, false
 	}
-	if len(next) == 0 {
-		delete(a.queues, sessionID)
-	} else {
-		a.queues[sessionID] = next
-	}
-	a.queueMu.Unlock()
-	if cancelled {
-		a.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: session.Agent, Kind: "queue.cancelled", Normalized: map[string]any{"queue_id": queueID}})
-	}
+	return s.store.getWorkspace(id)
 }
 
-func (a *app) clearSessionQueue(sessionID string, reason string) {
-	session, _ := a.store.getSession(sessionID)
-	a.queueMu.Lock()
-	queue := append([]queuedTurn(nil), a.queues[sessionID]...)
-	delete(a.queues, sessionID)
-	a.queueMu.Unlock()
-	for _, turn := range queue {
-		normalized := map[string]any{"queue_id": turn.ID}
-		if reason != "" {
-			normalized["reason"] = reason
-		}
-		if turn.Options.Internal {
-			normalized["internal"] = true
-		}
-		if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
-			normalized["text"] = text
-		}
-		a.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: session.Agent, Kind: "queue.cancelled", Normalized: normalized})
+func (s sessionQueueStoreAdapter) CreateSession(workspace Workspace, agent AgentKind) Session {
+	if s.store == nil {
+		return Session{}
 	}
+	return s.store.createSession(workspace, agent)
 }
 
-func (a *app) steerQueuedTurn(sessionID, queueID string) error {
-	ss, ok := a.store.getSession(sessionID)
-	if !ok {
-		return fmt.Errorf("session not found")
+func (s sessionQueueStoreAdapter) CreateForkSession(workspace Workspace, source Session, anchor forkAnchor) Session {
+	if s.store == nil {
+		return Session{}
 	}
-	runtime, ok := a.runtimes[ss.Agent]
-	if !ok {
-		return fmt.Errorf("agent runtime is not implemented")
-	}
-	steerer, ok := runtime.(TurnSteerer)
-	if !ok {
-		return ErrSteerUnsupported
-	}
-	turn, ok := a.peekQueuedTurn(sessionID, queueID)
-	if !ok {
-		return fmt.Errorf("queued message not found")
-	}
-	if err := steerer.Steer(sessionID, turn.Input, turn.Options); err != nil {
-		return err
-	}
-	if !a.removeQueuedTurn(sessionID, queueID) {
-		return fmt.Errorf("queued message not found")
-	}
-	normalized := map[string]any{"queue_id": queueID}
-	if turn.Options.Internal {
-		normalized["internal"] = true
-	}
-	if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
-		normalized["text"] = text
-	}
-	a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.steered", Normalized: normalized})
-	return nil
+	return s.store.createForkSession(workspace, source, anchor)
 }
 
-func (a *app) startNextQueuedTurn(sessionID string) {
-	turn, ok := a.popQueuedTurn(sessionID)
-	if !ok {
+func (s sessionQueueStoreAdapter) DeleteSession(id string) {
+	if s.store == nil {
 		return
 	}
-	ss, ok := a.store.getSession(sessionID)
-	if !ok {
+	s.store.deleteSession(id)
+}
+
+func (s sessionQueueStoreAdapter) UpdateSessionStatus(id, status string) {
+	if s.store == nil {
 		return
 	}
-	ws, ok := a.store.getWorkspace(ss.WorkspaceID)
-	if !ok {
-		return
-	}
-	runtime, ok := a.runtimes[ss.Agent]
-	if !ok {
-		return
-	}
-	if err := runtime.StartTurn(ss, ws, turn.Input, turn.Options); err != nil {
-		if errors.Is(err, ErrSessionRunning) {
-			a.requeueFront(sessionID, turn)
-			return
-		}
-		normalized := map[string]any{
-			"queue_id": turn.ID,
-			"message":  err.Error(),
-		}
-		if turn.Options.Internal {
-			normalized["internal"] = true
-		}
-		if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
-			normalized["text"] = text
-		}
-		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.failed", Normalized: normalized})
-		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{
-			"message":  err.Error(),
-			"queue_id": turn.ID,
-		}})
-		return
-	}
-	normalized := map[string]any{
-		"queue_id": turn.ID,
-	}
-	if turn.Options.Internal {
-		normalized["internal"] = true
-	}
-	if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
-		normalized["text"] = text
-	}
-	a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.dequeued", Normalized: normalized})
+	s.store.updateSessionStatus(id, status)
 }
 
-func (a *app) popQueuedTurn(sessionID string) (queuedTurn, bool) {
-	a.queueMu.Lock()
-	defer a.queueMu.Unlock()
-	queue := a.queues[sessionID]
-	if len(queue) == 0 {
-		return queuedTurn{}, false
+func (s sessionQueueStoreAdapter) QueryEvents(workspaceID, sessionID string, afterSeq int64) []AstralEvent {
+	if s.store == nil {
+		return nil
 	}
-	turn := queue[0]
-	if len(queue) == 1 {
-		delete(a.queues, sessionID)
-	} else {
-		a.queues[sessionID] = append([]queuedTurn(nil), queue[1:]...)
-	}
-	return turn, true
+	return s.store.queryEvents(workspaceID, sessionID, afterSeq)
 }
 
-func (a *app) peekQueuedTurn(sessionID, queueID string) (queuedTurn, bool) {
-	a.queueMu.Lock()
-	defer a.queueMu.Unlock()
-	for _, turn := range a.queues[sessionID] {
-		if turn.ID == queueID {
-			return turn, true
-		}
-	}
-	return queuedTurn{}, false
-}
-
-func (a *app) removeQueuedTurn(sessionID, queueID string) bool {
-	a.queueMu.Lock()
-	defer a.queueMu.Unlock()
-	queue := a.queues[sessionID]
-	next := queue[:0]
-	removed := false
-	for _, turn := range queue {
-		if turn.ID == queueID {
-			removed = true
-			continue
-		}
-		next = append(next, turn)
-	}
-	if len(next) == 0 {
-		delete(a.queues, sessionID)
-	} else {
-		a.queues[sessionID] = next
-	}
-	return removed
-}
-
-func (a *app) requeueFront(sessionID string, turn queuedTurn) {
-	a.queueMu.Lock()
-	defer a.queueMu.Unlock()
-	a.queues[sessionID] = append([]queuedTurn{turn}, a.queues[sessionID]...)
-}
-
-func turnDisplayInput(input string, options TurnOptions) string {
-	if text := strings.TrimSpace(options.DisplayInput); text != "" {
-		return text
-	}
-	if options.Internal {
+func (s sessionQueueStoreAdapter) SessionTitle(sessionID string) string {
+	if s.store == nil {
 		return ""
 	}
-	if text := strings.TrimSpace(input); text != "" {
-		return text
-	}
-	if len(options.Attachments) == 1 {
-		name := options.Attachments[0].Name
-		if name == "" {
-			name = options.Attachments[0].Path
-		}
-		return "附件：" + name
-	}
-	if len(options.Attachments) > 1 {
-		return fmt.Sprintf("%d 个附件", len(options.Attachments))
-	}
-	return ""
+	return s.store.sessionTitle(sessionID)
+}
+
+func (s *sessionService) queueService() *internalsessions.QueueService {
+	return internalsessions.NewQueueService(sessionQueueStoreAdapter{store: s.store}, s.runtimes, s.queueMu, s.queues, s.emit)
+}
+
+func (s *sessionService) enqueueTurn(session Session, input string, options TurnOptions) queuedTurn {
+	return s.queueService().EnqueueTurn(session, input, options)
+}
+
+func (s *sessionService) cancelQueuedTurn(sessionID, queueID string) {
+	s.queueService().CancelQueuedTurn(sessionID, queueID)
+}
+
+func (s *sessionService) clearSessionQueue(sessionID string, reason string) {
+	s.queueService().ClearSessionQueue(sessionID, reason)
+}
+
+func (s *sessionService) steerQueuedTurn(sessionID, queueID string) error {
+	return s.queueService().SteerQueuedTurn(sessionID, queueID)
+}
+
+func (s *sessionService) startNextQueuedTurn(sessionID string) {
+	s.queueService().StartNextQueuedTurn(sessionID)
+}
+
+func (s *sessionService) popQueuedTurn(sessionID string) (queuedTurn, bool) {
+	return s.queueService().PopQueuedTurn(sessionID)
+}
+
+func (s *sessionService) peekQueuedTurn(sessionID, queueID string) (queuedTurn, bool) {
+	return s.queueService().PeekQueuedTurn(sessionID, queueID)
+}
+
+func (s *sessionService) removeQueuedTurn(sessionID, queueID string) bool {
+	return s.queueService().RemoveQueuedTurn(sessionID, queueID)
+}
+
+func (s *sessionService) requeueFront(sessionID string, turn queuedTurn) {
+	s.queueService().RequeueFront(sessionID, turn)
 }

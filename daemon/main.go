@@ -18,6 +18,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/oines/astralops/daemon/internal/eventlog"
+	"github.com/oines/astralops/pkg/controllercore"
+	"github.com/oines/astralops/pkg/hostcore"
 )
 
 var version = "dev"
@@ -29,6 +32,7 @@ type app struct {
 	addr                 string
 	runtimePort          int
 	hub                  *eventHub
+	eventLog             *eventlog.Service
 	upgrader             websocket.Upgrader
 	agents               map[AgentKind]agentInfo
 	runtimes             map[AgentKind]AgentRuntime
@@ -47,10 +51,14 @@ type app struct {
 	codexExec            map[string]codexExecCommand
 	codexRemoteHomeMu    sync.Mutex
 	codexRemoteHome      map[string]string
-	remoteManager        *remoteControlManager
+	hostRemoteSessions   *hostRemoteSessionManager
 	network              *networkMonitor
 	remoteControlMu      sync.Mutex
 	remoteControl        *remoteControlRuntime
+	controllerCore       *controllercore.Controller
+	controllerTransport  *controllercore.ManagedTransport
+	hostCore             *hostcore.Core
+	role                 appRole
 	mesh                 *meshStateManager
 	cloudMu              sync.Mutex
 	cloudCancel          context.CancelFunc
@@ -114,9 +122,11 @@ func main() {
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
-	a.remoteManager = newRemoteControlManager(a)
-	a.network = newNetworkMonitor(a)
-	a.mesh = newMeshStateManager(a)
+	a.eventPublisher()
+	a.controllerCore = a.newControllerCore()
+	a.hostRemoteSessions = newHostRemoteSessionManager(hostRemoteSessionDepsFromApp(a))
+	a.network = newNetworkMonitor(networkMonitorDepsFromApp(a))
+	a.mesh = newMeshStateManager(meshStateDepsFromApp(a))
 	a.rebuildSessionProjections()
 	if err := a.backfillHistoricalContextEvents(); err != nil {
 		log.Fatal(err)
@@ -584,8 +594,4 @@ func dedupeStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
-}
-
-func (s Session) String() string {
-	return fmt.Sprintf("%s/%s", s.WorkspaceID, s.ID)
 }

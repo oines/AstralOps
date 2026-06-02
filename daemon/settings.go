@@ -36,6 +36,7 @@ type GeneralSettings struct {
 
 type AppearanceSettings struct {
 	Theme            string `json:"theme"`
+	Language         string `json:"language"`
 	MacSidebarEffect bool   `json:"mac_sidebar_effect"`
 	PreviewTheme     string `json:"preview_theme"`
 }
@@ -95,6 +96,7 @@ type generalSettingsPatch struct {
 
 type appearanceSettingsPatch struct {
 	Theme            *string `json:"theme,omitempty"`
+	Language         *string `json:"language,omitempty"`
 	MacSidebarEffect *bool   `json:"mac_sidebar_effect,omitempty"`
 	PreviewTheme     *string `json:"preview_theme,omitempty"`
 }
@@ -150,6 +152,7 @@ func defaultAppSettings() AppSettings {
 		},
 		Appearance: AppearanceSettings{
 			Theme:            "system",
+			Language:         "system",
 			MacSidebarEffect: true,
 			PreviewTheme:     "light",
 		},
@@ -251,6 +254,9 @@ func applySettingsPatch(settings *AppSettings, patch appSettingsPatch) {
 		if patch.Appearance.Theme != nil {
 			settings.Appearance.Theme = strings.TrimSpace(*patch.Appearance.Theme)
 		}
+		if patch.Appearance.Language != nil {
+			settings.Appearance.Language = strings.TrimSpace(*patch.Appearance.Language)
+		}
 		if patch.Appearance.MacSidebarEffect != nil {
 			settings.Appearance.MacSidebarEffect = *patch.Appearance.MacSidebarEffect
 		}
@@ -323,6 +329,9 @@ func normalizedAppSettings(settings AppSettings) AppSettings {
 	if settings.Appearance.Theme == "" {
 		settings.Appearance.Theme = "system"
 	}
+	if settings.Appearance.Language == "" {
+		settings.Appearance.Language = "system"
+	}
 	if settings.Appearance.PreviewTheme == "" {
 		settings.Appearance.PreviewTheme = "light"
 	}
@@ -352,6 +361,9 @@ func normalizedAppSettings(settings AppSettings) AppSettings {
 func validateAppSettings(settings AppSettings) error {
 	if !oneOf(settings.Appearance.Theme, "system", "light", "dark") {
 		return fmt.Errorf("invalid appearance.theme %q", settings.Appearance.Theme)
+	}
+	if !oneOf(settings.Appearance.Language, "system", "en", "zh-CN") {
+		return fmt.Errorf("invalid appearance.language %q", settings.Appearance.Language)
 	}
 	if !oneOf(settings.Appearance.PreviewTheme, "light", "dark", "system") {
 		return fmt.Errorf("invalid appearance.preview_theme %q", settings.Appearance.PreviewTheme)

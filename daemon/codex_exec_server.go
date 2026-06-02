@@ -23,7 +23,7 @@ type execServerRequest struct {
 }
 
 type execServerConn struct {
-	app             *app
+	deps            execServerDeps
 	ws              Workspace
 	proxy           *proxyClient
 	socket          *websocket.Conn
@@ -35,6 +35,32 @@ type execServerConn struct {
 	writeMu   sync.Mutex
 	processes map[string]*execServerProcess
 	remote    func(context.Context, string, any, any) error
+}
+
+type execServerDeps struct {
+	call          func(context.Context, Workspace, string, any, any) error
+	startExec     func(context.Context, Workspace, string, map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error)
+	startPTY      func(context.Context, Workspace, string, map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error)
+	recordCommand func(string, string, []string, []string)
+}
+
+func execServerDepsFromApp(a *app) execServerDeps {
+	deps := execServerDeps{}
+	if a == nil {
+		return deps
+	}
+	deps.recordCommand = a.recordCodexExecCommand
+	if a.ssh != nil {
+		deps.call = a.ssh.call
+		deps.startExec = func(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
+			return a.ssh.startExec(ctx, ws, id, params)
+		}
+		deps.startPTY = func(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
+			proxy, events, unsubscribe, started, err := a.ssh.startPTY(ctx, ws, id, params)
+			return proxy, events, unsubscribe, started, err
+		}
+	}
+	return deps
 }
 
 type execServerJSONRPCError struct {
@@ -99,7 +125,7 @@ func (a *app) handleCodexExecServerWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn := &execServerConn{
-		app:             a,
+		deps:            execServerDepsFromApp(a),
 		ws:              ws,
 		proxy:           proxy,
 		socket:          socket,
@@ -137,7 +163,7 @@ func (c *execServerConn) shutdown() {
 		proc.cancelProcess()
 		if proc.pty {
 			_ = c.remoteCall(context.Background(), "pty_kill", map[string]any{"id": proc.id}, nil)
-		} else if c.remote != nil || c.app != nil {
+		} else if c.remote != nil || c.deps.call != nil {
 			_ = c.remoteCall(context.Background(), "exec_kill", map[string]any{"id": proc.id}, nil)
 		}
 		proc.finish(143, "")
@@ -309,7 +335,10 @@ func (c *execServerConn) remoteCall(ctx context.Context, method string, params a
 	if c.remote != nil {
 		return c.remote(ctx, method, params, out)
 	}
-	return c.app.ssh.call(ctx, c.ws, method, params, out)
+	if c.deps.call == nil {
+		return errors.New("remote exec server ssh call is not initialized")
+	}
+	return c.deps.call(ctx, c.ws, method, params, out)
 }
 
 func (c *execServerConn) getMetadata(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -383,8 +412,8 @@ func (c *execServerConn) processStart(raw json.RawMessage) (any, error) {
 	if p.Arg0 != "" && len(p.Argv) > 0 {
 		p.Arg0 = p.Argv[0]
 	}
-	if c.app != nil {
-		c.app.recordCodexExecCommand(c.ws.ID, p.ProcessID, nativeArgv, p.Argv)
+	if c.deps.recordCommand != nil {
+		c.deps.recordCommand(c.ws.ID, p.ProcessID, nativeArgv, p.Argv)
 	}
 	proc := newExecServerProcess(p.ProcessID, c.writeNotification)
 	proc.pty = p.TTY
@@ -403,7 +432,7 @@ func (c *execServerConn) processStart(raw json.RawMessage) (any, error) {
 		}
 		return result, err
 	}
-	if c.remote == nil && c.app != nil {
+	if c.remote == nil && c.deps.startExec != nil {
 		result, err := c.startRemoteExecProcess(p, proc)
 		if err != nil {
 			c.removeProcess(p.ProcessID)
@@ -455,7 +484,10 @@ func (c *execServerConn) startRemoteExecProcess(p struct {
 	Arg0      string            `json:"arg0"`
 }, proc *execServerProcess) (any, error) {
 	command := argvToShellCommand(p.Argv)
-	proxy, events, unsubscribe, started, err := c.app.ssh.startExec(context.Background(), c.ws, p.ProcessID, map[string]any{"cwd": p.CWD, "command": command, "argv": p.Argv, "env": p.Env, "arg0": p.Arg0, "timeout_ms": int((24 * time.Hour).Milliseconds())})
+	if c.deps.startExec == nil {
+		return nil, errors.New("remote exec server ssh exec is not initialized")
+	}
+	proxy, events, unsubscribe, started, err := c.deps.startExec(context.Background(), c.ws, p.ProcessID, map[string]any{"cwd": p.CWD, "command": command, "argv": p.Argv, "env": p.Env, "arg0": p.Arg0, "timeout_ms": int((24 * time.Hour).Milliseconds())})
 	if err != nil {
 		proc.finish(1, err.Error())
 		return nil, err
@@ -489,7 +521,10 @@ func (c *execServerConn) startTTYProcess(p struct {
 	TTY       bool              `json:"tty"`
 	Arg0      string            `json:"arg0"`
 }, proc *execServerProcess) (any, error) {
-	proxy, events, unsubscribe, _, err := c.app.ssh.startPTY(context.Background(), c.ws, p.ProcessID, map[string]any{"cwd": p.CWD, "argv": p.Argv, "env": p.Env, "arg0": p.Arg0})
+	if c.deps.startPTY == nil {
+		return nil, errors.New("remote exec server ssh pty is not initialized")
+	}
+	proxy, events, unsubscribe, _, err := c.deps.startPTY(context.Background(), c.ws, p.ProcessID, map[string]any{"cwd": p.CWD, "argv": p.Argv, "env": p.Env, "arg0": p.Arg0})
 	if err != nil {
 		proc.finish(1, err.Error())
 		return nil, err
@@ -568,7 +603,7 @@ func (c *execServerConn) processTerminate(raw json.RawMessage) (any, error) {
 	proc.cancelProcess()
 	if proc.pty {
 		_ = c.remoteCall(context.Background(), "pty_kill", map[string]any{"id": p.ProcessID}, nil)
-	} else if c.remote != nil || c.app != nil {
+	} else if c.remote != nil || c.deps.call != nil {
 		_ = c.remoteCall(context.Background(), "exec_kill", map[string]any{"id": p.ProcessID}, nil)
 	}
 	proc.finish(143, "")

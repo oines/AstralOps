@@ -15,15 +15,15 @@ const (
 	cloudSyncTimeout  = 15 * time.Second
 )
 
-func (a *app) applyCloudSettings(settings CloudSettings) error {
+func (a *cloudmeshService) applyCloudSettings(settings CloudSettings) error {
 	return a.applyCloudSettingsWithOffline(settings, true)
 }
 
-func (a *app) restartCloudSync(settings CloudSettings) error {
+func (a *cloudmeshService) restartCloudSync(settings CloudSettings) error {
 	return a.applyCloudSettingsWithOffline(settings, false)
 }
 
-func (a *app) applyCloudSettingsWithOffline(settings CloudSettings, markOfflineOnStop bool) error {
+func (a *cloudmeshService) applyCloudSettingsWithOffline(settings CloudSettings, markOfflineOnStop bool) error {
 	settings = normalizedAppSettings(AppSettings{Cloud: settings}).Cloud
 	if settings.Enabled {
 		if err := validateCloudSettings(settings); err != nil {
@@ -33,24 +33,32 @@ func (a *app) applyCloudSettingsWithOffline(settings CloudSettings, markOfflineO
 
 	a.cloudMu.Lock()
 	defer a.cloudMu.Unlock()
-	if a.cloudCancel != nil {
-		a.cloudCancel()
-		a.cloudCancel = nil
+	if a.cloudCancel != nil && *a.cloudCancel != nil {
+		(*a.cloudCancel)()
+		*a.cloudCancel = nil
 	}
-	a.cloudSettings = settings
+	if a.cloudSettings != nil {
+		*a.cloudSettings = settings
+	}
 	if !settings.Enabled {
-		a.cloudRelayConnected = false
-		a.refreshMeshStateAsync(true)
+		if a.cloudRelayConnected != nil {
+			*a.cloudRelayConnected = false
+		}
+		if a.refreshMeshStateAsync != nil {
+			a.refreshMeshStateAsync(true)
+		}
 		return nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	a.cloudCancel = cancel
+	if a.cloudCancel != nil {
+		*a.cloudCancel = cancel
+	}
 	go a.cloudSyncLoop(ctx, settings, markOfflineOnStop)
 	return nil
 }
 
-func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings, markOfflineOnStop bool) {
+func (a *cloudmeshService) cloudSyncLoop(ctx context.Context, settings CloudSettings, markOfflineOnStop bool) {
 	client := CloudClient{BaseURL: settings.BaseURL, Token: settings.AccountToken}
 	selfDeviceID := a.store.hostInfo().Identity.DeviceID
 	if err := a.cloudRegisterAndHeartbeat(ctx, client); err != nil {
@@ -93,7 +101,7 @@ func (a *app) cloudSyncLoop(ctx context.Context, settings CloudSettings, markOff
 	}
 }
 
-func (a *app) startCloudRelayWebSocketLoop(ctx context.Context, cloudClient CloudClient, initialClient RelayClient, relayURL string, hasRelay bool) context.CancelFunc {
+func (a *cloudmeshService) startCloudRelayWebSocketLoop(ctx context.Context, cloudClient CloudClient, initialClient RelayClient, relayURL string, hasRelay bool) context.CancelFunc {
 	relayURL = strings.TrimSpace(relayURL)
 	if !hasRelay || relayURL == "" {
 		return func() {}
@@ -131,7 +139,7 @@ func relayWebSocketLoopKey(relayURL string, hasRelay bool) string {
 	return strings.TrimSpace(relayURL)
 }
 
-func (a *app) syncCloudRegistrationSoon(settings AppSettings) {
+func (a *cloudmeshService) syncCloudRegistrationSoon(settings AppSettings) {
 	if a == nil || !settings.Cloud.Enabled || validateCloudSettings(settings.Cloud) != nil {
 		return
 	}
@@ -145,7 +153,7 @@ func (a *app) syncCloudRegistrationSoon(settings AppSettings) {
 	}()
 }
 
-func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient) error {
+func (a *cloudmeshService) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient) error {
 	if a == nil || a.store == nil {
 		return nil
 	}
@@ -204,7 +212,9 @@ func (a *app) cloudRegisterAndHeartbeat(ctx context.Context, client CloudClient)
 			return err
 		}
 	}
-	a.refreshMeshStateAsync(true)
+	if a.refreshMeshStateAsync != nil {
+		a.refreshMeshStateAsync(true)
+	}
 	return nil
 }
 
@@ -220,7 +230,7 @@ func cloudRelayClientFromCloud(ctx context.Context, client CloudClient) (RelayCl
 	return relayClient, relay.RelayURL, true, nil
 }
 
-func (a *app) cloudSyncRevokedDevices(devices []CloudDeviceRecord) (bool, error) {
+func (a *cloudmeshService) cloudSyncRevokedDevices(devices []CloudDeviceRecord) (bool, error) {
 	if a == nil || a.store == nil {
 		return false, nil
 	}
@@ -235,13 +245,17 @@ func (a *app) cloudSyncRevokedDevices(devices []CloudDeviceRecord) (bool, error)
 			selfRevoked = true
 			continue
 		}
-		if _, ok := a.store.trustedControlGrant(deviceID); ok {
+		if _, ok := a.store.trustedControlGrant(deviceID); ok && a.revokeTrustedControlDevice != nil {
 			if _, err := a.revokeTrustedControlDevice(deviceID, ""); err != nil {
 				return selfRevoked, err
 			}
 		} else {
-			a.closeControlSessionsForDevice(deviceID, "mesh_device_revoked")
-			a.releaseTerminalWritersForDevice(deviceID)
+			if a.closeControlSessionsForDevice != nil {
+				a.closeControlSessionsForDevice(deviceID, "mesh_device_revoked")
+			}
+			if a.releaseTerminalWritersForDevice != nil {
+				a.releaseTerminalWritersForDevice(deviceID)
+			}
 		}
 		if _, _, err := a.store.markKnownHostRevoked(deviceID); err != nil {
 			return selfRevoked, err
@@ -253,25 +267,27 @@ func (a *app) cloudSyncRevokedDevices(devices []CloudDeviceRecord) (bool, error)
 	return selfRevoked, nil
 }
 
-func (a *app) setCloudSelfRevoked(revoked bool) {
+func (a *cloudmeshService) setCloudSelfRevoked(revoked bool) {
 	if a == nil {
 		return
 	}
 	a.cloudMu.Lock()
-	a.cloudSelfRevoked = revoked
+	if a.cloudSelfRevoked != nil {
+		*a.cloudSelfRevoked = revoked
+	}
 	a.cloudMu.Unlock()
 }
 
-func (a *app) currentDeviceCloudRevoked() bool {
+func (a *cloudmeshService) currentDeviceCloudRevoked() bool {
 	if a == nil {
 		return false
 	}
 	a.cloudMu.Lock()
 	defer a.cloudMu.Unlock()
-	return a.cloudSelfRevoked
+	return a.cloudSelfRevoked != nil && *a.cloudSelfRevoked
 }
 
-func (a *app) cloudSyncApprovedPairingKnownHosts(ctx context.Context, client CloudClient, devices []CloudDeviceRecord) error {
+func (a *cloudmeshService) cloudSyncApprovedPairingKnownHosts(ctx context.Context, client CloudClient, devices []CloudDeviceRecord) error {
 	if a == nil || a.store == nil {
 		return nil
 	}
@@ -353,7 +369,7 @@ func hostInfoFromCloudDevice(device CloudDeviceRecord) HostInfo {
 	}
 }
 
-func (a *app) cloudSyncPendingPairingRequests(ctx context.Context, client CloudClient) error {
+func (a *cloudmeshService) cloudSyncPendingPairingRequests(ctx context.Context, client CloudClient) error {
 	if a == nil || a.store == nil {
 		return nil
 	}
@@ -422,13 +438,15 @@ func (a *app) cloudSyncPendingPairingRequests(ctx context.Context, client CloudC
 			return err
 		}
 		if created {
-			a.emitPairingRequested(request)
+			if a.emitPairingRequested != nil {
+				a.emitPairingRequested(request)
+			}
 		}
 	}
 	return nil
 }
 
-func (a *app) cloudResolvePairingSignal(ctx context.Context, client CloudClient, request PairingRequest) {
+func (a *cloudmeshService) cloudResolvePairingSignal(ctx context.Context, client CloudClient, request PairingRequest) {
 	cloudRequestID := strings.TrimSpace(request.CloudRequestID)
 	if cloudRequestID == "" || (request.Status != PairingStatusApproved && request.Status != PairingStatusDenied) {
 		return
@@ -438,7 +456,7 @@ func (a *app) cloudResolvePairingSignal(ctx context.Context, client CloudClient,
 	}
 }
 
-func (a *app) syncCloudPairingResolution(request PairingRequest) {
+func (a *cloudmeshService) syncCloudPairingResolution(request PairingRequest) {
 	if a == nil || a.store == nil || strings.TrimSpace(request.CloudRequestID) == "" {
 		return
 	}
@@ -458,7 +476,7 @@ func (a *app) syncCloudPairingResolution(request PairingRequest) {
 	a.cloudResolvePairingSignal(ctx, CloudClient{BaseURL: settings.BaseURL, Token: settings.AccountToken}, request)
 }
 
-func (a *app) cloudMarkOffline(settings CloudSettings, deviceID string) {
+func (a *cloudmeshService) cloudMarkOffline(settings CloudSettings, deviceID string) {
 	if a == nil || a.store == nil || !settings.Enabled {
 		return
 	}

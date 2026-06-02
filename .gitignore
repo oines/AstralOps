@@ -16,6 +16,7 @@ proxy-agent/astral-proxy-agent
 !.env.*.example
 .npmrc.local
 .vercel/
+apps/mobile/.expo/
 secrets/
 credentials/
 private/

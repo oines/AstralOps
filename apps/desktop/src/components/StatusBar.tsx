@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import type { AgentKind, ConnectionState, Workspace, WorkspaceConnection } from "../types";
 
 type StatusBarProps = {
@@ -23,6 +25,7 @@ export function StatusBar({
   sessionState = "idle",
   sessionTitle,
 }: StatusBarProps): React.JSX.Element {
+  const { t } = useTranslation(["common", "desktop"]);
   const agent = sessionAgent ?? activeWorkspace?.agent;
   const title = sessionTitle || activeWorkspace?.name || "AstralOps";
   const path = activeWorkspace?.target === "ssh" ? sshDisplayPath(activeWorkspace, activeWorkspaceConnection) : activeWorkspace?.local_cwd;
@@ -40,11 +43,11 @@ export function StatusBar({
           {agent && path ? <span className="shrink-0 text-[#c2bfb8]">·</span> : null}
           {path ? <span className="truncate">{path}</span> : null}
           {agent ? <span className="shrink-0 text-[#c2bfb8]">·</span> : null}
-          {agent ? <span className={`shrink-0 ${sessionStateClass(effectiveState)}`}>{sessionStateLabel(effectiveState)}</span> : null}
+          {agent ? <span className={`shrink-0 ${sessionStateClass(effectiveState)}`}>{sessionStateLabel(effectiveState, t)}</span> : null}
           {queuedCount > 0 ? (
             <>
               <span className="shrink-0 text-[#c2bfb8]">·</span>
-              <span className="shrink-0 text-[#6f8df6]">已排队 {queuedCount}</span>
+              <span className="shrink-0 text-[#6f8df6]">{t("desktop:statusBar.queued", { count: queuedCount })}</span>
             </>
           ) : null}
         </div>
@@ -90,20 +93,20 @@ function sshDisplayPath(workspace: Workspace, connection?: WorkspaceConnection |
   return cwd;
 }
 
-function sessionStateLabel(state: NonNullable<StatusBarProps["sessionState"]>): string {
+function sessionStateLabel(state: NonNullable<StatusBarProps["sessionState"]>, t: TFunction): string {
   switch (state) {
     case "running":
-      return "运行中";
+      return t("desktop:statusBar.states.running");
     case "requires_action":
-      return "等待确认";
+      return t("desktop:statusBar.states.requires_action");
     case "reconnecting":
-      return "重连中";
+      return t("desktop:statusBar.states.reconnecting");
     case "disconnected":
-      return "已断开";
+      return t("desktop:statusBar.states.disconnected");
     case "failed":
-      return "失败";
+      return t("desktop:statusBar.states.failed");
     default:
-      return "空闲";
+      return t("desktop:statusBar.states.idle");
   }
 }
 

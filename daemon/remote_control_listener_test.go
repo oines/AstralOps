@@ -306,6 +306,49 @@ func TestRemoteHostProxyCreatesWorkspaceAndBrowsesHostFilesystem(t *testing.T) {
 	}
 }
 
+func TestRemoteHostProxyReadsSessionMedia(t *testing.T) {
+	hostApp, workspace := newRemoteControlHandlerTestApp(t)
+	session := hostApp.store.createSession(workspace, AgentCodex)
+	media := addControlMediaFixture(t, hostApp, workspace, session, []byte("remote-image-body"))
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
+	defer hostServer.Close()
+
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestCloudMembership(t, controllerStore, false, true)
+	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityMediaRead}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/sessions/"+session.ID+"/media/"+strconv.FormatInt(media.eventSeq, 10)+"/"+media.mediaID, nil)
+	resp := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("remote media status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if got := resp.Body.String(); got != "remote-image-body" {
+		t.Fatalf("remote media body = %q, want fixture bytes", got)
+	}
+	if contentType := resp.Header().Get("Content-Type"); contentType != "image/png" {
+		t.Fatalf("content type = %q, want image/png", contentType)
+	}
+	if strings.Contains(resp.Body.String(), media.path) {
+		t.Fatalf("remote media response leaked Host path: %s", resp.Body.String())
+	}
+}
+
+func TestRemoteHostRecordUsesActiveControlTransport(t *testing.T) {
+	host := remoteHostRecord{DeviceID: "dev_host", Status: remoteHostStatusLAN, Connection: remoteHostStatusLAN}
+	control := remoteHostControlState{State: remoteControlStateConnected, Transport: remoteHostStatusRelay}
+	next := remoteHostRecordWithControlState(host, control)
+	if next.Connection != remoteHostStatusRelay || next.Status != remoteHostStatusOnline {
+		t.Fatalf("record = %#v, want active relay transport to own displayed route", next)
+	}
+}
+
 func TestRemoteHostProxyRejectsUnknownHost(t *testing.T) {
 	controllerStore, err := loadStore(t.TempDir())
 	if err != nil {
@@ -408,6 +451,23 @@ func TestRemoteHostProxyOpensWorkspacePTY(t *testing.T) {
 	if ready["type"] != "ready" {
 		t.Fatalf("first PTY message = %#v, want ready", ready)
 	}
+	terminalID := stringValue(ready["terminal_id"])
+	stateReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/state", nil)
+	stateResp := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(stateResp, stateReq)
+	if stateResp.Code != http.StatusOK {
+		t.Fatalf("remote Host state status = %d body = %s", stateResp.Code, stateResp.Body.String())
+	}
+	var state remoteHostSessionState
+	if err := json.Unmarshal(stateResp.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.State != hostRemoteStateLive {
+		t.Fatalf("remote Host state = %q, want live", state.State)
+	}
+	if terminal := state.Terminals[terminalID]; terminal.State != hostTerminalStateLive || !terminal.CanInput {
+		t.Fatalf("terminal state = %#v, want live can_input", terminal)
+	}
 
 	marker := "remote-pty-facade-" + randomID(8)
 	command := "printf '%s\\n' " + shellSingleQuote(marker) + "\n"
@@ -433,4 +493,69 @@ func TestRemoteHostProxyOpensWorkspacePTY(t *testing.T) {
 		}
 	}
 	t.Fatalf("remote PTY output did not contain marker %q", marker)
+}
+
+func TestRemoteHostProxyReportsTerminalStreamDisconnectAsResyncing(t *testing.T) {
+	if !terminalAvailableOnHost() {
+		t.Skip("terminal is not available on this Host")
+	}
+	t.Setenv("SHELL", terminalManagerTestShell(t))
+
+	hostApp, workspace := newRemoteControlHandlerTestApp(t)
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
+	defer hostServer.Close()
+
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestCloudMembership(t, controllerStore, false, true)
+	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityTerminalOpen, CapabilityTerminalInput}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+	controllerServer := httptest.NewServer(http.HandlerFunc(controllerApp.handleRemoteHostAction))
+	defer controllerServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(controllerServer.URL, "http") + "/v1/remote/hosts/" + hostApp.store.deviceIdentity.DeviceID + "/workspaces/" + workspace.ID + "/pty"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var ready map[string]any
+	if err := conn.ReadJSON(&ready); err != nil {
+		t.Fatal(err)
+	}
+	if ready["type"] != "ready" {
+		t.Fatalf("first PTY message = %#v, want ready", ready)
+	}
+
+	controllerApp.controllerManagedTransport().Invalidate(hostApp.store.deviceIdentity.DeviceID, "test_disconnect")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			t.Fatal(err)
+		}
+		var message map[string]any
+		if err := conn.ReadJSON(&message); err != nil {
+			t.Fatal(err)
+		}
+		switch message["type"] {
+		case "status":
+			if stringValue(message["state"]) == "resyncing" && message["can_input"] == false {
+				return
+			}
+		case "exit":
+			t.Fatalf("remote PTY stream disconnect was reported as terminal exit: %#v", message)
+		case "error":
+			t.Fatalf("remote PTY stream disconnect should stay attached for resync, got error: %#v", message)
+		}
+	}
+	t.Fatal("remote PTY stream disconnect did not report resyncing status")
 }

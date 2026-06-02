@@ -3,25 +3,16 @@ package main
 import (
 	"errors"
 	"net/http"
+
+	"github.com/oines/astralops/daemon/internal/apperrors"
 )
 
 const controlAuthorizationRequiredCode = "control_authorization_required"
 
-type actionError struct {
-	Status  int
-	Code    string
-	Message string
-}
-
-func (e *actionError) Error() string {
-	if e == nil {
-		return ""
-	}
-	return e.Message
-}
+type actionError = apperrors.ActionError
 
 func newActionError(status int, code string, message string) *actionError {
-	return &actionError{Status: status, Code: code, Message: message}
+	return apperrors.New(status, code, message)
 }
 
 func writeActionError(w http.ResponseWriter, err error) {

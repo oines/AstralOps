@@ -1,39 +1,23 @@
-export type AgentKind = "claude" | "codex";
-export type WorkspaceTarget = "local" | "ssh";
+import type {
+  AgentKind as GeneratedAgentKind,
+  AstralEvent as GeneratedAstralEvent,
+  Workspace as GeneratedWorkspace,
+  WorkspaceConnection as GeneratedWorkspaceConnection,
+  WorkspaceTarget as GeneratedWorkspaceTarget,
+} from "./generated";
 
-export type Workspace = {
-  id: string;
-  name: string;
+export * as GeneratedProtocol from "./generated";
+
+export type AgentKind = GeneratedAgentKind;
+export type WorkspaceTarget = GeneratedWorkspaceTarget;
+
+export type Workspace = Omit<GeneratedWorkspace, "target"> & {
   target: WorkspaceTarget;
-  agent: AgentKind;
-  local_projection_root: string;
-  local_cwd?: string;
-  ssh?: {
-    endpoint: string;
-    port: number;
-    remote_cwd: string;
-  };
-  native_session_id?: string;
-  native_thread_id?: string;
-  created_at?: string;
-  updated_at?: string;
 };
 
-export type WorkspaceConnection = {
-  workspace_id: string;
-  target: WorkspaceTarget;
+export type WorkspaceConnection = Omit<GeneratedWorkspaceConnection, "target" | "status" | "capabilities"> & {
+  target: WorkspaceTarget | string;
   status: "disconnected" | "connecting" | "connected" | "reconnecting" | "degraded" | "failed" | string;
-  endpoint?: string;
-  port?: number;
-  remote_cwd?: string;
-  remote_user?: string;
-  remote_host?: string;
-  remote_os?: string;
-  remote_arch?: string;
-  remote_shell?: string;
-  display_cwd?: string;
-  helper_path?: string;
-  helper_status?: string;
   capabilities?: {
     rg?: {
       available?: boolean;
@@ -42,22 +26,11 @@ export type WorkspaceConnection = {
     };
     [key: string]: unknown;
   };
-  message?: string;
-  retry_attempt?: number;
-  retry_max?: number;
-  updated_at: string;
-  raw?: Record<string, unknown>;
 };
 
-export type AstralEvent = {
-  seq: number;
-  ts: string;
-  workspace_id: string;
-  session_id: string;
-  agent: AgentKind;
+export type AstralEvent = Omit<GeneratedAstralEvent, "kind" | "normalized"> & {
   kind: AstralEventKind;
   normalized: AstralNormalizedEvent;
-  raw?: unknown;
 };
 
 export type AstralEventFamily =
@@ -929,6 +902,7 @@ export type ControlAction =
   | "terminal.list"
   | "terminal.attach"
   | "terminal.detach"
+  | "terminal.heartbeat_ack"
   | "terminal.input"
   | "terminal.resize"
   | "terminal.close"
@@ -949,6 +923,8 @@ export type TerminalOpenParams = {
 
 export type TerminalInputParams = {
   terminal_id: string;
+  viewer_id?: string;
+  input_lease_id?: string;
   data?: string;
 };
 
@@ -963,12 +939,21 @@ export type TerminalDetachParams = {
 
 export type TerminalResizeParams = {
   terminal_id: string;
+  viewer_id?: string;
+  input_lease_id?: string;
   cols: number;
   rows: number;
 };
 
 export type TerminalCloseParams = {
   terminal_id: string;
+};
+
+export type TerminalHeartbeatAckParams = {
+  terminal_id: string;
+  viewer_id: string;
+  input_lease_id: string;
+  heartbeat_seq: number;
 };
 
 export type TerminalOpenResult = {
@@ -997,6 +982,8 @@ export type TerminalAttachResult = {
   target: WorkspaceTarget;
   status: "open" | "closed";
   viewer_device_id: string;
+  viewer_id: string;
+  input_lease_id: string;
   connection_id: string;
   writer_device_id?: string;
   output_seq: number;
@@ -1008,6 +995,9 @@ export type TerminalStreamFrame = {
   target: WorkspaceTarget;
   status: "open" | "closed";
   output_seq: number;
+  viewer_id?: string;
+  input_lease_id?: string;
+  heartbeat_seq?: number;
   data?: string;
   reason?: string;
 };
@@ -1301,6 +1291,10 @@ export type CloudPairingSignalResponse = {
   request: CloudPairingSignal;
 };
 
+export type CloudPairingSignalListResponse = {
+  requests: CloudPairingSignal[];
+};
+
 export type RelayPayloadKind = "control.hello" | "control.hello_ack" | "control.sealed_frame";
 
 export type RelayEnvelope = {
@@ -1324,6 +1318,7 @@ export type ControlHelloFrame = {
   controller_ephemeral_key: string;
   client_nonce: string;
   signature: string;
+  membership_lease?: CloudMembershipLease;
 };
 
 export type ControlHelloAckFrame = {
@@ -1333,10 +1328,12 @@ export type ControlHelloAckFrame = {
   host_device_id: string;
   host_public_key: string;
   host_ephemeral_key: string;
+  client_nonce?: string;
   server_nonce: string;
   signature: string;
   encryption: "x25519-aes-256-gcm" | string;
   signature_algorithm: "ed25519" | string;
+  membership_lease?: CloudMembershipLease;
 };
 
 export type ControlPlainFrame =
@@ -1354,6 +1351,10 @@ export type ControlPlainFrame =
     }
   | {
       type: "terminal.output";
+      terminal: TerminalStreamFrame;
+    }
+  | {
+      type: "terminal.heartbeat";
       terminal: TerminalStreamFrame;
     }
   | {
@@ -1423,13 +1424,34 @@ export type RemoteHostRecord = {
   lan_base_url?: string;
   capabilities?: ControlCapability[];
   control?: {
-    state: "idle" | "connecting" | "connected" | "reconnecting" | "failed" | string;
+    state: "idle" | "connecting" | "connected" | "live" | "reconnecting" | "failed" | "needs_pairing" | "revoked" | string;
     transport?: "lan" | "relay" | string;
     route_generation: number;
     last_error_code?: string;
     last_error?: string;
     updated_at?: string;
   };
+};
+
+export type RemoteHostSessionState = {
+  host_device_id: string;
+  state: "idle" | "connecting" | "live" | "reconnecting" | "failed" | "needs_pairing" | "revoked" | string;
+  transport?: "lan" | "relay" | string;
+  can_request: boolean;
+  workbench: {
+    state: "loading" | "live" | "resyncing" | "stale" | "failed" | string;
+    version?: number;
+    last_error?: string;
+  };
+  terminals: Record<string, {
+    state: "attaching" | "live" | "resyncing" | "paused" | "failed" | "closed" | string;
+    can_input: boolean;
+    output_seq?: number;
+    last_error?: string;
+    updated_at: string;
+  }>;
+  last_error?: string;
+  updated_at: string;
 };
 
 export type RemoteHostsResponse = {
@@ -1531,6 +1553,7 @@ export type ControlActionParamMap = {
   "terminal.list": undefined;
   "terminal.attach": TerminalAttachParams;
   "terminal.detach": TerminalDetachParams;
+  "terminal.heartbeat_ack": TerminalHeartbeatAckParams;
   "terminal.input": TerminalInputParams;
   "terminal.resize": TerminalResizeParams;
   "terminal.close": TerminalCloseParams;
@@ -1584,6 +1607,7 @@ export type ControlActionResultMap = {
   "terminal.list": TerminalListResult;
   "terminal.attach": TerminalAttachResult;
   "terminal.detach": TerminalAttachResult;
+  "terminal.heartbeat_ack": TerminalAckResult;
   "terminal.input": TerminalAckResult;
   "terminal.resize": TerminalAckResult;
   "terminal.close": TerminalAckResult;
@@ -1643,6 +1667,7 @@ export type AppSettings = {
   };
   appearance: {
     theme: "system" | "light" | "dark";
+    language: "system" | "en" | "zh-CN";
     mac_sidebar_effect: boolean;
     preview_theme: "light" | "dark" | "system";
   };

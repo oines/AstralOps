@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,9 +20,9 @@ const (
 	remoteHostStatusRelay   = "relay"
 	remoteHostStatusOnline  = "online"
 	remoteHostStatusOffline = "offline"
-	remoteHostDiscoveryTTL  = 1500 * time.Millisecond
+	remoteHostDiscoveryTTL  = 700 * time.Millisecond
 	remoteHostCloudTimeout  = 4 * time.Second
-	remoteHostLANTimeout    = 2 * time.Second
+	remoteHostLANTimeout    = 700 * time.Millisecond
 
 	remoteHostAuthorizationNeedsPairing = "needs_pairing"
 	remoteHostAuthorizationPending      = "pending"
@@ -68,7 +69,7 @@ func (a *app) handleRemoteHosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, remoteHostsResponse{Hosts: a.buildRemoteHostRecords(r.Context(), truthyQuery(r.URL.Query().Get("discover")))})
 }
 
-func (a *app) buildRemoteHostRecords(ctx context.Context, discover bool) []remoteHostRecord {
+func (a *remoteControlService) buildRemoteHostRecords(ctx context.Context, discover bool) []remoteHostRecord {
 	hosts := map[string]remoteHostRecord{}
 	if !a.cloudMeshActiveFor(cloudMembershipRole{CanControl: true}) {
 		return []remoteHostRecord{}
@@ -79,9 +80,10 @@ func (a *app) buildRemoteHostRecords(ctx context.Context, discover bool) []remot
 	}
 	out := make([]remoteHostRecord, 0, len(hosts))
 	for _, host := range hosts {
-		if a.remoteManager != nil {
-			host.Control = a.remoteManager.controlState(host.DeviceID)
+		if manager := a.hostRemoteSessionManager(); manager != nil {
+			host.Control = manager.ControlState(host.DeviceID)
 		}
+		host = remoteHostRecordWithControlState(host, host.Control)
 		out = append(out, host)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -95,7 +97,7 @@ func (a *app) buildRemoteHostRecords(ctx context.Context, discover bool) []remot
 	return out
 }
 
-func (a *app) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remoteHostRecord) {
+func (a *remoteControlService) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remoteHostRecord) {
 	if a == nil || a.store == nil {
 		return
 	}
@@ -133,7 +135,7 @@ func (a *app) mergeCloudRemoteHosts(ctx context.Context, hosts map[string]remote
 	}
 }
 
-func (a *app) remoteHostPairingSignalsByHost(ctx context.Context, client CloudClient, controllerDeviceID string) map[string]CloudPairingSignal {
+func (a *remoteControlService) remoteHostPairingSignalsByHost(ctx context.Context, client CloudClient, controllerDeviceID string) map[string]CloudPairingSignal {
 	controllerDeviceID = strings.TrimSpace(controllerDeviceID)
 	if controllerDeviceID == "" {
 		return nil
@@ -168,7 +170,7 @@ func cloudPairingSignalNewer(left, right CloudPairingSignal) bool {
 	return leftTime > rightTime
 }
 
-func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
+func (a *remoteControlService) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 	candidates, err := discoverRemoteControlHostsWithTimeout(remoteHostDiscoveryTTL, defaultRemoteControlDiscoveryPort)
 	if err != nil {
 		return
@@ -194,8 +196,14 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 			continue
 		}
 		known = a.rememberRemoteHostLANRoute(hostInfo, candidate.BaseURL, known)
-		if a.remoteManager != nil {
-			a.remoteManager.clearLANFailure(candidate.DeviceID)
+		if transport := a.controllerManagedTransport(); transport != nil {
+			transport.ClearLANFailure(candidate.DeviceID)
+			state := transport.ControlState(candidate.DeviceID)
+			if state.State == hostRemoteStateLive && state.Transport == remoteHostStatusRelay && transport.HasActiveSession(candidate.DeviceID) {
+				if manager := a.hostRemoteSessionManager(); manager == nil || !manager.InvalidateActiveSession(candidate.DeviceID, "lan_route_available") {
+					transport.Invalidate(candidate.DeviceID, "lan_route_available")
+				}
+			}
 		}
 		next := remoteHostRecordFromHostInfo(hostInfo, known, candidate.BaseURL)
 		if next.Capabilities == nil {
@@ -206,6 +214,23 @@ func (a *app) mergeDiscoveredRemoteHosts(hosts map[string]remoteHostRecord) {
 		next.PairingStatus = existing.PairingStatus
 		hosts[candidate.DeviceID] = next
 	}
+}
+
+func remoteHostRecordWithControlState(host remoteHostRecord, control remoteHostControlState) remoteHostRecord {
+	switch control.State {
+	case remoteControlStateConnecting, remoteControlStateConnected, remoteControlStateLive, remoteControlStateReconnecting:
+	default:
+		return host
+	}
+	switch control.Transport {
+	case remoteHostStatusLAN:
+		host.Status = remoteHostStatusLAN
+		host.Connection = remoteHostStatusLAN
+	case remoteHostStatusRelay:
+		host.Status = remoteHostStatusOnline
+		host.Connection = remoteHostStatusRelay
+	}
+	return host
 }
 
 func remoteHostRecordFromCloudDevice(device CloudDeviceRecord, existing remoteHostRecord) remoteHostRecord {
@@ -329,6 +354,17 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 	route := parts[1:]
 
 	switch {
+	case len(route) == 1 && route[0] == "state" && r.Method == http.MethodGet:
+		if r.URL.Query().Get("stream") == "1" || strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+			a.handleRemoteHostStateSSE(w, r, hostDeviceID)
+			return
+		}
+		manager := a.hostRemoteSessionManager()
+		if manager == nil {
+			writeRemoteHostError(w, errors.New("remote Host session manager is not initialized"))
+			return
+		}
+		writeJSON(w, http.StatusOK, manager.State(hostDeviceID))
 	case len(route) == 1 && route[0] == "workbench" && r.Method == http.MethodGet:
 		if r.URL.Query().Get("stream") == "1" || strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
 			a.handleRemoteHostWorkbenchSSE(w, r, hostDeviceID)
@@ -436,6 +472,8 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityHostManage, ControlActionHostPairingDeny, map[string]any{"request_id": route[2]})
 	case len(route) == 3 && route[0] == "sessions" && route[2] == "view" && r.Method == http.MethodGet:
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreRead, ControlActionSessionView, map[string]any{"session_id": route[1]})
+	case len(route) == 5 && route[0] == "sessions" && route[2] == "media" && r.Method == http.MethodGet:
+		a.handleRemoteSessionMedia(w, r, hostDeviceID, route[1], route[3], route[4])
 	case len(route) == 3 && route[0] == "sessions" && route[2] == "input" && r.Method == http.MethodPost:
 		var req struct {
 			Input           string            `json:"input"`
@@ -515,22 +553,63 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *app) writeRemoteWorkbenchResult(w http.ResponseWriter, hostDeviceID string) {
-	manager := a.remoteControlManager()
-	if manager == nil {
-		writeRemoteHostError(w, errors.New("remote control manager is not initialized"))
+func (a *app) handleRemoteSessionMedia(w http.ResponseWriter, r *http.Request, hostDeviceID, sessionID, seqText, mediaID string) {
+	seq, err := strconv.ParseInt(seqText, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid media reference", "code": "media_reference_invalid"})
 		return
 	}
-	response, err := manager.Request(context.Background(), hostDeviceID, CapabilityCoreRead, ControlActionHostSnapshot, map[string]any{"event_limit": 1})
+	download := r.URL.Query().Get("download") == "1"
+	capability := CapabilityMediaRead
+	action := ControlActionMediaRead
+	if download {
+		capability = CapabilityMediaDownload
+		action = ControlActionMediaDownload
+	}
+	response, err := a.remoteControlResponse(hostDeviceID, capability, action, map[string]any{
+		"session_id": sessionID,
+		"event_seq":  seq,
+		"media_id":   mediaID,
+	})
 	if err != nil {
 		writeRemoteHostError(w, err)
 		return
 	}
 	if !response.OK {
-		writeControlHTTPResult(w, response, ControlActionHostSnapshot)
+		writeControlHTTPResult(w, response, action)
 		return
 	}
-	workbench, err := remoteWorkbenchFromSnapshotResult(response.Result)
+	var result mediaReadResult
+	body, err := json.Marshal(response.Result)
+	if err != nil {
+		writeRemoteHostError(w, err)
+		return
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		writeRemoteHostError(w, err)
+		return
+	}
+	content, err := base64.StdEncoding.DecodeString(result.ContentBase64)
+	if err != nil {
+		writeRemoteHostError(w, newActionError(http.StatusBadGateway, "remote_media_invalid", "remote media response is invalid"))
+		return
+	}
+	if result.MIMEType != "" {
+		w.Header().Set("Content-Type", result.MIMEType)
+	}
+	if download {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", result.Name))
+	}
+	_, _ = w.Write(content)
+}
+
+func (a *app) writeRemoteWorkbenchResult(w http.ResponseWriter, hostDeviceID string) {
+	manager := a.hostRemoteSessionManager()
+	if manager == nil {
+		writeRemoteHostError(w, errors.New("remote Host session manager is not initialized"))
+		return
+	}
+	workbench, err := manager.session(hostDeviceID).Workbench(context.Background())
 	if err != nil {
 		writeRemoteHostError(w, err)
 		return
@@ -549,34 +628,12 @@ func (a *app) handleRemoteHostWorkbenchSSE(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	manager := a.remoteControlManager()
+	manager := a.hostRemoteSessionManager()
 	if manager == nil {
-		writeSSE(w, flusher, "workbench.error", map[string]string{"error": "remote control manager is not initialized"})
+		writeSSE(w, flusher, "workbench.error", map[string]string{"error": "remote Host session manager is not initialized"})
 		return
 	}
-	load := func() (workbenchState, error) {
-		response, err := manager.Request(r.Context(), hostDeviceID, CapabilityCoreRead, ControlActionHostSnapshot, map[string]any{"event_limit": 1})
-		if err != nil {
-			return workbenchState{}, err
-		}
-		if !response.OK {
-			return workbenchState{}, controlResponseActionError(response, ControlActionHostSnapshot)
-		}
-		return remoteWorkbenchFromSnapshotResult(response.Result)
-	}
-
-	current := workbenchState{}
-	if next, err := load(); err == nil {
-		writeSSE(w, flusher, "workbench.patch", diffWorkbenchState(current, next))
-		current = next
-	} else {
-		writeSSE(w, flusher, "workbench.error", map[string]string{"error": err.Error()})
-	}
-	stream, err := manager.SubscribeEvents(r.Context(), hostDeviceID, eventSubscriptionParams{})
-	if err != nil {
-		writeSSE(w, flusher, "workbench.error", map[string]string{"error": err.Error()})
-		return
-	}
+	stream := manager.session(hostDeviceID).SubscribeWorkbench(r.Context())
 	defer stream.Close()
 
 	ticker := time.NewTicker(10 * time.Second)
@@ -587,21 +644,11 @@ func (a *app) handleRemoteHostWorkbenchSSE(w http.ResponseWriter, r *http.Reques
 			return
 		case <-ticker.C:
 			writeSSE(w, flusher, "heartbeat", map[string]any{"ts": time.Now().UTC().Format(time.RFC3339Nano)})
-		case _, ok := <-stream.Events:
+		case message, ok := <-stream.Messages:
 			if !ok {
-				writeSSE(w, flusher, "workbench.error", map[string]string{"error": "remote workbench stream closed"})
 				return
 			}
-			next, err := load()
-			if err != nil {
-				writeSSE(w, flusher, "workbench.error", map[string]string{"error": err.Error()})
-				continue
-			}
-			patch := diffWorkbenchState(current, next)
-			if len(patch.Ops) > 0 {
-				writeSSE(w, flusher, "workbench.patch", patch)
-			}
-			current = next
+			writeSSE(w, flusher, message.Event, message.Payload)
 		}
 	}
 }
@@ -623,6 +670,41 @@ func remoteWorkbenchFromSnapshotResult(result any) (workbenchState, error) {
 	return snapshot.Workbench, nil
 }
 
+func (a *app) handleRemoteHostStateSSE(w http.ResponseWriter, r *http.Request, hostDeviceID string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming is not supported"})
+		return
+	}
+	manager := a.hostRemoteSessionManager()
+	if manager == nil {
+		writeRemoteHostError(w, errors.New("remote Host session manager is not initialized"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	ch, unsubscribe := manager.session(hostDeviceID).subscribeState()
+	defer unsubscribe()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case state, ok := <-ch:
+			if !ok {
+				return
+			}
+			writeSSE(w, flusher, "remote-host-state", state)
+		case <-ticker.C:
+			writeSSE(w, flusher, "heartbeat", map[string]any{"ts": time.Now().UTC().Format(time.RFC3339Nano)})
+		}
+	}
+}
+
 func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Request, hostDeviceID, workspaceID string) {
 	local, err := a.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -630,50 +712,36 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 	}
 	defer local.Close()
 
-	manager := a.remoteControlManager()
+	manager := a.hostRemoteSessionManager()
 	if manager == nil {
-		_ = local.WriteJSON(map[string]any{"type": "error", "message": "remote control manager is not initialized"})
+		_ = local.WriteJSON(map[string]any{"type": "error", "message": "remote Host session manager is not initialized"})
 		return
 	}
 	terminalID := strings.TrimSpace(r.URL.Query().Get("terminal_id"))
 	afterSeq, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
-	var terminal *remoteManagedTerminalStream
-	if terminalID != "" {
-		terminal, err = manager.AttachTerminal(r.Context(), hostDeviceID, terminalID, afterSeq)
-	} else {
-		terminal, err = manager.OpenTerminal(r.Context(), hostDeviceID, workspaceID, afterSeq)
-	}
+	terminal, err := manager.session(hostDeviceID).OpenTerminalViewer(r.Context(), workspaceID, terminalID, afterSeq)
 	if err != nil {
-		_ = local.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+		_ = local.WriteJSON(terminalSocketErrorPayload(err))
 		return
 	}
 	defer terminal.Detach()
 
 	localWriter := &remotePTYLocalWriter{}
-	localWriter.write(local, terminalReadySocketPayload(terminal.terminalID, terminal.shell, terminal.cwd, terminal.outputSeq))
+	if !localWriter.write(local, terminal.ReadyPayload()) {
+		return
+	}
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for frame := range terminal.Frames() {
-			if frame.Response != nil && !frame.Response.OK {
-				localWriter.write(local, map[string]any{"type": "error", "message": controlResponseMessage(*frame.Response)})
-				continue
+		for payload := range terminal.Messages() {
+			if !localWriter.write(local, payload) {
+				return
 			}
-			if frame.Terminal == nil || frame.Terminal.TerminalID != terminal.terminalID {
-				continue
-			}
-			switch frame.Type {
-			case terminalFrameOutput:
-				if payload := terminalOutputSocketPayload(frame.Terminal); payload != nil {
-					localWriter.write(local, payload)
-				}
-			case terminalFrameClosed:
-				localWriter.write(local, terminalExitSocketPayload(frame.Terminal))
+			if payload["type"] == "exit" {
 				return
 			}
 		}
-		localWriter.write(local, map[string]any{"type": "exit"})
 	}()
 
 	clientReads := make(chan remotePTYClientRead, 1)
@@ -707,8 +775,8 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 			if read.err != nil {
 				return
 			}
-			if err := remoteTerminalHandleManagedClientMessage(terminal, read.message); err != nil {
-				localWriter.write(local, map[string]any{"type": "error", "message": err.Error()})
+			if err := remoteTerminalHandleHostViewerClientMessage(terminal, read.message); err != nil {
+				localWriter.write(local, terminalSocketErrorPayload(err))
 			}
 		}
 	}
@@ -723,63 +791,32 @@ type remotePTYLocalWriter struct {
 	mu sync.Mutex
 }
 
-func (w *remotePTYLocalWriter) write(conn interface{ WriteJSON(any) error }, payload map[string]any) bool {
+func (w *remotePTYLocalWriter) write(conn interface {
+	SetWriteDeadline(time.Time) error
+	WriteJSON(any) error
+}, payload map[string]any) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return conn.WriteJSON(payload) == nil
+	_ = conn.SetWriteDeadline(time.Now().Add(terminalLocalSocketWriteTimeout))
+	err := conn.WriteJSON(payload)
+	_ = conn.SetWriteDeadline(time.Time{})
+	return err == nil
 }
 
-func remoteTerminalHandleClientMessage(conn controlClientFrameConn, st *store, terminalID string, message ptyClientMessage) error {
-	switch message.Type {
-	case "input":
-		return remoteTerminalRequest(conn, st, ControlRequest{
-			RequestID:  "remote_pty_input_" + randomID(8),
-			Capability: CapabilityTerminalInput,
-			Action:     ControlActionTerminalInput,
-			Params:     map[string]any{"terminal_id": terminalID, "data": message.Data},
-		})
-	case "resize":
-		if message.Cols > 0 && message.Rows > 0 {
-			return remoteTerminalRequest(conn, st, ControlRequest{
-				RequestID:  "remote_pty_resize_" + randomID(8),
-				Capability: CapabilityTerminalInput,
-				Action:     ControlActionTerminalResize,
-				Params:     map[string]any{"terminal_id": terminalID, "cols": message.Cols, "rows": message.Rows},
-			})
-		}
-	case "close":
-		return remoteTerminalClose(conn, st, terminalID)
-	}
-	return nil
-}
-
-func remoteTerminalHandleManagedClientMessage(terminal *remoteManagedTerminalStream, message ptyClientMessage) error {
+func remoteTerminalHandleHostViewerClientMessage(terminal *remoteHostTerminalViewer, message ptyClientMessage) error {
 	switch message.Type {
 	case "input":
 		return terminal.Input(message.Data)
 	case "resize":
 		return terminal.Resize(int(message.Cols), int(message.Rows))
+	case "heartbeat_ack":
+		return terminal.AckHeartbeat(message.HeartbeatSeq, message.RenderedSeq)
 	case "close":
 		return terminal.Close()
+	case "detach":
+		return terminal.Detach()
 	}
 	return nil
-}
-
-func remoteTerminalRequest(conn controlClientFrameConn, st *store, req ControlRequest) error {
-	req.ControllerDeviceID = st.deviceIdentity.DeviceID
-	return conn.WritePlain(controlPlainFrame{Type: "request", Request: &req})
-}
-
-func remoteTerminalClose(conn controlClientFrameConn, st *store, terminalID string) error {
-	if strings.TrimSpace(terminalID) == "" {
-		return nil
-	}
-	return remoteTerminalRequest(conn, st, ControlRequest{
-		RequestID:  "remote_pty_close_" + randomID(8),
-		Capability: CapabilityTerminalInput,
-		Action:     ControlActionTerminalClose,
-		Params:     map[string]any{"terminal_id": terminalID},
-	})
 }
 
 func controlResponseMessage(response ControlResponse) string {
@@ -795,14 +832,14 @@ func controlResponseMessage(response ControlResponse) string {
 	return "remote control request failed"
 }
 
-func (a *app) remoteHostTarget(hostDeviceID string) (controlClientTarget, error) {
+func (a *remoteControlService) remoteHostTarget(hostDeviceID string) (controlClientTarget, error) {
 	if !a.cloudMeshActiveFor(cloudMembershipRole{CanControl: true}) {
 		return controlClientTarget{}, cloudMeshInactiveError()
 	}
 	return a.remoteTargetResolver().ResolveKnownHost(hostDeviceID)
 }
 
-func (a *app) rememberRemoteHostLANRoute(hostInfo HostInfo, baseURL string, fallback KnownHost) KnownHost {
+func (a *remoteControlService) rememberRemoteHostLANRoute(hostInfo HostInfo, baseURL string, fallback KnownHost) KnownHost {
 	known, err := a.store.rememberKnownHost(hostInfo, baseURL)
 	if err != nil {
 		return fallback
@@ -810,7 +847,7 @@ func (a *app) rememberRemoteHostLANRoute(hostInfo HostInfo, baseURL string, fall
 	return known
 }
 
-func (a *app) remoteTargetResolver() remoteTargetResolver {
+func (a *remoteControlService) remoteTargetResolver() remoteTargetResolver {
 	return remoteTargetResolver{
 		store:                     a.store,
 		cloudClient:               a.cloudClientFromSettings,
@@ -846,10 +883,10 @@ func (a *app) writeRemoteWorkspaceFilesResult(w http.ResponseWriter, hostDeviceI
 	})
 }
 
-func (a *app) remoteControlResponse(hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
-	manager := a.remoteControlManager()
+func (a *remoteControlService) remoteControlResponse(hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
+	manager := a.hostRemoteSessionManager()
 	if manager == nil {
-		return ControlResponse{}, errors.New("remote control manager is not initialized")
+		return ControlResponse{}, errors.New("remote Host session manager is not initialized")
 	}
 	response, err := manager.Request(context.Background(), hostDeviceID, capability, action, params)
 	if err != nil {
@@ -870,21 +907,17 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 			replayLimit = parsed
 		}
 	}
-	manager := a.remoteControlManager()
+	manager := a.hostRemoteSessionManager()
 	if manager == nil {
-		writeRemoteHostError(w, errors.New("remote control manager is not initialized"))
+		writeRemoteHostError(w, errors.New("remote Host session manager is not initialized"))
 		return
 	}
-	stream, err := manager.SubscribeEvents(r.Context(), hostDeviceID, eventSubscriptionParams{
+	stream := manager.session(hostDeviceID).SubscribeEvents(r.Context(), eventSubscriptionParams{
 		WorkspaceID: r.URL.Query().Get("workspace_id"),
 		SessionID:   r.URL.Query().Get("session_id"),
 		AfterSeq:    afterSeq,
 		ReplayLimit: replayLimit,
 	})
-	if err != nil {
-		writeRemoteHostError(w, err)
-		return
-	}
 	defer stream.Close()
 
 	flusher, ok := w.(http.Flusher)
@@ -906,14 +939,11 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 			return
 		case <-ticker.C:
 			writeSSE(w, flusher, "heartbeat", map[string]any{"ts": time.Now().UTC().Format(time.RFC3339Nano)})
-		case event, ok := <-stream.Events:
+		case message, ok := <-stream.Messages:
 			if !ok {
-				if r.Context().Err() == nil {
-					writeSSE(w, flusher, "remote-error", map[string]string{"error": "remote event stream closed"})
-				}
 				return
 			}
-			writeSSE(w, flusher, "astral-event", event)
+			writeSSE(w, flusher, message.Event, message.Payload)
 		}
 	}
 }

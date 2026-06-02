@@ -1,6 +1,8 @@
 import { Bot, Check, ChevronDown, ChevronRight, Folder, Laptop, Link2, LoaderCircle, Plus, Settings, Smartphone, TerminalSquare, Trash2, Unlink2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import type { AgentKind, Session, Workspace, WorkspaceConnection } from "../types";
 
 type SidebarProps = {
@@ -69,6 +71,7 @@ export function Sidebar({
   onSelectHost,
   onSelectSession,
 }: SidebarProps): React.JSX.Element {
+  const { t } = useTranslation(["common", "desktop"]);
   const [hostMenuOpen, setHostMenuOpen] = useState(false);
   const [menuWorkspaceId, setMenuWorkspaceId] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<{ type: "workspace" | "session"; id: string } | null>(null);
@@ -164,10 +167,10 @@ export function Sidebar({
         >
           <HostIcon kind={activeHost?.kind} />
           <div className="min-w-0 flex-1">
-            <div className="truncate text-[13px] font-bold leading-5">{activeHost?.name || "本机"}</div>
+            <div className="truncate text-[13px] font-bold leading-5">{activeHost?.name || t("desktop:sidebar.local")}</div>
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] font-semibold leading-4 text-[var(--ao-muted)]">
-              <span className="truncate">{activeHost?.subtitle || "本机 Host"}</span>
-              <HostStatusPill label={activeHost?.statusLabel || hostConnectionLabel(activeHost?.connection)} tone={activeHost?.statusTone} />
+              <span className="truncate">{activeHost?.subtitle || t("desktop:sidebar.localHost")}</span>
+              <HostStatusPill label={activeHost?.statusLabel || hostConnectionLabel(activeHost?.connection, t)} tone={activeHost?.statusTone} />
               <HostStatusPill label={activeHost?.controlLabel} tone={activeHost?.controlTone} />
             </div>
           </div>
@@ -192,7 +195,7 @@ export function Sidebar({
                   <div className="truncate text-[12px] font-bold leading-4">{host.name}</div>
                   <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] font-semibold leading-4 text-[var(--ao-muted)]">
                     <span className="truncate">{host.subtitle}</span>
-                    <HostStatusPill label={host.statusLabel || hostConnectionLabel(host.connection)} tone={host.statusTone} />
+                    <HostStatusPill label={host.statusLabel || hostConnectionLabel(host.connection, t)} tone={host.statusTone} />
                     <HostStatusPill label={host.controlLabel} tone={host.controlTone} />
                   </div>
                 </div>
@@ -213,7 +216,7 @@ export function Sidebar({
           onClick={onCreateWorkspace}
         >
           <Plus size={18} strokeWidth={2.1} />
-          <span>新工作区</span>
+          <span>{t("desktop:sidebar.newWorkspace")}</span>
         </button>
       </nav>
 
@@ -227,7 +230,7 @@ export function Sidebar({
             disabled={workspaceActionsDisabled}
             onClick={onCreateWorkspace}
           >
-            {workspaceActionsDisabled ? "等待配对" : "创建第一个 workspace"}
+            {workspaceActionsDisabled ? t("desktop:sidebar.waitingPairing") : t("desktop:sidebar.createFirstWorkspace")}
           </button>
         ) : null}
 
@@ -283,7 +286,7 @@ export function Sidebar({
           onClick={onOpenSettings}
         >
           <Settings size={16} strokeWidth={1.9} />
-          <span>设置</span>
+          <span>{t("desktop:sidebar.settings")}</span>
           {pendingPairingCount > 0 ? (
             <span className="ml-auto grid min-w-5 place-items-center rounded-md bg-black/[0.055] px-1.5 text-[11px] font-bold text-[var(--ao-warning)]">
               {pendingPairingCount}
@@ -424,7 +427,8 @@ function WorkspaceRow({
   sessionCount,
   target,
 }: WorkspaceRowProps): React.JSX.Element {
-  const status = target === "ssh" ? workspaceConnectionLabel(connection) : null;
+  const { t } = useTranslation(["common", "desktop"]);
+  const status = target === "ssh" ? workspaceConnectionLabel(connection, t) : null;
   const connecting = connection?.status === "connecting" || connection?.status === "reconnecting";
   const connected = connection?.status === "connected";
   const canCreateSession = target !== "ssh" || connected;
@@ -469,8 +473,8 @@ function WorkspaceRow({
                 : "bg-[#e8f1ff] text-[#2563eb] hover:bg-[#dceaff]"
           } ${confirmDelete ? "pointer-events-none opacity-0" : ""}`}
           type="button"
-          aria-label={connected ? "断开 SSH" : connecting ? "SSH 连接中" : "连接 SSH"}
-          title={connected ? "断开 SSH" : connecting ? "SSH 连接中" : "连接 SSH"}
+          aria-label={connected ? t("desktop:sidebar.disconnectSsh") : connecting ? t("desktop:sidebar.sshConnecting") : t("desktop:sidebar.connectSsh")}
+          title={connected ? t("desktop:sidebar.disconnectSsh") : connecting ? t("desktop:sidebar.sshConnecting") : t("desktop:sidebar.connectSsh")}
           disabled={connecting}
           onClick={(event) => {
             event.stopPropagation();
@@ -493,8 +497,8 @@ function WorkspaceRow({
           canCreateSession ? "text-[#9a9da1] hover:bg-black/[0.06] hover:text-[#202124]" : "cursor-not-allowed text-[#c1bfb8]"
         }`}
         type="button"
-        aria-label="新建 session"
-        title="新建 session"
+        aria-label={t("desktop:sidebar.newSession")}
+        title={t("desktop:sidebar.newSession")}
         disabled={!canCreateSession}
         onClick={(event) => {
           event.stopPropagation();
@@ -511,8 +515,8 @@ function WorkspaceRow({
             : "pointer-events-none text-[#9a9da1] opacity-0 hover:bg-black/[0.06] hover:text-[#b45309] group-hover:pointer-events-auto group-hover:opacity-100"
         }`}
         type="button"
-        aria-label={confirmDelete ? "确认移除 workspace" : "移除 workspace"}
-        title={confirmDelete ? "确认移除 workspace" : "移除 workspace"}
+        aria-label={confirmDelete ? t("desktop:sidebar.confirmRemoveWorkspace") : t("desktop:sidebar.removeWorkspace")}
+        title={confirmDelete ? t("desktop:sidebar.confirmRemoveWorkspace") : t("desktop:sidebar.removeWorkspace")}
         data-delete-confirm={confirmDelete ? true : undefined}
         data-delete-trigger={!confirmDelete ? true : undefined}
         onClick={(event) => {
@@ -570,8 +574,9 @@ function SessionRow({
   status: string;
   title: string;
 }): React.JSX.Element {
+  const { t } = useTranslation(["common", "desktop"]);
   const running = status === "running";
-  const timeLabel = relativeSessionTime(session.updated_at || session.created_at, now);
+  const timeLabel = relativeSessionTime(session.updated_at || session.created_at, now, t);
   function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>): void {
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
@@ -608,8 +613,8 @@ function SessionRow({
               : "pointer-events-none text-[#a0a3a7] opacity-0 hover:bg-black/[0.06] hover:text-[#b45309] group-hover:pointer-events-auto group-hover:opacity-100"
           }`}
           type="button"
-          aria-label={confirmDelete ? "确认删除 session" : "删除 session"}
-          title={confirmDelete ? "确认删除 session" : "删除 session"}
+          aria-label={confirmDelete ? t("desktop:sidebar.confirmDeleteSession") : t("desktop:sidebar.deleteSession")}
+          title={confirmDelete ? t("desktop:sidebar.confirmDeleteSession") : t("desktop:sidebar.deleteSession")}
           data-delete-confirm={confirmDelete ? true : undefined}
           data-delete-trigger={!confirmDelete ? true : undefined}
           onClick={(event) => {
@@ -643,22 +648,22 @@ function HostStatusPill({ label, tone = "muted" }: { label?: string; tone?: "goo
   return <span className={`shrink-0 rounded-md px-1.5 text-[10px] font-bold leading-4 ${toneClass}`}>{label}</span>;
 }
 
-function hostConnectionLabel(connection?: string): string {
+function hostConnectionLabel(connection: string | undefined, t: TFunction): string {
   switch (connection) {
     case "local":
-      return "本机";
+      return t("desktop:host.local");
     case "lan":
       return "LAN";
     case "relay":
-      return "中继";
+      return t("desktop:host.relay");
     case "offline":
-      return "离线";
+      return t("desktop:host.offline");
     default:
       return "";
   }
 }
 
-function relativeSessionTime(timestamp: string | undefined, now: number): string {
+function relativeSessionTime(timestamp: string | undefined, now: number, t: TFunction): string {
   if (!timestamp) return "";
   const time = Date.parse(timestamp);
   if (!Number.isFinite(time)) return "";
@@ -666,23 +671,23 @@ function relativeSessionTime(timestamp: string | undefined, now: number): string
   const minute = 60_000;
   const hour = 60 * minute;
   const day = 24 * hour;
-  if (diff < minute) return "刚刚";
-  if (diff < hour) return `${Math.max(1, Math.floor(diff / minute))}分钟`;
-  if (diff < day) return `${Math.max(1, Math.floor(diff / hour))}小时`;
-  return `${Math.max(1, Math.floor(diff / day))}天`;
+  if (diff < minute) return t("common:time.justNow");
+  if (diff < hour) return t("common:time.minutesAgo", { count: Math.max(1, Math.floor(diff / minute)) });
+  if (diff < day) return t("common:time.hoursAgo", { count: Math.max(1, Math.floor(diff / hour)) });
+  return t("common:time.daysAgo", { count: Math.max(1, Math.floor(diff / day)) });
 }
 
-function workspaceConnectionLabel(connection?: WorkspaceConnection): string {
+function workspaceConnectionLabel(connection: WorkspaceConnection | undefined, t: TFunction): string {
   switch (connection?.status) {
     case "connected":
-      return "已连接";
+      return t("common:states.connected");
     case "connecting":
-      return "连接中";
+      return t("common:states.connecting");
     case "reconnecting":
-      if (connection.retry_attempt && connection.retry_max) return `重连中 ${connection.retry_attempt}/${connection.retry_max}`;
-      return "重连中";
+      if (connection.retry_attempt && connection.retry_max) return `${t("common:states.reconnecting")} ${connection.retry_attempt}/${connection.retry_max}`;
+      return t("common:states.reconnecting");
     default:
-      return "已断开";
+      return t("common:states.disconnected");
   }
 }
 

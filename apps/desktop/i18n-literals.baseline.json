@@ -1,0 +1,797 @@
+[
+  {
+    "file": "src/components/PendingInteractionPanel.tsx",
+    "line": 222,
+    "text": "{cancelAction?.label ?? \"取消\"} <span className=\"ml-1 rounded-md bg-[#f3dfdb] px-1.5 py-0.5 text-[11px]\">ESC</span>"
+  },
+  {
+    "file": "src/components/PendingInteractionPanel.tsx",
+    "line": 238,
+    "text": "{fields.length > 0 && !isLastQuestion ? \"继续\" : \"提交\"}"
+  },
+  {
+    "file": "src/components/PendingInteractionPanel.tsx",
+    "line": 230,
+    "text": "{secondaryAction?.label ?? \"跳过\"}"
+  },
+  {
+    "file": "src/components/PendingInteractionPanel.tsx",
+    "line": 279,
+    "text": "<span className=\"min-w-0 break-words\">{field.label || `问题 ${index + 1}`}</span>"
+  },
+  {
+    "file": "src/components/PendingInteractionPanel.tsx",
+    "line": 286,
+    "text": "aria-label=\"上一个问题\""
+  },
+  {
+    "file": "src/components/PendingInteractionPanel.tsx",
+    "line": 296,
+    "text": "aria-label=\"下一个问题\""
+  },
+  {
+    "file": "src/components/PendingInteractionPanel.tsx",
+    "line": 271,
+    "text": "const field = fields[index] ?? { id: \"field_0\", label: \"输入\", type: \"text\" };"
+  },
+  {
+    "file": "src/components/PendingInteractionPanel.tsx",
+    "line": 210,
+    "text": "placeholder=\"写下希望调整的地方\""
+  },
+  {
+    "file": "src/components/PendingInteractionPanel.tsx",
+    "line": 392,
+    "text": "placeholder=\"输入 JSON content\""
+  },
+  {
+    "file": "src/components/PendingInteractionPanel.tsx",
+    "line": 179,
+    "text": "placeholder=\"输入答案\""
+  },
+  {
+    "file": "src/components/PendingInteractionPanel.tsx",
+    "line": 343,
+    "text": "placeholder={options.length > 0 ? \"其他答案\" : \"输入答案\"}"
+  },
+  {
+    "file": "src/components/PendingInteractionPanel.tsx",
+    "line": 381,
+    "text": "打开"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 345,
+    "text": "{loading ? \"正在加载更早记录\" : \"加载更早记录\"}"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 694,
+    "text": "{preview.length !== text.length ? <div className=\"mb-2 text-[12px] font-semibold text-[#a0a3a7]\">已显示最新 8000 个字符</div> : null}"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 848,
+    "text": "<div className=\"mb-1 text-[13px] font-semibold text-[#a0a3a7]\">结果</div>"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 758,
+    "text": "<div className=\"text-[14px] font-medium leading-6 text-[#9a9da1]\">任务清单暂无可展示内容</div>"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 747,
+    "text": "<FoldableDetail defaultOpen icon={<ListChecks size={16} strokeWidth={1.8} />} title=\"任务清单已更新\" summary={summary}>"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 693,
+    "text": "<FoldableDetail defaultOpen icon={<TerminalSquare size={16} strokeWidth={1.8} />} title=\"命令输出\">"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 713,
+    "text": "<FoldableDetail defaultOpen={false} icon={<FileText size={16} strokeWidth={1.8} />} title=\"已读取文件\" summary={file.path}>"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 493,
+    "text": "<span>{isDone ? (group.status === \"failed\" ? \"处理失败\" : group.status === \"cancelled\" ? \"已取消\" : \"已处理\") : \"正在处理\"}</span>"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 373,
+    "text": "<span>{sourceSessionExists ? \"从对话中派生\" : \"源对话已删除\"}</span>"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 909,
+    "text": "aria-label=\"分叉\""
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 306,
+    "text": "aria-label=\"回到底部\""
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 900,
+    "text": "aria-label=\"复制\""
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 958,
+    "text": "aria-label=\"复制计划\""
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 603,
+    "text": "aria-label=\"编辑\""
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 660,
+    "text": "const label = kind === \"plan\" ? \"计划确认\" : kind === \"command\" ? \"命令确认\" : kind === \"file_change\" ? \"文件确认\" : \"权限确认\";"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 638,
+    "text": "const message = textValue(value, \"message\") || (event.kind === \"turn.cancelled\" ? \"已取消\" : \"运行失败\");"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 742,
+    "text": "const summary = [counts.in_progress ? `${counts.in_progress} 个进行中` : \"\", counts.completed ? `${counts.completed} 个完成` : \"\", counts.pending ? `${counts.pending} 个待办` : \"\"]"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 383,
+    "text": "const text = completed ? \"上下文已自动压缩\" : \"正在压缩上下文\";"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 807,
+    "text": "const title = running ? \"正在思考\" : \"思考\";"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 799,
+    "text": "if (Array.isArray(value.plan)) return \"计划进度\";"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1102,
+    "text": "if (entries.length === 0) return <div className=\"text-[14px] font-medium text-[#a0a3a7]\">暂无细节</div>;"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 663,
+    "text": "if (event.kind === \"approval.resolved\" || event.kind === \"approval.responded\") return <MetaLine icon={<CheckCircle2 size={16} strokeWidth={1.8} />} text=\"确认已处理\" time={event.ts} />;"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 667,
+    "text": "if (event.kind === \"ask.resolved\") return <MetaLine icon={<CheckCircle2 size={16} strokeWidth={1.8} />} text=\"问题已处理\" time={event.ts} />;"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 642,
+    "text": "if (event.kind === \"control.interrupt\") return <MetaLine icon={<CheckCircle2 size={16} strokeWidth={1.8} />} text=\"已请求中断\" time={event.ts} />;"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 643,
+    "text": "if (event.kind === \"control.steer\") return <MetaLine icon={<CheckCircle2 size={16} strokeWidth={1.8} />} text=\"已引导对话\" time={event.ts} />;"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 798,
+    "text": "if (event.kind === \"plan.delta\") return \"正在生成计划\";"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 644,
+    "text": "if (event.kind.startsWith(\"control.model\")) return <MetaLine icon={<Bot size={16} strokeWidth={1.8} />} text=\"模型状态已更新\" time={event.ts} />;"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 641,
+    "text": "if (event.kind.startsWith(\"control.warning\")) return <Notice tone=\"muted\" text={textValue(value, \"message\") || \"运行警告\"} />;"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 646,
+    "text": "if (event.kind.startsWith(\"memory.compacted\")) return <MetaLine icon={<Check size={16} />} text=\"上下文已压缩\" time={event.ts} />;"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 800,
+    "text": "return \"计划\";"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1095,
+    "text": "return { completedLabel: \"工具已完成\", icon: <Wrench size={16} strokeWidth={1.8} />, label: \"工具\", runningLabel: \"正在运行工具\", summary: target || textValue(value, \"name\") };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1086,
+    "text": "return { completedLabel: \"已搜索\", icon: <Search size={16} strokeWidth={1.8} />, label: \"搜索\", runningLabel: \"正在搜索\", summary: target };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1092,
+    "text": "return { completedLabel: \"已编辑\", icon: <FileCode2 size={16} strokeWidth={1.8} />, label: \"文件变更\", runningLabel: \"正在编辑\", summary: target };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1089,
+    "text": "return { completedLabel: \"已读取\", icon: <FileText size={16} strokeWidth={1.8} />, label: \"读取\", runningLabel: \"正在读取\", summary: target };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1097,
+    "text": "return { completedLabel: \"已运行\", icon: <Wrench size={16} strokeWidth={1.8} />, label: \"工具\", runningLabel: \"正在运行\", summary: target || textValue(value, \"name\") };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1127,
+    "text": "return { icon: <AlertCircle size={16} strokeWidth={1.8} />, title: \"工具失败 Hook\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1131,
+    "text": "return { icon: <AlertCircle size={16} strokeWidth={1.8} />, title: \"权限拒绝\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1141,
+    "text": "return { icon: <Bot size={16} strokeWidth={1.8} />, title: \"子 Agent 已停止\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1139,
+    "text": "return { icon: <Bot size={16} strokeWidth={1.8} />, title: \"子 Agent 已启动\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1145,
+    "text": "return { icon: <CheckCircle2 size={16} strokeWidth={1.8} />, title: \"任务已完成\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1149,
+    "text": "return { icon: <CheckCircle2 size={16} strokeWidth={1.8} />, title: \"压缩后 Hook\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1125,
+    "text": "return { icon: <CheckCircle2 size={16} strokeWidth={1.8} />, title: \"工具执行后 Hook\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1153,
+    "text": "return { icon: <CheckCircle2 size={16} strokeWidth={1.8} />, title: \"输入请求已完成\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1147,
+    "text": "return { icon: <CircleDot size={16} strokeWidth={1.8} />, title: \"压缩前 Hook\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1137,
+    "text": "return { icon: <FileCode2 size={16} strokeWidth={1.8} />, title: \"文件已变化\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1135,
+    "text": "return { icon: <FileText size={16} strokeWidth={1.8} />, title: \"工作目录已切换\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1133,
+    "text": "return { icon: <FileText size={16} strokeWidth={1.8} />, title: \"指令已加载\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1151,
+    "text": "return { icon: <HelpCircle size={16} strokeWidth={1.8} />, title: \"正在请求输入\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1143,
+    "text": "return { icon: <ListChecks size={16} strokeWidth={1.8} />, title: \"任务已创建\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1129,
+    "text": "return { icon: <ShieldCheck size={16} strokeWidth={1.8} />, title: \"权限请求 Hook\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1123,
+    "text": "return { icon: <Wrench size={16} strokeWidth={1.8} />, title: \"工具执行前 Hook\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 1155,
+    "text": "return { icon: <Wrench size={16} strokeWidth={1.8} />, title: hook || \"Hook 事件\" };"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 665,
+    "text": "return <MetaLine icon={<HelpCircle size={16} strokeWidth={1.8} />} text=\"问题请求\" time={event.ts} />;"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 661,
+    "text": "return <MetaLine icon={<ShieldCheck size={16} strokeWidth={1.8} />} text={`${label}请求`} time={event.ts} />;"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 910,
+    "text": "title=\"分叉\""
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 307,
+    "text": "title=\"回到底部\""
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 679,
+    "text": "title=\"文件变更\""
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 604,
+    "text": "title=\"编辑\""
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 588,
+    "text": "发送"
+  },
+  {
+    "file": "src/components/Transcript.tsx",
+    "line": 579,
+    "text": "取消"
+  },
+  {
+    "file": "src/components/transcript/MediaPreview.tsx",
+    "line": 166,
+    "text": "<a className=\"[-webkit-app-region:no-drag] grid size-8 place-items-center rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)] text-[var(--ao-text)] shadow-[var(--ao-shadow-panel)] transition-colors hover:bg-[var(--ao-panel)]\" href={downloadUrl} aria-label=\"下载\" title=\"下载\" onClick={(event) => event.stopPropagation()}>"
+  },
+  {
+    "file": "src/components/transcript/MediaPreview.tsx",
+    "line": 172,
+    "text": "aria-label=\"关闭\""
+  },
+  {
+    "file": "src/components/transcript/MediaPreview.tsx",
+    "line": 222,
+    "text": "aria-label=\"放大\""
+  },
+  {
+    "file": "src/components/transcript/MediaPreview.tsx",
+    "line": 211,
+    "text": "aria-label=\"缩小\""
+  },
+  {
+    "file": "src/components/transcript/MediaPreview.tsx",
+    "line": 173,
+    "text": "title=\"关闭\""
+  },
+  {
+    "file": "src/components/transcript/MediaPreview.tsx",
+    "line": 223,
+    "text": "title=\"放大\""
+  },
+  {
+    "file": "src/components/transcript/MediaPreview.tsx",
+    "line": 212,
+    "text": "title=\"缩小\""
+  },
+  {
+    "file": "src/components/transcript/OperationGroup.tsx",
+    "line": 291,
+    "text": "{item.status === \"completed\" ? <div className=\"mt-2 text-right text-[13px] font-semibold text-[#8a8d91]\">成功</div> : null}"
+  },
+  {
+    "file": "src/components/transcript/OperationGroup.tsx",
+    "line": 289,
+    "text": "{outputClipped ? <div className=\"mb-2 text-[12px] font-semibold text-[#a0a3a7]\">已显示最新 12000 个字符</div> : null}"
+  },
+  {
+    "file": "src/components/transcript/OperationGroup.tsx",
+    "line": 111,
+    "text": "<span className=\"shrink-0\">{file.status === \"running\" ? \"正在读取\" : \"已读取\"}</span>"
+  },
+  {
+    "file": "src/components/transcript/OperationGroup.tsx",
+    "line": 282,
+    "text": "<span className=\"shrink-0\">{item.status === \"running\" ? \"正在运行\" : \"已运行\"}</span>"
+  },
+  {
+    "file": "src/components/transcript/OperationGroup.tsx",
+    "line": 91,
+    "text": "<span className=\"shrink-0\">{search.status === \"running\" ? \"正在搜索\" : \"已搜索\"}</span>"
+  },
+  {
+    "file": "src/components/transcript/OperationGroup.tsx",
+    "line": 132,
+    "text": "<span className=\"shrink-0\">已编辑的文件</span>"
+  },
+  {
+    "file": "src/components/transcript/OperationGroup.tsx",
+    "line": 158,
+    "text": "aria-label=\"复制 diff\""
+  },
+  {
+    "file": "src/components/transcript/OperationGroup.tsx",
+    "line": 122,
+    "text": "const summary = files.length === 1 ? files[0].name : `${files.length} 个文件`;"
+  },
+  {
+    "file": "src/components/transcript/TranscriptMedia.tsx",
+    "line": 65,
+    "text": "<a className=\"grid size-7 place-items-center rounded-md hover:bg-black/[0.05]\" href={downloadUrl} aria-label=\"下载\" title=\"下载\">"
+  },
+  {
+    "file": "src/components/transcript/TranscriptMedia.tsx",
+    "line": 62,
+    "text": "<button className=\"grid size-7 place-items-center rounded-md hover:bg-black/[0.05]\" type=\"button\" aria-label=\"预览\" title=\"预览\" onClick={() => setPreviewOpen(true)}>"
+  },
+  {
+    "file": "src/components/transcript/TranscriptMedia.tsx",
+    "line": 44,
+    "text": "<span>正在生成图片</span>"
+  },
+  {
+    "file": "src/components/transcript/TranscriptMedia.tsx",
+    "line": 56,
+    "text": "aria-label=\"预览图片\""
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1081,
+    "text": "counts.completed ? `${counts.completed} 个完成` : \"\","
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1080,
+    "text": "counts.inProgress ? `${counts.inProgress} 个进行中` : \"\","
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1082,
+    "text": "counts.pending ? `${counts.pending} 个待办` : \"\","
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 427,
+    "text": "else if (readTools.size) parts.push(`已读取 ${readTools.size} 个文件`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 425,
+    "text": "else if (searchTools.size) parts.push(`已探索 ${searchTools.size} 次`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 993,
+    "text": "if (!item || typeof item !== \"object\") return { status: \"pending\", text: `任务 ${index + 1}` };"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 431,
+    "text": "if (approvals) parts.push(`${approvals} 个确认`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 879,
+    "text": "if (approvals) parts.push(`${approvals} 个确认`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 432,
+    "text": "if (asks) parts.push(`${asks} 个问题`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 880,
+    "text": "if (asks) parts.push(`${asks} 个问题`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 464,
+    "text": "if (category === \"file\" || name.includes(\"write\") || name.includes(\"edit\") || name.includes(\"filechange\")) return target ? `正在编辑 ${target}` : \"正在编辑文件\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 463,
+    "text": "if (category === \"read\" || name === \"read\" || name.includes(\"read\") || name.includes(\"list\")) return target ? `正在读取 ${target}` : \"正在读取\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 875,
+    "text": "if (changedFiles) parts.push(`已编辑 ${changedFiles} 个文件`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 977,
+    "text": "if (changes.length > 0) return `${changes.length} 个文件`;"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 428,
+    "text": "if (commands) parts.push(`已运行 ${commands} 条命令`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 874,
+    "text": "if (commands) parts.push(`已运行 ${commands} 条命令`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 423,
+    "text": "if (editedFiles) parts.push(`已编辑 ${editedFiles} 个文件`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 441,
+    "text": "if (event.kind === \"control.steer\") return \"已引导对话\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 443,
+    "text": "if (event.kind.startsWith(\"plan.\")) return \"正在生成计划\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 442,
+    "text": "if (event.kind.startsWith(\"reasoning.\")) return \"正在思考\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 449,
+    "text": "if (fileRead) return `正在读取 ${fileRead.path}`;"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 472,
+    "text": "if (files.length === 0) return \"正在编辑文件\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 473,
+    "text": "if (files.length > 1) return `正在编辑 ${files.length} 个文件`;"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 462,
+    "text": "if (isSearchToolName(name, category)) return target ? `正在搜索 ${target}` : \"正在搜索\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1109,
+    "text": "if (lines.length > 1) return `${lines.length} 段`;"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1090,
+    "text": "if (normalized === \"completed\" || normalized === \"complete\") return \"完成\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1091,
+    "text": "if (normalized === \"inprogress\" || normalized === \"in_progress\" || normalized === \"running\") return \"进行中\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1092,
+    "text": "if (normalized === \"pending\") return \"待办\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 877,
+    "text": "if (plans) parts.push(`计划 ${plans} 次`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 426,
+    "text": "if (readFiles.length) parts.push(`${readFiles.some((file) => file.status === \"running\") ? \"正在读取\" : \"已读取\"} ${readFiles.length} 个文件`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 429,
+    "text": "if (reasoning) parts.push(`思考 ${reasoning} 段`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 878,
+    "text": "if (reasoning) parts.push(`思考 ${reasoning} 段`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 451,
+    "text": "if (search) return search.target ? `正在搜索 ${search.target}` : \"正在搜索\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 424,
+    "text": "if (searches.length) parts.push(`已探索 ${searches.length} 次`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 873,
+    "text": "if (searches) parts.push(`已搜索 ${searches} 次`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 433,
+    "text": "if (steers) parts.push(\"已引导对话\");"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1105,
+    "text": "if (summary.length > 0) return `${summary.length} 段摘要`;"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 430,
+    "text": "if (todos) parts.push(`待办 ${todos} 次`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 876,
+    "text": "if (todos) parts.push(`待办 ${todos} 次`);"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 978,
+    "text": "if (value.diff || value.patch) return \"查看 diff\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 609,
+    "text": "name: baseName(path) || \"文件\","
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 746,
+    "text": "name: baseName(path) || \"文件\","
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 747,
+    "text": "path: path || \"文件\","
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1142,
+    "text": "return \"名称\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1131,
+    "text": "return \"命令\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1024,
+    "text": "return \"完成\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1129,
+    "text": "return \"工具\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1028,
+    "text": "return \"待办\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1228,
+    "text": "return \"排队消息已取消\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1232,
+    "text": "return \"排队消息已插入\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1230,
+    "text": "return \"排队消息开始执行\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1234,
+    "text": "return \"排队消息执行失败\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1140,
+    "text": "return \"查询\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1138,
+    "text": "return \"模式\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1224,
+    "text": "return \"消息已排队\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1146,
+    "text": "return \"状态\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1133,
+    "text": "return \"目录\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1144,
+    "text": "return \"类型\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1136,
+    "text": "return \"路径\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1026,
+    "text": "return \"进行中\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1226,
+    "text": "return \"队列已拒绝\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1236,
+    "text": "return \"队列状态已更新\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 475,
+    "text": "return `正在编辑 ${file.name} +${file.additions} -${file.deletions}`;"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 454,
+    "text": "return command ? `正在运行 ${command}` : \"正在运行命令\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 465,
+    "text": "return target ? `正在运行 ${target}` : \"正在运行工具\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 1281,
+    "text": "return text === \"权限已允许\" || text === \"权限已拒绝\" || text === \"计划已批准\" || text === \"计划未批准\" || text === \"问题已回复\";"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 997,
+    "text": "text: textValue(record, \"content\") || textValue(record, \"text\") || textValue(record, \"title\") || textValue(record, \"task\") || textValue(record, \"name\") || `任务 ${index + 1}`,"
+  },
+  {
+    "file": "src/transcriptModel.ts",
+    "line": 693,
+    "text": "tool: name || \"搜索\","
+  }
+]

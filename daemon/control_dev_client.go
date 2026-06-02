@@ -531,6 +531,9 @@ func (r remoteTargetResolver) ResolveKnownHost(hostDeviceID string) (controlClie
 	if err == nil {
 		return r.attachCloudRelayFallback(known, target), nil
 	}
+	if relay, relayErr := r.cachedRelayKnownHostTarget(known); relayErr == nil {
+		return relay, nil
+	}
 	if relay, relayErr := r.cloudRelayKnownHostTarget(known); relayErr == nil {
 		return relay, nil
 	}
@@ -641,6 +644,18 @@ func (r remoteTargetResolver) attachCloudRelayFallback(known KnownHost, target c
 	if target.UseRelay || strings.TrimSpace(target.RelayClient.BaseURL) != "" {
 		return target
 	}
+	if relay, err := r.cachedRelayKnownHostTarget(known); err == nil {
+		target.RelayClient = relay.RelayClient
+		target.ControllerDeviceID = relay.ControllerDeviceID
+		if target.HostInfo.Identity.DeviceID == "" {
+			target.HostInfo = relay.HostInfo
+		}
+		if !target.HasExpectedHost {
+			target.ExpectedHost = relay.ExpectedHost
+			target.HasExpectedHost = relay.HasExpectedHost
+		}
+		return target
+	}
 	relay, err := r.cloudRelayKnownHostTarget(known)
 	if err != nil {
 		return target
@@ -655,6 +670,34 @@ func (r remoteTargetResolver) attachCloudRelayFallback(known KnownHost, target c
 		target.HasExpectedHost = relay.HasExpectedHost
 	}
 	return target
+}
+
+func (r remoteTargetResolver) cachedRelayKnownHostTarget(known KnownHost) (controlClientTarget, error) {
+	if r.store == nil {
+		return controlClientTarget{}, fmt.Errorf("controller store required")
+	}
+	relayClient, _, ok := r.store.cachedCloudRelayClient()
+	if !ok {
+		return controlClientTarget{}, fmt.Errorf("cached cloud relay is not configured")
+	}
+	known = normalizeKnownHost(known)
+	if known.DeviceID == "" || known.PublicKey == "" || known.PublicKeyFingerprint == "" {
+		return controlClientTarget{}, fmt.Errorf("known Host identity is incomplete")
+	}
+	return controlClientTarget{
+		HostInfo: HostInfo{Identity: DeviceIdentity{
+			DeviceID:             known.DeviceID,
+			DeviceName:           known.DeviceName,
+			PublicKey:            known.PublicKey,
+			PublicKeyFingerprint: known.PublicKeyFingerprint,
+		}},
+		Timeout:            controlRelayRoundTripTimeout,
+		UseRelay:           true,
+		RelayClient:        relayClient,
+		ControllerDeviceID: r.store.hostInfo().Identity.DeviceID,
+		ExpectedHost:       known,
+		HasExpectedHost:    true,
+	}, nil
 }
 
 func (r remoteTargetResolver) cloudDeviceTarget(known KnownHost, devices []CloudDeviceRecord, relayClient RelayClient, timeout time.Duration, requireFound bool) (controlClientTarget, error) {
@@ -1273,46 +1316,41 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 	if err := controlClientSmokeResponseError("terminal_attach", attach); err != nil {
 		return steps, err
 	}
+	attachResult := mapValue(attach.Result)
+	viewerID := stringValue(attachResult["viewer_id"])
+	inputLeaseID := stringValue(attachResult["input_lease_id"])
 
 	marker := "terminal-smoke-" + randomID(8)
-	inputReq := ControlRequest{
-		RequestID:  "smoke_terminal_input",
-		Capability: CapabilityTerminalInput,
-		Action:     ControlActionTerminalInput,
-		Params: map[string]any{
-			"terminal_id": terminalID,
-			"data":        "printf '%s\\n' " + marker + "\n",
+	if err := conn.WritePlain(controlPlainFrame{
+		Type: terminalFrameInput,
+		Terminal: &terminalStreamFrame{
+			TerminalID:   terminalID,
+			ViewerID:     viewerID,
+			InputLeaseID: inputLeaseID,
+			Data:         "printf '%s\\n' " + marker + "\n",
 		},
-	}
-	inputReq.ControllerDeviceID = st.deviceIdentity.DeviceID
-	if err := conn.WritePlain(controlPlainFrame{Type: "request", Request: &inputReq}); err != nil {
+	}); err != nil {
 		step := controlClientSmokeStep{Name: "terminal_input", Capability: CapabilityTerminalInput, Action: ControlActionTerminalInput, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
 		steps = append(steps, step)
 		return steps, err
 	}
-	var inputResponse *ControlResponse
 	outputFrames := 0
 	outputBytes := 0
 	sawMarker := false
 	deadline := time.Now().Add(30 * time.Second)
-	for i := 0; i < 1000 && time.Now().Before(deadline) && (inputResponse == nil || !sawMarker); i++ {
+	for i := 0; i < 1000 && time.Now().Before(deadline) && !sawMarker; i++ {
 		frame, err := conn.ReadPlain(activeTarget.Timeout)
 		if err != nil {
 			step := controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "terminal_read_failed", Message: err.Error()}}
-			steps = appendTerminalInputStep(steps, inputResponse)
+			steps = appendTerminalInputStep(steps)
 			steps = append(steps, step)
 			return steps, err
 		}
 		switch frame.Type {
-		case "response":
-			if frame.Response != nil && frame.Response.RequestID == inputReq.RequestID {
-				response := *frame.Response
-				inputResponse = &response
-			}
 		case terminalFrameOutput:
 			if frame.Terminal == nil || frame.Terminal.TerminalID != terminalID {
 				err := fmt.Errorf("unexpected terminal output frame")
-				steps = appendTerminalInputStep(steps, inputResponse)
+				steps = appendTerminalInputStep(steps)
 				steps = append(steps, controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "unexpected_terminal_frame", Message: err.Error()}})
 				return steps, err
 			}
@@ -1321,22 +1359,23 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 			if strings.Contains(frame.Terminal.Data, marker) {
 				sawMarker = true
 			}
+		case terminalFrameHeartbeat:
+			if frame.Terminal != nil && frame.Terminal.TerminalID == terminalID && frame.Terminal.ViewerID != "" && frame.Terminal.InputLeaseID != "" {
+				_ = conn.WritePlain(controlPlainFrame{Type: terminalFrameHeartbeatAck, Terminal: &terminalStreamFrame{
+					TerminalID:   terminalID,
+					ViewerID:     frame.Terminal.ViewerID,
+					InputLeaseID: frame.Terminal.InputLeaseID,
+					HeartbeatSeq: frame.Terminal.HeartbeatSeq,
+				}})
+			}
 		case terminalFrameClosed:
 			err := fmt.Errorf("terminal closed before smoke output was observed")
-			steps = appendTerminalInputStep(steps, inputResponse)
+			steps = appendTerminalInputStep(steps)
 			steps = append(steps, controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "terminal_closed", Message: err.Error()}})
 			return steps, err
 		}
 	}
-	steps = appendTerminalInputStep(steps, inputResponse)
-	if inputResponse == nil {
-		err := fmt.Errorf("smoke step terminal_input failed: response missing")
-		steps[len(steps)-1].Error = &ControlError{Code: "terminal_input_response_missing", Message: err.Error()}
-		return steps, err
-	}
-	if err := controlClientSmokeResponseError("terminal_input", *inputResponse); err != nil {
-		return steps, err
-	}
+	steps = appendTerminalInputStep(steps)
 	outputStep := controlClientSmokeStep{
 		Name:       "terminal_output",
 		Capability: CapabilityTerminalOpen,
@@ -1366,11 +1405,8 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 	return steps, nil
 }
 
-func appendTerminalInputStep(steps []controlClientSmokeStep, response *ControlResponse) []controlClientSmokeStep {
-	if response == nil {
-		return append(steps, controlClientSmokeStep{Name: "terminal_input", Capability: CapabilityTerminalInput, Action: ControlActionTerminalInput})
-	}
-	return append(steps, controlClientSmokeStepFromResponse("terminal_input", CapabilityTerminalInput, ControlActionTerminalInput, *response, controlClientTerminalSmokeSummary(*response)))
+func appendTerminalInputStep(steps []controlClientSmokeStep) []controlClientSmokeStep {
+	return append(steps, controlClientSmokeStep{Name: "terminal_input", Capability: CapabilityTerminalInput, Action: ControlActionTerminalInput, OK: true})
 }
 
 func controlClientTerminalResponseRoundTrip(conn controlClientFrameConn, timeout time.Duration, st *store, req ControlRequest) (ControlResponse, error) {
@@ -1858,6 +1894,7 @@ func controlClientTerminalAttachSmokeSummary(response ControlResponse) map[strin
 		"target":           stringValue(result["target"]),
 		"status":           stringValue(result["status"]),
 		"viewer_device_id": stringValue(result["viewer_device_id"]),
+		"viewer_id":        stringValue(result["viewer_id"]),
 		"connection_id":    stringValue(result["connection_id"]),
 		"writer_device_id": stringValue(result["writer_device_id"]),
 		"output_seq":       int64(numberValue(result["output_seq"])),
@@ -2445,6 +2482,11 @@ func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, tim
 	if err != nil {
 		return nil, nil, err
 	}
+	if timeout > 0 {
+		deadline := time.Now().Add(timeout)
+		_ = socket.SetWriteDeadline(deadline)
+		_ = socket.SetReadDeadline(deadline)
+	}
 	curve := ecdh.X25519()
 	controllerEphemeral, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
@@ -2470,10 +2512,17 @@ func controlClientDialWithTimeout(host string, st *store, hostInfo HostInfo, tim
 		socket.Close()
 		return nil, nil, err
 	}
+	if timeout > 0 {
+		_ = socket.SetWriteDeadline(time.Time{})
+		_ = socket.SetReadDeadline(time.Now().Add(timeout))
+	}
 	_, ackBody, err := socket.ReadMessage()
 	if err != nil {
 		socket.Close()
 		return nil, nil, err
+	}
+	if timeout > 0 {
+		_ = socket.SetReadDeadline(time.Time{})
 	}
 	var closeFrame controlPlainFrame
 	if err := json.Unmarshal(ackBody, &closeFrame); err == nil && closeFrame.Type == "close" {

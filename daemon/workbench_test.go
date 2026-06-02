@@ -20,7 +20,7 @@ func TestWorkbenchStateUsesSanitizedHostProjection(t *testing.T) {
 	session := st.createSession(workspace, AgentCodex)
 	app := &app{store: st, hub: newEventHub()}
 	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "hello"}})
-	app.terminalManager().register(newTerminalSession(workspace.ID, AgentCodex, "local", ".", "zsh", "device_mobile"))
+	app.terminalManager().register(newTerminalSession(workspace.ID, AgentCodex, "local", ".", "zsh"))
 
 	state := app.buildWorkbenchState()
 	if state.Version == 0 {
@@ -83,7 +83,7 @@ func TestWorkbenchStateOmitsClosedTerminalTabs(t *testing.T) {
 	}
 	app := &app{store: st, hub: newEventHub()}
 	deviceID := st.hostInfo().Identity.DeviceID
-	terminal := newTerminalSession(workspace.ID, AgentCodex, "local", ".", "zsh", deviceID)
+	terminal := newTerminalSession(workspace.ID, AgentCodex, "local", ".", "zsh")
 	app.terminalManager().register(terminal)
 
 	if got := len(app.buildWorkbenchState().TerminalTabs); got != 1 {

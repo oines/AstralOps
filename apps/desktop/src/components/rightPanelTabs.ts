@@ -19,7 +19,7 @@ export function createPanelTab(kind: PanelTabKind, workspaceId?: string): PanelT
     id: `${kind}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     kind,
     workspaceId,
-    title: kind === "terminal" ? undefined : "文件",
+    title: kind === "terminal" ? undefined : "Files",
   };
 }
 
@@ -74,10 +74,10 @@ export function panelContentTabs(tabs: PanelTab[], currentOrder: string[]): Pane
   };
 }
 
-export function panelTabTitle(tab: PanelTab, workspace: Workspace | null): string {
+export function panelTabTitle(tab: PanelTab, workspace: Workspace | null, fileLabel = "Files"): string {
   if (tab.title) return tab.title;
   if (tab.kind === "terminal") return `shell · ${basename(workspace?.local_cwd || "") || "workspace"}`;
-  return "文件";
+  return fileLabel;
 }
 
 export function terminalPanelTabID(terminalID: string): string {

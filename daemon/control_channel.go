@@ -2,60 +2,28 @@ package main
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/ecdh"
-	"crypto/ed25519"
-	"crypto/hkdf"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/oines/astralops/pkg/controlwire"
+	"github.com/oines/astralops/pkg/hostcore"
 )
 
 const (
-	controlProtocolVersion            = "astralops-control-v1"
+	controlProtocolVersion            = controlwire.ProtocolVersion
 	controlHelloFrameMaxBytesDefault  = 16 * 1024
 	controlSealedFrameMaxBytesDefault = 64 * 1024 * 1024
-
-	controlDirectionControllerToHost = "controller-to-host"
-	controlDirectionHostToController = "host-to-controller"
 )
 
-type controlHelloFrame struct {
-	Type                   string                `json:"type"`
-	Version                string                `json:"version"`
-	ControllerDeviceID     string                `json:"controller_device_id"`
-	ControllerPublicKey    string                `json:"controller_public_key"`
-	ControllerEphemeralKey string                `json:"controller_ephemeral_key"`
-	ClientNonce            string                `json:"client_nonce"`
-	Signature              string                `json:"signature"`
-	MembershipLease        *CloudMembershipLease `json:"membership_lease,omitempty"`
-}
-
-type controlHelloAckFrame struct {
-	Type               string                `json:"type"`
-	Version            string                `json:"version"`
-	ConnectionID       string                `json:"connection_id"`
-	HostDeviceID       string                `json:"host_device_id"`
-	HostPublicKey      string                `json:"host_public_key"`
-	HostEphemeralKey   string                `json:"host_ephemeral_key"`
-	ClientNonce        string                `json:"client_nonce"`
-	ServerNonce        string                `json:"server_nonce"`
-	Signature          string                `json:"signature"`
-	Encryption         string                `json:"encryption"`
-	SignatureAlgorithm string                `json:"signature_algorithm"`
-	MembershipLease    *CloudMembershipLease `json:"membership_lease,omitempty"`
-}
+type controlHelloFrame = controlwire.HelloFrame
+type controlHelloAckFrame = controlwire.HelloAckFrame
 
 type controlPlainFrame struct {
 	Type          string                    `json:"type"`
@@ -69,12 +37,7 @@ type controlPlainFrame struct {
 	Code          string                    `json:"code,omitempty"`
 }
 
-type controlSealedFrame struct {
-	Type       string `json:"type"`
-	Seq        uint64 `json:"seq"`
-	Nonce      string `json:"nonce"`
-	Ciphertext string `json:"ciphertext"`
-}
+type controlSealedFrame = controlwire.SealedFrame
 
 type controlFrameRead struct {
 	plain        controlPlainFrame
@@ -94,11 +57,12 @@ type controlConnection interface {
 }
 
 type controlWSConn struct {
-	app                *app
+	control            *remoteControlService
 	socket             *websocket.Conn
 	id                 string
 	controllerDeviceID string
 	cipher             *controlCipher
+	hostSession        hostcore.Session
 	ctx                context.Context
 	cancel             context.CancelFunc
 	writeMu            sync.Mutex
@@ -107,16 +71,14 @@ type controlWSConn struct {
 }
 
 type controlCipher struct {
-	sendAEAD      cipher.AEAD
-	recvAEAD      cipher.AEAD
-	connectionID  string
-	sendDirection string
-	recvDirection string
-	sendSeq       uint64
-	recvSeq       uint64
+	inner *controlwire.Cipher
 }
 
 func (a *app) handleControlWS(w http.ResponseWriter, r *http.Request) {
+	if !a.hostRoleEnabled() {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 	if r.Method != http.MethodGet || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -127,14 +89,15 @@ func (a *app) handleControlWS(w http.ResponseWriter, r *http.Request) {
 	}
 	socket.SetReadLimit(a.controlHelloFrameMaxBytes())
 	ctx, cancel := context.WithCancel(context.Background())
-	conn := &controlWSConn{app: a, socket: socket, ctx: ctx, cancel: cancel}
+	control := a.remoteControlService()
+	conn := &controlWSConn{control: control, socket: socket, ctx: ctx, cancel: cancel}
 	if err := conn.acceptHello(); err != nil {
 		cancel()
 		_ = socket.Close()
 		return
 	}
 	socket.SetReadLimit(a.controlSealedFrameMaxBytes())
-	a.registerControlSession(conn)
+	control.registerControlSession(conn)
 	conn.serve()
 }
 
@@ -162,95 +125,25 @@ func (c *controlWSConn) acceptHello() error {
 		c.writeUnsealedClose("invalid_hello", "invalid control hello")
 		return err
 	}
-	if hello.Type != "hello" || hello.Version != controlProtocolVersion {
-		c.writeUnsealedClose("invalid_hello", "invalid control hello")
-		return errors.New("invalid control hello")
+	core := c.control.hostCoreManager()
+	if core == nil {
+		c.writeUnsealedClose("host_service_unavailable", "host core is not enabled")
+		return errors.New("host core is not enabled")
 	}
-
-	grant, ok := c.app.store.trustedControlGrant(hello.ControllerDeviceID)
-	if !ok {
-		c.writeUnsealedClose("capability_denied", "controller is not trusted")
-		return errors.New("controller is not trusted")
-	}
-	controllerPublicKey, err := c.validateControllerPublicKey(grant, hello.ControllerPublicKey)
+	session, ack, cipher, err := core.AcceptHello(c.requestContext(), hello, hostcore.Transport{Kind: hostcore.TransportDirect, RemoteAddr: c.socket.RemoteAddr().String()})
 	if err != nil {
-		c.writeUnsealedClose("invalid_identity", err.Error())
+		c.writeUnsealedClose(controlHelloCloseCode(err), controlHelloCloseReason(err))
 		return err
 	}
-	membership, err := c.app.store.currentCloudMembership(cloudMembershipRole{CanHost: true})
-	if err != nil {
-		c.writeUnsealedClose("membership_required", err.Error())
-		return err
-	}
-	if err := validateCloudMembershipLease(firstNonNilMembershipLease(hello.MembershipLease), membership.SigningPublicKey, membership.AccountIDHash, hello.ControllerDeviceID, devicePublicKeyFingerprint(controllerPublicKey), cloudMembershipRole{CanControl: true}, time.Now().UTC()); err != nil {
-		c.writeUnsealedClose("membership_invalid", err.Error())
-		return err
-	}
-	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(hello.Signature))
-	if err != nil || !ed25519.Verify(controllerPublicKey, controlClientSignaturePayload(c.app.store.deviceIdentity.DeviceID, hello), signature) {
-		c.writeUnsealedClose("invalid_signature", "invalid control hello signature")
-		return errors.New("invalid control hello signature")
-	}
-
-	curve := ecdh.X25519()
-	hostEphemeral, err := curve.GenerateKey(rand.Reader)
-	if err != nil {
-		c.writeUnsealedClose("handshake_failed", "failed to create host ephemeral key")
-		return err
-	}
-	controllerEphemeralBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(hello.ControllerEphemeralKey))
-	if err != nil {
-		c.writeUnsealedClose("invalid_ephemeral_key", "invalid controller ephemeral key")
-		return err
-	}
-	controllerEphemeral, err := curve.NewPublicKey(controllerEphemeralBytes)
-	if err != nil {
-		c.writeUnsealedClose("invalid_ephemeral_key", "invalid controller ephemeral key")
-		return err
-	}
-	sharedSecret, err := hostEphemeral.ECDH(controllerEphemeral)
-	if err != nil {
-		c.writeUnsealedClose("handshake_failed", "failed to create shared secret")
-		return err
-	}
-
-	serverNonce, err := randomBase64(32)
-	if err != nil {
-		c.writeUnsealedClose("handshake_failed", "failed to create server nonce")
-		return err
-	}
-	c.id = "ctrl_" + randomID(16)
-	c.controllerDeviceID = hello.ControllerDeviceID
-	hostEphemeralKey := base64.StdEncoding.EncodeToString(hostEphemeral.PublicKey().Bytes())
-	cipher, err := newControlHostCipher(sharedSecret, hello, c.app.store.deviceIdentity.DeviceID, c.app.store.deviceIdentity.PublicKey, hostEphemeralKey, serverNonce, c.id)
-	if err != nil {
-		c.writeUnsealedClose("handshake_failed", "failed to create control cipher")
-		return err
-	}
-	c.cipher = cipher
-
-	ack := controlHelloAckFrame{
-		Type:               "hello_ack",
-		Version:            controlProtocolVersion,
-		ConnectionID:       c.id,
-		HostDeviceID:       c.app.store.deviceIdentity.DeviceID,
-		HostPublicKey:      c.app.store.deviceIdentity.PublicKey,
-		HostEphemeralKey:   hostEphemeralKey,
-		ClientNonce:        hello.ClientNonce,
-		ServerNonce:        serverNonce,
-		Encryption:         "x25519-aes-256-gcm",
-		SignatureAlgorithm: "ed25519",
-		MembershipLease:    membership.Lease,
-	}
-	ack.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(c.app.store.devicePrivateKey), controlHostSignaturePayload(hello, ack)))
+	session.Connection = c
+	c.id = session.ConnectionID
+	c.controllerDeviceID = session.ControllerDeviceID
+	c.hostSession = session
+	c.cipher = hostCoreCipher(cipher)
 	if err := c.socket.WriteJSON(ack); err != nil {
 		return err
 	}
 	return nil
-}
-
-func (c *controlWSConn) validateControllerPublicKey(grant TrustGrant, value string) (ed25519.PublicKey, error) {
-	return validateControlControllerPublicKey(grant, value)
 }
 
 func (c *controlWSConn) serve() {
@@ -268,10 +161,11 @@ func (c *controlWSConn) serve() {
 				c.writePlain(controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_request", "missing request")})
 				continue
 			}
-			response, after := c.handleRequest(*frame.plain.Request)
-			c.writePlain(controlPlainFrame{Type: "response", Response: response})
-			if after != nil {
-				go after()
+			req := *frame.plain.Request
+			go c.handleRequestAsync(req)
+		case terminalFrameInput, terminalFrameResize, terminalFrameHeartbeatAck:
+			if err := c.handleTerminalFrame(frame.plain); err != nil {
+				c.writeTerminalError(frame.plain, err)
 			}
 		case "close":
 			return
@@ -279,6 +173,85 @@ func (c *controlWSConn) serve() {
 			c.writePlain(controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_frame", "unsupported control frame type")})
 		}
 	}
+}
+
+func (c *controlWSConn) handleRequestAsync(req ControlRequest) {
+	response, after := c.handleRequest(req)
+	c.writePlain(controlPlainFrame{Type: "response", Response: response})
+	if after != nil {
+		go after()
+	}
+}
+
+func (c *controlWSConn) handleTerminalFrame(frame controlPlainFrame) error {
+	req, err := terminalFrameControlRequest(c.controllerID(), frame)
+	if err != nil {
+		return err
+	}
+	_, err = c.control.executeControlRequestWithContext(c.requestContext(), req, c)
+	return err
+}
+
+func (c *controlWSConn) writeTerminalError(frame controlPlainFrame, err error) {
+	c.writePlain(terminalErrorFrame(frame, err))
+}
+
+func terminalErrorFrame(frame controlPlainFrame, err error) controlPlainFrame {
+	response := controlResponseFromError("", err)
+	code := "terminal_frame_error"
+	message := "terminal frame failed"
+	if response != nil && response.Error != nil {
+		if response.Error.Code != "" {
+			code = response.Error.Code
+		}
+		if response.Error.Message != "" {
+			message = response.Error.Message
+		}
+	}
+	payload := &terminalStreamFrame{frameType: terminalFrameError, Code: code, Reason: message}
+	if frame.Terminal != nil {
+		payload.TerminalID = frame.Terminal.TerminalID
+		payload.WorkspaceID = frame.Terminal.WorkspaceID
+		payload.Target = frame.Terminal.Target
+		payload.OutputSeq = frame.Terminal.OutputSeq
+		payload.ViewerID = frame.Terminal.ViewerID
+		payload.InputLeaseID = frame.Terminal.InputLeaseID
+	}
+	return controlPlainFrame{Type: terminalFrameError, Terminal: payload}
+}
+
+func terminalFrameControlRequest(controllerDeviceID string, frame controlPlainFrame) (ControlRequest, error) {
+	if frame.Terminal == nil {
+		return ControlRequest{}, newActionError(http.StatusBadRequest, "terminal_frame_invalid", "terminal frame payload is missing")
+	}
+	params := map[string]any{
+		"terminal_id":    frame.Terminal.TerminalID,
+		"viewer_id":      frame.Terminal.ViewerID,
+		"input_lease_id": frame.Terminal.InputLeaseID,
+	}
+	req := ControlRequest{
+		ControllerDeviceID: controllerDeviceID,
+		Params:             params,
+	}
+	switch frame.Type {
+	case terminalFrameInput:
+		req.Capability = CapabilityTerminalInput
+		req.Action = ControlActionTerminalInput
+		params["data"] = frame.Terminal.Data
+	case terminalFrameResize:
+		req.Capability = CapabilityTerminalInput
+		req.Action = ControlActionTerminalResize
+		params["cols"] = frame.Terminal.Cols
+		params["rows"] = frame.Terminal.Rows
+	case terminalFrameHeartbeatAck:
+		req.Capability = CapabilityTerminalOpen
+		req.Action = ControlActionTerminalHeartbeatAck
+		params["heartbeat_seq"] = frame.Terminal.HeartbeatSeq
+		params["rendered_seq"] = frame.Terminal.RenderedSeq
+	default:
+		return ControlRequest{}, newActionError(http.StatusBadRequest, "terminal_frame_invalid", "unsupported terminal frame type")
+	}
+	return req, nil
 }
 
 func (c *controlWSConn) readControlFrames() <-chan controlFrameRead {
@@ -324,18 +297,20 @@ func (c *controlWSConn) sendControlFrameRead(frames chan<- controlFrameRead, fra
 }
 
 func (c *controlWSConn) handleRequest(req ControlRequest) (*ControlResponse, func()) {
-	if strings.TrimSpace(req.ControllerDeviceID) != "" && req.ControllerDeviceID != c.controllerDeviceID {
-		return controlResponseError(req.RequestID, http.StatusForbidden, "controller_device_mismatch", "request controller_device_id does not match control session"), nil
+	session := c.hostSession
+	session.Connection = c
+	core := c.control.hostCoreManager()
+	if core == nil {
+		return controlResponseError(req.RequestID, http.StatusServiceUnavailable, "host_service_unavailable", "host core is not enabled"), nil
 	}
-	req.ControllerDeviceID = c.controllerDeviceID
-	response, err := c.app.executeControlRequestWithConnection(req, c)
+	response, err := core.Dispatch(c.requestContext(), session, req)
 	if err == nil {
-		return &response, c.app.afterControlResponse(c, req, response)
+		return &response, c.control.afterControlResponse(c, req, response)
 	}
 	return controlResponseFromError(req.RequestID, err), nil
 }
 
-func (a *app) afterControlResponse(conn controlConnection, req ControlRequest, response ControlResponse) func() {
+func (s *remoteControlService) afterControlResponse(conn controlConnection, req ControlRequest, response ControlResponse) func() {
 	if !response.OK {
 		return nil
 	}
@@ -349,7 +324,7 @@ func (a *app) afterControlResponse(conn controlConnection, req ControlRequest, r
 		conn.registerControlStream(result.StreamID, cancel)
 		return func() {
 			defer conn.unregisterControlStream(result.StreamID)
-			a.streamControlEvents(ctx, result, conn, req.RequestID)
+			s.streamControlEvents(ctx, result, conn, req.RequestID)
 		}
 	case ControlActionMediaStream:
 		result, ok := response.Result.(mediaStreamResult)
@@ -360,7 +335,7 @@ func (a *app) afterControlResponse(conn controlConnection, req ControlRequest, r
 		conn.registerControlStream(result.StreamID, cancel)
 		return func() {
 			defer conn.unregisterControlStream(result.StreamID)
-			a.streamControlMedia(ctx, result, conn, req.RequestID)
+			s.mediaService().streamControlMedia(ctx, result, conn, req.RequestID)
 		}
 	case ControlActionHostTrustRevoke:
 		result, ok := response.Result.(hostTrustRevokeResult)
@@ -368,7 +343,7 @@ func (a *app) afterControlResponse(conn controlConnection, req ControlRequest, r
 			return nil
 		}
 		return func() {
-			a.closeControlSessionsForDevice(conn.controllerID(), "trust_revoked")
+			s.closeControlSessionsForDevice(conn.controllerID(), "trust_revoked")
 		}
 	case ControlActionWorkspaceFilesStream:
 		result, ok := response.Result.(workspaceFileStreamResult)
@@ -383,7 +358,7 @@ func (a *app) afterControlResponse(conn controlConnection, req ControlRequest, r
 		conn.registerControlStream(result.StreamID, cancel)
 		return func() {
 			defer conn.unregisterControlStream(result.StreamID)
-			a.streamControlWorkspaceFile(ctx, params, result, conn, req.RequestID)
+			s.workspaceService().streamControlWorkspaceFile(ctx, params, result, conn, req.RequestID)
 		}
 	default:
 		return nil
@@ -472,6 +447,14 @@ func (c *controlWSConn) cancelControlSession() {
 	c.cancel()
 }
 
+func (c *controlWSConn) terminateControlConnection(code, reason string) {
+	if c == nil {
+		return
+	}
+	c.writeEncryptedClose(code, reason)
+	c.shutdown()
+}
+
 func (c *controlWSConn) unregisterMediaStream(streamID string) {
 	c.unregisterControlStream(streamID)
 }
@@ -542,50 +525,49 @@ func (c *controlWSConn) writeUnsealedClose(code, reason string) {
 func (c *controlWSConn) shutdown() {
 	c.cancelControlSession()
 	c.cancelAllMediaStreams()
-	c.app.detachTerminalViewersForControlSession(c.id, "connection_closed")
-	c.app.unregisterControlSession(c.id)
+	c.control.detachTerminalViewersForControlSession(c.id, "connection_closed")
+	c.control.unregisterControlSession(c.id)
 	_ = c.socket.Close()
 }
 
-func (a *app) registerControlSession(conn *controlWSConn) {
-	a.controlMu.Lock()
-	defer a.controlMu.Unlock()
-	if a.controlSessions == nil {
-		a.controlSessions = map[string]*controlWSConn{}
-	}
-	a.controlSessions[conn.id] = conn
+func (s *remoteControlService) registerControlSession(conn *controlWSConn) {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	s.wsSessions()[conn.id] = conn
 }
 
-func (a *app) unregisterControlSession(connectionID string) {
+func (s *remoteControlService) unregisterControlSession(connectionID string) {
 	if connectionID == "" {
 		return
 	}
-	a.controlMu.Lock()
-	defer a.controlMu.Unlock()
-	delete(a.controlSessions, connectionID)
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	delete(s.wsSessions(), connectionID)
 }
 
-func (a *app) closeControlSessionsForDevice(controllerDeviceID, reason string) int {
-	return a.closeControlSessionsForDeviceExcept(controllerDeviceID, reason, "")
+func (s *remoteControlService) closeControlSessionsForDevice(controllerDeviceID, reason string) int {
+	return s.closeControlSessionsForDeviceExcept(controllerDeviceID, reason, "")
 }
 
-func (a *app) closeAllControlSessions(reason string) int {
-	a.controlMu.Lock()
-	wsSessions := make([]*controlWSConn, 0, len(a.controlSessions))
-	for id, conn := range a.controlSessions {
+func (s *remoteControlService) closeAllControlSessions(reason string) int {
+	s.controlMu.Lock()
+	controlSessions := s.wsSessions()
+	wsSessions := make([]*controlWSConn, 0, len(controlSessions))
+	for id, conn := range controlSessions {
 		wsSessions = append(wsSessions, conn)
-		delete(a.controlSessions, id)
+		delete(controlSessions, id)
 	}
-	relaySessions := make([]*controlRelaySession, 0, len(a.controlRelaySessions))
-	for id, session := range a.controlRelaySessions {
+	controlRelaySessions := s.relaySessions()
+	relaySessions := make([]*controlRelaySession, 0, len(controlRelaySessions))
+	for id, session := range controlRelaySessions {
 		relaySessions = append(relaySessions, session)
-		delete(a.controlRelaySessions, id)
+		delete(controlRelaySessions, id)
 	}
-	a.controlMu.Unlock()
+	s.controlMu.Unlock()
 	for _, conn := range wsSessions {
 		conn.cancelControlSession()
 		conn.cancelAllControlStreams()
-		a.detachTerminalViewersForControlSession(conn.id, reason)
+		s.detachTerminalViewersForControlSession(conn.id, reason)
 		conn.writeEncryptedClose(reason, reason)
 		_ = conn.socket.Close()
 	}
@@ -596,36 +578,37 @@ func (a *app) closeAllControlSessions(reason string) int {
 	return len(wsSessions) + len(relaySessions)
 }
 
-func (a *app) closeControlSessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID string) int {
-	a.controlMu.Lock()
+func (s *remoteControlService) closeControlSessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID string) int {
+	s.controlMu.Lock()
 	sessions := []*controlWSConn{}
-	for id, conn := range a.controlSessions {
+	controlSessions := s.wsSessions()
+	for id, conn := range controlSessions {
 		if conn.controllerDeviceID == controllerDeviceID && id != exceptConnectionID {
 			sessions = append(sessions, conn)
-			delete(a.controlSessions, id)
+			delete(controlSessions, id)
 		}
 	}
-	a.controlMu.Unlock()
+	s.controlMu.Unlock()
 	for _, conn := range sessions {
 		conn.cancelControlSession()
 		conn.cancelAllControlStreams()
-		a.detachTerminalViewersForControlSession(conn.id, reason)
+		s.detachTerminalViewersForControlSession(conn.id, reason)
 		conn.writeEncryptedClose("trust_revoked", reason)
 		_ = conn.socket.Close()
 	}
-	return len(sessions) + a.closeControlRelaySessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID)
+	return len(sessions) + s.closeControlRelaySessionsForDeviceExcept(controllerDeviceID, reason, exceptConnectionID)
 }
 
-func (a *app) activeControlSessionCountForDevice(controllerDeviceID string) int {
-	a.controlMu.Lock()
-	defer a.controlMu.Unlock()
+func (s *remoteControlService) activeControlSessionCountForDevice(controllerDeviceID string) int {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
 	count := 0
-	for _, conn := range a.controlSessions {
+	for _, conn := range s.wsSessions() {
 		if conn.controllerDeviceID == controllerDeviceID {
 			count++
 		}
 	}
-	for _, session := range a.controlRelaySessions {
+	for _, session := range s.relaySessions() {
 		if session.controllerDeviceID == controllerDeviceID {
 			count++
 		}
@@ -633,191 +616,58 @@ func (a *app) activeControlSessionCountForDevice(controllerDeviceID string) int 
 	return count
 }
 
-type controlSessionKeys struct {
-	controllerToHost []byte
-	hostToController []byte
-}
-
 func newControlHostCipher(sharedSecret []byte, hello controlHelloFrame, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID string) (*controlCipher, error) {
-	keys := deriveControlSessionKeys(sharedSecret, hello, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID)
-	return newControlCipher(keys.hostToController, keys.controllerToHost, connectionID, controlDirectionHostToController, controlDirectionControllerToHost)
+	cipher, err := controlwire.NewHostCipher(sharedSecret, hello, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID)
+	if err != nil {
+		return nil, err
+	}
+	return &controlCipher{inner: cipher}, nil
 }
 
 func newControlControllerCipher(sharedSecret []byte, hello controlHelloFrame, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID string) (*controlCipher, error) {
-	keys := deriveControlSessionKeys(sharedSecret, hello, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID)
-	return newControlCipher(keys.controllerToHost, keys.hostToController, connectionID, controlDirectionControllerToHost, controlDirectionHostToController)
-}
-
-func newControlCipher(sendKey, recvKey []byte, connectionID, sendDirection, recvDirection string) (*controlCipher, error) {
-	if strings.TrimSpace(connectionID) == "" || strings.TrimSpace(sendDirection) == "" || strings.TrimSpace(recvDirection) == "" {
-		return nil, errors.New("control cipher context required")
-	}
-	sendAEAD, err := newControlAEAD(sendKey)
+	cipher, err := controlwire.NewControllerCipher(sharedSecret, hello, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID)
 	if err != nil {
 		return nil, err
 	}
-	recvAEAD, err := newControlAEAD(recvKey)
-	if err != nil {
-		return nil, err
-	}
-	return &controlCipher{
-		sendAEAD:      sendAEAD,
-		recvAEAD:      recvAEAD,
-		connectionID:  connectionID,
-		sendDirection: sendDirection,
-		recvDirection: recvDirection,
-	}, nil
-}
-
-func newControlAEAD(key []byte) (cipher.AEAD, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	return aead, nil
+	return &controlCipher{inner: cipher}, nil
 }
 
 func (c *controlCipher) seal(frame controlPlainFrame) (controlSealedFrame, error) {
-	body, err := json.Marshal(frame)
-	if err != nil {
-		return controlSealedFrame{}, err
+	if c == nil || c.inner == nil {
+		return controlSealedFrame{}, errors.New("control cipher is not initialized")
 	}
-	nonce := make([]byte, c.sendAEAD.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return controlSealedFrame{}, err
-	}
-	c.sendSeq++
-	sealed := c.sendAEAD.Seal(nil, nonce, body, controlFrameAAD(c.connectionID, c.sendDirection, c.sendSeq))
-	return controlSealedFrame{
-		Type:       "sealed",
-		Seq:        c.sendSeq,
-		Nonce:      base64.StdEncoding.EncodeToString(nonce),
-		Ciphertext: base64.StdEncoding.EncodeToString(sealed),
-	}, nil
+	return c.inner.Seal(toWirePlainFrame(frame))
 }
 
 func (c *controlCipher) open(frame controlSealedFrame) (controlPlainFrame, error) {
-	if frame.Type != "sealed" || frame.Seq == 0 || frame.Seq != c.recvSeq+1 {
-		return controlPlainFrame{}, errors.New("invalid sealed frame sequence")
+	if c == nil || c.inner == nil {
+		return controlPlainFrame{}, errors.New("control cipher is not initialized")
 	}
-	nonce, err := base64.StdEncoding.DecodeString(frame.Nonce)
+	plain, err := c.inner.Open(frame)
 	if err != nil {
 		return controlPlainFrame{}, err
 	}
-	ciphertext, err := base64.StdEncoding.DecodeString(frame.Ciphertext)
-	if err != nil {
-		return controlPlainFrame{}, err
-	}
-	body, err := c.recvAEAD.Open(nil, nonce, ciphertext, controlFrameAAD(c.connectionID, c.recvDirection, frame.Seq))
-	if err != nil {
-		return controlPlainFrame{}, err
-	}
-	var plain controlPlainFrame
-	if err := json.Unmarshal(body, &plain); err != nil {
-		return controlPlainFrame{}, err
-	}
-	c.recvSeq = frame.Seq
-	return plain, nil
-}
-
-func controlFrameAAD(connectionID, direction string, seq uint64) []byte {
-	return []byte(strings.Join([]string{
-		controlProtocolVersion,
-		"sealed",
-		connectionID,
-		direction,
-		strconv.FormatUint(seq, 10),
-	}, "\n"))
-}
-
-func deriveControlSessionKeys(sharedSecret []byte, hello controlHelloFrame, hostDeviceID, hostPublicKey, hostEphemeralKey, serverNonce, connectionID string) controlSessionKeys {
-	salt := sha256.Sum256([]byte(hello.ClientNonce + "\x00" + serverNonce))
-	info := strings.Join([]string{
-		controlProtocolVersion,
-		"session-key",
-		connectionID,
-		hostDeviceID,
-		hostPublicKey,
-		hello.ControllerDeviceID,
-		hello.ControllerPublicKey,
-		hello.ControllerEphemeralKey,
-		hostEphemeralKey,
-	}, "\n")
-	return controlSessionKeys{
-		controllerToHost: deriveControlSessionDirectionKey(sharedSecret, salt[:], info, controlDirectionControllerToHost),
-		hostToController: deriveControlSessionDirectionKey(sharedSecret, salt[:], info, controlDirectionHostToController),
-	}
-}
-
-func deriveControlSessionDirectionKey(sharedSecret, salt []byte, baseInfo, direction string) []byte {
-	key, err := hkdf.Key(sha256.New, sharedSecret, salt, baseInfo+"\n"+direction, 32)
-	if err != nil {
-		panic(err)
-	}
-	return key
+	return fromWirePlainFrame(plain), nil
 }
 
 func controlClientSignaturePayload(hostDeviceID string, hello controlHelloFrame) []byte {
-	return []byte(strings.Join([]string{
-		controlProtocolVersion,
-		"client-hello",
-		hostDeviceID,
-		hello.ControllerDeviceID,
-		hello.ControllerPublicKey,
-		hello.ControllerEphemeralKey,
-		hello.ClientNonce,
-		controlMembershipLeaseSignaturePart(hello.MembershipLease),
-	}, "\n"))
+	return controlwire.ControllerSignaturePayload(hostDeviceID, hello)
 }
 
 func controlHostSignaturePayload(hello controlHelloFrame, ack controlHelloAckFrame) []byte {
-	return []byte(strings.Join([]string{
-		controlProtocolVersion,
-		"host-hello-ack",
-		ack.ConnectionID,
-		ack.HostDeviceID,
-		ack.HostPublicKey,
-		hello.ControllerDeviceID,
-		hello.ControllerPublicKey,
-		hello.ControllerEphemeralKey,
-		ack.HostEphemeralKey,
-		hello.ClientNonce,
-		ack.ServerNonce,
-		controlMembershipLeaseSignaturePart(hello.MembershipLease),
-		controlMembershipLeaseSignaturePart(ack.MembershipLease),
-	}, "\n"))
+	return controlwire.HostSignaturePayload(hello, ack)
 }
 
 func validateControlClientHelloAck(st *store, hostInfo HostInfo, hello controlHelloFrame, ack controlHelloAckFrame) error {
-	if ack.Type != "hello_ack" || ack.Version != controlProtocolVersion {
-		return fmt.Errorf("invalid control hello_ack")
-	}
-	if ack.HostDeviceID != hostInfo.Identity.DeviceID || ack.HostPublicKey != hostInfo.Identity.PublicKey {
-		return fmt.Errorf("remote Host identity changed during handshake")
-	}
-	if ack.ClientNonce != hello.ClientNonce {
-		return fmt.Errorf("invalid control hello_ack client nonce")
-	}
 	membership, err := st.currentCloudMembership(cloudMembershipRole{CanControl: true})
 	if err != nil {
 		return err
 	}
-	if err := validateCloudMembershipLease(firstNonNilMembershipLease(ack.MembershipLease), membership.SigningPublicKey, membership.AccountIDHash, ack.HostDeviceID, hostInfo.Identity.PublicKeyFingerprint, cloudMembershipRole{CanHost: true}, time.Now().UTC()); err != nil {
-		return err
-	}
-	hostPublicKey, err := decodeDevicePublicKey(ack.HostPublicKey)
-	if err != nil {
-		return err
-	}
-	signature, err := base64.StdEncoding.DecodeString(ack.Signature)
-	if err != nil || !ed25519.Verify(hostPublicKey, controlHostSignaturePayload(hello, ack), signature) {
-		return fmt.Errorf("invalid Host hello_ack signature")
-	}
-	return nil
+	return controlwire.ValidateControllerHelloAck(hostInfo.Identity, controlwire.MembershipState{
+		AccountIDHash:    membership.AccountIDHash,
+		SigningPublicKey: membership.SigningPublicKey,
+		Lease:            membership.Lease,
+	}, hello, ack)
 }
 
 func firstNonNilMembershipLease(lease *CloudMembershipLease) CloudMembershipLease {
@@ -836,6 +686,10 @@ func randomBase64(n int) (string, error) {
 }
 
 func controlResponseFromError(requestID string, err error) *ControlResponse {
+	var coreErr *hostcore.Error
+	if errors.As(err, &coreErr) {
+		return controlResponseError(requestID, coreErr.Status, coreErr.Code, coreErr.Message)
+	}
 	var actionErr *actionError
 	if errors.As(err, &actionErr) {
 		return controlResponseError(requestID, actionErr.Status, actionErr.Code, actionErr.Message)

@@ -29,6 +29,7 @@ import type {
   PairingRequestListResult,
   PairingRequestResolveResult,
   RemoteHostRecord,
+  RemoteHostSessionState,
   Session,
   SessionCommandListResponse,
   SessionCommandResponse,
@@ -91,19 +92,38 @@ export type WorkbenchSubscriptionHandlers = {
   onError?: (error?: unknown) => void;
 };
 
+export type RemoteHostStateSubscriptionHandlers = {
+  onState: (state: RemoteHostSessionState) => void;
+  onOpen?: () => void;
+  onError?: (error?: unknown) => void;
+};
+
 export type TerminalReadyPayload = {
   terminal_id?: string;
+  viewer_id?: string;
+  input_lease_id?: string;
   shell?: string;
   cwd?: string;
+  output_seq?: number;
+  can_input?: boolean;
+};
+
+export type TerminalStatusPayload = {
+  terminal_id?: string;
+  state?: "attaching" | "live" | "resyncing" | "paused" | "failed" | "closed" | string;
+  can_input?: boolean;
+  message?: string;
   output_seq?: number;
 };
 
 export type TerminalHandlers = {
   onOpen?: () => void;
   onReady?: (payload: TerminalReadyPayload) => void;
+  onStatus?: (payload: TerminalStatusPayload) => void;
+  onHeartbeat?: (payload: { terminal_id?: string; viewer_id?: string; input_lease_id?: string; heartbeat_seq?: number; output_seq?: number; can_input?: boolean }) => void;
   onOutput?: (data: string, outputSeq?: number) => void;
   onExit?: (payload: Record<string, unknown>) => void;
-  onError?: (message: string) => void;
+  onError?: (message: string, code?: string) => void;
   onConnectionError?: (message: string) => void;
   onClose?: (payload: { code?: number; reason?: string; wasClean?: boolean }) => void;
 };
@@ -111,6 +131,7 @@ export type TerminalHandlers = {
 export type TerminalConnection = {
   input: (data: string) => void;
   resize: (cols: number, rows: number) => void;
+  ackRendered: (outputSeq: number) => void;
   close: () => void;
 };
 
@@ -227,6 +248,21 @@ export async function requestRemoteHostPairing(info: DaemonInfo, hostDeviceId: s
     controller_device_id: host.identity.device_id,
     scope: "full",
   });
+}
+
+export function subscribeRemoteHostSessionState(info: DaemonInfo, hostDeviceId: string, handlers: RemoteHostStateSubscriptionHandlers): EventSubscription {
+  const channel = new LocalHttpControlChannel(info);
+  const source = new EventSource(channel.url(`/v1/remote/hosts/${encodeURIComponent(hostDeviceId)}/state`, { stream: 1 }));
+  source.addEventListener("remote-host-state", (message) => {
+    try {
+      handlers.onState(JSON.parse((message as MessageEvent).data) as RemoteHostSessionState);
+    } catch (error) {
+      handlers.onError?.(error);
+    }
+  });
+  source.onopen = () => handlers.onOpen?.();
+  source.onerror = (event) => handlers.onError?.(event);
+  return { close: () => source.close() };
 }
 
 type RequestMethod = "GET" | "PATCH" | "POST" | "DELETE";
@@ -360,10 +396,10 @@ function errorMessage(error: unknown): string {
 
 function httpErrorMessage(payload: { code?: unknown; error?: unknown }, remote: boolean): string | null {
   if (payload.code === "control_action_unknown" && typeof payload.error === "string") {
-    return remote ? "远端 Host 不支持这个远控操作，通常是目标设备 AstralOps 版本过旧。请更新并重启目标设备。" : payload.error;
+    return remote ? "The target Host does not support this remote operation. It is usually running an older AstralOps version. Update and restart the target device." : payload.error;
   }
   if (payload.code === "control_authorization_required") {
-    return "需要目标 Host 批准本机控制";
+    return "Target Host approval is required to control this device.";
   }
   return typeof payload.error === "string" && payload.error ? payload.error : null;
 }
@@ -613,6 +649,16 @@ class RemoteDaemonControlChannel implements ControlChannel {
     const remotePath = this.remotePath(path);
     const separator = remotePath.includes("?") ? "&" : "?";
     return new WebSocket(`${this.baseUrl.replace(/^http/, "ws")}${remotePath}${separator}${params.toString()}`);
+  }
+
+  url(path: string, params: Record<string, string | number | boolean | undefined> = {}): string {
+    const query = new URLSearchParams({ token: this.token });
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) query.set(key, String(value));
+    }
+    const remotePath = this.remotePath(path);
+    const separator = remotePath.includes("?") ? "&" : "?";
+    return `${this.baseUrl}${remotePath}${separator}${query.toString()}`;
   }
 
   private remotePath(path: string): string {
@@ -866,48 +912,52 @@ export class LocalCoreClient implements CoreClient {
 }
 
 class RemoteCoreClient extends LocalCoreClient {
+  constructor(private readonly remoteChannel: RemoteDaemonControlChannel) {
+    super(remoteChannel);
+  }
+
   health(): Promise<HealthResponse> {
-    return Promise.reject(new Error("远端 Host health 尚未进入控制协议"));
+    return Promise.reject(new Error("Remote Host health is not available through the control protocol."));
   }
 
   settings(): Promise<AppSettings> {
-    return Promise.reject(new Error("远端 Host settings 尚未进入控制协议"));
+    return Promise.reject(new Error("Remote Host settings are not available through the control protocol."));
   }
 
   patchSettings(): Promise<AppSettings> {
-    return Promise.reject(new Error("远端 Host settings 尚未进入控制协议"));
+    return Promise.reject(new Error("Remote Host settings are not available through the control protocol."));
   }
 
   clearMediaCache(): Promise<ClearMediaCacheResponse> {
-    return Promise.reject(new Error("远端 Host 本地缓存不能由 Controller 清理"));
+    return Promise.reject(new Error("Controller cannot clear a remote Host cache."));
   }
 
   listCloudDevices(): Promise<CloudDeviceRecord[]> {
-    return Promise.reject(new Error("远端 Host cloud 设备列表不能由 Controller 读取"));
+    return Promise.reject(new Error("Controller cannot read remote Host cloud devices."));
   }
 
   cloudAccountStatus(): Promise<CloudAccountStatus> {
-    return Promise.reject(new Error("远端 Host cloud 账号状态不能由 Controller 读取"));
+    return Promise.reject(new Error("Controller cannot read remote Host cloud account status."));
   }
 
   startCloudAuth(): Promise<CloudAuthStartResponse> {
-    return Promise.reject(new Error("远端 Host cloud 登录不能由 Controller 发起"));
+    return Promise.reject(new Error("Controller cannot start cloud login on a remote Host."));
   }
 
   logoutCloudAuth(): Promise<CloudAuthLogoutResponse> {
-    return Promise.reject(new Error("远端 Host cloud 登录不能由 Controller 退出"));
+    return Promise.reject(new Error("Controller cannot log out cloud account on a remote Host."));
   }
 
   listCloudRelays(): Promise<CloudRelayListResponse> {
-    return Promise.reject(new Error("远端 Host cloud 中继列表不能由 Controller 读取"));
+    return Promise.reject(new Error("Controller cannot read remote Host cloud relays."));
   }
 
   setCloudAccountRelay(): Promise<CloudAccountStatus> {
-    return Promise.reject(new Error("远端 Host cloud 中继不能由 Controller 切换"));
+    return Promise.reject(new Error("Controller cannot switch cloud relay on a remote Host."));
   }
 
   removeCloudDevice(): Promise<CloudDeviceRemoveResponse> {
-    return Promise.reject(new Error("远端 Host cloud 设备不能由 Controller 移除"));
+    return Promise.reject(new Error("Controller cannot remove cloud devices from a remote Host."));
   }
 
   sessionCommands(): Promise<SessionCommandListResponse> {
@@ -915,11 +965,11 @@ class RemoteCoreClient extends LocalCoreClient {
   }
 
   runSessionCommand(): Promise<SessionCommandResponse> {
-    return Promise.reject(new Error("远端 session command 尚未进入控制协议"));
+    return Promise.reject(new Error("Remote session commands are not available through the control protocol."));
   }
 
-  mediaUrl(): string {
-    return "";
+  mediaUrl(sessionId: string, eventSeq: number, mediaId: string, download = false): string {
+    return this.remoteChannel.url(`/v1/sessions/${sessionId}/media/${eventSeq}/${encodeURIComponent(mediaId)}`, download ? { download: 1 } : {});
   }
 }
 
@@ -948,6 +998,12 @@ class LocalTerminalClient implements TerminalClient {
 }
 
 class WebSocketTerminalConnection implements TerminalConnection {
+  private terminalId = "";
+  private viewerId = "";
+  private inputLeaseId = "";
+  private heartbeatSeq = 0;
+  private renderedSeq = 0;
+
   constructor(private readonly socket: WebSocket, handlers: TerminalHandlers) {
     socket.onopen = () => {
       logClientEvent("terminal.open.completed");
@@ -955,10 +1011,49 @@ class WebSocketTerminalConnection implements TerminalConnection {
     };
     socket.onmessage = (event) => {
       try {
-        const message = JSON.parse(event.data as string) as { type: string; terminal_id?: string; data?: string; message?: string; shell?: string; cwd?: string; output_seq?: number };
+        const message = JSON.parse(event.data as string) as {
+          type: string;
+          terminal_id?: string;
+          viewer_id?: string;
+          input_lease_id?: string;
+          heartbeat_seq?: number;
+          can_input?: boolean;
+          data?: string;
+          code?: string;
+          message?: string;
+          shell?: string;
+          cwd?: string;
+          output_seq?: number;
+        };
         if (message.type === "ready") {
           logClientEvent("terminal.ready", { terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
-          handlers.onReady?.({ terminal_id: message.terminal_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq });
+          this.updateLease(message);
+          handlers.onReady?.({ terminal_id: message.terminal_id, viewer_id: message.viewer_id, input_lease_id: message.input_lease_id, shell: message.shell, cwd: message.cwd, output_seq: message.output_seq, can_input: message.can_input });
+        }
+        if (message.type === "status") {
+          const raw = message as Record<string, unknown>;
+          handlers.onStatus?.({
+            terminal_id: message.terminal_id,
+            state: typeof raw.state === "string" ? raw.state : undefined,
+            can_input: typeof raw.can_input === "boolean" ? raw.can_input : undefined,
+            message: message.message,
+            output_seq: message.output_seq,
+          });
+        }
+        if (message.type === "heartbeat") {
+          this.updateLease(message);
+          if (typeof message.heartbeat_seq === "number") this.heartbeatSeq = message.heartbeat_seq;
+          if (message.viewer_id && message.input_lease_id && typeof message.heartbeat_seq === "number") {
+            this.sendAck();
+          }
+          handlers.onHeartbeat?.({
+            terminal_id: message.terminal_id,
+            viewer_id: message.viewer_id,
+            input_lease_id: message.input_lease_id,
+            heartbeat_seq: message.heartbeat_seq,
+            output_seq: message.output_seq,
+            can_input: message.can_input,
+          });
         }
         if (message.type === "output" && message.data) handlers.onOutput?.(message.data, message.output_seq);
         if (message.type === "exit") {
@@ -967,8 +1062,8 @@ class WebSocketTerminalConnection implements TerminalConnection {
           handlers.onExit?.(exitPayload);
         }
         if (message.type === "error") {
-          logClientEvent("terminal.error", { message: message.message || "PTY error" }, "error");
-          handlers.onError?.(message.message || "PTY error");
+          logClientEvent("terminal.error", { code: message.code, message: message.message || "PTY error" }, "error");
+          handlers.onError?.(message.message || "PTY error", message.code);
         }
       } catch {
         handlers.onOutput?.(String(event.data));
@@ -976,7 +1071,7 @@ class WebSocketTerminalConnection implements TerminalConnection {
     };
     socket.onerror = () => {
       logClientEvent("terminal.connection_failed", {}, "error");
-      handlers.onConnectionError?.("PTY 连接失败");
+      handlers.onConnectionError?.("PTY connection failed");
     };
     socket.onclose = (event) => {
       logClientEvent("terminal.closed", { code: event.code, reason: event.reason, was_clean: event.wasClean });
@@ -994,9 +1089,34 @@ class WebSocketTerminalConnection implements TerminalConnection {
     this.send({ type: "resize", cols, rows });
   }
 
+  ackRendered(outputSeq: number): void {
+    if (Number.isFinite(outputSeq) && outputSeq > this.renderedSeq) {
+      this.renderedSeq = outputSeq;
+    }
+    this.sendAck();
+  }
+
   close(): void {
     logClientEvent("terminal.close");
     this.socket.close();
+  }
+
+  private updateLease(message: { terminal_id?: string; viewer_id?: string; input_lease_id?: string }): void {
+    if (message.terminal_id) this.terminalId = message.terminal_id;
+    if (message.viewer_id) this.viewerId = message.viewer_id;
+    if (message.input_lease_id) this.inputLeaseId = message.input_lease_id;
+  }
+
+  private sendAck(): void {
+    if (!this.viewerId || !this.inputLeaseId) return;
+    this.send({
+      type: "heartbeat_ack",
+      terminal_id: this.terminalId || undefined,
+      viewer_id: this.viewerId,
+      input_lease_id: this.inputLeaseId,
+      heartbeat_seq: this.heartbeatSeq,
+      rendered_seq: this.renderedSeq,
+    });
   }
 
   private send(payload: Record<string, unknown>): void {

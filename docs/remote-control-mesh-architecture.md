@@ -212,7 +212,7 @@ A 通过账号 relay 的 WebSocket 转发 opaque envelope 给 B
 
 MVP 不做 previous relay grace、双 relay 投递、relay-to-relay 转发或跨 relay 查找。用户在设置里切换账号 relay 时，daemon 只调用本机 daemon 的 `PATCH /v1/cloud/account/relay`，daemon 再调用 Cloud 的 `PATCH /v1/account/relay`。Cloud 持久化账号当前 `relay_id` 后立即对后续 `GET /v1/account` 签发新 relay credential。其他设备在下一次 Cloud sync 后切到新 relay；切换窗口内 relay fallback 可能短暂不可用，但不会破坏 LAN 直连和设备 E2EE 信任边界。
 
-默认 relay 传输是 WebSocket：Host daemon 登录 Mesh 后连接账号 relay，并用自己的 `device_id` 挂在线转发通道；Controller 需要控制 Host 时也连接同一个账号 relay，发送 `control.hello`，随后同一条 WebSocket 承载 `control.hello_ack` 与 `control.sealed_frame`。Relay 不持久化 WebSocket 消息，也不解析 payload。HTTP envelope queue 仍保留为旧接口和测试夹具，不作为 daemon 的默认交互路径。
+默认 relay 传输是 WebSocket：Host daemon 登录 Mesh 后连接账号 relay，并用自己的 `device_id` 挂在线转发通道；Controller 需要控制 Host 时也连接同一个账号 relay，发送 `control.hello`，随后同一条 WebSocket 承载 `control.hello_ack` 与 `control.sealed_frame`。Relay 不持久化 WebSocket 消息，也不解析 payload。HTTP envelope queue 仍保留为旧接口和测试夹具，不作为 daemon 或 mobile 的默认交互路径。
 
 开发默认账号 relay 是 `cn-nanjing`：
 
@@ -727,7 +727,8 @@ Host 永远是每个动作的最终权限判断者。
 Host 对每个 action 做当前状态和 trust policy 校验。
 同一个 pending interaction 只能成功 resolve 一次。
 过期响应由 Host 拒绝。
-PTY 可以支持多个 viewer，但默认只有一个 active writer。
+PTY 支持多个 viewer，也支持多个可信 Controller shared input。
+Host 按收到 input frame 的顺序写入 PTY，不维护写入锁。
 Host 可以断开或撤销某个 Controller session。
 ```
 
@@ -967,7 +968,7 @@ Host B 用户点击“移除设备 A”
   -> Host B 本地 trust store 标记 A revoked
   -> Host B 关闭 A 的所有 control sessions
   -> Host B 清理 A 的 event subscription / pending request / stream attach
-  -> Host B 释放 A 持有的 PTY active writer lock
+  -> Host B 移除 A 的 PTY viewer/input 权限；PTY 本身继续归 Host 所有
   -> Host B 广播 trust revoked 状态给其他仍可信 Controller
   -> Host B 通知云端更新 trust metadata
 ```
@@ -1015,7 +1016,7 @@ POST /v1/trust/devices/:device_id/revoke
 4. 关闭 transport。
 5. 取消该 control connection 绑定的 Host-owned action context，包括 event/media/workspace file streams 和正在执行的 workspace.exec。
 6. 清理该设备的 event subscription、pending request、PTY attach。
-7. 如果该设备是某个 PTY 的 active writer，释放 writer lock，并让下一台仍可信且具备 `terminal.input` 能力的 Controller 由 Host 在 input/resize/close 时重新认领。
+7. 不关闭 Host-owned PTY；其他仍可信且具备 `terminal.input` 能力的 Controller 可以继续 shared input。
 8. append 本地 audit event，例如 control.trust.revoked。
 9. 通知云端同步 trust metadata。
 ```
@@ -1177,7 +1178,7 @@ terminal.input
   向 Host 拥有的 PTY 发送原始按键输入。
 
 host.manage
-  管理 Host-owned 控制面能力。v1 开放 `host.trust.list`、`host.trust.revoke`、`host.pairing.list`、`host.pairing.approve`、`host.pairing.deny`，用于通过 E2EE control channel 查看 trusted devices、撤销某个 Controller、批准/拒绝 pending pairing request，并触发 Host 本地立即断开和 terminal writer lock 释放。创建/删除 workspace、连接/断开 SSH workspace、settings 和 updates 不塞进这个 v1 action。
+  管理 Host-owned 控制面能力。v1 开放 `host.trust.list`、`host.trust.revoke`、`host.pairing.list`、`host.pairing.approve`、`host.pairing.deny`，用于通过 E2EE control channel 查看 trusted devices、撤销某个 Controller、批准/拒绝 pending pairing request，并触发 Host 本地立即断开和 terminal viewer/input detach。创建/删除 workspace、连接/断开 SSH workspace、settings 和 updates 不塞进这个 v1 action。
 ```
 
 UI 可以展示更简单的模式：
@@ -1364,6 +1365,7 @@ PTY manager 目标形态：
 ```text
 terminal.open -> terminal_id
 terminal.attach
+terminal.heartbeat_ack
 terminal.input
 terminal.resize
 terminal.output stream
@@ -1376,20 +1378,24 @@ terminal.close
 terminal.open
 terminal.attach
 terminal.detach
+terminal.heartbeat_ack
 terminal.input
 terminal.resize
 terminal.close
 terminal.output stream over E2EE control channel
+viewer lease + heartbeat ack input gate
 local terminal cwd confinement
 bounded terminal.input payload
 bounded terminal.output frame size
-single active writer
+shared input from trusted Controllers
 multi viewer
 opened/attached/detached/closed lifecycle events only
-trust revocation releases active writer lock
+trust revocation detaches that Controller without closing Host-owned PTY
 ```
 
-这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.attach` 必须发生在已完成握手的 encrypted control WebSocket 上，因为 PTY 输出只能回到这条 E2EE channel。`terminal.open` 的本地 cwd 必须和 workspace files/exec 一样做 workspace root confinement，包括拒绝通过 symlink 逃逸到 root 外。`terminal.open` response 和 terminal lifecycle event 里的 `cwd` 只能是 workspace-relative display cwd，不能暴露 Desktop 本机绝对路径或 SSH remote cwd；真实执行 cwd 只留在 Host 内部。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。`terminal.input` 是按键/粘贴输入，不是无限上传通道，必须有单次 payload 上限；PTY 输出 frame 也必须由 Host 拆成有界 E2EE frame。PTY 输出不进入 JSONL，只有 opened、attached、detached、closed lifecycle event 会落盘。
+这些 action 仍然经过 Host trust store 和 capability 校验。`terminal.attach` 必须发生在已完成握手的 encrypted control WebSocket 上，因为 PTY 输出只能回到这条 E2EE channel。Host 会为每个 attached viewer 生成 `viewer_id` 和短期 `input_lease_id`，并通过 `terminal.heartbeat` stream frame 持续要求 Controller 回 `terminal.heartbeat_ack`。`terminal.input` 和 `terminal.resize` 必须带这个 viewer lease；如果输出通道卡住、viewer 已 detach、lease 不匹配或 heartbeat ack 过期，Host 必须拒绝输入，Desktop 也必须显示“画面未同步，输入已暂停”。这个规则解决的是安全语义：用户不能在看不到最新终端画面的情况下继续把按键写进 Host PTY。
+
+`terminal.open` 的本地 cwd 必须和 workspace files/exec 一样做 workspace root confinement，包括拒绝通过 symlink 逃逸到 root 外。`terminal.open` response 和 terminal lifecycle event 里的 `cwd` 只能是 workspace-relative display cwd，不能暴露 Desktop 本机绝对路径或 SSH remote cwd；真实执行 cwd 只留在 Host 内部。`terminal.input`、`terminal.resize`、`terminal.close` 使用 `terminal.input` capability，因为它们都会改变 Host 侧 PTY 状态。`terminal.input` 是按键/粘贴输入，不是无限上传通道，必须有单次 payload 上限；PTY 输出 frame 也必须由 Host 拆成有界 E2EE frame。PTY 输出不进入 JSONL，只有 opened、attached、detached、closed lifecycle event 会落盘。
 
 断线行为：
 
@@ -1397,8 +1403,9 @@ trust revocation releases active writer lock
 Host 可以在短时间 retention window 内保留 PTY session。
 Controller 重连后可以重新 attach。
 多个 viewer 可以 attach。
-默认只有一个 Controller 拥有 active input。
-撤销 trusted device 会清空该设备持有的 writer_device_id；释放后的 writer 只能由下一台仍可信且具备 terminal.input capability 的 Controller 经 Host/Core 认领。
+多个可信 Controller 可以同时 input，Host 按 frame 到达顺序写入 PTY。
+撤销 trusted device 会关闭该设备的 control session 并 detach viewer；不影响其他可信 Controller 的 input。
+`writer_device_id` / `released_terminal_writers` 仅保留为兼容字段，shared-input 模式下通常为空或 0。
 没有 viewer 的 terminal session 会启动 retention timeout。
 retention 到期后 Host 关闭 PTY 并记录 closed(reason=retention_timeout)。
 ```
@@ -1591,7 +1598,7 @@ host.pairing.list/approve/deny over E2EE control channel
 local pairing request submit/list/approve/deny HTTP endpoints
 local trust revoke HTTP endpoint
 immediate active control session close
-terminal active writer release on revoke
+terminal viewer/input detach on revoke
 ```
 
 批准新设备后，Host 可以写入本地审计事件：
@@ -1643,6 +1650,41 @@ GET /v1/control/ws
 relay streaming 不是云端业务代理：`control.sealed_frame` 内部明文只存在于 Controller 和 Host 设备内存中。Broker 只能长轮询、存储待投递密文 envelope、ack 删除和按账号/设备做基础限流；不能缓存明文事件、文件、媒体、PTY 输出或 SSH 配置。连接关闭、设备踢出信任或 idle 过期时，Host 必须清理 relay control session 绑定的 stream context 和 PTY viewer。
 
 Desktop Controller 不直接在 React/Electron renderer 内实现远控握手，也不持有远控私钥。当前桌面端先通过本机 daemon 暴露 controller-side 代理 API，再由本机 daemon 复用同一套 Host identity、known_hosts、LAN discovery 和 E2EE control channel：
+
+### Core 固定、Shell 可替换
+
+远控实现按 Core/Shell 边界维护：
+
+```text
+Core
+controlwire: control hello/ack、加密帧、sequence/replay
+controllercore: Controller 侧 LAN/Relay、HostRemoteSession、request/event/terminal mux
+hostcore: Host 侧 hello 授权、trust/capability 校验、action dispatch、terminal/workbench 业务边界
+cloudmesh / relaymesh / deviceidentity: 账号、relay、设备身份基础能力
+
+Shell
+Desktop Electron: Host + Controller + UI
+未来原生 Desktop: Host + Controller + native UI
+Mobile: Controller + UI
+Headless Host: Host only
+Terminal App / CLI Controller: Controller only
+```
+
+Shell 只负责 OAuth 浏览器入口、本地系统权限、渲染 transcript/workbench/terminal、输入事件、本地通知展示和平台打包。Shell 不能判断 Host 是否可控、terminal 是否可输入、LAN/Relay 如何选择、pairing/trust 如何流转、workspace/session 如何同步，也不能自己做 transcript semantic projection。上述业务事实必须来自 daemon/Core。
+
+当前 daemon 是默认 `desktop` role：同时启用 HostCore、ControllerCore 和本地 UI API。内部 role 边界允许后续拆出 `host` role 和 `controller` role：Host-only 进程不加载 Controller transport；Controller-only 进程不加载 Host listener。第一版不做安装器，也不做 daemon 重启后的 PTY 恢复。
+
+Host-owned terminal 语义固定为：
+
+```text
+terminal.open: 在 Host daemon 内创建 terminal tab + PTY
+terminal.attach: Controller 只是 viewer，读取 ring buffer 和新输出
+terminal.input/resize: 只有 viewer live 且 input lease live 才允许
+terminal.detach: 只移除 viewer，不关闭 PTY
+terminal.close: 显式关闭 Host PTY
+```
+
+客户端关闭、UI 切换、网络切换或 relay 断开只会 detach viewer，不能 kill PTY。终端状态写入 Host-owned workbench；output stream 独立实时传输，snapshot 只包含 tab 元数据。第一版持久性只保证 Host daemon 进程生命周期；daemon 退出后不恢复 PTY。
 
 ```text
 GET /v1/remote/hosts?discover=1
@@ -1809,10 +1851,10 @@ terminal.resize
 terminal.close
 terminal.output stream
 local terminal cwd confinement
-single active writer
+shared input from trusted Controllers
 multi viewer
 retention timeout
-trust revocation releases active writer lock
+trust revocation detaches that Controller without closing Host-owned PTY
 lifecycle event only, no ANSI output JSONL storage
 
 待落地:

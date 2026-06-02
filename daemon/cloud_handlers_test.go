@@ -259,6 +259,78 @@ func TestCloudHandlersPairingSignalDoesNotWriteLocalTrust(t *testing.T) {
 	}
 }
 
+func TestControllerCoreMeshStateListsCloudHosts(t *testing.T) {
+	app, broker := testCloudApp(t)
+	defer broker.Close()
+
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	if err := app.cloudRegisterAndHeartbeat(t.Context(), client); err != nil {
+		t.Fatal(err)
+	}
+	host := testCloudDeviceRegistration(t, "dev_cloud_host", "desktop", true, true)
+	if _, err := client.RegisterDevice(t.Context(), DeviceIdentity{
+		DeviceID:             host.DeviceID,
+		DeviceName:           host.DeviceName,
+		DeviceKind:           host.DeviceKind,
+		PublicKey:            host.PublicKey,
+		PublicKeyFingerprint: host.PublicKeyFingerprint,
+		Capabilities:         host.Capabilities,
+	}, true, true, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := app.controllerCoreManager().MeshState(t.Context(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Self.CloudActive || !state.Self.CanControl {
+		t.Fatalf("mesh self = %#v, want active controller", state.Self)
+	}
+	if len(state.Hosts) != 1 || state.Hosts[0].DeviceID != host.DeviceID || state.Hosts[0].AuthorizationState != remoteHostAuthorizationNeedsPairing {
+		t.Fatalf("mesh hosts = %#v, want cloud Host needing pairing", state.Hosts)
+	}
+}
+
+func TestControllerCoreRequestPairingSubmitsCloudSignal(t *testing.T) {
+	app, broker := testCloudApp(t)
+	defer broker.Close()
+
+	client := CloudClient{BaseURL: broker.URL, Token: "account-token"}
+	host := testCloudDeviceRegistration(t, "dev_cloud_host", "desktop", true, true)
+	if _, err := client.RegisterDevice(t.Context(), DeviceIdentity{
+		DeviceID:             host.DeviceID,
+		DeviceName:           host.DeviceName,
+		DeviceKind:           host.DeviceKind,
+		PublicKey:            host.PublicKey,
+		PublicKeyFingerprint: host.PublicKeyFingerprint,
+		Capabilities:         host.Capabilities,
+	}, true, true, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	signal, err := app.controllerCoreManager().RequestPairing(t.Context(), host.DeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signal.HostDeviceID != host.DeviceID || signal.ControllerDeviceID != app.store.hostInfo().Identity.DeviceID || signal.Status != PairingStatusPending {
+		t.Fatalf("pairing signal = %#v", signal)
+	}
+	devices := brokerDevices(t, broker)
+	foundController := false
+	for _, device := range devices {
+		if device.DeviceID != app.store.hostInfo().Identity.DeviceID {
+			continue
+		}
+		foundController = true
+		if !device.CanControl {
+			t.Fatalf("controller device = %#v, want can_control", device)
+		}
+	}
+	if !foundController {
+		t.Fatalf("devices = %#v, want current controller registered before pairing", devices)
+	}
+}
+
 func TestCloudPairingSubmitRegistersCurrentControllerDevice(t *testing.T) {
 	app, broker := testCloudApp(t)
 	defer broker.Close()

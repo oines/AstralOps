@@ -18,7 +18,7 @@ import (
 const codexRequestTimeout = 30 * time.Second
 
 type codexLocalRuntime struct {
-	app *app
+	deps runtimeDeps
 
 	mu      sync.Mutex
 	clients map[string]*codexClient
@@ -69,14 +69,18 @@ type codexRPCError struct {
 	Message string `json:"message"`
 }
 
-func newCodexLocalRuntime(a *app) *codexLocalRuntime {
+func newCodexLocalRuntime(deps runtimeDeps) *codexLocalRuntime {
 	return &codexLocalRuntime{
-		app:     a,
+		deps:    deps,
 		clients: map[string]*codexClient{},
 	}
 }
 
+func (r *codexLocalRuntime) ensureDeps() {
+}
+
 func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, input string, options TurnOptions) error {
+	r.ensureDeps()
 	client, err := r.clientForSession(session, workspace)
 	if err != nil {
 		return err
@@ -85,9 +89,9 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 		return ErrSessionRunning
 	}
 
-	r.app.store.updateSessionStatus(session.ID, "running")
+	r.deps.store.updateSessionStatus(session.ID, "running")
 	if !options.Internal && !options.SuppressUserMessage {
-		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
+		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
 	}
 
 	go client.startTurn(input, options)
@@ -95,6 +99,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 }
 
 func (r *codexLocalRuntime) RunCommand(session Session, workspace Workspace, commandID string, _ map[string]any) error {
+	r.ensureDeps()
 	if commandID != "compact" {
 		return fmt.Errorf("codex command %s is not implemented", commandID)
 	}
@@ -105,9 +110,9 @@ func (r *codexLocalRuntime) RunCommand(session Session, workspace Workspace, com
 	if !client.trySetRunning() {
 		return ErrSessionRunning
 	}
-	r.app.store.updateSessionStatus(session.ID, "running")
+	r.deps.store.updateSessionStatus(session.ID, "running")
 	if commandID == "compact" {
-		r.app.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "memory.compacting", Normalized: map[string]any{
+		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "memory.compacting", Normalized: map[string]any{
 			"source":  "astralops",
 			"command": "compact",
 			"status":  "running",
@@ -128,6 +133,7 @@ func (r *codexLocalRuntime) RunCommand(session Session, workspace Workspace, com
 }
 
 func (r *codexLocalRuntime) ForkSession(source Session, fork Session, workspace Workspace, rollbackTurns int) error {
+	r.ensureDeps()
 	if strings.TrimSpace(source.NativeThreadID) == "" {
 		return fmt.Errorf("source codex session is missing native thread id")
 	}
@@ -139,6 +145,7 @@ func (r *codexLocalRuntime) ForkSession(source Session, fork Session, workspace 
 }
 
 func (r *codexLocalRuntime) EditLastUserMessageAndResend(session Session, workspace Workspace, input string, options TurnOptions) error {
+	r.ensureDeps()
 	client, err := r.clientForSession(session, workspace)
 	if err != nil {
 		return err
@@ -148,7 +155,7 @@ func (r *codexLocalRuntime) EditLastUserMessageAndResend(session Session, worksp
 	defer func() {
 		client.endLastUserMessageEdit()
 		if !started {
-			go r.app.startNextQueuedTurn(session.ID)
+			go r.deps.startNextQueuedTurn(session.ID)
 		}
 	}()
 
@@ -165,7 +172,7 @@ func (r *codexLocalRuntime) EditLastUserMessageAndResend(session Session, worksp
 	if err := client.rollbackLastTurnWithRetry(10 * time.Second); err != nil {
 		return err
 	}
-	if updated, ok := r.app.store.getSession(session.ID); ok {
+	if updated, ok := r.deps.store.getSession(session.ID); ok {
 		session = updated
 	}
 	if err := r.StartTurn(session, workspace, input, options); err != nil {
@@ -176,7 +183,8 @@ func (r *codexLocalRuntime) EditLastUserMessageAndResend(session Session, worksp
 }
 
 func (r *codexLocalRuntime) clientForSession(session Session, workspace Workspace) (*codexClient, error) {
-	info := r.app.agents[AgentCodex]
+	r.ensureDeps()
+	info := r.deps.agents[AgentCodex]
 	if !info.Available || info.Path == "" {
 		return nil, fmt.Errorf("codex executable was not found on PATH")
 	}
@@ -192,15 +200,15 @@ func (r *codexLocalRuntime) clientForSession(session Session, workspace Workspac
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		var hello map[string]any
-		err := r.app.ssh.call(ctx, workspace, "hello", map[string]any{}, &hello)
+		err := r.deps.ssh.call(ctx, workspace, "hello", map[string]any{}, &hello)
 		if err == nil {
-			codexHome, err = r.app.prepareCodexRemoteHome(ctx, workspace)
+			codexHome, err = r.deps.prepareCodexRemoteHome(ctx, workspace)
 		}
 		if err == nil {
 			var skillErr error
-			remoteCodexHome, skillErr = r.app.prepareCodexRemoteBundledSkills(ctx, workspace, info.Path)
+			remoteCodexHome, skillErr = r.deps.prepareCodexRemoteBundledSkills(ctx, workspace, info.Path)
 			if skillErr != nil {
-				r.app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.warning", Normalized: map[string]any{
+				r.deps.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.warning", Normalized: map[string]any{
 					"source":  "codex",
 					"message": "failed to prepare Codex bundled skills on SSH remote: " + skillErr.Error(),
 				}})
@@ -210,10 +218,10 @@ func (r *codexLocalRuntime) clientForSession(session Session, workspace Workspac
 		if err != nil {
 			return nil, err
 		}
-		r.app.setCodexRemoteHome(workspace.ID, remoteCodexHome)
+		r.deps.setCodexRemoteHome(workspace.ID, remoteCodexHome)
 		cwd = remotePathClean(workspace.SSH.RemoteCWD)
 		processCWD = workspace.LocalProjectionRoot
-		execServerURL = r.app.codexExecServerURL(workspace.ID)
+		execServerURL = r.deps.codexExecServerURL(workspace.ID)
 		remoteShell = stringValue(hello["shell"])
 	}
 	if cwd == "" {
@@ -276,6 +284,7 @@ func copyOptionalCodexRuntimeFile(sourceHome, remoteHome, name string) error {
 }
 
 func (r *codexLocalRuntime) Interrupt(sessionID string) error {
+	r.ensureDeps()
 	r.mu.Lock()
 	client := r.clients[sessionID]
 	r.mu.Unlock()
@@ -289,6 +298,7 @@ func (r *codexLocalRuntime) Interrupt(sessionID string) error {
 }
 
 func (r *codexLocalRuntime) StopSession(sessionID string, reason string) {
+	r.ensureDeps()
 	r.mu.Lock()
 	client := r.clients[sessionID]
 	delete(r.clients, sessionID)
@@ -300,6 +310,7 @@ func (r *codexLocalRuntime) StopSession(sessionID string, reason string) {
 }
 
 func (r *codexLocalRuntime) Steer(sessionID string, input string, options TurnOptions) error {
+	r.ensureDeps()
 	r.mu.Lock()
 	client := r.clients[sessionID]
 	r.mu.Unlock()
@@ -310,6 +321,7 @@ func (r *codexLocalRuntime) Steer(sessionID string, input string, options TurnOp
 }
 
 func (r *codexLocalRuntime) RespondApproval(approvalID string, response map[string]any) error {
+	r.ensureDeps()
 	r.mu.Lock()
 	clients := make([]*codexClient, 0, len(r.clients))
 	for _, client := range r.clients {
@@ -342,6 +354,12 @@ func newCodexClient(runtime *codexLocalRuntime, session Session, cwd, processCWD
 		pending:       map[int64]chan codexRPCResponse{},
 		approvals:     map[string]codexPendingApproval{},
 		items:         map[string]map[string]any{},
+	}
+}
+
+func (c *codexClient) ensureRuntimeDeps() {
+	if c != nil && c.runtime != nil {
+		c.runtime.ensureDeps()
 	}
 }
 
@@ -427,7 +445,7 @@ func (c *codexClient) forkThread(sourceThreadID string, rollbackTurns int) error
 	c.threadID = threadID
 	c.session.NativeThreadID = threadID
 	c.mu.Unlock()
-	c.runtime.app.store.updateSessionNativeThreadID(c.session.ID, threadID)
+	c.runtime.deps.store.updateSessionNativeThreadID(c.session.ID, threadID)
 
 	if rollbackTurns > 0 {
 		result, err = c.request("thread/rollback", map[string]any{
@@ -442,7 +460,7 @@ func (c *codexClient) forkThread(sourceThreadID string, rollbackTurns int) error
 			c.threadID = rolledThreadID
 			c.session.NativeThreadID = rolledThreadID
 			c.mu.Unlock()
-			c.runtime.app.store.updateSessionNativeThreadID(c.session.ID, rolledThreadID)
+			c.runtime.deps.store.updateSessionNativeThreadID(c.session.ID, rolledThreadID)
 		}
 	}
 	return nil
@@ -494,7 +512,7 @@ func (c *codexClient) rollbackLastTurn() error {
 		c.threadID = rolledThreadID
 		c.session.NativeThreadID = rolledThreadID
 		c.mu.Unlock()
-		c.runtime.app.store.updateSessionNativeThreadID(c.session.ID, rolledThreadID)
+		c.runtime.deps.store.updateSessionNativeThreadID(c.session.ID, rolledThreadID)
 	}
 	return nil
 }
@@ -639,6 +657,7 @@ func withEnvValue(env []string, key, value string) []string {
 }
 
 func (c *codexClient) ensureThread() error {
+	c.ensureRuntimeDeps()
 	if c.getThreadID() != "" {
 		return nil
 	}
@@ -655,10 +674,10 @@ func (c *codexClient) ensureThread() error {
 			c.threadID = threadID
 			c.session.NativeThreadID = threadID
 			c.mu.Unlock()
-			c.runtime.app.store.updateSessionNativeThreadID(c.session.ID, threadID)
+			c.runtime.deps.store.updateSessionNativeThreadID(c.session.ID, threadID)
 			return nil
 		}
-		c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "control.warning", Normalized: map[string]any{
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "control.warning", Normalized: map[string]any{
 			"source":  "codex",
 			"message": fmt.Sprintf("failed to resume codex thread %s: %s", nativeThreadID, err.Error()),
 		}})
@@ -675,7 +694,7 @@ func (c *codexClient) ensureThread() error {
 	c.threadID = threadID
 	c.session.NativeThreadID = threadID
 	c.mu.Unlock()
-	c.runtime.app.store.updateSessionNativeThreadID(c.session.ID, threadID)
+	c.runtime.deps.store.updateSessionNativeThreadID(c.session.ID, threadID)
 	return nil
 }
 
@@ -690,6 +709,7 @@ func (c *codexClient) threadParams() map[string]any {
 }
 
 func (c *codexClient) interrupt() error {
+	c.ensureRuntimeDeps()
 	threadID := c.getThreadID()
 	turnID := c.getActiveTurn()
 	if threadID == "" || turnID == "" {
@@ -703,13 +723,14 @@ func (c *codexClient) interrupt() error {
 	if err != nil {
 		return err
 	}
-	c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.interrupt", Normalized: map[string]any{"status": "requested"}})
-	c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle", "turn_id": turnID}})
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.interrupt", Normalized: map[string]any{"status": "requested"}})
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle", "turn_id": turnID}})
 	c.markIdle("cancelled")
 	return nil
 }
 
 func (c *codexClient) interruptForEdit() error {
+	c.ensureRuntimeDeps()
 	threadID := c.getThreadID()
 	turnID := c.getActiveTurn()
 	if threadID == "" || turnID == "" {
@@ -725,11 +746,12 @@ func (c *codexClient) interruptForEdit() error {
 		}
 		return err
 	}
-	c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.interrupt", Normalized: map[string]any{"status": "requested", "turn_id": turnID}})
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.interrupt", Normalized: map[string]any{"status": "requested", "turn_id": turnID}})
 	return nil
 }
 
 func (c *codexClient) stop(reason string) {
+	c.ensureRuntimeDeps()
 	c.mu.Lock()
 	wasRunning := c.running
 	turnID := c.activeTurn
@@ -749,7 +771,7 @@ func (c *codexClient) stop(reason string) {
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
 	}
-	c.runtime.app.store.updateSessionStatus(c.session.ID, "idle")
+	c.runtime.deps.store.updateSessionStatus(c.session.ID, "idle")
 	if wasRunning {
 		normalized := map[string]any{"status": "idle"}
 		if turnID != "" {
@@ -758,18 +780,19 @@ func (c *codexClient) stop(reason string) {
 		if reason != "" {
 			normalized["reason"] = reason
 		}
-		c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.cancelled", Normalized: normalized})
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.cancelled", Normalized: normalized})
 	}
 }
 
 func (c *codexClient) steer(input string, options TurnOptions) error {
+	c.ensureRuntimeDeps()
 	threadID := c.getThreadID()
 	turnID := c.getActiveTurn()
 	if threadID == "" || turnID == "" {
 		return ErrSessionIdle
 	}
 	if !options.Internal && !options.SuppressUserMessage {
-		c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
 	}
 	_, err := c.request("turn/steer", map[string]any{
 		"threadId":       threadID,
@@ -779,7 +802,7 @@ func (c *codexClient) steer(input string, options TurnOptions) error {
 	if err != nil {
 		return err
 	}
-	c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.steer", Normalized: map[string]any{"status": "sent", "turn_id": turnID}})
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.steer", Normalized: map[string]any{"status": "sent", "turn_id": turnID}})
 	return nil
 }
 
@@ -816,7 +839,7 @@ func (c *codexClient) scan(stdout io.Reader) {
 		c.handleLine([]byte(line))
 	}
 	if err := scanner.Err(); err != nil {
-		c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.error", Normalized: map[string]any{"message": err.Error()}})
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.error", Normalized: map[string]any{"message": err.Error()}})
 	}
 }
 
@@ -831,7 +854,7 @@ func (c *codexClient) scanStderr(stderr io.Reader) {
 		if shouldSuppressCodexStderr(text) {
 			continue
 		}
-		c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.warning", Normalized: map[string]any{
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.warning", Normalized: map[string]any{
 			"source":  "codex",
 			"message": text,
 		}})
@@ -862,7 +885,7 @@ func shouldSuppressCodexStderr(text string) bool {
 func (c *codexClient) handleLine(line []byte) {
 	var raw map[string]any
 	if err := json.Unmarshal(line, &raw); err != nil {
-		c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.raw", Normalized: map[string]any{
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.raw", Normalized: map[string]any{
 			"source": "codex",
 			"line":   string(line),
 			"error":  err.Error(),
@@ -889,7 +912,7 @@ func (c *codexClient) handleLine(line []byte) {
 	if raw["id"] != nil && raw["method"] != nil {
 		ev := normalizeCodexServerRequest(c.session, raw)
 		c.enrichServerRequestEvent(&ev)
-		c.runtime.app.emit(ev)
+		c.runtime.deps.emit(ev)
 		method := stringValue(raw["method"])
 		if !codexServerRequestSupported(method) {
 			_ = c.writeJSON(map[string]any{"id": raw["id"], "error": map[string]any{"code": -32601, "message": "unsupported codex server request " + method}})
@@ -906,7 +929,7 @@ func (c *codexClient) handleLine(line []byte) {
 	for _, ev := range normalizeCodexMessage(c.session, raw) {
 		c.enrichRemoteCommandEvent(&ev)
 		c.enrichInternalTurnEvent(&ev)
-		c.runtime.app.emit(ev)
+		c.runtime.deps.emit(ev)
 		if ev.Kind == "turn.started" {
 			if value := mapValue(ev.Normalized); stringValue(value["turn_id"]) != "" {
 				c.mu.Lock()
@@ -940,6 +963,7 @@ func (c *codexClient) enrichInternalTurnEvent(ev *AstralEvent) {
 }
 
 func (c *codexClient) enrichRemoteCommandEvent(ev *AstralEvent) {
+	c.ensureRuntimeDeps()
 	if c.execServerURL == "" || (ev.Kind != "tool.started" && ev.Kind != "tool.completed") {
 		return
 	}
@@ -954,7 +978,7 @@ func (c *codexClient) enrichRemoteCommandEvent(ev *AstralEvent) {
 	if processID == "" {
 		return
 	}
-	command, ok := c.runtime.app.codexExecCommand(c.session.WorkspaceID, processID)
+	command, ok := c.runtime.deps.codexExecCommand(c.session.WorkspaceID, processID)
 	if !ok {
 		return
 	}
@@ -968,6 +992,7 @@ func (c *codexClient) enrichRemoteCommandEvent(ev *AstralEvent) {
 }
 
 func (c *codexClient) wait(cmd *exec.Cmd, closed chan struct{}) {
+	c.ensureRuntimeDeps()
 	err := cmd.Wait()
 	c.mu.Lock()
 	current := c.cmd == cmd && c.closed == closed
@@ -987,8 +1012,8 @@ func (c *codexClient) wait(cmd *exec.Cmd, closed chan struct{}) {
 	c.mu.Unlock()
 	close(closed)
 	if err != nil && !stopping && current {
-		c.runtime.app.store.updateSessionStatus(c.session.ID, "failed")
-		c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.failed", Normalized: map[string]any{
+		c.runtime.deps.store.updateSessionStatus(c.session.ID, "failed")
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.failed", Normalized: map[string]any{
 			"status":  "failed",
 			"message": err.Error(),
 		}})
@@ -996,27 +1021,29 @@ func (c *codexClient) wait(cmd *exec.Cmd, closed chan struct{}) {
 }
 
 func (c *codexClient) finishFailed(message string) {
+	c.ensureRuntimeDeps()
 	c.markIdle("failed")
-	c.runtime.app.store.updateSessionStatus(c.session.ID, "failed")
-	c.runtime.app.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.failed", Normalized: map[string]any{
+	c.runtime.deps.store.updateSessionStatus(c.session.ID, "failed")
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.failed", Normalized: map[string]any{
 		"status":  "failed",
 		"message": message,
 	}})
 }
 
 func (c *codexClient) markIdle(status string) {
+	c.ensureRuntimeDeps()
 	c.mu.Lock()
 	c.running = false
 	c.activeTurn = ""
 	editingLast := c.editingLast
 	c.mu.Unlock()
 	if status == "failed" {
-		c.runtime.app.store.updateSessionStatus(c.session.ID, "failed")
+		c.runtime.deps.store.updateSessionStatus(c.session.ID, "failed")
 		return
 	}
-	c.runtime.app.store.updateSessionStatus(c.session.ID, "idle")
+	c.runtime.deps.store.updateSessionStatus(c.session.ID, "idle")
 	if !editingLast {
-		go c.runtime.app.startNextQueuedTurn(c.session.ID)
+		go c.runtime.deps.startNextQueuedTurn(c.session.ID)
 	}
 }
 
@@ -1118,6 +1145,7 @@ func (c *codexClient) updateWorkspace(cwd, processCWD, execServerURL, remoteShel
 }
 
 func (c *codexClient) persistedThreadID() string {
+	c.ensureRuntimeDeps()
 	c.mu.Lock()
 	if threadID := strings.TrimSpace(c.session.NativeThreadID); threadID != "" {
 		c.mu.Unlock()
@@ -1126,7 +1154,7 @@ func (c *codexClient) persistedThreadID() string {
 	sessionID := c.session.ID
 	c.mu.Unlock()
 
-	session, ok := c.runtime.app.store.getSession(sessionID)
+	session, ok := c.runtime.deps.store.getSession(sessionID)
 	if !ok {
 		return ""
 	}
@@ -1134,7 +1162,8 @@ func (c *codexClient) persistedThreadID() string {
 }
 
 func (c *codexClient) defaultModel() string {
-	info := c.runtime.app.agents[AgentCodex]
+	c.ensureRuntimeDeps()
+	info := c.runtime.deps.agents[AgentCodex]
 	if model := strings.TrimSpace(info.CurrentModel); model != "" {
 		return model
 	}
@@ -1147,7 +1176,8 @@ func (c *codexClient) defaultModel() string {
 }
 
 func (c *codexClient) defaultReasoningEffort() string {
-	info := c.runtime.app.agents[AgentCodex]
+	c.ensureRuntimeDeps()
+	info := c.runtime.deps.agents[AgentCodex]
 	if effort := strings.TrimSpace(info.CurrentEffort); effort != "" {
 		return effort
 	}

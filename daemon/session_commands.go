@@ -27,7 +27,7 @@ func (a *app) listSessionCommands(sessionID string) ([]SessionCommand, bool) {
 	commands := []SessionCommand{
 		{
 			ID:          "compact",
-			Title:       "压缩",
+			Title:       "Compact",
 			Description: compactDescription(usedPercent),
 			Icon:        "rotate-ccw",
 			Kind:        commandKindAction,
@@ -36,8 +36,8 @@ func (a *app) listSessionCommands(sessionID string) ([]SessionCommand, bool) {
 		},
 		{
 			ID:          "status",
-			Title:       "状态",
-			Description: "显示对话 ID、上下文使用情况及额度限制",
+			Title:       "Status",
+			Description: "Show conversation ID, context usage, and rate limits",
 			Icon:        "radio",
 			Kind:        commandKindAction,
 			Agent:       ss.Agent,
@@ -45,7 +45,7 @@ func (a *app) listSessionCommands(sessionID string) ([]SessionCommand, bool) {
 		},
 		{
 			ID:           "model",
-			Title:        "模型",
+			Title:        "Model",
 			Description:  currentModelDescription(a.agents[ss.Agent]),
 			Icon:         "box",
 			Kind:         commandKindClient,
@@ -55,7 +55,7 @@ func (a *app) listSessionCommands(sessionID string) ([]SessionCommand, bool) {
 		},
 		{
 			ID:           "reasoning",
-			Title:        "推理模式",
+			Title:        "Reasoning",
 			Description:  currentEffortDescription(a.agents[ss.Agent]),
 			Icon:         "brain",
 			Kind:         commandKindClient,
@@ -65,8 +65,8 @@ func (a *app) listSessionCommands(sessionID string) ([]SessionCommand, bool) {
 		},
 		{
 			ID:           "plan-mode",
-			Title:        "计划模式",
-			Description:  "开启计划模式",
+			Title:        "Plan mode",
+			Description:  "Enable plan mode",
 			Icon:         "list-checks",
 			Kind:         commandKindClient,
 			Agent:        ss.Agent,
@@ -77,7 +77,7 @@ func (a *app) listSessionCommands(sessionID string) ([]SessionCommand, bool) {
 	}
 	if ss.Agent == AgentCodex {
 		commands = append(commands,
-			SessionCommand{ID: "goal", Title: "目标", Description: "设置 Codex 将持续努力实现的目标", Icon: "target", Kind: commandKindClient, Agent: ss.Agent, Enabled: true, ClientAction: "goal_mode"},
+			SessionCommand{ID: "goal", Title: "Goal", Description: "Set a goal that Codex will keep working toward", Icon: "target", Kind: commandKindClient, Agent: ss.Agent, Enabled: true, ClientAction: "goal_mode"},
 		)
 	}
 	if ss.Agent == AgentClaude {
@@ -92,7 +92,7 @@ func (a *app) listSessionCommands(sessionID string) ([]SessionCommand, bool) {
 			commands = append(commands, SessionCommand{
 				ID:          "claude:" + slash,
 				Title:       slash,
-				Description: "发送 /" + slash + " 给 Claude Code",
+				Description: "Send /" + slash + " to Claude Code",
 				Icon:        claudeSlashIcon(slash),
 				Kind:        commandKindPrompt,
 				Agent:       ss.Agent,
@@ -103,10 +103,10 @@ func (a *app) listSessionCommands(sessionID string) ([]SessionCommand, bool) {
 	}
 	for index := range commands {
 		if !commands[index].Enabled && commands[index].DisabledReason == "" {
-			commands[index].DisabledReason = "当前会话正在运行"
+			commands[index].DisabledReason = "The current session is running"
 		}
 		if ws.Target == "ssh" && ss.Agent == AgentClaude && commands[index].ID == "compact" {
-			commands[index].Description = "发送 /compact 给 Claude Code"
+			commands[index].Description = "Send /compact to Claude Code"
 		}
 	}
 	sort.SliceStable(commands, func(i, j int) bool {
@@ -217,7 +217,7 @@ func (a *app) emitSessionStatusSnapshot(ss Session) {
 		"native_session_id": ss.NativeSessionID,
 		"native_thread_id":  ss.NativeThreadID,
 		"status":            ss.Status,
-		"message":           "状态已刷新",
+		"message":           "Status refreshed",
 	}})
 	if context := a.sessionProjections().latestContext(ss.ID); len(context) > 0 {
 		context["source"] = "astralops"
@@ -228,23 +228,23 @@ func (a *app) emitSessionStatusSnapshot(ss Session) {
 
 func compactDescription(percent int) string {
 	if percent > 0 {
-		return fmt.Sprintf("压缩此对话的上下文（已使用 %d%%）", percent)
+		return fmt.Sprintf("Compact this conversation context (%d%% used)", percent)
 	}
-	return "压缩此对话的上下文"
+	return "Compact this conversation context"
 }
 
 func currentModelDescription(info agentInfo) string {
 	if info.CurrentModel != "" {
 		return info.CurrentModel
 	}
-	return "选择本会话使用的模型"
+	return "Select the model for this session"
 }
 
 func currentEffortDescription(info agentInfo) string {
 	if info.CurrentEffort != "" {
 		return info.CurrentEffort
 	}
-	return "调整推理强度"
+	return "Adjust reasoning effort"
 }
 
 func contextUsedPercent(value map[string]any) int {

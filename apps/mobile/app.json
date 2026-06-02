@@ -1,0 +1,39 @@
+{
+  "expo": {
+    "name": "AstralOps",
+    "slug": "astralops",
+    "scheme": "astralops",
+    "version": "0.3.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "bundleIdentifier": "dev.oines.astralops",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "AstralOps uses the local network to find and connect to your trusted desktop Host.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "dev.oines.astralops",
+      "usesCleartextTraffic": true,
+      "softwareKeyboardLayoutMode": "resize",
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "ACCESS_WIFI_STATE",
+        "CHANGE_WIFI_MULTICAST_STATE"
+      ]
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-web-browser",
+      "expo-localization"
+    ]
+  }
+}

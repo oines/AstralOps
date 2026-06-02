@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,30 +9,20 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/oines/astralops/pkg/cloudmesh"
 )
 
 const (
-	cloudMembershipLeaseVersion   = "astralops-membership-lease-v1"
-	cloudMembershipLeaseAlgorithm = "Ed25519"
-	cloudMembershipFileName       = "cloud_membership.json"
+	cloudMembershipFileName = "cloud_membership.json"
 )
-
-type cloudMembershipLeasePayload struct {
-	AccountIDHash        string `json:"account_id_hash"`
-	DeviceID             string `json:"device_id"`
-	PublicKeyFingerprint string `json:"public_key_fingerprint"`
-	CanHost              bool   `json:"can_host"`
-	CanControl           bool   `json:"can_control"`
-	MeshEpoch            int64  `json:"mesh_epoch"`
-	IssuedAt             int64  `json:"iat"`
-	ExpiresAt            int64  `json:"exp"`
-}
 
 type cloudMembershipState struct {
 	AccountIDHash    string                `json:"account_id_hash"`
 	SigningKeyID     string                `json:"signing_key_id,omitempty"`
 	SigningPublicKey string                `json:"signing_public_key"`
 	Lease            *CloudMembershipLease `json:"lease,omitempty"`
+	Relay            *CloudRelayConfig     `json:"relay,omitempty"`
 	UpdatedAt        string                `json:"updated_at,omitempty"`
 }
 
@@ -67,7 +55,28 @@ func normalizeCloudMembershipState(state cloudMembershipState) cloudMembershipSt
 	state.SigningKeyID = strings.TrimSpace(state.SigningKeyID)
 	state.SigningPublicKey = strings.TrimSpace(state.SigningPublicKey)
 	state.UpdatedAt = strings.TrimSpace(state.UpdatedAt)
+	if state.Relay != nil {
+		relay := normalizeCloudMembershipRelay(*state.Relay)
+		if relay.RelayURL == "" || relay.Credential == "" {
+			state.Relay = nil
+		} else {
+			state.Relay = &relay
+		}
+	}
 	return state
+}
+
+func normalizeCloudMembershipRelay(relay CloudRelayConfig) CloudRelayConfig {
+	relay.RelayID = strings.TrimSpace(relay.RelayID)
+	relay.RelayURL = strings.TrimSpace(relay.RelayURL)
+	relay.Region = strings.TrimSpace(relay.Region)
+	relay.Name = strings.TrimSpace(relay.Name)
+	relay.Credential = strings.TrimSpace(relay.Credential)
+	relay.CredentialExpiresAt = strings.TrimSpace(relay.CredentialExpiresAt)
+	if relay.RelayID == "" {
+		relay.RelayID = "default"
+	}
+	return relay
 }
 
 func (s *store) updateCloudMembership(account CloudAccount, device CloudDeviceRecord) error {
@@ -98,6 +107,10 @@ func (s *store) updateCloudMembership(account CloudAccount, device CloudDeviceRe
 		SigningPublicKey: publicKey,
 		Lease:            lease,
 		UpdatedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if _, relay, ok := relayClientFromCloudAccount(account, nil); ok {
+		relay = normalizeCloudMembershipRelay(relay)
+		state.Relay = &relay
 	}
 	if err := writeJSONFile(cloudMembershipPath(s.dataDir), state, defaultHostFileMode); err != nil {
 		return err
@@ -139,72 +152,32 @@ func (s *store) currentCloudMembership(role cloudMembershipRole) (cloudMembershi
 	return state, nil
 }
 
-func validateCloudMembershipLease(lease CloudMembershipLease, signingPublicKey, accountIDHash, deviceID, publicKeyFingerprint string, role cloudMembershipRole, now time.Time) error {
-	if strings.TrimSpace(lease.Version) != cloudMembershipLeaseVersion {
-		return fmt.Errorf("membership lease version invalid")
+func (s *store) cachedCloudRelayClient() (RelayClient, CloudRelayConfig, bool) {
+	if s == nil {
+		return RelayClient{}, CloudRelayConfig{}, false
 	}
-	if strings.TrimSpace(lease.Algorithm) != cloudMembershipLeaseAlgorithm {
-		return fmt.Errorf("membership lease algorithm invalid")
+	s.mu.Lock()
+	state := normalizeCloudMembershipState(s.cloudMembership)
+	s.mu.Unlock()
+	if state.Relay == nil {
+		return RelayClient{}, CloudRelayConfig{}, false
 	}
-	payloadPart := strings.TrimSpace(lease.PayloadBase64)
-	if payloadPart == "" || strings.TrimSpace(lease.Signature) == "" {
-		return fmt.Errorf("membership lease payload/signature required")
+	relay := normalizeCloudMembershipRelay(*state.Relay)
+	if relay.RelayURL == "" || relay.Credential == "" {
+		return RelayClient{}, CloudRelayConfig{}, false
 	}
-	publicKeyBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(signingPublicKey))
-	if err != nil || len(publicKeyBytes) != ed25519.PublicKeySize {
-		return fmt.Errorf("membership signing public key invalid")
+	if relay.CredentialExpiresAt != "" {
+		expiresAt, err := time.Parse(time.RFC3339, relay.CredentialExpiresAt)
+		if err != nil {
+			expiresAt, err = time.Parse(time.RFC3339Nano, relay.CredentialExpiresAt)
+		}
+		if err == nil && time.Now().UTC().After(expiresAt) {
+			return RelayClient{}, CloudRelayConfig{}, false
+		}
 	}
-	signature, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(lease.Signature))
-	if err != nil || !ed25519.Verify(ed25519.PublicKey(publicKeyBytes), []byte(payloadPart), signature) {
-		return fmt.Errorf("membership lease signature invalid")
-	}
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadPart)
-	if err != nil {
-		return fmt.Errorf("membership lease payload invalid")
-	}
-	var payload cloudMembershipLeasePayload
-	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		return fmt.Errorf("membership lease payload invalid")
-	}
-	if strings.TrimSpace(payload.AccountIDHash) != strings.TrimSpace(accountIDHash) {
-		return fmt.Errorf("membership lease account mismatch")
-	}
-	if strings.TrimSpace(payload.DeviceID) != strings.TrimSpace(deviceID) {
-		return fmt.Errorf("membership lease device mismatch")
-	}
-	if strings.TrimSpace(payload.PublicKeyFingerprint) != strings.TrimSpace(publicKeyFingerprint) {
-		return fmt.Errorf("membership lease fingerprint mismatch")
-	}
-	if payload.MeshEpoch <= 0 {
-		return fmt.Errorf("membership lease mesh epoch invalid")
-	}
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	if payload.IssuedAt > now.Add(5*time.Minute).Unix() {
-		return fmt.Errorf("membership lease issued in the future")
-	}
-	if payload.ExpiresAt <= now.Unix() {
-		return fmt.Errorf("membership lease expired")
-	}
-	if role.CanHost && !payload.CanHost {
-		return fmt.Errorf("membership lease does not allow host role")
-	}
-	if role.CanControl && !payload.CanControl {
-		return fmt.Errorf("membership lease does not allow controller role")
-	}
-	return nil
+	return RelayClient{BaseURL: relay.RelayURL, Token: relay.Credential}, relay, true
 }
 
-func controlMembershipLeaseSignaturePart(lease *CloudMembershipLease) string {
-	if lease == nil {
-		return ""
-	}
-	return strings.Join([]string{
-		strings.TrimSpace(lease.Version),
-		strings.TrimSpace(lease.Algorithm),
-		strings.TrimSpace(lease.KeyID),
-		strings.TrimSpace(lease.PayloadBase64),
-		strings.TrimSpace(lease.Signature),
-	}, "\n")
+func validateCloudMembershipLease(lease CloudMembershipLease, signingPublicKey, accountIDHash, deviceID, publicKeyFingerprint string, role cloudMembershipRole, now time.Time) error {
+	return cloudmesh.ValidateMembershipLease(lease, signingPublicKey, accountIDHash, deviceID, publicKeyFingerprint, cloudmesh.MembershipRole(role), now)
 }

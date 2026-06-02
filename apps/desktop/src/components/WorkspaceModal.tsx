@@ -1,5 +1,6 @@
 import { Check, ChevronLeft, Folder, FolderGit2, HardDrive, LoaderCircle, RefreshCw, Server, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { CreateWorkspaceRequest } from "@astralops/protocol";
 import type { HostFileSystemBrowseParams, HostFileSystemBrowseResult, HostFileSystemEntry, HostFileSystemRoot, WorkspaceDraft } from "../types";
 
@@ -27,6 +28,7 @@ export function WorkspaceModal({
   onClose,
   onCreate,
 }: WorkspaceModalProps): React.JSX.Element | null {
+  const { t } = useTranslation(["common", "desktop"]);
   const [draft, setDraft] = useState<WorkspaceDraft>(initialDraft);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -108,7 +110,7 @@ export function WorkspaceModal({
 
   async function submit(): Promise<void> {
     if (!canCreate) {
-      setError(draft.target === "local" ? "先选择目录" : "填写 SSH 地址并选择目录");
+      setError(draft.target === "local" ? t("desktop:workspaceModal.selectDirectoryFirst") : t("desktop:workspaceModal.fillSshAndSelectDirectory"));
       return;
     }
     setBusy(true);
@@ -143,27 +145,27 @@ export function WorkspaceModal({
       <section className="grid max-h-[min(760px,calc(100vh-32px))] w-[min(720px,100%)] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden rounded-lg border border-[#e9e7e1] bg-white shadow-[0_18px_48px_rgba(29,29,31,0.16)]">
         <header className="flex items-start justify-between gap-4 border-b border-[#e7e5e0] px-4 pb-3 pt-4">
           <div className="min-w-0">
-            <h2 className="m-0 text-[16px] font-bold text-[#1d1d1f]">创建工作区</h2>
+            <h2 className="m-0 text-[16px] font-bold text-[#1d1d1f]">{t("desktop:workspaceModal.title")}</h2>
             <p className="m-0 mt-0.5 truncate text-[12px] font-semibold text-[var(--ao-muted)]">{hostName}</p>
           </div>
-          <button className="grid size-8 place-items-center rounded-lg text-[#98979c] hover:bg-black/[0.035]" type="button" title="关闭" onClick={onClose}>
+          <button className="grid size-8 place-items-center rounded-lg text-[#98979c] hover:bg-black/[0.035]" type="button" title={t("common:actions.close")} onClick={onClose}>
             <X size={16} />
           </button>
         </header>
 
         <div className="grid min-h-0 gap-4 overflow-auto px-4 py-4">
-          <Field label="位置">
+          <Field label={t("desktop:workspaceModal.location")}>
             <div className="grid grid-cols-2 gap-2">
               <TargetChoice
                 active={draft.target === "local"}
-                description="Host 本地目录"
+                description={t("desktop:workspaceModal.localDescription")}
                 icon={<FolderGit2 size={17} strokeWidth={1.8} />}
-                label="本地"
+                label={t("desktop:workspaceModal.local")}
                 onClick={() => setTarget("local")}
               />
               <TargetChoice
                 active={draft.target === "ssh"}
-                description="Host 连接 SSH"
+                description={t("desktop:workspaceModal.sshDescription")}
                 icon={<Server size={17} strokeWidth={1.8} />}
                 label="SSH"
                 onClick={() => setTarget("ssh")}
@@ -173,7 +175,7 @@ export function WorkspaceModal({
 
           {draft.target === "ssh" ? (
             <div className="grid gap-3">
-              <Field label="SSH 地址">
+              <Field label={t("desktop:workspaceModal.sshAddress")}>
                 <input
                   className="h-10 w-full rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
                   placeholder="root@example.com"
@@ -182,7 +184,7 @@ export function WorkspaceModal({
                 />
               </Field>
               <div className="grid grid-cols-[110px_minmax(0,1fr)] gap-3">
-                <Field label="端口">
+                <Field label={t("desktop:workspaceModal.port")}>
                   <input
                     className="h-10 w-full rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
                     min={1}
@@ -191,7 +193,7 @@ export function WorkspaceModal({
                     onChange={(event) => setDraft((current) => ({ ...current, ssh_port: Number(event.target.value) || 22 }))}
                   />
                 </Field>
-                <Field label="目录">
+                <Field label={t("desktop:workspaceModal.directory")}>
                   <div className="flex min-w-0 gap-2">
                     <input
                       className="h-10 min-w-0 flex-1 rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 font-mono text-[13px] outline-none focus:border-[#2563eb]"
@@ -206,7 +208,7 @@ export function WorkspaceModal({
                       onClick={() => void browse({ target: "ssh", path: draft.ssh_remote_cwd || "/", ssh: sshConfig })}
                     >
                       {browseLoading && draft.target === "ssh" ? <LoaderCircle className="animate-spin" size={15} /> : <RefreshCw size={15} />}
-                      浏览
+                      {t("common:actions.browse")}
                     </button>
                   </div>
                 </Field>
@@ -225,10 +227,10 @@ export function WorkspaceModal({
             canBrowse={draft.target === "local" || canBrowseSSH}
           />
 
-          <Field label="名称">
+          <Field label={t("desktop:workspaceModal.name")}>
             <input
               className="h-10 w-full rounded-lg border border-[#e7e5e0] bg-[#f7f6f3] px-3 text-[14px] outline-none focus:border-[#2563eb]"
-              placeholder="默认使用目录名"
+              placeholder={t("desktop:workspaceModal.defaultNamePlaceholder")}
               value={draft.name}
               onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
             />
@@ -239,10 +241,10 @@ export function WorkspaceModal({
 
         <footer className="flex justify-end gap-2 border-t border-[#e7e5e0] px-4 pb-4 pt-3">
           <button className="rounded-lg border border-[#e7e5e0] px-3 py-1.5 text-[13px] font-semibold text-[#1d1d1f] hover:bg-black/[0.035]" type="button" onClick={onClose}>
-            取消
+            {t("common:actions.cancel")}
           </button>
           <button className="rounded-lg bg-[#2563eb] px-3 py-1.5 text-[13px] font-semibold text-white disabled:opacity-50" type="button" disabled={busy || !canCreate} onClick={() => void submit()}>
-            {busy ? "创建中" : "创建工作区"}
+            {busy ? t("desktop:workspaceModal.creating") : t("desktop:workspaceModal.create")}
           </button>
         </footer>
       </section>
@@ -262,6 +264,7 @@ type DirectoryBrowserProps = {
 };
 
 function DirectoryBrowser({ canBrowse, error, loading, result, selectedPath, target, onBrowse, onChoose }: DirectoryBrowserProps): React.JSX.Element {
+  const { t } = useTranslation(["common", "desktop"]);
   const roots = result?.roots ?? [];
   return (
     <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-[#e7e5e0]">
@@ -269,13 +272,13 @@ function DirectoryBrowser({ canBrowse, error, loading, result, selectedPath, tar
         <button
           className="grid size-7 shrink-0 place-items-center rounded-md text-[var(--ao-muted-strong)] hover:bg-black/[0.055] disabled:cursor-default disabled:opacity-35"
           type="button"
-          title="上一级"
+          title={t("desktop:workspaceModal.parent")}
           disabled={!canBrowse || loading || !result?.parent_path}
           onClick={() => result?.parent_path && onBrowse(result.parent_path)}
         >
           <ChevronLeft size={16} strokeWidth={1.9} />
         </button>
-        <div className="min-w-0 flex-1 truncate font-mono text-[12px] font-semibold text-[#343438]">{result?.path || (target === "ssh" ? "填写 SSH 后浏览" : "加载中")}</div>
+        <div className="min-w-0 flex-1 truncate font-mono text-[12px] font-semibold text-[#343438]">{result?.path || (target === "ssh" ? t("desktop:workspaceModal.fillSshBeforeBrowse") : t("common:states.loading"))}</div>
         <button
           className="flex h-7 shrink-0 items-center gap-1.5 rounded-md bg-black/[0.055] px-2 text-[12px] font-semibold text-[var(--ao-text)] hover:bg-black/[0.08] disabled:cursor-default disabled:opacity-50"
           type="button"
@@ -283,7 +286,7 @@ function DirectoryBrowser({ canBrowse, error, loading, result, selectedPath, tar
           onClick={onChoose}
         >
           <Check size={14} strokeWidth={2} />
-          选择
+          {t("common:actions.select")}
         </button>
       </div>
       {roots.length > 0 ? (
@@ -298,7 +301,7 @@ function DirectoryBrowser({ canBrowse, error, loading, result, selectedPath, tar
           <div className="grid h-[188px] place-items-center text-[13px] font-semibold text-[var(--ao-muted)]">
             <span className="flex items-center gap-2">
               <LoaderCircle className="animate-spin" size={15} />
-              加载中
+              {t("common:states.loading")}
             </span>
           </div>
         ) : error ? (
@@ -316,10 +319,10 @@ function DirectoryBrowser({ canBrowse, error, loading, result, selectedPath, tar
               ))}
             </div>
           ) : (
-            <div className="px-3 py-3 text-[13px] font-semibold text-[var(--ao-muted)]">空目录</div>
+            <div className="px-3 py-3 text-[13px] font-semibold text-[var(--ao-muted)]">{t("desktop:workspaceModal.emptyDirectory")}</div>
           )
         ) : (
-          <div className="px-3 py-3 text-[13px] font-semibold text-[var(--ao-muted)]">{canBrowse ? "选择一个根目录" : "填写 SSH 地址后浏览"}</div>
+          <div className="px-3 py-3 text-[13px] font-semibold text-[var(--ao-muted)]">{canBrowse ? t("desktop:workspaceModal.selectRoot") : t("desktop:workspaceModal.fillSshBeforeBrowse")}</div>
         )}
       </div>
     </div>

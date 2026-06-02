@@ -21,12 +21,15 @@ type cloudMeshLogoutResult struct {
 	RemovedDevice           *CloudDeviceRecord      `json:"-"`
 }
 
-func (a *app) cloudMeshActive() bool {
+func (a *cloudmeshService) cloudMeshActive() bool {
 	return a.cloudMeshActiveFor(cloudMembershipRole{})
 }
 
-func (a *app) cloudMeshActiveFor(role cloudMembershipRole) bool {
+func (a *cloudmeshService) cloudMeshActiveFor(role cloudMembershipRole) bool {
 	if a == nil || a.store == nil {
+		return false
+	}
+	if a.currentSettings == nil {
 		return false
 	}
 	settings := a.currentSettings().Cloud
@@ -47,7 +50,7 @@ func cloudMeshInactiveError() *actionError {
 	return newActionError(http.StatusConflict, "cloud_mesh_inactive", "cloud login is required for mesh remote control")
 }
 
-func (a *app) requireCloudMeshRemoteControl(w http.ResponseWriter) bool {
+func (a *cloudmeshService) requireCloudMeshRemoteControl(w http.ResponseWriter) bool {
 	if a.cloudMeshActiveFor(cloudMembershipRole{CanHost: true}) {
 		return true
 	}
@@ -58,22 +61,28 @@ func (a *app) requireCloudMeshRemoteControl(w http.ResponseWriter) bool {
 	return false
 }
 
-func (a *app) cancelCloudSync() {
+func (a *cloudmeshService) cancelCloudSync() {
 	if a == nil {
 		return
 	}
 	a.cloudMu.Lock()
-	cancel := a.cloudCancel
-	a.cloudCancel = nil
+	var cancel context.CancelFunc
+	if a.cloudCancel != nil {
+		cancel = *a.cloudCancel
+		*a.cloudCancel = nil
+	}
 	a.cloudMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
 }
 
-func (a *app) logoutCloudMesh(ctx context.Context, removeSelf bool) (cloudMeshLogoutResult, error) {
+func (a *cloudmeshService) logoutCloudMesh(ctx context.Context, removeSelf bool) (cloudMeshLogoutResult, error) {
 	result := cloudMeshLogoutResult{OK: true}
 	if a == nil || a.store == nil {
+		return result, nil
+	}
+	if a.currentSettings == nil {
 		return result, nil
 	}
 	settings := a.currentSettings()
@@ -107,12 +116,16 @@ func (a *app) logoutCloudMesh(ctx context.Context, removeSelf bool) (cloudMeshLo
 		return result, err
 	}
 
-	result.ClosedControlSessions = a.closeAllControlSessions("mesh_logout")
-	if a.remoteManager != nil {
-		a.remoteManager.InvalidateAll("mesh_logout")
+	if a.closeAllControlSessions != nil {
+		result.ClosedControlSessions = a.closeAllControlSessions("mesh_logout")
+	}
+	if a.controllerInvalidateAll != nil {
+		a.controllerInvalidateAll("mesh_logout")
 	}
 	for _, grant := range a.store.listTrustGrants() {
-		result.ReleasedTerminalWriters += a.releaseTerminalWritersForDevice(grant.ControllerDeviceID)
+		if a.releaseTerminalWritersForDevice != nil {
+			result.ReleasedTerminalWriters += a.releaseTerminalWritersForDevice(grant.ControllerDeviceID)
+		}
 	}
 	reset, err := a.store.resetMeshIdentity()
 	if err != nil {
@@ -126,7 +139,7 @@ func (a *app) logoutCloudMesh(ctx context.Context, removeSelf bool) (cloudMeshLo
 	return result, nil
 }
 
-func (a *app) handleCloudSelfRevoked() {
+func (a *cloudmeshService) handleCloudSelfRevoked() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if _, err := a.logoutCloudMesh(ctx, false); err != nil {

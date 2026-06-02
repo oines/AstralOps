@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 const (
@@ -27,6 +30,7 @@ const (
 
 const (
 	ControlActionHostSnapshot               = "core.read.host_snapshot"
+	ControlActionPing                       = "core.read.ping"
 	ControlActionSessionView                = "core.read.session_view"
 	ControlActionSessions                   = "core.read.sessions"
 	ControlActionWorkspaces                 = "core.read.workspaces"
@@ -67,6 +71,7 @@ const (
 	ControlActionTerminalList               = "terminal.list"
 	ControlActionTerminalAttach             = "terminal.attach"
 	ControlActionTerminalDetach             = "terminal.detach"
+	ControlActionTerminalHeartbeatAck       = "terminal.heartbeat_ack"
 	ControlActionTerminalInput              = "terminal.input"
 	ControlActionTerminalResize             = "terminal.resize"
 	ControlActionTerminalClose              = "terminal.close"
@@ -78,40 +83,23 @@ const (
 	ControlActionHostPairingDeny            = "host.pairing.deny"
 )
 
-type ControlRequest struct {
-	RequestID          string         `json:"request_id,omitempty"`
-	ControllerDeviceID string         `json:"controller_device_id"`
-	Capability         string         `json:"capability"`
-	Action             string         `json:"action"`
-	Params             map[string]any `json:"params,omitempty"`
+type ControlRequest = protocol.ControlRequest
+type ControlResponse = protocol.ControlResponse
+type ControlError = protocol.ControlError
+
+func (s *remoteControlService) executeControlRequest(req ControlRequest) (ControlResponse, error) {
+	return s.executeControlRequestWithConnection(req, nil)
 }
 
-type ControlResponse struct {
-	RequestID string        `json:"request_id,omitempty"`
-	OK        bool          `json:"ok"`
-	Result    any           `json:"result,omitempty"`
-	Error     *ControlError `json:"error,omitempty"`
-}
-
-type ControlError struct {
-	Status  int    `json:"status,omitempty"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-func (a *app) executeControlRequest(req ControlRequest) (ControlResponse, error) {
-	return a.executeControlRequestWithConnection(req, nil)
-}
-
-func (a *app) executeControlRequestWithConnection(req ControlRequest, conn controlConnection) (ControlResponse, error) {
+func (s *remoteControlService) executeControlRequestWithConnection(req ControlRequest, conn controlConnection) (ControlResponse, error) {
 	ctx := context.Background()
 	if conn != nil {
 		ctx = conn.requestContext()
 	}
-	return a.executeControlRequestWithContext(ctx, req, conn)
+	return s.executeControlRequestWithContext(ctx, req, conn)
 }
 
-func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlRequest, conn controlConnection) (response ControlResponse, err error) {
+func (s *remoteControlService) executeControlRequestWithContext(ctx context.Context, req ControlRequest, conn controlConnection) (response ControlResponse, err error) {
 	startedAt := logControlActionStart(req)
 	defer func() {
 		if err != nil {
@@ -130,12 +118,28 @@ func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlR
 	if req.Capability != requiredCapability {
 		return ControlResponse{RequestID: req.RequestID}, newActionError(http.StatusForbidden, "capability_mismatch", "control capability does not match action")
 	}
-	grant, ok := a.store.trustedControlGrant(req.ControllerDeviceID)
+	grant, ok := s.store.trustedControlGrant(req.ControllerDeviceID)
 	if !ok || !trustGrantAllows(grant, requiredCapability) {
 		return ControlResponse{RequestID: req.RequestID}, newActionError(http.StatusForbidden, "capability_denied", "controller is not allowed to use capability")
 	}
 
-	result, err := a.dispatchControlAction(ctx, req, conn, grant)
+	return s.dispatchAuthorizedControlRequest(ctx, req, conn, grant)
+}
+
+func (s *remoteControlService) executeAuthorizedControlRequestWithContext(ctx context.Context, req ControlRequest, conn controlConnection, grant TrustGrant) (response ControlResponse, err error) {
+	startedAt := logControlActionStart(req)
+	defer func() {
+		if err != nil {
+			logControlActionFailed(req, startedAt, err)
+			return
+		}
+		logControlActionCompleted(req, startedAt)
+	}()
+	return s.dispatchAuthorizedControlRequest(ctx, req, conn, grant)
+}
+
+func (s *remoteControlService) dispatchAuthorizedControlRequest(ctx context.Context, req ControlRequest, conn controlConnection, grant TrustGrant) (ControlResponse, error) {
+	result, err := s.dispatchControlAction(ctx, req, conn, grant)
 	if err != nil {
 		return ControlResponse{RequestID: req.RequestID}, err
 	}
@@ -144,7 +148,7 @@ func (a *app) executeControlRequestWithContext(ctx context.Context, req ControlR
 
 func controlActionCapability(action string) string {
 	switch action {
-	case ControlActionHostSnapshot, ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionWorkspaceConnection, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
+	case ControlActionHostSnapshot, ControlActionPing, ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionWorkspaceConnection, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
 		return CapabilityCoreRead
 	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionWorkspaceCreate, ControlActionWorkspaceConnect, ControlActionWorkspaceDisconnect, ControlActionWorkspaceDelete, ControlActionSessionCreate, ControlActionSessionFork, ControlActionSessionDelete:
 		return CapabilityCoreControl
@@ -166,7 +170,7 @@ func controlActionCapability(action string) string {
 		return CapabilityWorkspaceFilesWrite
 	case ControlActionWorkspaceExec:
 		return CapabilityWorkspaceExec
-	case ControlActionTerminalOpen, ControlActionTerminalList, ControlActionTerminalAttach, ControlActionTerminalDetach:
+	case ControlActionTerminalOpen, ControlActionTerminalList, ControlActionTerminalAttach, ControlActionTerminalDetach, ControlActionTerminalHeartbeatAck:
 		return CapabilityTerminalOpen
 	case ControlActionTerminalInput, ControlActionTerminalResize, ControlActionTerminalClose:
 		return CapabilityTerminalInput
@@ -179,14 +183,20 @@ func controlActionCapability(action string) string {
 	}
 }
 
-func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, conn controlConnection, grant TrustGrant) (any, error) {
+func (s *remoteControlService) dispatchControlAction(ctx context.Context, req ControlRequest, conn controlConnection, grant TrustGrant) (any, error) {
 	switch req.Action {
+	case ControlActionPing:
+		return map[string]any{
+			"ok":             true,
+			"ts":             time.Now().UTC().Format(time.RFC3339Nano),
+			"host_device_id": s.store.hostInfo().Identity.DeviceID,
+		}, nil
 	case ControlActionHostSnapshot:
 		var params hostSnapshotParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.buildHostSnapshot(params), nil
+		return s.buildHostSnapshot(params), nil
 	case ControlActionSessionView:
 		var params struct {
 			SessionID string `json:"session_id"`
@@ -194,11 +204,11 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		view, ok := a.buildSessionView(params.SessionID)
+		view, ok := s.buildSessionView(params.SessionID)
 		if !ok {
 			return nil, newActionError(http.StatusNotFound, "session_not_found", "session not found")
 		}
-		workspace, _ := a.store.getWorkspace(view.Session.WorkspaceID)
+		workspace, _ := s.store.getWorkspace(view.Session.WorkspaceID)
 		return sanitizeControlSessionView(view, workspace), nil
 	case ControlActionSessions:
 		var params struct {
@@ -207,19 +217,19 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return sanitizeControlSessions(a.store.listSessions(params.WorkspaceID)), nil
+		return sanitizeControlSessions(s.store.listSessions(params.WorkspaceID)), nil
 	case ControlActionWorkspaces:
-		return sanitizeControlWorkspaces(a.store.listWorkspaces()), nil
+		return sanitizeControlWorkspaces(s.store.listWorkspaces()), nil
 	case ControlActionWorkspaceConnection:
 		var params workspaceReferenceParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		workspace, err := a.controlWorkspace(params.WorkspaceID)
+		workspace, err := s.workspaceService().controlWorkspace(params.WorkspaceID)
 		if err != nil {
 			return nil, err
 		}
-		return sanitizeControlWorkspaceConnection(a.ssh.getConnection(workspace)), nil
+		return sanitizeControlWorkspaceConnection(s.ssh.getConnection(workspace)), nil
 	case ControlActionEvents:
 		var params struct {
 			WorkspaceID string `json:"workspace_id"`
@@ -231,7 +241,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return sanitizeControlEvents(a.store.queryEventsWindow(params.WorkspaceID, params.SessionID, params.AfterSeq, params.BeforeSeq, params.Limit)), nil
+		return sanitizeControlEvents(s.store.queryEventsWindow(params.WorkspaceID, params.SessionID, params.AfterSeq, params.BeforeSeq, params.Limit)), nil
 	case ControlActionEventsSubscribe:
 		if conn == nil {
 			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "core.subscribe.events requires an encrypted control connection")
@@ -240,7 +250,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.prepareControlEventSubscription(params)
+		return s.prepareControlEventSubscription(params)
 	case ControlActionEventsUnsubscribe:
 		if conn == nil {
 			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "core.unsubscribe.events requires an encrypted control connection")
@@ -266,11 +276,11 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		attachments, err := a.resolveControlInputAttachments(params.SessionID, params.Attachments)
+		attachments, err := s.mediaService().resolveControlInputAttachments(params.SessionID, params.Attachments)
 		if err != nil {
 			return nil, err
 		}
-		return a.startSessionInput(params.SessionID, params.Input, TurnOptions{
+		return s.sessions().startSessionInput(params.SessionID, params.Input, TurnOptions{
 			Model:           params.Model,
 			ReasoningEffort: params.ReasoningEffort,
 			PermissionMode:  params.PermissionMode,
@@ -283,25 +293,25 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.interruptSession(params.SessionID)
+		return s.sessions().interruptSession(params.SessionID)
 	case ControlActionQueueCancel:
 		var params queueControlParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.cancelControlQueuedTurn(params)
+		return s.sessions().cancelControlQueuedTurn(params)
 	case ControlActionQueueSteer:
 		var params queueControlParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.steerControlQueuedTurn(params)
+		return s.sessions().steerControlQueuedTurn(params)
 	case ControlActionWorkspaceCreate:
 		var params createWorkspaceRequest
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		workspace, err := a.createWorkspace(params)
+		workspace, err := s.createWorkspace(params)
 		if err != nil {
 			return nil, err
 		}
@@ -311,33 +321,33 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		workspace, err := a.controlWorkspace(params.WorkspaceID)
+		workspace, err := s.workspaceService().controlWorkspace(params.WorkspaceID)
 		if err != nil {
 			return nil, err
 		}
-		return a.ssh.connect(ctx, workspace)
+		return s.ssh.connect(ctx, workspace)
 	case ControlActionWorkspaceDisconnect:
 		var params workspaceReferenceParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		workspace, err := a.controlWorkspace(params.WorkspaceID)
+		workspace, err := s.workspaceService().controlWorkspace(params.WorkspaceID)
 		if err != nil {
 			return nil, err
 		}
-		return a.ssh.disconnect(workspace), nil
+		return s.ssh.disconnect(workspace), nil
 	case ControlActionWorkspaceDelete:
 		var params workspaceReferenceParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.deleteWorkspace(params.WorkspaceID)
+		return s.deleteWorkspace(params.WorkspaceID)
 	case ControlActionSessionCreate:
 		var params createSessionRequest
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		session, err := a.createSession(params)
+		session, err := s.sessions().createSession(params)
 		if err != nil {
 			return nil, err
 		}
@@ -347,13 +357,13 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.forkSession(params.SessionID, forkSessionRequest{EventSeq: params.EventSeq})
+		return s.sessions().forkSession(params.SessionID, forkSessionRequest{EventSeq: params.EventSeq})
 	case ControlActionSessionDelete:
 		var params sessionDeleteParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.deleteSessionByID(params.SessionID)
+		return s.sessions().deleteSessionByID(params.SessionID)
 	case ControlActionInteractionRespond:
 		var params struct {
 			InteractionID string         `json:"interaction_id"`
@@ -362,7 +372,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.respondInteraction(params.InteractionID, params.Response)
+		return s.sessions().respondInteraction(params.InteractionID, params.Response)
 	case ControlActionSessionEdit:
 		var params struct {
 			SessionID       string `json:"session_id"`
@@ -375,7 +385,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.editLastUserMessage(params.SessionID, editLastUserMessageRequest{
+		return s.sessions().editLastUserMessage(params.SessionID, editLastUserMessageRequest{
 			EventSeq:        params.EventSeq,
 			Input:           params.Input,
 			Model:           params.Model,
@@ -387,37 +397,37 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.ingestControlAttachment(params)
+		return s.mediaService().ingestControlAttachment(params)
 	case ControlActionAttachmentIngestStart:
 		var params attachmentIngestStartParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.startControlAttachmentIngest(params)
+		return s.mediaService().startControlAttachmentIngest(params)
 	case ControlActionAttachmentIngestChunk:
 		var params attachmentIngestChunkParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.appendControlAttachmentChunk(params)
+		return s.mediaService().appendControlAttachmentChunk(params)
 	case ControlActionAttachmentIngestFinish:
 		var params attachmentIngestFinishParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.finishControlAttachmentIngest(params)
+		return s.mediaService().finishControlAttachmentIngest(params)
 	case ControlActionMediaRead:
 		var params mediaReadParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.readControlMedia(params, false)
+		return s.mediaService().readControlMedia(params, false)
 	case ControlActionMediaDownload:
 		var params mediaReadParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.readControlMedia(params, true)
+		return s.mediaService().readControlMedia(params, true)
 	case ControlActionMediaStream:
 		if conn == nil {
 			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "media.stream requires an encrypted control connection")
@@ -426,7 +436,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.prepareControlMediaStream(params)
+		return s.mediaService().prepareControlMediaStream(params)
 	case ControlActionMediaStreamCancel:
 		if conn == nil {
 			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "media.stream.cancel requires an encrypted control connection")
@@ -445,31 +455,31 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.readControlWorkspaceFiles(ctx, params)
+		return s.workspaceService().readControlWorkspaceFiles(ctx, params)
 	case ControlActionWorkspaceFilesWrite:
 		var params workspaceFilesWriteParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.writeControlWorkspaceFile(ctx, params)
+		return s.workspaceService().writeControlWorkspaceFile(ctx, params)
 	case ControlActionWorkspaceFilesApplyPatch:
 		var params workspaceFilesApplyPatchParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.applyControlWorkspacePatch(ctx, params)
+		return s.workspaceService().applyControlWorkspacePatch(ctx, params)
 	case ControlActionWorkspaceFilesDelete:
 		var params workspaceFilesDeleteParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.deleteControlWorkspacePath(ctx, params)
+		return s.workspaceService().deleteControlWorkspacePath(ctx, params)
 	case ControlActionWorkspaceFilesMove:
 		var params workspaceFilesMoveParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.moveControlWorkspacePath(ctx, params)
+		return s.workspaceService().moveControlWorkspacePath(ctx, params)
 	case ControlActionWorkspaceFilesStream:
 		if conn == nil {
 			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "workspace.files.stream requires an encrypted control connection")
@@ -478,7 +488,7 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.prepareControlWorkspaceFileStream(ctx, params)
+		return s.workspaceService().prepareControlWorkspaceFileStream(ctx, params)
 	case ControlActionWorkspaceFilesStreamCancel:
 		if conn == nil {
 			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "workspace.files.stream.cancel requires an encrypted control connection")
@@ -497,53 +507,59 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.executeControlWorkspaceCommand(ctx, params, grant)
+		return s.workspaceService().executeControlWorkspaceCommand(ctx, params, grant)
 	case ControlActionTerminalOpen:
 		var params terminalOpenParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.terminalManager().open(ctx, req.ControllerDeviceID, params)
+		return s.terminalManager().open(ctx, req.ControllerDeviceID, params)
 	case ControlActionTerminalList:
-		return a.terminalManager().listTabs(), nil
+		return s.terminalManager().listTabs(), nil
 	case ControlActionTerminalAttach:
 		var params terminalAttachParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.terminalManager().attach(req.ControllerDeviceID, conn, params)
+		return s.terminalManager().attach(req.ControllerDeviceID, conn, params)
 	case ControlActionTerminalDetach:
 		var params terminalDetachParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.terminalManager().detach(req.ControllerDeviceID, conn, params)
+		return s.terminalManager().detach(req.ControllerDeviceID, conn, params)
+	case ControlActionTerminalHeartbeatAck:
+		var params terminalHeartbeatAckParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		return s.terminalManager().heartbeatAck(req.ControllerDeviceID, params)
 	case ControlActionTerminalInput:
 		var params terminalInputParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.terminalManager().input(ctx, req.ControllerDeviceID, params)
+		return s.terminalManager().input(ctx, req.ControllerDeviceID, params)
 	case ControlActionTerminalResize:
 		var params terminalResizeParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.terminalManager().resize(ctx, req.ControllerDeviceID, params)
+		return s.terminalManager().resize(ctx, req.ControllerDeviceID, params)
 	case ControlActionTerminalClose:
 		var params terminalCloseParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.terminalManager().close(ctx, req.ControllerDeviceID, params)
+		return s.terminalManager().close(ctx, req.ControllerDeviceID, params)
 	case ControlActionHostFileSystemBrowse:
 		var params hostFileSystemBrowseParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.browseHostFileSystem(ctx, params)
+		return s.browseHostFileSystem(ctx, params)
 	case ControlActionHostTrustList:
-		return hostTrustListResult{Grants: a.store.listTrustGrants()}, nil
+		return hostTrustListResult{Grants: s.store.listTrustGrants()}, nil
 	case ControlActionHostTrustRevoke:
 		var params hostTrustRevokeParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
@@ -553,21 +569,21 @@ func (a *app) dispatchControlAction(ctx context.Context, req ControlRequest, con
 		if conn != nil {
 			exceptConnectionID = conn.connectionID()
 		}
-		return a.revokeTrustedControlDevice(params.ControllerDeviceID, exceptConnectionID)
+		return s.revokeTrustedControlDevice(params.ControllerDeviceID, exceptConnectionID)
 	case ControlActionHostPairingList:
-		return pairingRequestListResult{Requests: a.store.listPairingRequests()}, nil
+		return pairingRequestListResult{Requests: s.store.listPairingRequests()}, nil
 	case ControlActionHostPairingApprove:
 		var params pairingRequestResolveParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.approvePairingRequest(params.RequestID)
+		return s.approvePairingRequest(params.RequestID)
 	case ControlActionHostPairingDeny:
 		var params pairingRequestResolveParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return a.denyPairingRequest(params.RequestID)
+		return s.denyPairingRequest(params.RequestID)
 	default:
 		return nil, newActionError(http.StatusNotFound, "control_action_unknown", "control action not found")
 	}

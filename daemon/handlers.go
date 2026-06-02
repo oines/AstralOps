@@ -20,6 +20,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const terminalLocalSocketWriteTimeout = 2 * time.Second
+
 func (a *app) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("token") == a.token {
@@ -443,10 +445,14 @@ func (a *app) runRemoteWorkspaceExecAt(ctx context.Context, ws Workspace, comman
 }
 
 type ptyClientMessage struct {
-	Type string `json:"type"`
-	Data string `json:"data,omitempty"`
-	Cols uint16 `json:"cols,omitempty"`
-	Rows uint16 `json:"rows,omitempty"`
+	Type         string `json:"type"`
+	Data         string `json:"data,omitempty"`
+	Cols         uint16 `json:"cols,omitempty"`
+	Rows         uint16 `json:"rows,omitempty"`
+	ViewerID     string `json:"viewer_id,omitempty"`
+	InputLeaseID string `json:"input_lease_id,omitempty"`
+	HeartbeatSeq int64  `json:"heartbeat_seq,omitempty"`
+	RenderedSeq  int64  `json:"rendered_seq,omitempty"`
 }
 
 func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Workspace) {
@@ -480,15 +486,15 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 			return
 		}
 	}
-	_ = conn.WriteJSON(terminalReadySocketPayload(open.TerminalID, open.Shell, open.CWD, open.OutputSeq))
-
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	localControl := newLocalPTYControlConnection(ctx, cancel, controllerID, conn)
-	if _, err := terminals.attach(controllerID, localControl, terminalAttachParams{TerminalID: open.TerminalID, AfterSeq: afterSeq}); err != nil {
+	attach, err := terminals.attach(controllerID, localControl, terminalAttachParams{TerminalID: open.TerminalID, AfterSeq: afterSeq})
+	if err != nil {
 		_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
+	_ = localControl.writeJSON(terminalReadySocketPayload(open.TerminalID, open.Shell, open.CWD, attach.OutputSeq, attach.ViewerID, attach.InputLeaseID, attach.CanInput))
 	defer func() {
 		_, _ = terminals.detach(controllerID, localControl, terminalDetachParams{TerminalID: open.TerminalID})
 	}()
@@ -505,10 +511,18 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 		}
 		switch message.Type {
 		case "input":
-			_, _ = terminals.input(r.Context(), controllerID, terminalInputParams{TerminalID: open.TerminalID, Data: message.Data})
+			if _, err := terminals.input(r.Context(), controllerID, terminalInputParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, Data: message.Data}); err != nil {
+				_ = localControl.writeJSON(terminalSocketErrorPayload(err))
+			}
 		case "resize":
 			if message.Cols > 0 && message.Rows > 0 {
-				_, _ = terminals.resize(r.Context(), controllerID, terminalResizeParams{TerminalID: open.TerminalID, Cols: message.Cols, Rows: message.Rows})
+				if _, err := terminals.resize(r.Context(), controllerID, terminalResizeParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, Cols: message.Cols, Rows: message.Rows}); err != nil {
+					_ = localControl.writeJSON(terminalSocketErrorPayload(err))
+				}
+			}
+		case "heartbeat_ack":
+			if ack, err := terminals.heartbeatAck(controllerID, terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: message.HeartbeatSeq, RenderedSeq: message.RenderedSeq}); err == nil {
+				_ = localControl.writeJSON(map[string]any{"type": "status", "terminal_id": ack.TerminalID, "state": "live", "can_input": ack.CanInput, "output_seq": ack.OutputSeq})
 			}
 		case "close":
 			_, _ = terminals.close(r.Context(), controllerID, terminalCloseParams{TerminalID: open.TerminalID})
@@ -568,24 +582,76 @@ func (c *localPTYControlConnection) writePlain(frame controlPlainFrame) {
 	switch frame.Type {
 	case terminalFrameOutput:
 		if payload := terminalOutputSocketPayload(frame.Terminal); payload != nil {
-			_ = c.socket.WriteJSON(payload)
+			_ = c.writeJSON(payload)
+		}
+	case terminalFrameHeartbeat:
+		if payload := terminalHeartbeatSocketPayload(frame.Terminal); payload != nil {
+			_ = c.writeJSON(payload)
 		}
 	case terminalFrameClosed:
-		_ = c.socket.WriteJSON(terminalExitSocketPayload(frame.Terminal))
+		_ = c.writeJSON(terminalExitSocketPayload(frame.Terminal))
 		if c.cancel != nil {
 			c.cancel()
 		}
 	case "response":
 		if frame.Response != nil && !frame.Response.OK {
-			_ = c.socket.WriteJSON(map[string]any{"type": "error", "message": controlResponseMessage(*frame.Response)})
+			_ = c.writeJSON(terminalControlResponseErrorPayload(*frame.Response))
 		}
 	}
+}
+
+func (c *localPTYControlConnection) writeJSON(payload any) error {
+	if c == nil || c.socket == nil {
+		return errors.New("terminal socket is closed")
+	}
+	_ = c.socket.SetWriteDeadline(time.Now().Add(terminalLocalSocketWriteTimeout))
+	err := c.socket.WriteJSON(payload)
+	_ = c.socket.SetWriteDeadline(time.Time{})
+	if err != nil {
+		if c.cancel != nil {
+			c.cancel()
+		}
+		_ = c.socket.Close()
+	}
+	return err
+}
+
+func terminalSocketErrorPayload(err error) map[string]any {
+	payload := map[string]any{"type": "error", "message": "terminal stream error"}
+	if err != nil {
+		payload["message"] = err.Error()
+	}
+	var actionErr *actionError
+	if errors.As(err, &actionErr) && actionErr.Code != "" {
+		payload["code"] = actionErr.Code
+	}
+	return payload
+}
+
+func terminalControlResponseErrorPayload(response ControlResponse) map[string]any {
+	payload := map[string]any{"type": "error", "message": controlResponseMessage(response)}
+	if response.Error != nil && response.Error.Code != "" {
+		payload["code"] = response.Error.Code
+	}
+	return payload
 }
 
 func (c *localPTYControlConnection) registerControlStream(string, context.CancelFunc) {}
 func (c *localPTYControlConnection) unregisterControlStream(string)                   {}
 func (c *localPTYControlConnection) cancelControlStream(string) bool                  { return false }
 func (c *localPTYControlConnection) cancelAllControlStreams()                         {}
+
+func (c *localPTYControlConnection) terminateControlConnection(code, reason string) {
+	if c == nil {
+		return
+	}
+	if c.cancel != nil {
+		c.cancel()
+	}
+	if c.socket != nil {
+		_ = c.socket.Close()
+	}
+}
 
 func resolveWorkspacePath(root, queryPath string) (string, string, error) {
 	if root == "" {
@@ -665,7 +731,7 @@ func (a *app) handleSessions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	ss, err := a.createSession(req)
+	ss, err := a.sessions().createSession(req)
 	if err != nil {
 		writeActionError(w, err)
 		return
@@ -676,7 +742,7 @@ func (a *app) handleSessions(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/sessions/"), "/")
 	if len(parts) == 1 && r.Method == http.MethodDelete {
-		if _, err := a.deleteSessionByID(parts[0]); err != nil {
+		if _, err := a.sessions().deleteSessionByID(parts[0]); err != nil {
 			writeActionError(w, err)
 			return
 		}
@@ -732,10 +798,10 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 	case action == "interrupt" && r.Method == http.MethodPost:
 		a.handleSessionInterrupt(w, sessionID)
 	case action == "queue" && len(parts) == 4 && parts[3] == "cancel" && r.Method == http.MethodPost:
-		a.cancelQueuedTurn(sessionID, parts[2])
+		a.sessions().cancelQueuedTurn(sessionID, parts[2])
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case action == "queue" && len(parts) == 4 && parts[3] == "steer" && r.Method == http.MethodPost:
-		if err := a.steerQueuedTurn(sessionID, parts[2]); err != nil {
+		if err := a.sessions().steerQueuedTurn(sessionID, parts[2]); err != nil {
 			status := http.StatusConflict
 			if err.Error() == "session not found" {
 				status = http.StatusNotFound
@@ -753,7 +819,7 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleSessionInput(w http.ResponseWriter, sessionID, input string, options TurnOptions) {
-	result, err := a.startSessionInput(sessionID, input, options)
+	result, err := a.sessions().startSessionInput(sessionID, input, options)
 	if err != nil {
 		writeActionError(w, err)
 		return
@@ -762,7 +828,7 @@ func (a *app) handleSessionInput(w http.ResponseWriter, sessionID, input string,
 }
 
 func (a *app) handleSessionInterrupt(w http.ResponseWriter, sessionID string) {
-	result, err := a.interruptSession(sessionID)
+	result, err := a.sessions().interruptSession(sessionID)
 	if err != nil {
 		writeActionError(w, err)
 		return
