@@ -1869,15 +1869,33 @@ func remoteDisplayCWD(user, host, cwd, endpoint string) string {
 
 func repoRootGuess() string {
 	wd, err := os.Getwd()
-	if err == nil {
-		for dir := wd; dir != "." && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
-			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-				return dir
-			}
-		}
-		return wd
+	if err != nil {
+		return "."
 	}
-	return "."
+	return repoRootGuessFrom(wd, func(dir string) bool {
+		_, err := os.Stat(filepath.Join(dir, "go.mod"))
+		return err == nil
+	}, filepath.Dir)
+}
+
+func repoRootGuessFrom(wd string, hasGoMod func(string) bool, parentDir func(string) string) string {
+	if wd == "" {
+		return "."
+	}
+	for dir := wd; ; {
+		if hasGoMod != nil && hasGoMod(dir) {
+			return dir
+		}
+		parent := "."
+		if parentDir != nil {
+			parent = parentDir(dir)
+		}
+		if parent == "" || parent == dir || dir == "." {
+			break
+		}
+		dir = parent
+	}
+	return wd
 }
 
 func localTCPHostPort(addr string) string {
