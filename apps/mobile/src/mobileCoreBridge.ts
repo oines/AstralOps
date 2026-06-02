@@ -1,4 +1,4 @@
-import { NativeModules } from "react-native";
+import { NativeEventEmitter, NativeModules } from "react-native";
 import type { CloudAccountStatus, DeviceIdentity, RemoteHostRecord, WorkbenchState } from "@astralops/protocol";
 
 type NativeMobileCoreModule = {
@@ -16,6 +16,8 @@ type NativeMobileCoreModule = {
   terminalInput?: (hostDeviceID: string, terminalID: string, data: string) => Promise<string>;
   terminalResize?: (hostDeviceID: string, terminalID: string, cols: number, rows: number) => Promise<string>;
   terminalClose?: (hostDeviceID: string, terminalID: string) => Promise<string>;
+  addListener?: (eventName: string) => void;
+  removeListeners?: (count: number) => void;
 };
 
 export type MobileCoreSnapshot = {
@@ -72,6 +74,23 @@ export type MobileCoreTerminalInfo = {
   output_seq?: number;
 };
 
+export type MobileCoreTerminalFrameEvent = {
+  host_device_id?: string;
+  terminal_id?: string;
+  frame?: {
+    type?: string;
+    terminal?: {
+      terminal_id?: string;
+      output_seq?: number;
+      heartbeat_seq?: number;
+      data?: string;
+      reason?: string;
+      code?: string;
+      can_input?: boolean;
+    };
+  };
+};
+
 const moduleName = "AstralOpsMobileCore";
 
 function nativeModule(): NativeMobileCoreModule | undefined {
@@ -121,6 +140,10 @@ export async function openTerminal(hostDeviceID: string, workspaceID: string): P
   return callNative("openTerminal", [hostDeviceID, workspaceID]) as Promise<MobileCoreTerminalInfo>;
 }
 
+export async function attachTerminal(hostDeviceID: string, terminalID: string, afterSeq = 0): Promise<MobileCoreTerminalInfo> {
+  return callNative("attachTerminal", [hostDeviceID, terminalID, afterSeq]) as Promise<MobileCoreTerminalInfo>;
+}
+
 export async function terminalInput(hostDeviceID: string, terminalID: string, data: string): Promise<unknown> {
   return callNative("terminalInput", [hostDeviceID, terminalID, data]);
 }
@@ -131,6 +154,21 @@ export async function terminalResize(hostDeviceID: string, terminalID: string, c
 
 export async function terminalClose(hostDeviceID: string, terminalID: string): Promise<unknown> {
   return callNative("terminalClose", [hostDeviceID, terminalID]);
+}
+
+export function subscribeTerminalFrames(handler: (event: MobileCoreTerminalFrameEvent) => void): () => void {
+  const mod = nativeModule();
+  if (!mod) return () => undefined;
+  const emitter = new NativeEventEmitter(mod as never);
+  const subscription = emitter.addListener("terminalFrame", (payload: string) => {
+    if (typeof payload !== "string" || payload.length === 0) return;
+    try {
+      handler(JSON.parse(payload) as MobileCoreTerminalFrameEvent);
+    } catch {
+      // Native callbacks are diagnostics-adjacent; malformed payloads should not break the UI thread.
+    }
+  });
+  return () => subscription.remove();
 }
 
 export function meshCloudSession(mesh: MobileCoreMeshState | undefined, baseUrl?: string): MobileCoreCloudSession | undefined {

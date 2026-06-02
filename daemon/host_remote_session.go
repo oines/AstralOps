@@ -12,45 +12,51 @@ import (
 )
 
 const (
-	hostRemoteStateIdle          = "idle"
-	hostRemoteStateConnecting    = "connecting"
-	hostRemoteStateLive          = "live"
-	hostRemoteStateReconnecting  = "reconnecting"
-	hostRemoteStateFailed        = "failed"
-	hostRemoteStateNeedsPairing  = "needs_pairing"
-	hostRemoteStateRevoked       = "revoked"
-	hostWorkbenchStateLoading    = "loading"
-	hostWorkbenchStateLive       = "live"
-	hostWorkbenchStateResyncing  = "resyncing"
-	hostWorkbenchStateStale      = "stale"
-	hostWorkbenchStateFailed     = "failed"
-	hostTerminalStateAttaching   = "attaching"
-	hostTerminalStateLive        = "live"
-	hostTerminalStateResyncing   = "resyncing"
-	hostTerminalStatePaused      = "paused"
-	hostTerminalStateFailed      = "failed"
-	hostTerminalStateClosed      = "closed"
-	hostRemoteStateBufferSize    = 8
-	hostRemoteStreamBufferSize   = 64
-	hostRemotePingInterval       = 1 * time.Second
-	hostRemotePingTimeout        = 900 * time.Millisecond
-	hostRemoteReconnectTimeout   = 2 * time.Second
-	hostRemoteNoFrameTimeout     = 3 * time.Second
-	hostRemoteMissedPingLimit    = 2
-	hostTerminalViewerStaleAfter = 12 * time.Second
-	hostTerminalReconnectMax     = 4 * time.Second
+	remoteControlStateIdle         = controllercore.StateIdle
+	remoteControlStateConnecting   = controllercore.StateConnecting
+	remoteControlStateConnected    = "connected"
+	remoteControlStateLive         = controllercore.StateLive
+	remoteControlStateReconnecting = controllercore.StateReconnecting
+	remoteControlStateFailed       = controllercore.StateFailed
+	hostRemoteStateIdle            = controllercore.StateIdle
+	hostRemoteStateConnecting      = controllercore.StateConnecting
+	hostRemoteStateLive            = controllercore.StateLive
+	hostRemoteStateReconnecting    = controllercore.StateReconnecting
+	hostRemoteStateFailed          = controllercore.StateFailed
+	hostRemoteStateNeedsPairing    = controllercore.StateNeedsPairing
+	hostRemoteStateRevoked         = controllercore.StateRevoked
+	hostWorkbenchStateLoading      = controllercore.WorkbenchLoading
+	hostWorkbenchStateLive         = controllercore.WorkbenchLive
+	hostWorkbenchStateResyncing    = controllercore.WorkbenchResyncing
+	hostWorkbenchStateStale        = controllercore.WorkbenchStale
+	hostWorkbenchStateFailed       = controllercore.WorkbenchFailed
+	hostTerminalStateAttaching     = controllercore.TerminalAttaching
+	hostTerminalStateLive          = controllercore.TerminalLive
+	hostTerminalStateResyncing     = controllercore.TerminalResyncing
+	hostTerminalStatePaused        = controllercore.TerminalPaused
+	hostTerminalStateFailed        = controllercore.TerminalFailed
+	hostTerminalStateClosed        = controllercore.TerminalClosed
+	hostRemoteStateBufferSize      = 8
+	hostRemoteStreamBufferSize     = 64
+	hostRemotePingInterval         = 1 * time.Second
+	hostRemotePingTimeout          = 900 * time.Millisecond
+	hostRemoteReconnectTimeout     = 2 * time.Second
+	hostRemoteNoFrameTimeout       = 3 * time.Second
+	hostRemoteMissedPingLimit      = 2
+	hostTerminalViewerStaleAfter   = 12 * time.Second
+	hostTerminalReconnectMax       = 4 * time.Second
 )
 
 type hostRemoteSessionManager struct {
-	deps  hostRemoteSessionDeps
-	lower *remoteControlManager
+	deps hostRemoteSessionDeps
 
 	mu       sync.Mutex
 	sessions map[string]*hostRemoteSession
 }
 
 type hostRemoteSessionDeps struct {
-	controlState     func(string) remoteHostControlState
+	coreSession      func(string) *controllercore.HostSession
+	controlState     func(string) controllercore.ControlState
 	hasActiveSession func(string) bool
 	request          func(context.Context, string, string, string, map[string]any) (ControlResponse, error)
 	subscribeEvents  func(context.Context, string, eventSubscriptionParams) (remoteControlEventStream, error)
@@ -80,31 +86,6 @@ type hostRemoteSession struct {
 	reconnectAttemptStartedAt time.Time
 }
 
-type remoteHostSessionState struct {
-	HostDeviceID string                             `json:"host_device_id"`
-	State        string                             `json:"state"`
-	Transport    string                             `json:"transport,omitempty"`
-	CanRequest   bool                               `json:"can_request"`
-	Workbench    remoteHostWorkbenchState           `json:"workbench"`
-	Terminals    map[string]remoteHostTerminalState `json:"terminals"`
-	LastError    string                             `json:"last_error,omitempty"`
-	UpdatedAt    string                             `json:"updated_at"`
-}
-
-type remoteHostWorkbenchState struct {
-	State     string `json:"state"`
-	Version   int64  `json:"version,omitempty"`
-	LastError string `json:"last_error,omitempty"`
-}
-
-type remoteHostTerminalState struct {
-	State     string `json:"state"`
-	CanInput  bool   `json:"can_input"`
-	OutputSeq int64  `json:"output_seq,omitempty"`
-	LastError string `json:"last_error,omitempty"`
-	UpdatedAt string `json:"updated_at"`
-}
-
 type remoteHostStreamMessage struct {
 	Event   string
 	Payload any
@@ -115,10 +96,19 @@ type remoteHostEventStream struct {
 	Close    func()
 }
 
-func newHostRemoteSessionManager(deps hostRemoteSessionDeps, lower *remoteControlManager) *hostRemoteSessionManager {
+type remoteControlEventStream struct {
+	Events <-chan AstralEvent
+	Close  func()
+}
+
+type remoteHostControlState = controllercore.ControlState
+type remoteHostSessionState = controllercore.HostSessionState
+type remoteHostWorkbenchState = controllercore.WorkbenchStatus
+type remoteHostTerminalState = controllercore.TerminalState
+
+func newHostRemoteSessionManager(deps hostRemoteSessionDeps) *hostRemoteSessionManager {
 	return &hostRemoteSessionManager{
 		deps:     deps,
-		lower:    lower,
 		sessions: map[string]*hostRemoteSession{},
 	}
 }
@@ -128,11 +118,18 @@ func hostRemoteSessionDepsFromApp(a *app) hostRemoteSessionDeps {
 		return hostRemoteSessionDeps{}
 	}
 	return hostRemoteSessionDeps{
-		controlState: func(hostDeviceID string) remoteHostControlState {
-			if transport := a.controllerManagedTransport(); transport != nil {
-				return fromCoreControlState(transport.ControlState(hostDeviceID))
+		coreSession: func(hostDeviceID string) *controllercore.HostSession {
+			core := a.controllerCoreManager()
+			if core == nil {
+				return nil
 			}
-			return remoteHostControlState{State: remoteControlStateIdle}
+			return core.OpenHostSession(hostDeviceID)
+		},
+		controlState: func(hostDeviceID string) controllercore.ControlState {
+			if transport := a.controllerManagedTransport(); transport != nil {
+				return transport.ControlState(hostDeviceID)
+			}
+			return controllercore.ControlState{State: controllercore.StateIdle}
 		},
 		hasActiveSession: func(hostDeviceID string) bool {
 			transport := a.controllerManagedTransport()
@@ -161,7 +158,7 @@ func (a *app) hostRemoteSessionManager() *hostRemoteSessionManager {
 		return nil
 	}
 	if a.hostRemoteSessions == nil {
-		a.hostRemoteSessions = newHostRemoteSessionManager(hostRemoteSessionDepsFromApp(a), a.remoteControlManager())
+		a.hostRemoteSessions = newHostRemoteSessionManager(hostRemoteSessionDepsFromApp(a))
 	}
 	return a.hostRemoteSessions
 }
@@ -231,6 +228,9 @@ func (m *hostRemoteSessionManager) ApplyControlState(hostDeviceID string, state 
 	if session == nil || !session.isActive() {
 		return
 	}
+	if core := session.coreSession(); core != nil {
+		core.ApplyControlState(state)
+	}
 	switch state.State {
 	case controllercore.StateLive:
 		session.markActivity(state.Transport)
@@ -271,54 +271,51 @@ func (m *hostRemoteSessionManager) ControlState(hostDeviceID string) remoteHostC
 	if m == nil {
 		return remoteHostControlState{State: remoteControlStateIdle}
 	}
-	session := m.session(hostDeviceID)
-	if session == nil {
-		return remoteHostControlState{State: remoteControlStateIdle}
-	}
-	state := session.State()
-	lower := remoteHostControlState{}
+	control := remoteHostControlState{State: remoteControlStateIdle}
 	if m.deps.controlState != nil {
-		lower = m.deps.controlState(hostDeviceID)
-	} else if m.lower != nil {
-		lower = m.lower.controlState(hostDeviceID)
+		control = m.deps.controlState(hostDeviceID)
 	}
-	controlState := hostRemoteControlStateName(state.State)
-	if controlState == remoteControlStateIdle && lower.State != "" {
-		controlState = lower.State
+	if session := m.session(hostDeviceID); session != nil {
+		state := session.State()
+		if state.State != "" && state.State != hostRemoteStateIdle {
+			control.State = state.State
+		}
+		if state.Transport != "" {
+			control.Transport = state.Transport
+		}
+		if state.LastError != "" {
+			control.LastError = state.LastError
+		}
+		if state.UpdatedAt != "" {
+			control.UpdatedAt = state.UpdatedAt
+		}
 	}
-	transport := firstString(state.Transport, lower.Transport)
-	return remoteHostControlState{
-		State:           controlState,
-		Transport:       transport,
-		RouteGeneration: lower.RouteGeneration,
-		LastError:       firstString(state.LastError, lower.LastError),
-		LastErrorCode:   lower.LastErrorCode,
-		UpdatedAt:       firstString(state.UpdatedAt, lower.UpdatedAt),
+	if control.State == "" {
+		control.State = remoteControlStateIdle
 	}
-}
-
-func hostRemoteControlStateName(state string) string {
-	switch state {
-	case hostRemoteStateConnecting:
-		return remoteControlStateConnecting
-	case hostRemoteStateLive:
-		return remoteControlStateConnected
-	case hostRemoteStateReconnecting:
-		return remoteControlStateReconnecting
-	case hostRemoteStateFailed, hostRemoteStateNeedsPairing, hostRemoteStateRevoked:
-		return remoteControlStateFailed
-	default:
-		return remoteControlStateIdle
-	}
+	return control
 }
 
 func (s *hostRemoteSession) State() remoteHostSessionState {
 	if s == nil {
 		return remoteHostSessionState{}
 	}
+	if core := s.coreSession(); core != nil {
+		state := core.State()
+		if state.HostDeviceID != "" {
+			return state
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.snapshotLocked()
+}
+
+func (s *hostRemoteSession) coreSession() *controllercore.HostSession {
+	if s == nil || s.manager == nil || s.manager.deps.coreSession == nil {
+		return nil
+	}
+	return s.manager.deps.coreSession(s.hostDeviceID)
 }
 
 func (s *hostRemoteSession) activate() {
@@ -354,11 +351,12 @@ func (s *hostRemoteSession) shouldProbeHealth() bool {
 		return false
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.active {
+		s.mu.Unlock()
 		return false
 	}
-	switch s.state.State {
+	s.mu.Unlock()
+	switch s.State().State {
 	case hostRemoteStateNeedsPairing, hostRemoteStateRevoked:
 		return false
 	default:
@@ -460,7 +458,7 @@ func (s *hostRemoteSession) markConnectionUntrusted(reason string, err error) {
 	s.state.Terminals = cloneRemoteHostTerminalStates(s.terminals)
 	s.mu.Unlock()
 	s.setHostState(hostRemoteStateReconnecting, "", err)
-	if s.manager != nil && (s.manager.deps.invalidate != nil || s.manager.lower != nil) {
+	if s.manager != nil && s.manager.deps.invalidate != nil {
 		s.invalidateControlSession(reason)
 	}
 }
@@ -474,10 +472,6 @@ func (s *hostRemoteSession) invalidateControlSession(reason string) {
 	}
 	if s.manager.deps.invalidate != nil {
 		s.manager.deps.invalidate(s.hostDeviceID, reason)
-		return
-	}
-	if s.manager.lower != nil {
-		s.manager.lower.Invalidate(s.hostDeviceID, reason)
 	}
 }
 
@@ -535,10 +529,8 @@ func (s *hostRemoteSession) Workbench(ctx context.Context) (workbenchState, erro
 	}
 	s.mu.Lock()
 	s.workbench = workbench
-	s.state.Workbench = remoteHostWorkbenchState{State: hostWorkbenchStateLive, Version: workbench.Version}
-	s.state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	s.mu.Unlock()
-	s.notify()
+	s.setWorkbenchState(hostWorkbenchStateLive, nil)
 	return workbench, nil
 }
 
@@ -633,6 +625,27 @@ func hostRemoteRequestFailureState(err error) string {
 	return hostRemoteStateReconnecting
 }
 
+func controlResponseActionError(response ControlResponse, action string) error {
+	status := http.StatusBadGateway
+	message := "remote control request failed"
+	code := "remote_control_failed"
+	if response.Error != nil {
+		if response.Error.Status > 0 {
+			status = response.Error.Status
+		}
+		if response.Error.Message != "" {
+			message = response.Error.Message
+		}
+		if response.Error.Code != "" {
+			code = response.Error.Code
+		}
+	}
+	if action != "" && message == "remote control request failed" {
+		message = "remote control request failed: " + action
+	}
+	return newActionError(status, code, message)
+}
+
 func (s *hostRemoteSession) SubscribeEvents(ctx context.Context, params eventSubscriptionParams) remoteHostEventStream {
 	s.activate()
 	out := make(chan remoteHostStreamMessage, hostRemoteStreamBufferSize)
@@ -715,6 +728,9 @@ func (s *hostRemoteSession) setConnectingIfNotLive() {
 	s.mu.Lock()
 	live := s.state.State == hostRemoteStateLive
 	s.mu.Unlock()
+	if core := s.coreSession(); core != nil {
+		live = core.State().State == hostRemoteStateLive
+	}
 	if !live {
 		s.setHostState(hostRemoteStateConnecting, "", nil)
 	}
@@ -726,8 +742,9 @@ func (s *hostRemoteSession) setHostState(state, transport string, err error) {
 	}
 	if transport == "" && s.manager != nil && s.manager.deps.controlState != nil {
 		transport = s.manager.deps.controlState(s.hostDeviceID).Transport
-	} else if transport == "" && s.manager != nil && s.manager.lower != nil {
-		transport = s.manager.lower.controlState(s.hostDeviceID).Transport
+	}
+	if core := s.coreSession(); core != nil {
+		core.UpdateHostState(state, transport, err)
 	}
 	s.mu.Lock()
 	if state == "" {
@@ -762,10 +779,19 @@ func (s *hostRemoteSession) setWorkbenchState(state string, err error) {
 	if s == nil {
 		return
 	}
+	version := int64(0)
+	s.mu.Lock()
+	if s.workbench.Version > 0 {
+		version = s.workbench.Version
+	}
+	s.mu.Unlock()
+	if core := s.coreSession(); core != nil {
+		core.UpdateWorkbenchState(state, version, err)
+	}
 	s.mu.Lock()
 	s.state.Workbench.State = state
-	if s.workbench.Version > 0 {
-		s.state.Workbench.Version = s.workbench.Version
+	if version > 0 {
+		s.state.Workbench.Version = version
 	}
 	s.state.Workbench.LastError = ""
 	if err != nil {
@@ -780,6 +806,9 @@ func (s *hostRemoteSession) setTerminalState(terminalID, state string, canInput 
 	terminalID = strings.TrimSpace(terminalID)
 	if s == nil || terminalID == "" {
 		return
+	}
+	if core := s.coreSession(); core != nil {
+		core.UpdateTerminalState(terminalID, state, canInput, outputSeq, err)
 	}
 	s.mu.Lock()
 	if s.terminals == nil {
@@ -806,8 +835,8 @@ func (s *hostRemoteSession) subscribeState() (<-chan remoteHostSessionState, fun
 	ch := make(chan remoteHostSessionState, hostRemoteStateBufferSize)
 	s.mu.Lock()
 	s.subscribers[ch] = struct{}{}
-	ch <- s.snapshotLocked()
 	s.mu.Unlock()
+	ch <- s.State()
 	var once sync.Once
 	return ch, func() {
 		once.Do(func() {
@@ -839,8 +868,8 @@ func (s *hostRemoteSession) notify() {
 	if s == nil {
 		return
 	}
+	state := s.State()
 	s.mu.Lock()
-	state := s.snapshotLocked()
 	subscribers := make([]chan remoteHostSessionState, 0, len(s.subscribers))
 	for subscriber := range s.subscribers {
 		subscribers = append(subscribers, subscriber)
@@ -1130,6 +1159,7 @@ func (v *remoteHostTerminalViewer) attach(ctx context.Context) error {
 
 func (v *remoteHostTerminalViewer) pump(ctx context.Context) {
 	defer close(v.messages)
+streamLoop:
 	for {
 		stream := v.currentStream()
 		if stream == nil {
@@ -1162,6 +1192,18 @@ func (v *remoteHostTerminalViewer) pump(ctx context.Context) {
 						return
 					}
 				}
+			case terminalFrameError:
+				err := terminalFrameStreamError(frame.Terminal)
+				if terminalFrameRequiresReattach(frame.Terminal) {
+					v.resetStreamForReconnect(err)
+					if !v.reattach(ctx, err) {
+						return
+					}
+					continue streamLoop
+				}
+				if !v.send(terminalSocketErrorPayload(err)) {
+					return
+				}
 			case terminalFrameClosed:
 				if !v.send(terminalExitSocketPayload(frame.Terminal)) {
 					return
@@ -1179,6 +1221,23 @@ func (v *remoteHostTerminalViewer) pump(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func terminalFrameRequiresReattach(frame *terminalStreamFrame) bool {
+	if frame == nil {
+		return false
+	}
+	code := strings.TrimSpace(frame.Code)
+	return code == terminalViewerNotReadyCode || code == terminalViewerRequiredCode || code == controllercore.TerminalViewerNotReadyCode
+}
+
+func terminalFrameStreamError(frame *terminalStreamFrame) error {
+	if frame == nil {
+		return errors.New("terminal stream error")
+	}
+	code := firstString(frame.Code, "terminal_stream_error")
+	message := firstString(frame.Reason, frame.Code, "terminal stream error")
+	return newActionError(http.StatusConflict, code, message)
 }
 
 func (v *remoteHostTerminalViewer) monitor(ctx context.Context) {

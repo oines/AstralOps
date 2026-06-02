@@ -615,7 +615,6 @@ function TerminalTab({
       onOpen: () => {
         if (!isCurrent()) return;
         opened = true;
-        sendResize();
       },
       onReady: (message) => {
         if (!isCurrent()) return;

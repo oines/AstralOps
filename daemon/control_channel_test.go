@@ -3185,35 +3185,25 @@ func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *test
 
 	secret := "stream-secret-" + randomID(8)
 	sealedInput := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
-		Type: "request",
-		Request: &ControlRequest{
-			RequestID:  "terminal_input",
-			Capability: CapabilityTerminalInput,
-			Action:     ControlActionTerminalInput,
-			Params: map[string]any{
-				"terminal_id":    terminalID,
-				"viewer_id":      viewerID,
-				"input_lease_id": inputLeaseID,
-				"data":           "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
-			},
+		Type: terminalFrameInput,
+		Terminal: &terminalStreamFrame{
+			TerminalID:   terminalID,
+			ViewerID:     viewerID,
+			InputLeaseID: inputLeaseID,
+			Data:         "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
 		},
 	})
 	if strings.Contains(string(sealedInput), secret) {
 		t.Fatalf("sealed terminal input leaked payload: %s", string(sealedInput))
 	}
 
-	sawInputResponse := false
 	sawOutput := false
-	for i := 0; i < 20 && (!sawInputResponse || !sawOutput); i++ {
+	for i := 0; i < 20 && !sawOutput; i++ {
 		plain, sealed := readEncryptedControlFrameWithBody(t, client, cipher)
 		if strings.Contains(string(sealed), secret) {
 			t.Fatalf("sealed terminal stream leaked payload: %s", string(sealed))
 		}
 		switch plain.Type {
-		case "response":
-			if plain.Response != nil && plain.Response.RequestID == "terminal_input" && plain.Response.OK {
-				sawInputResponse = true
-			}
 		case terminalFrameOutput:
 			if plain.Terminal == nil || plain.Terminal.TerminalID != terminalID {
 				t.Fatalf("terminal output frame = %#v, want terminal %s", plain, terminalID)
@@ -3223,8 +3213,8 @@ func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *test
 			}
 		}
 	}
-	if !sawInputResponse || !sawOutput {
-		t.Fatalf("saw input response=%v output=%v, want both", sawInputResponse, sawOutput)
+	if !sawOutput {
+		t.Fatal("terminal input did not produce output")
 	}
 
 	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
@@ -3319,33 +3309,17 @@ func TestControlWebSocketTerminalResizeAndDetachAreEncrypted(t *testing.T) {
 	inputLeaseID := stringValue(attachResult["input_lease_id"])
 
 	sealedResize := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
-		Type: "request",
-		Request: &ControlRequest{
-			RequestID:  "terminal_resize",
-			Capability: CapabilityTerminalInput,
-			Action:     ControlActionTerminalResize,
-			Params: map[string]any{
-				"terminal_id":    terminalID,
-				"viewer_id":      viewerID,
-				"input_lease_id": inputLeaseID,
-				"cols":           120,
-				"rows":           32,
-			},
+		Type: terminalFrameResize,
+		Terminal: &terminalStreamFrame{
+			TerminalID:   terminalID,
+			ViewerID:     viewerID,
+			InputLeaseID: inputLeaseID,
+			Cols:         120,
+			Rows:         32,
 		},
 	})
 	if strings.Contains(string(sealedResize), ControlActionTerminalResize) || strings.Contains(string(sealedResize), terminalID) {
-		t.Fatalf("sealed terminal resize request leaked payload: %s", string(sealedResize))
-	}
-	plain, sealedResizeResponse := readEncryptedControlFrameWithBody(t, client, cipher)
-	if strings.Contains(string(sealedResizeResponse), terminalID) {
-		t.Fatalf("sealed terminal resize response leaked payload: %s", string(sealedResizeResponse))
-	}
-	if plain.Response == nil || !plain.Response.OK || plain.Response.RequestID != "terminal_resize" {
-		t.Fatalf("resize response = %#v, want ok", plain)
-	}
-	resize := mapValue(plain.Response.Result)
-	if stringValue(resize["terminal_id"]) != terminalID || stringValue(resize["status"]) != terminalStatusOpen {
-		t.Fatalf("resize result = %#v", resize)
+		t.Fatalf("sealed terminal resize frame leaked payload: %s", string(sealedResize))
 	}
 
 	sealedDetach := writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
@@ -3446,17 +3420,12 @@ func TestControlWebSocketTerminalReconnectAttachWithinRetention(t *testing.T) {
 
 	secret := "reattach-secret-" + randomID(8)
 	writeEncryptedControlFrame(t, reconnected, reconnectedCipher, controlPlainFrame{
-		Type: "request",
-		Request: &ControlRequest{
-			RequestID:  "terminal_input_after_reattach",
-			Capability: CapabilityTerminalInput,
-			Action:     ControlActionTerminalInput,
-			Params: map[string]any{
-				"terminal_id":    terminalID,
-				"viewer_id":      viewerID,
-				"input_lease_id": inputLeaseID,
-				"data":           "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
-			},
+		Type: terminalFrameInput,
+		Terminal: &terminalStreamFrame{
+			TerminalID:   terminalID,
+			ViewerID:     viewerID,
+			InputLeaseID: inputLeaseID,
+			Data:         "printf '%s\\n' " + shellSingleQuote(secret) + "\n",
 		},
 	})
 	sawOutput := false

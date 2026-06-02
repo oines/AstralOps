@@ -12,14 +12,12 @@ type TerminalViewerControllerOptions = {
   onReady?: (payload: TerminalReadyPayload) => void;
   onOutput?: (data: string, done: () => void, outputSeq?: number) => void;
   onExit?: (payload: Record<string, unknown>) => void;
-  onError?: (message: string) => void;
+  onError?: (message: string, code?: string) => void;
   onHealthChange?: (health: TerminalViewerHealth) => void;
   onInputBlocked?: () => void;
 };
 
 export class TerminalViewerController {
-  private static readonly maxQueuedInputBytes = 4096;
-
   private connection: TerminalConnection | null = null;
   private disposed = false;
   private exited = false;
@@ -32,9 +30,7 @@ export class TerminalViewerController {
   private lastBlockedNoticeAt = 0;
   private canInput = false;
   private hostAllowsInput = false;
-  private renderPending = false;
-  private awaitingHostInputResume = false;
-  private queuedInput = "";
+  private attached = false;
 
   constructor(private readonly options: TerminalViewerControllerOptions) {}
 
@@ -47,9 +43,6 @@ export class TerminalViewerController {
       this.connect();
     }
     if (!this.canSendInput()) {
-      if (this.queueInputIfTransientlyPaused(data)) {
-        return;
-      }
       this.notifyInputBlocked();
       return;
     }
@@ -59,7 +52,7 @@ export class TerminalViewerController {
   resize(cols: number, rows: number): void {
     this.lastCols = cols;
     this.lastRows = rows;
-    if (this.canSendInput()) {
+    if (this.connection && this.attached) {
       this.connection?.resize(cols, rows);
     }
   }
@@ -72,6 +65,7 @@ export class TerminalViewerController {
     }
     this.connection?.close();
     this.connection = null;
+    this.attached = false;
   }
 
   private connect(): void {
@@ -91,6 +85,7 @@ export class TerminalViewerController {
         },
         onReady: (payload) => {
           if (this.disposed || this.exited) return;
+          this.attached = true;
           this.hostAllowsInput = payload.can_input === true;
           this.markHealthy(this.hostAllowsInput);
           if (this.lastCols > 0 && this.lastRows > 0) {
@@ -100,6 +95,9 @@ export class TerminalViewerController {
         },
         onHeartbeat: (payload) => {
           if (this.disposed || this.exited) return;
+          if (payload.viewer_id && payload.input_lease_id) {
+            this.attached = true;
+          }
           if (payload.can_input !== undefined) {
             this.hostAllowsInput = payload.can_input === true;
           }
@@ -112,18 +110,10 @@ export class TerminalViewerController {
         onOutput: (data, outputSeq) => {
           if (this.disposed || this.exited) return;
           if (!this.shouldAcceptOutput(outputSeq)) return;
-          this.canInput = false;
-          this.renderPending = true;
-          this.awaitingHostInputResume = false;
-          this.setHealth("degraded");
           const renderedSeq = outputSeq ?? this.lastOutputSeq;
           const markRendered = (): void => {
             if (this.disposed || this.exited) return;
-            this.renderPending = false;
             this.connection?.ackRendered(renderedSeq);
-            if (!this.hostAllowsInput) {
-              this.awaitingHostInputResume = true;
-            }
             this.markHealthy(this.hostAllowsInput);
           };
           if (!this.options.onOutput) {
@@ -142,25 +132,35 @@ export class TerminalViewerController {
           this.setHealth("exited");
           this.options.onExit?.(payload);
         },
-        onError: (message) => {
+        onError: (message, code) => {
           if (this.disposed || this.exited) return;
-          this.options.onError?.(message);
+          if (isTerminalViewerLifecycleError(message, code)) {
+            const failedConnection = this.connection;
+            this.connection = null;
+            this.attached = false;
+            this.canInput = false;
+            failedConnection?.close();
+            this.setHealth("reconnecting");
+            this.scheduleReconnect();
+            return;
+          }
+          this.options.onError?.(message, code);
         },
         onConnectionError: () => {
           if (this.disposed || this.exited) return;
           const failedConnection = this.connection;
           this.connection = null;
           this.canInput = false;
-          this.clearQueuedInput();
+          this.attached = false;
           failedConnection?.close();
           this.setHealth("reconnecting");
           this.scheduleReconnect();
         },
         onClose: () => {
           this.connection = null;
+          this.attached = false;
           if (!this.disposed && !this.exited) {
             this.canInput = false;
-            this.clearQueuedInput();
             this.setHealth("reconnecting");
           }
           this.scheduleReconnect();
@@ -193,13 +193,7 @@ export class TerminalViewerController {
 
   private markHealthy(canInput = true): void {
     this.canInput = canInput;
-    if (canInput) {
-      this.awaitingHostInputResume = false;
-    }
     this.setHealth(canInput ? "healthy" : "degraded");
-    if (canInput) {
-      this.flushQueuedInput();
-    }
   }
 
   private applyStatus(payload: TerminalStatusPayload): void {
@@ -216,15 +210,12 @@ export class TerminalViewerController {
         break;
       case "resyncing":
       case "paused":
-        this.clearQueuedInput();
         this.setHealth("degraded");
         break;
       case "failed":
-        this.clearQueuedInput();
         this.setHealth("reconnecting");
         break;
       case "closed":
-        this.clearQueuedInput();
         this.exited = true;
         this.setHealth("exited");
         break;
@@ -240,34 +231,7 @@ export class TerminalViewerController {
   }
 
   private canSendInput(): boolean {
-    return this.connection !== null && this.health === "healthy" && this.canInput;
-  }
-
-  private queueInputIfTransientlyPaused(data: string): boolean {
-    if (!this.connection || (!this.renderPending && !this.awaitingHostInputResume)) {
-      return false;
-    }
-    if (this.queuedInput.length + data.length > TerminalViewerController.maxQueuedInputBytes) {
-      this.clearQueuedInput();
-      return false;
-    }
-    this.queuedInput += data;
-    return true;
-  }
-
-  private flushQueuedInput(): void {
-    if (!this.connection || this.renderPending || this.awaitingHostInputResume || !this.canSendInput() || this.queuedInput === "") {
-      return;
-    }
-    const data = this.queuedInput;
-    this.queuedInput = "";
-    this.connection.input(data);
-  }
-
-  private clearQueuedInput(): void {
-    this.queuedInput = "";
-    this.renderPending = false;
-    this.awaitingHostInputResume = false;
+    return this.connection !== null && this.attached && this.health === "healthy" && this.canInput;
   }
 
   private notifyInputBlocked(): void {
@@ -276,4 +240,13 @@ export class TerminalViewerController {
     this.lastBlockedNoticeAt = now;
     this.options.onInputBlocked?.();
   }
+}
+
+function isTerminalViewerLifecycleError(message: string, code?: string): boolean {
+  const normalizedCode = (code || "").trim();
+  if (normalizedCode === "terminal_viewer_not_ready" || normalizedCode === "terminal_viewer_required" || normalizedCode === "terminal_viewer_not_live") {
+    return true;
+  }
+  const normalizedMessage = message.trim().toLowerCase();
+  return normalizedMessage === "terminal viewer is not attached" || normalizedMessage === "terminal input requires an attached healthy viewer" || normalizedMessage === "terminal viewer is not live";
 }

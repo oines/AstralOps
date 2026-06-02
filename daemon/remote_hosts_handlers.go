@@ -82,8 +82,6 @@ func (a *remoteControlService) buildRemoteHostRecords(ctx context.Context, disco
 	for _, host := range hosts {
 		if manager := a.hostRemoteSessionManager(); manager != nil {
 			host.Control = manager.ControlState(host.DeviceID)
-		} else if manager := a.remoteManager(); manager != nil {
-			host.Control = manager.controlState(host.DeviceID)
 		}
 		host = remoteHostRecordWithControlState(host, host.Control)
 		out = append(out, host)
@@ -198,9 +196,6 @@ func (a *remoteControlService) mergeDiscoveredRemoteHosts(hosts map[string]remot
 			continue
 		}
 		known = a.rememberRemoteHostLANRoute(hostInfo, candidate.BaseURL, known)
-		if manager := a.remoteManager(); manager != nil {
-			manager.clearLANFailure(candidate.DeviceID)
-		}
 		if transport := a.controllerManagedTransport(); transport != nil {
 			transport.ClearLANFailure(candidate.DeviceID)
 			state := transport.ControlState(candidate.DeviceID)
@@ -223,7 +218,7 @@ func (a *remoteControlService) mergeDiscoveredRemoteHosts(hosts map[string]remot
 
 func remoteHostRecordWithControlState(host remoteHostRecord, control remoteHostControlState) remoteHostRecord {
 	switch control.State {
-	case remoteControlStateConnecting, remoteControlStateConnected, remoteControlStateReconnecting:
+	case remoteControlStateConnecting, remoteControlStateConnected, remoteControlStateLive, remoteControlStateReconnecting:
 	default:
 		return host
 	}
@@ -726,7 +721,7 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 	afterSeq, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
 	terminal, err := manager.session(hostDeviceID).OpenTerminalViewer(r.Context(), workspaceID, terminalID, afterSeq)
 	if err != nil {
-		_ = local.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+		_ = local.WriteJSON(terminalSocketErrorPayload(err))
 		return
 	}
 	defer terminal.Detach()
@@ -781,7 +776,7 @@ func (a *app) handleRemoteHostWorkspacePTY(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			if err := remoteTerminalHandleHostViewerClientMessage(terminal, read.message); err != nil {
-				localWriter.write(local, map[string]any{"type": "error", "message": err.Error()})
+				localWriter.write(local, terminalSocketErrorPayload(err))
 			}
 		}
 	}

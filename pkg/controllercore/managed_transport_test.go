@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -101,8 +102,9 @@ func TestManagedTransportRoutesTerminalFramesAndInput(t *testing.T) {
 	if err := stream.Input("echo ok\n"); err != nil {
 		t.Fatal(err)
 	}
-	if got := opener.conn(0).requestCount(ActionTerminalInput); got != 1 {
-		t.Fatalf("terminal input requests = %d, want 1", got)
+	frame := opener.conn(0).lastTerminalFrame(TerminalFrameInput)
+	if frame == nil || frame.Terminal == nil || frame.Terminal.Data != "echo ok\n" || frame.Terminal.TerminalID != "term_1" {
+		t.Fatalf("terminal input frame = %#v, want echo input", frame)
 	}
 }
 
@@ -133,6 +135,48 @@ func TestManagedTransportRoutesTerminalFramesToMultipleViewers(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("timed out waiting for %s terminal output", name)
 		}
+	}
+}
+
+func TestManagedTransportRoutesTerminalPrivateErrorsToMatchingViewer(t *testing.T) {
+	opener := &fakeManagedOpener{}
+	manager := NewManagedTransport(ManagedTransportConfig{OpenFrameConn: opener.open})
+
+	left, err := manager.AttachTerminal(context.Background(), "dev_host", "term_1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer left.Detach()
+	right, err := manager.AttachTerminal(context.Background(), "dev_host", "term_1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer right.Detach()
+	if left.ViewerID() == right.ViewerID() || left.InputLeaseID() == right.InputLeaseID() {
+		t.Fatalf("test setup expected distinct viewer leases, got left %q/%q right %q/%q", left.ViewerID(), left.InputLeaseID(), right.ViewerID(), right.InputLeaseID())
+	}
+
+	leftFrames := left.Frames()
+	rightFrames := right.Frames()
+	opener.conn(0).sendTerminalFrame(TerminalFrameError, TerminalPayload{
+		TerminalID:   "term_1",
+		ViewerID:     left.ViewerID(),
+		InputLeaseID: left.InputLeaseID(),
+		Code:         TerminalViewerNotReadyCode,
+		Reason:       "terminal viewer is not attached",
+	})
+	select {
+	case frame := <-leftFrames:
+		if frame.Type != TerminalFrameError || frame.Terminal == nil || frame.Terminal.ViewerID != left.ViewerID() {
+			t.Fatalf("left terminal frame = %#v, want private error", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for matching private error")
+	}
+	select {
+	case frame := <-rightFrames:
+		t.Fatalf("right received private error for another viewer: %#v", frame)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -258,11 +302,12 @@ func (o *fakeManagedOpener) preferRelayAt(index int) bool {
 }
 
 type fakeManagedFrameConn struct {
-	mu      sync.Mutex
-	reads   chan controlwire.PlainFrame
-	closed  chan struct{}
-	respond bool
-	writes  []controlwire.PlainFrame
+	mu          sync.Mutex
+	reads       chan controlwire.PlainFrame
+	closed      chan struct{}
+	respond     bool
+	writes      []controlwire.PlainFrame
+	attachCount int
 }
 
 func newFakeManagedFrameConn() *fakeManagedFrameConn {
@@ -343,6 +388,20 @@ func (c *fakeManagedFrameConn) lastRequestParam(action, key string) any {
 	return nil
 }
 
+func (c *fakeManagedFrameConn) lastTerminalFrame(frameType string) *TerminalFrame {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := len(c.writes) - 1; i >= 0; i-- {
+		frame := c.writes[i]
+		if frame.Type != frameType || len(frame.Terminal) == 0 {
+			continue
+		}
+		decoded := toTerminalFrame(frame)
+		return &decoded
+	}
+	return nil
+}
+
 func (c *fakeManagedFrameConn) sendTerminalFrame(frameType string, payload TerminalPayload) {
 	body, _ := json.Marshal(payload)
 	c.reads <- controlwire.PlainFrame{Type: frameType, Terminal: body}
@@ -354,7 +413,12 @@ func (c *fakeManagedFrameConn) responseFor(request *controlwire.ControlRequest) 
 	case ActionTerminalOpen:
 		response.Result = map[string]any{"terminal_id": "term_1", "shell": "zsh", "cwd": "/"}
 	case ActionTerminalAttach:
-		response.Result = map[string]any{"viewer_id": "viewer_1", "input_lease_id": "lease_1", "output_seq": request.Params["after_seq"]}
+		c.mu.Lock()
+		c.attachCount++
+		attachCount := c.attachCount
+		c.mu.Unlock()
+		suffix := strconv.Itoa(attachCount)
+		response.Result = map[string]any{"viewer_id": "viewer_" + suffix, "input_lease_id": "lease_" + suffix, "output_seq": request.Params["after_seq"]}
 	case ActionTerminalList:
 		response.Result = []map[string]any{{"terminal_id": "term_1", "shell": "zsh", "cwd": "/", "status": "open", "output_seq": 1}}
 	default:

@@ -17,9 +17,13 @@ import (
 const (
 	terminalStatusOpen              = "open"
 	terminalStatusClosed            = "closed"
+	terminalFrameInput              = "terminal.input"
+	terminalFrameResize             = "terminal.resize"
+	terminalFrameHeartbeatAck       = "terminal.heartbeat_ack"
 	terminalFrameOutput             = "terminal.output"
 	terminalFrameHeartbeat          = "terminal.heartbeat"
 	terminalFrameClosed             = "terminal.closed"
+	terminalFrameError              = "terminal.error"
 	terminalOutputDisconnectedCode  = "terminal_output_disconnected"
 	terminalOutputDisconnectedText  = "terminal output stream disconnected"
 	terminalViewerRequiredCode      = "terminal_viewer_required"
@@ -125,8 +129,12 @@ type terminalStreamFrame struct {
 	ViewerID     string `json:"viewer_id,omitempty"`
 	InputLeaseID string `json:"input_lease_id,omitempty"`
 	HeartbeatSeq int64  `json:"heartbeat_seq,omitempty"`
+	RenderedSeq  int64  `json:"rendered_seq,omitempty"`
 	Data         string `json:"data,omitempty"`
+	Cols         uint16 `json:"cols,omitempty"`
+	Rows         uint16 `json:"rows,omitempty"`
 	Reason       string `json:"reason,omitempty"`
+	Code         string `json:"code,omitempty"`
 	CanInput     bool   `json:"can_input,omitempty"`
 }
 
@@ -652,12 +660,6 @@ func (s *terminalSession) validateViewerLease(controllerDeviceID, viewerID, inpu
 	if viewer.controllerDeviceID != controllerDeviceID || viewer.inputLeaseID != inputLeaseID {
 		return newActionError(http.StatusForbidden, terminalViewerMismatchCode, "terminal viewer lease does not match controller")
 	}
-	if viewer.lastAckAt.IsZero() || time.Since(viewer.lastAckAt) > terminalViewerAckTTL {
-		return newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal output is not synchronized; input is paused")
-	}
-	if viewer.renderedSeq < viewer.deliveredSeq {
-		return newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal output is not synchronized; input is paused")
-	}
 	return nil
 }
 
@@ -1152,10 +1154,7 @@ func (v *terminalViewer) canInputLocked(now time.Time) bool {
 	if v == nil || v.closed || v.viewerID == "" || v.inputLeaseID == "" {
 		return false
 	}
-	if v.lastAckAt.IsZero() || now.Sub(v.lastAckAt) > terminalViewerAckTTL {
-		return false
-	}
-	return v.renderedSeq >= v.deliveredSeq
+	return true
 }
 
 func (v *terminalViewer) close() {

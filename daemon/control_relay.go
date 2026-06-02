@@ -309,6 +309,11 @@ func (s *remoteControlService) handleControlRelaySealedFrame(ctx context.Context
 			go after()
 		}
 		return nil
+	case terminalFrameInput, terminalFrameResize, terminalFrameHeartbeatAck:
+		if err := session.handleTerminalFrame(plain); err != nil {
+			return session.writeRelayPlain(ctx, relay, terminalErrorFrame(plain, err))
+		}
+		return nil
 	case "close":
 		session.close("connection_closed")
 		s.unregisterControlRelaySession(session.id)
@@ -316,6 +321,15 @@ func (s *remoteControlService) handleControlRelaySealedFrame(ctx context.Context
 	default:
 		return session.writeRelayPlain(ctx, relay, controlPlainFrame{Type: "response", Response: controlResponseError("", http.StatusBadRequest, "invalid_frame", "unsupported control frame type")})
 	}
+}
+
+func (s *controlRelaySession) handleTerminalFrame(frame controlPlainFrame) error {
+	req, err := terminalFrameControlRequest(s.controllerID(), frame)
+	if err != nil {
+		return err
+	}
+	_, err = s.control.executeControlRequestWithContext(s.requestContext(), req, s)
+	return err
 }
 
 func (s *controlRelaySession) handleRequest(req ControlRequest) (*ControlResponse, func()) {

@@ -163,6 +163,10 @@ func (c *controlWSConn) serve() {
 			}
 			req := *frame.plain.Request
 			go c.handleRequestAsync(req)
+		case terminalFrameInput, terminalFrameResize, terminalFrameHeartbeatAck:
+			if err := c.handleTerminalFrame(frame.plain); err != nil {
+				c.writeTerminalError(frame.plain, err)
+			}
 		case "close":
 			return
 		default:
@@ -177,6 +181,77 @@ func (c *controlWSConn) handleRequestAsync(req ControlRequest) {
 	if after != nil {
 		go after()
 	}
+}
+
+func (c *controlWSConn) handleTerminalFrame(frame controlPlainFrame) error {
+	req, err := terminalFrameControlRequest(c.controllerID(), frame)
+	if err != nil {
+		return err
+	}
+	_, err = c.control.executeControlRequestWithContext(c.requestContext(), req, c)
+	return err
+}
+
+func (c *controlWSConn) writeTerminalError(frame controlPlainFrame, err error) {
+	c.writePlain(terminalErrorFrame(frame, err))
+}
+
+func terminalErrorFrame(frame controlPlainFrame, err error) controlPlainFrame {
+	response := controlResponseFromError("", err)
+	code := "terminal_frame_error"
+	message := "terminal frame failed"
+	if response != nil && response.Error != nil {
+		if response.Error.Code != "" {
+			code = response.Error.Code
+		}
+		if response.Error.Message != "" {
+			message = response.Error.Message
+		}
+	}
+	payload := &terminalStreamFrame{frameType: terminalFrameError, Code: code, Reason: message}
+	if frame.Terminal != nil {
+		payload.TerminalID = frame.Terminal.TerminalID
+		payload.WorkspaceID = frame.Terminal.WorkspaceID
+		payload.Target = frame.Terminal.Target
+		payload.OutputSeq = frame.Terminal.OutputSeq
+		payload.ViewerID = frame.Terminal.ViewerID
+		payload.InputLeaseID = frame.Terminal.InputLeaseID
+	}
+	return controlPlainFrame{Type: terminalFrameError, Terminal: payload}
+}
+
+func terminalFrameControlRequest(controllerDeviceID string, frame controlPlainFrame) (ControlRequest, error) {
+	if frame.Terminal == nil {
+		return ControlRequest{}, newActionError(http.StatusBadRequest, "terminal_frame_invalid", "terminal frame payload is missing")
+	}
+	params := map[string]any{
+		"terminal_id":    frame.Terminal.TerminalID,
+		"viewer_id":      frame.Terminal.ViewerID,
+		"input_lease_id": frame.Terminal.InputLeaseID,
+	}
+	req := ControlRequest{
+		ControllerDeviceID: controllerDeviceID,
+		Params:             params,
+	}
+	switch frame.Type {
+	case terminalFrameInput:
+		req.Capability = CapabilityTerminalInput
+		req.Action = ControlActionTerminalInput
+		params["data"] = frame.Terminal.Data
+	case terminalFrameResize:
+		req.Capability = CapabilityTerminalInput
+		req.Action = ControlActionTerminalResize
+		params["cols"] = frame.Terminal.Cols
+		params["rows"] = frame.Terminal.Rows
+	case terminalFrameHeartbeatAck:
+		req.Capability = CapabilityTerminalOpen
+		req.Action = ControlActionTerminalHeartbeatAck
+		params["heartbeat_seq"] = frame.Terminal.HeartbeatSeq
+		params["rendered_seq"] = frame.Terminal.RenderedSeq
+	default:
+		return ControlRequest{}, newActionError(http.StatusBadRequest, "terminal_frame_invalid", "unsupported terminal frame type")
+	}
+	return req, nil
 }
 
 func (c *controlWSConn) readControlFrames() <-chan controlFrameRead {

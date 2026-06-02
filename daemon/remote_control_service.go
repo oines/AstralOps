@@ -36,7 +36,6 @@ type remoteControlService struct {
 	cloudClientFromSettingsFn            func() (CloudClient, error)
 	cloudSyncApprovedPairingKnownHostsFn func(context.Context, CloudClient, []CloudDeviceRecord) error
 	hostRemoteSessionManagerFn           func() *hostRemoteSessionManager
-	remoteManagerFn                      func() *remoteControlManager
 	controllerManagedTransportFn         func() *controllercore.ManagedTransport
 	currentDeviceCloudRevokedFn          func() bool
 }
@@ -80,7 +79,6 @@ func remoteControlServiceDepsFromApp(a *app) remoteControlService {
 		cloudClientFromSettingsFn:            a.cloudClientFromSettings,
 		cloudSyncApprovedPairingKnownHostsFn: a.cloudSyncApprovedPairingKnownHosts,
 		hostRemoteSessionManagerFn:           a.hostRemoteSessionManager,
-		remoteManagerFn:                      a.remoteControlManager,
 		controllerManagedTransportFn:         a.controllerManagedTransport,
 		currentDeviceCloudRevokedFn:          a.currentDeviceCloudRevoked,
 	}
@@ -223,13 +221,6 @@ func (s *remoteControlService) hostRemoteSessionManager() *hostRemoteSessionMana
 		return nil
 	}
 	return s.hostRemoteSessionManagerFn()
-}
-
-func (s *remoteControlService) remoteManager() *remoteControlManager {
-	if s.remoteManagerFn == nil {
-		return nil
-	}
-	return s.remoteManagerFn()
 }
 
 func (s *remoteControlService) controllerManagedTransport() *controllercore.ManagedTransport {

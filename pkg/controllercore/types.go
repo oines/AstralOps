@@ -58,9 +58,13 @@ const (
 	TerminalPaused               = "paused"
 	TerminalFailed               = "failed"
 	TerminalClosed               = "closed"
+	TerminalFrameInput           = "terminal.input"
+	TerminalFrameResize          = "terminal.resize"
+	TerminalFrameHeartbeatAck    = "terminal.heartbeat_ack"
 	TerminalFrameOutput          = "terminal.output"
 	TerminalFrameHeartbeat       = "terminal.heartbeat"
 	TerminalFrameClosed          = "terminal.closed"
+	TerminalFrameError           = "terminal.error"
 	TransportLAN                 = "lan"
 	TransportRelay               = "relay"
 )
@@ -171,8 +175,12 @@ type TerminalPayload struct {
 	ViewerID     string `json:"viewer_id,omitempty"`
 	InputLeaseID string `json:"input_lease_id,omitempty"`
 	HeartbeatSeq int64  `json:"heartbeat_seq,omitempty"`
+	RenderedSeq  int64  `json:"rendered_seq,omitempty"`
 	Data         string `json:"data,omitempty"`
+	Cols         int    `json:"cols,omitempty"`
+	Rows         int    `json:"rows,omitempty"`
 	Reason       string `json:"reason,omitempty"`
+	Code         string `json:"code,omitempty"`
 	CanInput     bool   `json:"can_input,omitempty"`
 }
 

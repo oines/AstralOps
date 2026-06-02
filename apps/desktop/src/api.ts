@@ -123,7 +123,7 @@ export type TerminalHandlers = {
   onHeartbeat?: (payload: { terminal_id?: string; viewer_id?: string; input_lease_id?: string; heartbeat_seq?: number; output_seq?: number; can_input?: boolean }) => void;
   onOutput?: (data: string, outputSeq?: number) => void;
   onExit?: (payload: Record<string, unknown>) => void;
-  onError?: (message: string) => void;
+  onError?: (message: string, code?: string) => void;
   onConnectionError?: (message: string) => void;
   onClose?: (payload: { code?: number; reason?: string; wasClean?: boolean }) => void;
 };
@@ -1019,6 +1019,7 @@ class WebSocketTerminalConnection implements TerminalConnection {
           heartbeat_seq?: number;
           can_input?: boolean;
           data?: string;
+          code?: string;
           message?: string;
           shell?: string;
           cwd?: string;
@@ -1061,8 +1062,8 @@ class WebSocketTerminalConnection implements TerminalConnection {
           handlers.onExit?.(exitPayload);
         }
         if (message.type === "error") {
-          logClientEvent("terminal.error", { message: message.message || "PTY error" }, "error");
-          handlers.onError?.(message.message || "PTY error");
+          logClientEvent("terminal.error", { code: message.code, message: message.message || "PTY error" }, "error");
+          handlers.onError?.(message.message || "PTY error", message.code);
         }
       } catch {
         handlers.onOutput?.(String(event.data));

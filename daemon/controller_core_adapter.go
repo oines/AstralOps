@@ -13,6 +13,8 @@ import (
 	"github.com/oines/astralops/pkg/controlwire"
 )
 
+const remoteControlStreamBufferSize = 128
+
 type daemonControllerTransport struct {
 	deps controllerTransportDeps
 }
@@ -84,6 +86,11 @@ func (a *app) newControllerManagedTransport() *controllercore.ManagedTransport {
 		},
 		StateChanged: func(hostDeviceID string, state controllercore.ControlState) {
 			if a != nil {
+				if core := a.controllerCoreManager(); core != nil {
+					if session := core.OpenHostSession(hostDeviceID); session != nil {
+						session.ApplyControlState(state)
+					}
+				}
 				if manager := a.hostRemoteSessionManager(); manager != nil {
 					manager.ApplyControlState(hostDeviceID, state)
 				}
@@ -334,87 +341,6 @@ func (d daemonControllerFrameConn) ReadPlain(timeout time.Duration) (controlwire
 	return toWirePlainFrame(frame), nil
 }
 
-type daemonTerminalStreamAdapter struct {
-	stream *remoteManagedTerminalStream
-}
-
-func (d daemonTerminalStreamAdapter) TerminalID() string {
-	if d.stream == nil {
-		return ""
-	}
-	return d.stream.terminalID
-}
-
-func (d daemonTerminalStreamAdapter) ViewerID() string {
-	if d.stream == nil {
-		return ""
-	}
-	return d.stream.viewerID
-}
-
-func (d daemonTerminalStreamAdapter) InputLeaseID() string {
-	if d.stream == nil {
-		return ""
-	}
-	return d.stream.inputLeaseID
-}
-
-func (d daemonTerminalStreamAdapter) Shell() string {
-	if d.stream == nil {
-		return ""
-	}
-	return d.stream.shell
-}
-
-func (d daemonTerminalStreamAdapter) CWD() string {
-	if d.stream == nil {
-		return ""
-	}
-	return d.stream.cwd
-}
-
-func (d daemonTerminalStreamAdapter) OutputSeq() int64 {
-	if d.stream == nil {
-		return 0
-	}
-	return d.stream.outputSeq
-}
-
-func (d daemonTerminalStreamAdapter) Frames() <-chan controllercore.TerminalFrame {
-	out := make(chan controllercore.TerminalFrame, remoteControlStreamBufferSize)
-	if d.stream == nil {
-		close(out)
-		return out
-	}
-	go func() {
-		defer close(out)
-		for frame := range d.stream.Frames() {
-			out <- toCoreTerminalFrame(frame)
-		}
-	}()
-	return out
-}
-
-func (d daemonTerminalStreamAdapter) Input(data string) error {
-	return d.stream.Input(data)
-}
-
-func (d daemonTerminalStreamAdapter) Resize(cols, rows int) error {
-	return d.stream.Resize(cols, rows)
-}
-
-func (d daemonTerminalStreamAdapter) AckHeartbeat(seq, renderedSeq int64) error {
-	return d.stream.AckHeartbeat(seq, renderedSeq)
-}
-
-func (d daemonTerminalStreamAdapter) Close() error {
-	return d.stream.Close()
-}
-
-func (d daemonTerminalStreamAdapter) Detach() error {
-	return d.stream.Detach()
-}
-
 type coreTerminalStreamAdapter struct {
 	stream controllercore.TerminalStream
 }
@@ -511,28 +437,6 @@ func (c coreTerminalStreamAdapter) Detach() error {
 	return fromCoreError(c.stream.Detach())
 }
 
-func toCoreControlState(state remoteHostControlState) controllercore.ControlState {
-	return controllercore.ControlState{
-		State:           state.State,
-		Transport:       state.Transport,
-		RouteGeneration: state.RouteGeneration,
-		LastErrorCode:   state.LastErrorCode,
-		LastError:       state.LastError,
-		UpdatedAt:       state.UpdatedAt,
-	}
-}
-
-func fromCoreControlState(state controllercore.ControlState) remoteHostControlState {
-	return remoteHostControlState{
-		State:           state.State,
-		Transport:       state.Transport,
-		RouteGeneration: state.RouteGeneration,
-		LastErrorCode:   state.LastErrorCode,
-		LastError:       state.LastError,
-		UpdatedAt:       state.UpdatedAt,
-	}
-}
-
 func toCoreResolvedTarget(hostDeviceID string, target controlClientTarget) controllercore.ResolvedTarget {
 	return controllercore.ResolvedTarget{
 		HostDeviceID: hostDeviceID,
@@ -540,6 +444,16 @@ func toCoreResolvedTarget(hostDeviceID string, target controlClientTarget) contr
 		Timeout:      target.Timeout,
 		HasRelay:     strings.TrimSpace(target.RelayClient.BaseURL) != "" && strings.TrimSpace(target.RelayClient.Token) != "",
 	}
+}
+
+func remoteControlTransport(target controlClientTarget) string {
+	if target.UseRelay {
+		return remoteHostStatusRelay
+	}
+	if strings.TrimSpace(target.BaseURL) != "" {
+		return remoteHostStatusLAN
+	}
+	return ""
 }
 
 func toWirePlainFrame(frame controlPlainFrame) controlwire.PlainFrame {
@@ -818,7 +732,7 @@ func toCoreRemoteHostRecord(host remoteHostRecord) controllercore.RemoteHostReco
 		LastBaseURL:          host.LastBaseURL,
 		LANBaseURL:           host.LANBaseURL,
 		Capabilities:         append([]string(nil), host.Capabilities...),
-		Control:              toCoreControlState(host.Control),
+		Control:              host.Control,
 	}
 }
 
@@ -875,43 +789,12 @@ func fromCoreTerminalPayload(frameType string, payload *controllercore.TerminalP
 		ViewerID:     payload.ViewerID,
 		InputLeaseID: payload.InputLeaseID,
 		HeartbeatSeq: payload.HeartbeatSeq,
+		RenderedSeq:  payload.RenderedSeq,
 		Data:         payload.Data,
+		Cols:         uint16(payload.Cols),
+		Rows:         uint16(payload.Rows),
 		Reason:       payload.Reason,
+		Code:         payload.Code,
 		CanInput:     payload.CanInput,
-	}
-}
-
-func toCoreTerminalFrame(frame controlPlainFrame) controllercore.TerminalFrame {
-	return controllercore.TerminalFrame{
-		Type:     frame.Type,
-		Response: toCoreControlResponsePtr(frame.Response),
-		Terminal: toCoreTerminalPayload(frame.Terminal),
-	}
-}
-
-func toCoreControlResponsePtr(response *ControlResponse) *controllercore.ControlResponse {
-	if response == nil {
-		return nil
-	}
-	next := toCoreControlResponse(*response)
-	return &next
-}
-
-func toCoreTerminalPayload(frame *terminalStreamFrame) *controllercore.TerminalPayload {
-	if frame == nil {
-		return nil
-	}
-	return &controllercore.TerminalPayload{
-		TerminalID:   frame.TerminalID,
-		WorkspaceID:  frame.WorkspaceID,
-		Target:       frame.Target,
-		Status:       frame.Status,
-		OutputSeq:    frame.OutputSeq,
-		ViewerID:     frame.ViewerID,
-		InputLeaseID: frame.InputLeaseID,
-		HeartbeatSeq: frame.HeartbeatSeq,
-		Data:         frame.Data,
-		Reason:       frame.Reason,
-		CanInput:     frame.CanInput,
 	}
 }

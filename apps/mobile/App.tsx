@@ -25,6 +25,7 @@ type Page = "navigator" | "transcript" | "terminal";
 const initialWorkbench = createEmptyWorkbenchState();
 const mobileDebugForceRelayKey = "astralops.mobile.debug.force-relay.v1";
 const emptyInputAccessoryID = "astralops-empty-input-accessory";
+const mobileTerminalOutputMaxChars = 256 * 1024;
 
 type TerminalRuntime = MobileTerminalStatus & {
   output: string;
@@ -351,6 +352,104 @@ function AppShell(): React.JSX.Element {
     }));
     return () => undefined;
   }, [activeTerminal?.terminal_id, t]);
+
+  useEffect(() => {
+    if (!mobileCore.mobileCoreAvailable()) return () => undefined;
+    return mobileCore.subscribeTerminalFrames((event) => {
+      const frame = event.frame;
+      const terminal = frame?.terminal;
+      const terminalID = terminal?.terminal_id ?? event.terminal_id;
+      if (!terminalID) return;
+      setTerminalRuntime((current) => {
+        const existing = current[terminalID] ?? emptyTerminalRuntime();
+        let next: TerminalRuntime = existing;
+        switch (frame?.type) {
+          case "terminal.output": {
+            const data = terminal?.data ?? "";
+            next = {
+              ...existing,
+              state: "live",
+              canInput: true,
+              outputSeq: terminal?.output_seq ?? existing.outputSeq,
+              output: clampTerminalOutput(existing.output + data),
+              message: "",
+            };
+            break;
+          }
+          case "terminal.heartbeat":
+            next = {
+              ...existing,
+              state: "live",
+              canInput: terminal?.can_input !== false,
+              outputSeq: terminal?.output_seq ?? existing.outputSeq,
+              message: "",
+            };
+            break;
+          case "terminal.closed":
+            next = {
+              ...existing,
+              state: "closed",
+              canInput: false,
+              outputSeq: terminal?.output_seq ?? existing.outputSeq,
+              message: terminal?.reason ?? existing.message,
+            };
+            break;
+          case "terminal.error":
+            next = {
+              ...existing,
+              state: "failed",
+              canInput: false,
+              message: terminal?.reason ?? terminal?.code ?? existing.message,
+            };
+            break;
+          default:
+            return current;
+        }
+        return { ...current, [terminalID]: next };
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!activeHost || !activeTerminal || !mobileCore.mobileCoreAvailable()) return () => undefined;
+    const existing = terminalRuntime[activeTerminal.terminal_id];
+    if (existing?.state === "live" && existing.canInput) return () => undefined;
+    if (existing?.state === "attaching" || existing?.state === "failed" || existing?.state === "closed") return () => undefined;
+    let cancelled = false;
+    const terminalID = activeTerminal.terminal_id;
+    const afterSeq = existing?.outputSeq ?? activeTerminal.output_seq ?? 0;
+    setTerminalRuntime((current) => ({
+      ...current,
+      [terminalID]: { ...(current[terminalID] ?? emptyTerminalRuntime()), state: "attaching", canInput: false, message: "" },
+    }));
+    void mobileCore.attachTerminal(activeHost.device_id, terminalID, afterSeq).then((info) => {
+      if (cancelled || !info.terminal_id) return;
+      setTerminalRuntime((current) => ({
+        ...current,
+        [info.terminal_id as string]: {
+          ...(current[info.terminal_id as string] ?? emptyTerminalRuntime()),
+          state: "live",
+          canInput: true,
+          outputSeq: info.output_seq,
+          message: "",
+        },
+      }));
+    }).catch((error) => {
+      if (cancelled) return;
+      setTerminalRuntime((current) => ({
+        ...current,
+        [terminalID]: {
+          ...(current[terminalID] ?? emptyTerminalRuntime()),
+          state: "failed",
+          canInput: false,
+          message: errorMessage(error),
+        },
+      }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeHost?.device_id, activeTerminal?.terminal_id, activeTerminal?.output_seq, terminalRuntime]);
 
   async function openTerminalForWorkspace(): Promise<void> {
     if (!activeHost || !activeWorkspace) {
@@ -1013,6 +1112,11 @@ function mergeCloudHostsWithLocalControl(cloudHosts: mobileCore.MobileHostRecord
 
 function emptyTerminalRuntime(message = ""): TerminalRuntime {
   return { state: "paused", canInput: false, outputSeq: 0, output: "", message };
+}
+
+function clampTerminalOutput(value: string): string {
+  if (value.length <= mobileTerminalOutputMaxChars) return value;
+  return value.slice(value.length - mobileTerminalOutputMaxChars);
 }
 
 const styles = StyleSheet.create({

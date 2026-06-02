@@ -77,6 +77,56 @@ func (s *HostSession) State() HostSessionState {
 	return s.snapshotLocked()
 }
 
+func (s *HostSession) ApplyControlState(state ControlState) {
+	if s == nil {
+		return
+	}
+	next := state.State
+	switch state.State {
+	case "connected":
+		next = StateLive
+	case StateIdle, StateConnecting, StateLive, StateReconnecting, StateFailed, StateNeedsPairing, StateRevoked:
+	default:
+		next = StateIdle
+	}
+	var err error
+	if state.LastError != "" || state.LastErrorCode != "" {
+		err = NewActionError(0, state.LastErrorCode, firstString(state.LastError, state.LastErrorCode))
+	}
+	s.setHostState(next, state.Transport, err)
+}
+
+func (s *HostSession) UpdateHostState(state, transport string, err error) {
+	s.setHostState(state, transport, err)
+}
+
+func (s *HostSession) UpdateWorkbenchState(state string, version int64, err error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if state == "" {
+		state = s.state.Workbench.State
+	}
+	if state == "" {
+		state = WorkbenchLoading
+	}
+	s.state.Workbench.State = state
+	if version > 0 {
+		s.state.Workbench.Version = version
+	}
+	s.state.Workbench.LastError = ""
+	if err != nil {
+		s.state.Workbench.LastError = err.Error()
+	}
+	s.state.UpdatedAt = nowString()
+	s.mu.Unlock()
+}
+
+func (s *HostSession) UpdateTerminalState(terminalID, state string, canInput bool, outputSeq int64, err error) {
+	s.setTerminalState(terminalID, state, canInput, outputSeq, err)
+}
+
 func (s *HostSession) Request(ctx context.Context, capability, action string, params map[string]any) (ControlResponse, error) {
 	if s == nil || s.controller == nil || s.controller.transport == nil {
 		return ControlResponse{}, errors.New("controller transport is not initialized")
@@ -295,6 +345,9 @@ func (t *hostSessionTerminalStream) observeFrame(frame TerminalFrame) {
 		t.closed = true
 		t.mu.Unlock()
 		t.session.setTerminalState(terminalID, TerminalClosed, false, frame.Terminal.OutputSeq, nil)
+	case TerminalFrameError:
+		err := NewActionError(409, firstString(frame.Terminal.Code, TerminalViewerNotReadyCode), firstString(frame.Terminal.Reason, "terminal stream error"))
+		t.session.setTerminalState(terminalID, TerminalFailed, false, frame.Terminal.OutputSeq, err)
 	case TerminalFrameOutput, TerminalFrameHeartbeat:
 		t.session.setTerminalState(terminalID, TerminalLive, true, frame.Terminal.OutputSeq, nil)
 	}
@@ -308,7 +361,7 @@ func (t *hostSessionTerminalStream) requireLive() error {
 	hostState := t.session.state.State
 	terminal := t.session.terminals[t.TerminalID()]
 	t.session.mu.Unlock()
-	if hostState != StateLive || terminal.State != TerminalLive || !terminal.CanInput {
+	if hostState != StateLive || terminal.State != TerminalLive {
 		return NewActionError(409, TerminalViewerNotReadyCode, "terminal viewer is not live")
 	}
 	return nil

@@ -207,7 +207,7 @@ func TestControlGatewayTerminalInputRejectsLargePayload(t *testing.T) {
 	assertActionError(t, err, http.StatusRequestEntityTooLarge, "terminal_input_too_large")
 }
 
-func TestControlGatewayTerminalInputRequiresHealthyViewerLease(t *testing.T) {
+func TestControlGatewayTerminalInputRequiresActiveViewerLease(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 
 	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
@@ -242,35 +242,11 @@ func TestControlGatewayTerminalInputRequiresHealthyViewerLease(t *testing.T) {
 	}
 	viewer.mu.Lock()
 	viewer.lastAckAt = time.Now().Add(-terminalViewerAckTTL - time.Second)
-	viewer.mu.Unlock()
-
-	_, err = app.executeControlRequest(ControlRequest{
-		ControllerDeviceID: "device_mobile",
-		Capability:         CapabilityTerminalInput,
-		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
-			"terminal_id":    open.TerminalID,
-			"viewer_id":      attach.ViewerID,
-			"input_lease_id": attach.InputLeaseID,
-			"data":           "echo stale\n",
-		},
-	})
-	assertActionError(t, err, http.StatusConflict, terminalViewerNotReadyCode)
-
-	ack, err := app.terminalManager().heartbeatAck("device_mobile", terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ack.TerminalID != open.TerminalID {
-		t.Fatalf("heartbeat ack = %#v", ack)
-	}
-
-	viewer.mu.Lock()
 	viewer.deliveredSeq = 2
 	viewer.renderedSeq = 1
-	viewer.lastAckAt = time.Now()
 	viewer.mu.Unlock()
-	_, err = app.executeControlRequest(ControlRequest{
+
+	response, err := app.executeControlRequest(ControlRequest{
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
@@ -281,7 +257,20 @@ func TestControlGatewayTerminalInputRequiresHealthyViewerLease(t *testing.T) {
 			"data":           "",
 		},
 	})
-	assertActionError(t, err, http.StatusConflict, terminalViewerNotReadyCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("input response = %#v, want ok", response)
+	}
+
+	ack, err := app.terminalManager().heartbeatAck("device_mobile", terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.TerminalID != open.TerminalID {
+		t.Fatalf("heartbeat ack = %#v", ack)
+	}
 
 	ack, err = app.terminalManager().heartbeatAck("device_mobile", terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: 2, RenderedSeq: 2})
 	if err != nil {

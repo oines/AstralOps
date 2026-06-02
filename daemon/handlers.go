@@ -512,12 +512,12 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 		switch message.Type {
 		case "input":
 			if _, err := terminals.input(r.Context(), controllerID, terminalInputParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, Data: message.Data}); err != nil {
-				_ = localControl.writeJSON(map[string]any{"type": "error", "message": err.Error()})
+				_ = localControl.writeJSON(terminalSocketErrorPayload(err))
 			}
 		case "resize":
 			if message.Cols > 0 && message.Rows > 0 {
 				if _, err := terminals.resize(r.Context(), controllerID, terminalResizeParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, Cols: message.Cols, Rows: message.Rows}); err != nil {
-					_ = localControl.writeJSON(map[string]any{"type": "error", "message": err.Error()})
+					_ = localControl.writeJSON(terminalSocketErrorPayload(err))
 				}
 			}
 		case "heartbeat_ack":
@@ -595,7 +595,7 @@ func (c *localPTYControlConnection) writePlain(frame controlPlainFrame) {
 		}
 	case "response":
 		if frame.Response != nil && !frame.Response.OK {
-			_ = c.writeJSON(map[string]any{"type": "error", "message": controlResponseMessage(*frame.Response)})
+			_ = c.writeJSON(terminalControlResponseErrorPayload(*frame.Response))
 		}
 	}
 }
@@ -614,6 +614,26 @@ func (c *localPTYControlConnection) writeJSON(payload any) error {
 		_ = c.socket.Close()
 	}
 	return err
+}
+
+func terminalSocketErrorPayload(err error) map[string]any {
+	payload := map[string]any{"type": "error", "message": "terminal stream error"}
+	if err != nil {
+		payload["message"] = err.Error()
+	}
+	var actionErr *actionError
+	if errors.As(err, &actionErr) && actionErr.Code != "" {
+		payload["code"] = actionErr.Code
+	}
+	return payload
+}
+
+func terminalControlResponseErrorPayload(response ControlResponse) map[string]any {
+	payload := map[string]any{"type": "error", "message": controlResponseMessage(response)}
+	if response.Error != nil && response.Error.Code != "" {
+		payload["code"] = response.Error.Code
+	}
+	return payload
 }
 
 func (c *localPTYControlConnection) registerControlStream(string, context.CancelFunc) {}

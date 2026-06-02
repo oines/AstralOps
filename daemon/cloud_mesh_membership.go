@@ -119,9 +119,6 @@ func (a *cloudmeshService) logoutCloudMesh(ctx context.Context, removeSelf bool)
 	if a.closeAllControlSessions != nil {
 		result.ClosedControlSessions = a.closeAllControlSessions("mesh_logout")
 	}
-	if a.remoteInvalidateAll != nil {
-		a.remoteInvalidateAll("mesh_logout")
-	}
 	if a.controllerInvalidateAll != nil {
 		a.controllerInvalidateAll("mesh_logout")
 	}

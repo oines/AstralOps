@@ -23,7 +23,6 @@ type cloudmeshService struct {
 	closeAllControlSessions         func(string) int
 	releaseTerminalWritersForDevice func(string) int
 	emitPairingRequested            func(PairingRequest)
-	remoteInvalidateAll             func(string)
 	controllerInvalidateAll         func(string)
 	hostRoleEnabled                 func() bool
 	expireIdleControlRelaySessions  func(time.Time)
@@ -63,11 +62,6 @@ func cloudmeshDepsFromApp(a *app) cloudmeshService {
 		hostRoleEnabled:                 a.hostRoleEnabled,
 		expireIdleControlRelaySessions:  a.expireIdleControlRelaySessions,
 		handleControlRelayEnvelope:      a.remoteControlService().handleControlRelayEnvelope,
-	}
-	deps.remoteInvalidateAll = func(reason string) {
-		if a.remoteManager != nil {
-			a.remoteManager.InvalidateAll(reason)
-		}
 	}
 	deps.controllerInvalidateAll = func(reason string) {
 		if transport := a.controllerManagedTransport(); transport != nil {

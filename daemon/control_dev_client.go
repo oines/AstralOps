@@ -1321,46 +1321,36 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 	inputLeaseID := stringValue(attachResult["input_lease_id"])
 
 	marker := "terminal-smoke-" + randomID(8)
-	inputReq := ControlRequest{
-		RequestID:  "smoke_terminal_input",
-		Capability: CapabilityTerminalInput,
-		Action:     ControlActionTerminalInput,
-		Params: map[string]any{
-			"terminal_id":    terminalID,
-			"viewer_id":      viewerID,
-			"input_lease_id": inputLeaseID,
-			"data":           "printf '%s\\n' " + marker + "\n",
+	if err := conn.WritePlain(controlPlainFrame{
+		Type: terminalFrameInput,
+		Terminal: &terminalStreamFrame{
+			TerminalID:   terminalID,
+			ViewerID:     viewerID,
+			InputLeaseID: inputLeaseID,
+			Data:         "printf '%s\\n' " + marker + "\n",
 		},
-	}
-	inputReq.ControllerDeviceID = st.deviceIdentity.DeviceID
-	if err := conn.WritePlain(controlPlainFrame{Type: "request", Request: &inputReq}); err != nil {
+	}); err != nil {
 		step := controlClientSmokeStep{Name: "terminal_input", Capability: CapabilityTerminalInput, Action: ControlActionTerminalInput, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
 		steps = append(steps, step)
 		return steps, err
 	}
-	var inputResponse *ControlResponse
 	outputFrames := 0
 	outputBytes := 0
 	sawMarker := false
 	deadline := time.Now().Add(30 * time.Second)
-	for i := 0; i < 1000 && time.Now().Before(deadline) && (inputResponse == nil || !sawMarker); i++ {
+	for i := 0; i < 1000 && time.Now().Before(deadline) && !sawMarker; i++ {
 		frame, err := conn.ReadPlain(activeTarget.Timeout)
 		if err != nil {
 			step := controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "terminal_read_failed", Message: err.Error()}}
-			steps = appendTerminalInputStep(steps, inputResponse)
+			steps = appendTerminalInputStep(steps)
 			steps = append(steps, step)
 			return steps, err
 		}
 		switch frame.Type {
-		case "response":
-			if frame.Response != nil && frame.Response.RequestID == inputReq.RequestID {
-				response := *frame.Response
-				inputResponse = &response
-			}
 		case terminalFrameOutput:
 			if frame.Terminal == nil || frame.Terminal.TerminalID != terminalID {
 				err := fmt.Errorf("unexpected terminal output frame")
-				steps = appendTerminalInputStep(steps, inputResponse)
+				steps = appendTerminalInputStep(steps)
 				steps = append(steps, controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "unexpected_terminal_frame", Message: err.Error()}})
 				return steps, err
 			}
@@ -1371,30 +1361,21 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 			}
 		case terminalFrameHeartbeat:
 			if frame.Terminal != nil && frame.Terminal.TerminalID == terminalID && frame.Terminal.ViewerID != "" && frame.Terminal.InputLeaseID != "" {
-				_ = conn.WritePlain(controlPlainFrame{Type: "request", Request: &ControlRequest{
-					RequestID:          "smoke_terminal_heartbeat_ack_" + randomID(8),
-					ControllerDeviceID: st.deviceIdentity.DeviceID,
-					Capability:         CapabilityTerminalOpen,
-					Action:             ControlActionTerminalHeartbeatAck,
-					Params:             map[string]any{"terminal_id": terminalID, "viewer_id": frame.Terminal.ViewerID, "input_lease_id": frame.Terminal.InputLeaseID, "heartbeat_seq": frame.Terminal.HeartbeatSeq},
+				_ = conn.WritePlain(controlPlainFrame{Type: terminalFrameHeartbeatAck, Terminal: &terminalStreamFrame{
+					TerminalID:   terminalID,
+					ViewerID:     frame.Terminal.ViewerID,
+					InputLeaseID: frame.Terminal.InputLeaseID,
+					HeartbeatSeq: frame.Terminal.HeartbeatSeq,
 				}})
 			}
 		case terminalFrameClosed:
 			err := fmt.Errorf("terminal closed before smoke output was observed")
-			steps = appendTerminalInputStep(steps, inputResponse)
+			steps = appendTerminalInputStep(steps)
 			steps = append(steps, controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "terminal_closed", Message: err.Error()}})
 			return steps, err
 		}
 	}
-	steps = appendTerminalInputStep(steps, inputResponse)
-	if inputResponse == nil {
-		err := fmt.Errorf("smoke step terminal_input failed: response missing")
-		steps[len(steps)-1].Error = &ControlError{Code: "terminal_input_response_missing", Message: err.Error()}
-		return steps, err
-	}
-	if err := controlClientSmokeResponseError("terminal_input", *inputResponse); err != nil {
-		return steps, err
-	}
+	steps = appendTerminalInputStep(steps)
 	outputStep := controlClientSmokeStep{
 		Name:       "terminal_output",
 		Capability: CapabilityTerminalOpen,
@@ -1424,11 +1405,8 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 	return steps, nil
 }
 
-func appendTerminalInputStep(steps []controlClientSmokeStep, response *ControlResponse) []controlClientSmokeStep {
-	if response == nil {
-		return append(steps, controlClientSmokeStep{Name: "terminal_input", Capability: CapabilityTerminalInput, Action: ControlActionTerminalInput})
-	}
-	return append(steps, controlClientSmokeStepFromResponse("terminal_input", CapabilityTerminalInput, ControlActionTerminalInput, *response, controlClientTerminalSmokeSummary(*response)))
+func appendTerminalInputStep(steps []controlClientSmokeStep) []controlClientSmokeStep {
+	return append(steps, controlClientSmokeStep{Name: "terminal_input", Capability: CapabilityTerminalInput, Action: ControlActionTerminalInput, OK: true})
 }
 
 func controlClientTerminalResponseRoundTrip(conn controlClientFrameConn, timeout time.Duration, st *store, req ControlRequest) (ControlResponse, error) {

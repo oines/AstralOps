@@ -639,33 +639,18 @@ func (s *managedSession) remoteTerminalByID(ctx context.Context, terminalID stri
 }
 
 func (s *managedSession) remoteTerminalInput(terminalID, viewerID, inputLeaseID, data string) error {
-	return s.writeTerminalRequest(ControlRequest{
-		RequestID:  managedRequestPrefix + "pty_input_" + randomID(8),
-		Capability: CapabilityTerminalInput,
-		Action:     ActionTerminalInput,
-		Params:     map[string]any{"terminal_id": terminalID, "viewer_id": viewerID, "input_lease_id": inputLeaseID, "data": data},
-	})
+	return s.writeTerminalFrame(TerminalFrameInput, TerminalPayload{TerminalID: terminalID, ViewerID: viewerID, InputLeaseID: inputLeaseID, Data: data})
 }
 
 func (s *managedSession) remoteTerminalResize(terminalID, viewerID, inputLeaseID string, cols, rows int) error {
 	if cols <= 0 || rows <= 0 {
 		return nil
 	}
-	return s.writeTerminalRequest(ControlRequest{
-		RequestID:  managedRequestPrefix + "pty_resize_" + randomID(8),
-		Capability: CapabilityTerminalInput,
-		Action:     ActionTerminalResize,
-		Params:     map[string]any{"terminal_id": terminalID, "viewer_id": viewerID, "input_lease_id": inputLeaseID, "cols": cols, "rows": rows},
-	})
+	return s.writeTerminalFrame(TerminalFrameResize, TerminalPayload{TerminalID: terminalID, ViewerID: viewerID, InputLeaseID: inputLeaseID, Cols: cols, Rows: rows})
 }
 
 func (s *managedSession) remoteTerminalHeartbeatAck(terminalID, viewerID, inputLeaseID string, heartbeatSeq, renderedSeq int64) error {
-	return s.writeTerminalRequest(ControlRequest{
-		RequestID:  managedRequestPrefix + "pty_heartbeat_ack_" + randomID(8),
-		Capability: CapabilityTerminalOpen,
-		Action:     ActionTerminalHeartbeatAck,
-		Params:     map[string]any{"terminal_id": terminalID, "viewer_id": viewerID, "input_lease_id": inputLeaseID, "heartbeat_seq": heartbeatSeq, "rendered_seq": renderedSeq},
-	})
+	return s.writeTerminalFrame(TerminalFrameHeartbeatAck, TerminalPayload{TerminalID: terminalID, ViewerID: viewerID, InputLeaseID: inputLeaseID, HeartbeatSeq: heartbeatSeq, RenderedSeq: renderedSeq})
 }
 
 func (s *managedSession) remoteTerminalClose(terminalID string) error {
@@ -700,6 +685,17 @@ func (s *managedSession) writeTerminalRequest(req ControlRequest) error {
 		req.ControllerDeviceID = s.manager.config.SelfDeviceID()
 	}
 	if err := s.conn.WritePlain(controlwire.PlainFrame{Type: "request", Request: &req}); err != nil {
+		s.closeWithError(err)
+		return err
+	}
+	return nil
+}
+
+func (s *managedSession) writeTerminalFrame(frameType string, payload TerminalPayload) error {
+	if s.isClosed() {
+		return s.closedError()
+	}
+	if err := s.conn.WritePlain(controlwire.PlainFrame{Type: frameType, Terminal: terminalPayloadRaw(payload)}); err != nil {
 		s.closeWithError(err)
 		return err
 	}
@@ -894,10 +890,29 @@ func (t *managedTerminalStream) Frames() <-chan TerminalFrame {
 	go func() {
 		defer close(out)
 		for frame := range t.frames {
-			out <- toTerminalFrame(frame)
+			terminalFrame := toTerminalFrame(frame)
+			if !t.acceptFrame(terminalFrame) {
+				continue
+			}
+			out <- terminalFrame
 		}
 	}()
 	return out
+}
+
+func (t *managedTerminalStream) acceptFrame(frame TerminalFrame) bool {
+	if t == nil || frame.Terminal == nil {
+		return true
+	}
+	if frame.Type != TerminalFrameError {
+		return true
+	}
+	viewerID := strings.TrimSpace(frame.Terminal.ViewerID)
+	inputLeaseID := strings.TrimSpace(frame.Terminal.InputLeaseID)
+	if viewerID == "" && inputLeaseID == "" {
+		return true
+	}
+	return viewerID == t.viewerID && inputLeaseID == t.inputLeaseID
 }
 
 func (t *managedTerminalStream) Input(data string) error {
@@ -1017,6 +1032,14 @@ func rawStreamID(body json.RawMessage) string {
 	}
 	_ = json.Unmarshal(body, &payload)
 	return strings.TrimSpace(payload.StreamID)
+}
+
+func terminalPayloadRaw(payload TerminalPayload) json.RawMessage {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	return body
 }
 
 func mapValue(value any) map[string]any {

@@ -51,7 +51,6 @@ type app struct {
 	codexExec            map[string]codexExecCommand
 	codexRemoteHomeMu    sync.Mutex
 	codexRemoteHome      map[string]string
-	remoteManager        *remoteControlManager
 	hostRemoteSessions   *hostRemoteSessionManager
 	network              *networkMonitor
 	remoteControlMu      sync.Mutex
@@ -124,9 +123,8 @@ func main() {
 		},
 	}
 	a.eventPublisher()
-	a.remoteManager = newRemoteControlManager(remoteControlDepsFromApp(a))
 	a.controllerCore = a.newControllerCore()
-	a.hostRemoteSessions = newHostRemoteSessionManager(hostRemoteSessionDepsFromApp(a), a.remoteManager)
+	a.hostRemoteSessions = newHostRemoteSessionManager(hostRemoteSessionDepsFromApp(a))
 	a.network = newNetworkMonitor(networkMonitorDepsFromApp(a))
 	a.mesh = newMeshStateManager(meshStateDepsFromApp(a))
 	a.rebuildSessionProjections()
