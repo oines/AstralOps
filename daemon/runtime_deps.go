@@ -19,11 +19,13 @@ type runtimeDeps struct {
 
 func runtimeDepsFromApp(a *app) runtimeDeps {
 	return runtimeDeps{
-		store:                           a.store,
-		agents:                          a.agents,
-		ssh:                             a.ssh,
-		emit:                            a.emit,
-		startNextQueuedTurn:             a.sessions().startNextQueuedTurn,
+		store:  a.store,
+		agents: a.agents,
+		ssh:    a.ssh,
+		emit:   a.emit,
+		startNextQueuedTurn: func(sessionID string) {
+			a.sessions().startNextQueuedTurn(sessionID)
+		},
 		syncRemoteSkillTree:             a.syncRemoteSkillTree,
 		writeClaudeRemoteMCPConfig:      a.writeClaudeRemoteMCPConfig,
 		prepareCodexRemoteHome:          a.prepareCodexRemoteHome,

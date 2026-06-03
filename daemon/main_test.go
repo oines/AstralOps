@@ -1206,6 +1206,58 @@ func TestClaudeResultUnknownPermissionDenialDoesNotGuessApproval(t *testing.T) {
 	}
 }
 
+func TestClaudePersistentControlFixturesPreserveRawShapes(t *testing.T) {
+	session := Session{ID: "sess_claude", WorkspaceID: "ws", Agent: AgentClaude, NativeSessionID: "native"}
+	twoTurnLines := readFixtureLines(t, "../fixtures/claude-stream-json/real-local-persistent-two-turns.jsonl")
+	resultCount := 0
+	endSessionControl := false
+	for _, line := range twoTurnLines {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			t.Fatal(err)
+		}
+		events := normalizeClaudeStreamJSON(session, []byte(line))
+		switch stringValue(raw["type"]) {
+		case "result":
+			resultCount++
+			if len(events) == 0 || events[0].Kind != "control.raw" {
+				t.Fatalf("result events = %#v, want control.raw first", events)
+			}
+		case "control_response":
+			endSessionControl = stringValue(mapValue(raw["response"])["request_id"]) == "fixture_end_session"
+			if len(events) != 1 || events[0].Kind != "control.raw" {
+				t.Fatalf("control_response events = %#v, want raw preservation", events)
+			}
+		}
+	}
+	if resultCount != 2 || !endSessionControl {
+		t.Fatalf("two-turn fixture resultCount=%d endSession=%v", resultCount, endSessionControl)
+	}
+
+	interruptLines := readFixtureLines(t, "../fixtures/claude-stream-json/real-local-persistent-interrupt-followup.jsonl")
+	interruptControl := false
+	interruptedResult := false
+	followupResult := false
+	for _, line := range interruptLines {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			t.Fatal(err)
+		}
+		if stringValue(raw["type"]) == "control_response" && stringValue(mapValue(raw["response"])["request_id"]) == "fixture_interrupt" {
+			interruptControl = true
+		}
+		if stringValue(raw["type"]) == "result" && stringValue(raw["subtype"]) == "error_during_execution" {
+			interruptedResult = true
+		}
+		if stringValue(raw["type"]) == "result" && stringValue(raw["result"]) == "ASTRALOPS_AFTER_INTERRUPT" {
+			followupResult = true
+		}
+	}
+	if !interruptControl || !interruptedResult || !followupResult {
+		t.Fatalf("interrupt fixture interruptControl=%v interruptedResult=%v followupResult=%v", interruptControl, interruptedResult, followupResult)
+	}
+}
+
 func TestStoreEventWindowQuery(t *testing.T) {
 	dir := t.TempDir()
 	st, err := loadStore(dir)
@@ -3600,6 +3652,8 @@ func TestClaudeRuntimePassesAllowedToolsToCLI(t *testing.T) {
 	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
 echo "$@" > "$ASTRALOPS_TEST_ARGS"
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+IFS= read -r input
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
 `))
 	argsPath := filepath.Join(t.TempDir(), "args.txt")
 	t.Setenv("ASTRALOPS_TEST_ARGS", argsPath)
@@ -3624,6 +3678,8 @@ func TestClaudeSSHRuntimeUsesRemoteMCPAndDisallowsNativeTools(t *testing.T) {
 echo "$@" > "$ASTRALOPS_TEST_ARGS"
 printf '%s\n' "$ANTHROPIC_MODEL" > "$ASTRALOPS_TEST_ENV"
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"native","tools":["mcp__astralops_remote__read"]}'
+IFS= read -r input
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
 `)
 	argsPath := filepath.Join(t.TempDir(), "args.txt")
 	envPath := filepath.Join(t.TempDir(), "env.txt")
@@ -3693,6 +3749,8 @@ func TestClaudeSSHRuntimeSyncsOnlyRemoteWorkspaceSkills(t *testing.T) {
 	defer cleanup()
 	claudePath := fakeClaudeScript(t, `#!/bin/sh
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+IFS= read -r input
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
 `)
 	app := &app{
 		store: st,
@@ -3731,6 +3789,8 @@ func TestClaudeSSHRuntimePreservesPlanPermissionMode(t *testing.T) {
 	claudePath := fakeClaudeScript(t, `#!/bin/sh
 echo "$@" > "$ASTRALOPS_TEST_ARGS"
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"native","tools":["mcp__astralops_remote__read"]}'
+IFS= read -r input
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
 `)
 	argsPath := filepath.Join(t.TempDir(), "args.txt")
 	t.Setenv("ASTRALOPS_TEST_ARGS", argsPath)
@@ -4691,6 +4751,7 @@ func TestClaudeMultipleOperationApprovalToolResultRequestsPermission(t *testing.
 func TestClaudeLocalRuntimePausesWhenCommandRequiresApproval(t *testing.T) {
 	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+IFS= read -r input
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call_needs_approval","name":"Bash","input":{"command":"sw_vers"}}]}}'
 printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_needs_approval","content":"This command requires approval","is_error":true}]},"tool_use_result":"Error: This command requires approval"}'
 sleep 1
@@ -4717,6 +4778,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 func TestClaudeLocalRuntimePausesOnAskUserQuestion(t *testing.T) {
 	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+IFS= read -r input
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"ask_1","name":"AskUserQuestion","input":{"questions":[{"question":"Pick A or B?","options":[{"label":"A"},{"label":"B"}]}]}}]}}'
 sleep 1
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"ask_2","name":"AskUserQuestion","input":{"questions":[{"question":"This stale ask should not render"}]}}]}}'
@@ -4755,6 +4817,7 @@ printf '%s\n' '{"type":"result","subtype":"success","terminal_reason":"completed
 func TestClaudeLocalRuntimeMarksResultPermissionDenialRequiresAction(t *testing.T) {
 	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+IFS= read -r input
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call_search","name":"WebSearch","input":{"query":"today"}}]}}'
 printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_search","content":"Claude requested permissions to use WebSearch, but you haven'\''t granted it yet.","is_error":true}]},"tool_use_result":"Error: Claude requested permissions to use WebSearch, but you haven'\''t granted it yet."}'
 printf '%s\n' '{"type":"result","subtype":"success","terminal_reason":"completed","result":"WebSearch needs permission","permission_denials":[{"tool_name":"WebSearch","tool_use_id":"call_search","tool_input":{"query":"today"}}]}'
@@ -4811,7 +4874,9 @@ func TestClaudeLocalRuntimeStreamsFakeClaude(t *testing.T) {
 	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
 echo "$@" > "$ASTRALOPS_TEST_ARGS"
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
+IFS= read -r input
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"hello from fake claude"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
 `))
 	argsPath := filepath.Join(t.TempDir(), "args.txt")
 	t.Setenv("ASTRALOPS_TEST_ARGS", argsPath)
@@ -4824,7 +4889,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 	waitForKind(t, app.store, session.ID, "control.notification")
 
 	gotKinds := eventKinds(app.store.queryEvents(workspace.ID, session.ID, 0))
-	wantKinds := []string{"message.user", "turn.started", "session.native", "message.delta", "turn.completed", "control.notification"}
+	wantKinds := []string{"message.user", "turn.started", "session.native", "message.delta", "control.raw", "turn.completed", "control.notification"}
 	if !reflect.DeepEqual(gotKinds, wantKinds) {
 		t.Fatalf("kinds = %#v, want %#v", gotKinds, wantKinds)
 	}
@@ -4838,16 +4903,261 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 	assertClaudeSettingsUnchanged(t, beforeSettings)
 }
 
+func TestClaudeLocalRuntimeReusesPersistentProcessBetweenTurns(t *testing.T) {
+	inputsPath := filepath.Join(t.TempDir(), "claude-inputs.jsonl")
+	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/usr/bin/env node
+const fs = require("fs");
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function write(payload) { process.stdout.write(JSON.stringify(payload) + "\n"); }
+write({ type: "system", subtype: "init", session_id: "native" });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === "control_request" && msg.request && msg.request.subtype === "end_session") {
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    process.exit(0);
+  }
+  fs.appendFileSync(process.env.ASTRALOPS_TEST_CLAUDE_INPUTS, line + "\n");
+  const text = line.includes("second") ? "second done" : "first done";
+  write({ type: "assistant", message: { content: [{ type: "text", text }] } });
+  write({ type: "result", subtype: "success", is_error: false, result: text });
+});
+`))
+	t.Setenv("ASTRALOPS_TEST_CLAUDE_INPUTS", inputsPath)
+
+	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "first", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.completed")
+	client := claudeClientForTest(t, app, session.ID)
+	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "second", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKindCount(t, app.store, session.ID, "turn.completed", 2)
+	if got := claudeClientForTest(t, app, session.ID); got != client {
+		t.Fatal("Claude runtime restarted instead of reusing the persistent client")
+	}
+	inputs, err := os.ReadFile(inputsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(inputs); !strings.Contains(text, `"text":"first"`) || !strings.Contains(text, `"text":"second"`) {
+		t.Fatalf("claude inputs = %s, want both turns in one process", text)
+	}
+	app.runtimes[AgentClaude].(SessionStopper).StopSession(session.ID, "test cleanup")
+	waitForClaudeClientDone(t, client)
+}
+
+func TestClaudeLocalRuntimeRestartsWhenProcessArgsChange(t *testing.T) {
+	argsPath := filepath.Join(t.TempDir(), "claude-args.jsonl")
+	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/usr/bin/env node
+const fs = require("fs");
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function write(payload) { process.stdout.write(JSON.stringify(payload) + "\n"); }
+fs.appendFileSync(process.env.ASTRALOPS_TEST_CLAUDE_ARGS, JSON.stringify(process.argv.slice(2)) + "\n");
+write({ type: "system", subtype: "init", session_id: "native" });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === "control_request" && msg.request && msg.request.subtype === "end_session") {
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    process.exit(0);
+  }
+  write({ type: "result", subtype: "success", is_error: false, result: "ok" });
+});
+`))
+	t.Setenv("ASTRALOPS_TEST_CLAUDE_ARGS", argsPath)
+
+	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "first", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.completed")
+	first := claudeClientForTest(t, app, session.ID)
+	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "second", TurnOptions{Model: "claude-test-model"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKindCount(t, app.store, session.ID, "turn.completed", 2)
+	second := claudeClientForTest(t, app, session.ID)
+	if second == first {
+		t.Fatal("Claude runtime reused a process after process-level args changed")
+	}
+	waitForClaudeClientDone(t, first)
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Split(strings.TrimSpace(string(args)), "\n"); len(lines) != 2 || !strings.Contains(lines[1], "claude-test-model") {
+		t.Fatalf("claude args log = %s, want restart with model args", args)
+	}
+	app.runtimes[AgentClaude].(SessionStopper).StopSession(session.ID, "test cleanup")
+	waitForClaudeClientDone(t, second)
+}
+
+func TestClaudeLocalRuntimeStopSessionSendsEndSession(t *testing.T) {
+	controlPath := filepath.Join(t.TempDir(), "claude-control.log")
+	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/usr/bin/env node
+const fs = require("fs");
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function write(payload) { process.stdout.write(JSON.stringify(payload) + "\n"); }
+write({ type: "system", subtype: "init", session_id: "native" });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === "control_request") {
+    fs.appendFileSync(process.env.ASTRALOPS_TEST_CLAUDE_CONTROL, msg.request.subtype + "\n");
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    if (msg.request.subtype === "end_session") process.exit(0);
+    return;
+  }
+  write({ type: "result", subtype: "success", is_error: false, result: "ok" });
+});
+`))
+	t.Setenv("ASTRALOPS_TEST_CLAUDE_CONTROL", controlPath)
+
+	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "first", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.completed")
+	client := claudeClientForTest(t, app, session.ID)
+	app.runtimes[AgentClaude].(SessionStopper).StopSession(session.ID, "test stop")
+	waitForClaudeClientDone(t, client)
+	control, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(control)) != "end_session" {
+		t.Fatalf("control log = %q, want end_session", control)
+	}
+}
+
+func TestClaudeLocalRuntimeRepeatsInterruptWhenToolStartsAfterCancel(t *testing.T) {
+	controlPath := filepath.Join(t.TempDir(), "claude-control.log")
+	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/usr/bin/env node
+const fs = require("fs");
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+let interrupts = 0;
+function write(payload) { process.stdout.write(JSON.stringify(payload) + "\n"); }
+write({ type: "system", subtype: "init", session_id: "native" });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === "control_request" && msg.request && msg.request.subtype === "interrupt") {
+    interrupts += 1;
+    fs.appendFileSync(process.env.ASTRALOPS_TEST_CLAUDE_CONTROL, "interrupt\n");
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    if (interrupts >= 2) {
+      write({ type: "result", subtype: "error_during_execution", is_error: true, result: "" });
+    }
+    return;
+  }
+  if (msg.type === "control_request" && msg.request && msg.request.subtype === "end_session") {
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    process.exit(0);
+  }
+  write({ type: "assistant", message: { content: [{ type: "text", text: "working" }] } });
+  setTimeout(() => {
+    write({ type: "assistant", message: { content: [{ type: "tool_use", id: "call_late", name: "Bash", input: { command: "echo late" } }] } });
+  }, 100);
+});
+`))
+	t.Setenv("ASTRALOPS_TEST_CLAUDE_CONTROL", controlPath)
+
+	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "first", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "message.delta")
+	client := claudeClientForTest(t, app, session.ID)
+	if err := app.runtimes[AgentClaude].Interrupt(session.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.cancelled")
+	control, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(control), "interrupt"); count < 2 {
+		t.Fatalf("interrupt count = %d, log=%q; want retry after late tool_use", count, control)
+	}
+	app.runtimes[AgentClaude].(SessionStopper).StopSession(session.ID, "test cleanup")
+	waitForClaudeClientDone(t, client)
+}
+
+func TestClaudeLocalRuntimeStartsQueuedTurnAfterUserInterrupt(t *testing.T) {
+	inputsPath := filepath.Join(t.TempDir(), "claude-inputs.jsonl")
+	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/usr/bin/env node
+const fs = require("fs");
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function write(payload) { process.stdout.write(JSON.stringify(payload) + "\n"); }
+write({ type: "system", subtype: "init", session_id: "native" });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === "control_request" && msg.request && msg.request.subtype === "interrupt") {
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    write({ type: "result", subtype: "error_during_execution", is_error: true, result: "" });
+    return;
+  }
+  if (msg.type === "control_request" && msg.request && msg.request.subtype === "end_session") {
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    process.exit(0);
+  }
+  fs.appendFileSync(process.env.ASTRALOPS_TEST_CLAUDE_INPUTS, line + "\n");
+  if (line.includes("first")) {
+    write({ type: "assistant", message: { content: [{ type: "text", text: "working" }] } });
+    return;
+  }
+  write({ type: "assistant", message: { content: [{ type: "text", text: "queued done" }] } });
+  write({ type: "result", subtype: "success", is_error: false, result: "queued done" });
+});
+`))
+	t.Setenv("ASTRALOPS_TEST_CLAUDE_INPUTS", inputsPath)
+
+	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "first", TurnOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "message.delta")
+	client := claudeClientForTest(t, app, session.ID)
+	app.enqueueTurn(session, "queued", TurnOptions{})
+	if err := app.runtimes[AgentClaude].Interrupt(session.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitForKind(t, app.store, session.ID, "turn.cancelled")
+	waitForKind(t, app.store, session.ID, "queue.dequeued")
+	waitForKind(t, app.store, session.ID, "turn.completed")
+	inputs, err := os.ReadFile(inputsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(inputs); !strings.Contains(text, `"text":"first"`) || !strings.Contains(text, `"text":"queued"`) {
+		t.Fatalf("claude inputs = %s, want interrupted turn and queued follow-up", text)
+	}
+	app.runtimes[AgentClaude].(SessionStopper).StopSession(session.ID, "test cleanup")
+	waitForClaudeClientDone(t, client)
+}
+
 func TestClaudeLocalRuntimeRejectsConcurrentInputAndInterrupts(t *testing.T) {
-	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
-sleep 30
+	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/usr/bin/env node
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function write(payload) { process.stdout.write(JSON.stringify(payload) + "\n"); }
+write({ type: "system", subtype: "init", session_id: "native" });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === "control_request" && msg.request && msg.request.subtype === "interrupt") {
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    write({ type: "result", subtype: "error_during_execution", is_error: true, result: "" });
+  }
+  if (msg.type === "control_request" && msg.request && msg.request.subtype === "end_session") {
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    process.exit(0);
+  }
+});
 `))
 
 	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "first", TurnOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	run := claudeRunForTest(t, app, session.ID)
+	client := claudeClientForTest(t, app, session.ID)
 	if err := app.runtimes[AgentClaude].StartTurn(session, workspace, "second", TurnOptions{}); !errors.Is(err, ErrSessionRunning) {
 		t.Fatalf("StartTurn while running error = %v, want ErrSessionRunning", err)
 	}
@@ -4855,24 +5165,42 @@ sleep 30
 		t.Fatal(err)
 	}
 	waitForKind(t, app.store, session.ID, "turn.cancelled")
-	waitForClaudeRunDone(t, run)
+	if client.isActive() {
+		t.Fatal("Claude client still has an active turn after interrupt result")
+	}
+	app.runtimes[AgentClaude].(SessionStopper).StopSession(session.ID, "test cleanup")
+	waitForClaudeClientDone(t, client)
 }
 
 func TestClaudeLocalRuntimeSteerInterruptsAndResumes(t *testing.T) {
 	inputsPath := filepath.Join(t.TempDir(), "claude-inputs.jsonl")
-	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
-	printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
-	IFS= read -r input
-	printf '%s\n' "$input" >> "$ASTRALOPS_TEST_CLAUDE_INPUTS"
-	case "$input" in
-	*"first"*)
-		printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}'
-		exec sleep 30
-		;;
-	*)
-		printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"steered"}]}}'
-		;;
-	esac
+	app, session, workspace := newTestClaudeApp(t, fakeClaudeScript(t, `#!/usr/bin/env node
+const fs = require("fs");
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function write(payload) { process.stdout.write(JSON.stringify(payload) + "\n"); }
+write({ type: "system", subtype: "init", session_id: "native" });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (process.env.ASTRALOPS_TEST_CLAUDE_INPUTS) {
+    fs.appendFileSync(process.env.ASTRALOPS_TEST_CLAUDE_INPUTS, line + "\n");
+  }
+  if (msg.type === "control_request" && msg.request && msg.request.subtype === "interrupt") {
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    write({ type: "result", subtype: "error_during_execution", is_error: true, result: "" });
+    return;
+  }
+  if (msg.type === "control_request" && msg.request && msg.request.subtype === "end_session") {
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    process.exit(0);
+  }
+  if (line.includes("first")) {
+    write({ type: "assistant", message: { content: [{ type: "text", text: "working" }] } });
+    return;
+  }
+  write({ type: "assistant", message: { content: [{ type: "text", text: "steered" }] } });
+  write({ type: "result", subtype: "success", is_error: false, result: "ok" });
+});
 	`))
 	t.Setenv("ASTRALOPS_TEST_CLAUDE_INPUTS", inputsPath)
 
@@ -4880,7 +5208,7 @@ func TestClaudeLocalRuntimeSteerInterruptsAndResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForKind(t, app.store, session.ID, "message.delta")
-	run := claudeRunForTest(t, app, session.ID)
+	client := claudeClientForTest(t, app, session.ID)
 	steerer, ok := app.runtimes[AgentClaude].(TurnSteerer)
 	if !ok {
 		t.Fatal("claude runtime does not implement TurnSteerer")
@@ -4898,7 +5226,8 @@ func TestClaudeLocalRuntimeSteerInterruptsAndResumes(t *testing.T) {
 	if !strings.Contains(text, `"text":"first"`) || !strings.Contains(text, `"text":"mid task guidance"`) {
 		t.Fatalf("claude inputs did not include initial and steered messages:\n%s", text)
 	}
-	waitForClaudeRunDone(t, run)
+	app.runtimes[AgentClaude].(SessionStopper).StopSession(session.ID, "test cleanup")
+	waitForClaudeClientDone(t, client)
 	events := app.store.queryEvents(workspace.ID, session.ID, 0)
 	if !containsEventKind(events, "turn.cancelled") {
 		t.Fatalf("events = %#v, want cancelled turn before steered turn", events)
@@ -4907,19 +5236,33 @@ func TestClaudeLocalRuntimeSteerInterruptsAndResumes(t *testing.T) {
 
 func TestClaudeSessionInputSteersWhileRuntimeIsBusy(t *testing.T) {
 	inputsPath := filepath.Join(t.TempDir(), "claude-inputs.jsonl")
-	app, session, _ := newTestClaudeApp(t, fakeClaudeScript(t, `#!/bin/sh
-	printf '%s\n' '{"type":"system","subtype":"init","session_id":"native"}'
-	IFS= read -r input
-	printf '%s\n' "$input" >> "$ASTRALOPS_TEST_CLAUDE_INPUTS"
-	case "$input" in
-	*"first"*)
-		printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}'
-		exec sleep 30
-		;;
-	*)
-		printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'
-		;;
-	esac
+	app, session, _ := newTestClaudeApp(t, fakeClaudeScript(t, `#!/usr/bin/env node
+const fs = require("fs");
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function write(payload) { process.stdout.write(JSON.stringify(payload) + "\n"); }
+write({ type: "system", subtype: "init", session_id: "native" });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (process.env.ASTRALOPS_TEST_CLAUDE_INPUTS) {
+    fs.appendFileSync(process.env.ASTRALOPS_TEST_CLAUDE_INPUTS, line + "\n");
+  }
+  if (msg.type === "control_request" && msg.request && msg.request.subtype === "interrupt") {
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    write({ type: "result", subtype: "error_during_execution", is_error: true, result: "" });
+    return;
+  }
+  if (msg.type === "control_request" && msg.request && msg.request.subtype === "end_session") {
+    write({ type: "control_response", response: { subtype: "success", request_id: msg.request_id } });
+    process.exit(0);
+  }
+  if (line.includes("first")) {
+    write({ type: "assistant", message: { content: [{ type: "text", text: "working" }] } });
+    return;
+  }
+  write({ type: "assistant", message: { content: [{ type: "text", text: "done" }] } });
+  write({ type: "result", subtype: "success", is_error: false, result: "ok" });
+});
 	`))
 	t.Setenv("ASTRALOPS_TEST_CLAUDE_INPUTS", inputsPath)
 
@@ -6690,7 +7033,7 @@ func waitForKind(t *testing.T, st *store, sessionID, kind string) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for event kind %s", kind)
+	t.Fatalf("timed out waiting for event kind %s; events=%#v", kind, st.queryEvents("", sessionID, 0))
 }
 
 func waitForKindCount(t *testing.T, st *store, sessionID, kind string, want int) {
@@ -6711,27 +7054,27 @@ func waitForKindCount(t *testing.T, st *store, sessionID, kind string, want int)
 	t.Fatalf("timed out waiting for %d events of kind %s", want, kind)
 }
 
-func claudeRunForTest(t *testing.T, app *app, sessionID string) *claudeRun {
+func claudeClientForTest(t *testing.T, app *app, sessionID string) *claudeClient {
 	t.Helper()
 	runtime, ok := app.runtimes[AgentClaude].(*claudeLocalRuntime)
 	if !ok {
 		t.Fatal("Claude runtime has unexpected type")
 	}
 	runtime.mu.Lock()
-	run := runtime.running[sessionID]
+	client := runtime.clients[sessionID]
 	runtime.mu.Unlock()
-	if run == nil {
-		t.Fatal("Claude run was not registered")
+	if client == nil {
+		t.Fatal("Claude client was not registered")
 	}
-	return run
+	return client
 }
 
-func waitForClaudeRunDone(t *testing.T, run *claudeRun) {
+func waitForClaudeClientDone(t *testing.T, client *claudeClient) {
 	t.Helper()
 	select {
-	case <-run.done:
+	case <-client.done:
 	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for Claude run cleanup")
+		t.Fatal("timed out waiting for Claude client cleanup")
 	}
 }
 
