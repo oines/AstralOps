@@ -63,9 +63,10 @@ type DiagnosticSettings struct {
 }
 
 type RemoteControlSettings struct {
-	Enabled      bool   `json:"enabled"`
-	ListenAddr   string `json:"listen_addr"`
-	LANDiscovery bool   `json:"lan_discovery"`
+	Enabled        bool   `json:"enabled"`
+	ListenAddr     string `json:"listen_addr"`
+	LANDiscovery   bool   `json:"lan_discovery"`
+	ForceRelayOnly bool   `json:"force_relay_only"`
 }
 
 type CloudSettings struct {
@@ -123,9 +124,10 @@ type diagnosticSettingsPatch struct {
 }
 
 type remoteControlSettingsPatch struct {
-	Enabled      *bool   `json:"enabled,omitempty"`
-	ListenAddr   *string `json:"listen_addr,omitempty"`
-	LANDiscovery *bool   `json:"lan_discovery,omitempty"`
+	Enabled        *bool   `json:"enabled,omitempty"`
+	ListenAddr     *string `json:"listen_addr,omitempty"`
+	LANDiscovery   *bool   `json:"lan_discovery,omitempty"`
+	ForceRelayOnly *bool   `json:"force_relay_only,omitempty"`
 }
 
 type cloudSettingsPatch struct {
@@ -174,9 +176,10 @@ func defaultAppSettings() AppSettings {
 			LoggingEnabled: false,
 		},
 		RemoteControl: RemoteControlSettings{
-			Enabled:      false,
-			ListenAddr:   defaultRemoteControlListenAddr,
-			LANDiscovery: true,
+			Enabled:        false,
+			ListenAddr:     defaultRemoteControlListenAddr,
+			LANDiscovery:   true,
+			ForceRelayOnly: false,
 		},
 		Cloud: CloudSettings{
 			Enabled: false,
@@ -306,6 +309,9 @@ func applySettingsPatch(settings *AppSettings, patch appSettingsPatch) {
 		}
 		if patch.RemoteControl.LANDiscovery != nil {
 			settings.RemoteControl.LANDiscovery = *patch.RemoteControl.LANDiscovery
+		}
+		if patch.RemoteControl.ForceRelayOnly != nil {
+			settings.RemoteControl.ForceRelayOnly = *patch.RemoteControl.ForceRelayOnly
 		}
 	}
 	if patch.Cloud != nil {

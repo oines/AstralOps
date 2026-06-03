@@ -20,6 +20,7 @@ const (
 	CapabilityTerminalInput      = "terminal.input"
 	ActionPing                   = "core.read.ping"
 	ActionHostSnapshot           = "core.read.host_snapshot"
+	ActionWorkbench              = "core.read.workbench"
 	ActionSessionView            = "core.read.session_view"
 	ActionSessions               = "core.read.sessions"
 	ActionWorkspaces             = "core.read.workspaces"

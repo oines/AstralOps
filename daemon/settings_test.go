@@ -23,7 +23,7 @@ func TestSettingsDefaultWhenFileMissing(t *testing.T) {
 	if !settings.General.RestoreOnLaunch || settings.Appearance.Theme != "system" || settings.Appearance.Language != "system" || settings.Session.DefaultAgent != "remember" {
 		t.Fatalf("default settings = %#v", settings)
 	}
-	if settings.RemoteControl.Enabled || settings.RemoteControl.ListenAddr != defaultRemoteControlListenAddr || !settings.RemoteControl.LANDiscovery {
+	if settings.RemoteControl.Enabled || settings.RemoteControl.ListenAddr != defaultRemoteControlListenAddr || !settings.RemoteControl.LANDiscovery || settings.RemoteControl.ForceRelayOnly {
 		t.Fatalf("remote control defaults = %#v", settings.RemoteControl)
 	}
 	if settings.Cloud.Enabled || settings.Cloud.BaseURL != defaultCloudBaseURL || settings.Cloud.AccountToken != "" {
@@ -61,6 +61,7 @@ func TestSettingsPatchPersistsAndReloads(t *testing.T) {
 	reconnect := false
 	remoteEnabled := true
 	remoteAddr := "127.0.0.1:43900"
+	forceRelayOnly := true
 	cloudEnabled := true
 	cloudBaseURL := "https://cloud.example.test/"
 	cloudToken := "account-token"
@@ -70,20 +71,20 @@ func TestSettingsPatchPersistsAndReloads(t *testing.T) {
 		Session:       &sessionSettingsPatch{DefaultPermissionMode: &permission},
 		Workspace:     &workspaceSettingsPatch{SSHAutoReconnect: &reconnect},
 		Diagnostics:   &diagnosticSettingsPatch{LoggingEnabled: &diagnosticLogging},
-		RemoteControl: &remoteControlSettingsPatch{Enabled: &remoteEnabled, ListenAddr: &remoteAddr},
+		RemoteControl: &remoteControlSettingsPatch{Enabled: &remoteEnabled, ListenAddr: &remoteAddr, ForceRelayOnly: &forceRelayOnly},
 		Cloud:         &cloudSettingsPatch{Enabled: &cloudEnabled, BaseURL: &cloudBaseURL, AccountToken: &cloudToken},
 	})
 	if err != nil {
 		t.Fatalf("patch settings = %v", err)
 	}
-	if updated.Appearance.Theme != "dark" || updated.Appearance.Language != "zh-CN" || updated.Session.DefaultPermissionMode != "auto" || updated.Workspace.SSHAutoReconnect || !updated.Diagnostics.LoggingEnabled || !updated.RemoteControl.Enabled || updated.RemoteControl.ListenAddr != remoteAddr || !updated.Cloud.Enabled || updated.Cloud.BaseURL != "https://cloud.example.test" || updated.Cloud.AccountToken != cloudToken {
+	if updated.Appearance.Theme != "dark" || updated.Appearance.Language != "zh-CN" || updated.Session.DefaultPermissionMode != "auto" || updated.Workspace.SSHAutoReconnect || !updated.Diagnostics.LoggingEnabled || !updated.RemoteControl.Enabled || updated.RemoteControl.ListenAddr != remoteAddr || !updated.RemoteControl.ForceRelayOnly || !updated.Cloud.Enabled || updated.Cloud.BaseURL != "https://cloud.example.test" || updated.Cloud.AccountToken != cloudToken {
 		t.Fatalf("patched settings = %#v", updated)
 	}
 	reloaded, err := loadSettingsStore(dir)
 	if err != nil {
 		t.Fatalf("reload settings = %v", err)
 	}
-	if reloaded.get().Appearance.Theme != "dark" || reloaded.get().Appearance.Language != "zh-CN" || reloaded.get().Session.DefaultPermissionMode != "auto" || reloaded.get().Workspace.SSHAutoReconnect || !reloaded.get().Diagnostics.LoggingEnabled || !reloaded.get().RemoteControl.Enabled || reloaded.get().RemoteControl.ListenAddr != remoteAddr || !reloaded.get().Cloud.Enabled || reloaded.get().Cloud.BaseURL != "https://cloud.example.test" || reloaded.get().Cloud.AccountToken != cloudToken {
+	if reloaded.get().Appearance.Theme != "dark" || reloaded.get().Appearance.Language != "zh-CN" || reloaded.get().Session.DefaultPermissionMode != "auto" || reloaded.get().Workspace.SSHAutoReconnect || !reloaded.get().Diagnostics.LoggingEnabled || !reloaded.get().RemoteControl.Enabled || reloaded.get().RemoteControl.ListenAddr != remoteAddr || !reloaded.get().RemoteControl.ForceRelayOnly || !reloaded.get().Cloud.Enabled || reloaded.get().Cloud.BaseURL != "https://cloud.example.test" || reloaded.get().Cloud.AccountToken != cloudToken {
 		t.Fatalf("reloaded settings = %#v", reloaded.get())
 	}
 }

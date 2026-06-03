@@ -862,6 +862,7 @@ export type ControlCapability =
 
 export type ControlAction =
   | "core.read.host_snapshot"
+  | "core.read.workbench"
   | "core.read.session_view"
   | "core.read.sessions"
   | "core.read.workspaces"
@@ -1513,6 +1514,7 @@ export type SessionDeleteResult = {
 
 export type ControlActionParamMap = {
   "core.read.host_snapshot": HostSnapshotRequest;
+  "core.read.workbench": undefined;
   "core.read.session_view": SessionReferenceParams;
   "core.read.sessions": SessionsReadParams;
   "core.read.workspaces": undefined;
@@ -1567,6 +1569,7 @@ export type ControlActionParamMap = {
 
 export type ControlActionResultMap = {
   "core.read.host_snapshot": HostSnapshotResponse;
+  "core.read.workbench": WorkbenchState;
   "core.read.session_view": SessionView;
   "core.read.sessions": Session[];
   "core.read.workspaces": Workspace[];
@@ -1692,6 +1695,7 @@ export type AppSettings = {
     enabled: boolean;
     listen_addr: string;
     lan_discovery: boolean;
+    force_relay_only: boolean;
   };
   cloud: {
     enabled: boolean;

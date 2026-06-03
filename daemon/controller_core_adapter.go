@@ -57,11 +57,11 @@ func (a *app) controllerManagedTransport() *controllercore.ManagedTransport {
 func (a *app) newControllerManagedTransport() *controllercore.ManagedTransport {
 	return controllercore.NewManagedTransport(controllercore.ManagedTransportConfig{
 		OpenFrameConn: func(ctx context.Context, hostDeviceID string, preferRelay bool) (controllercore.FrameConn, controllercore.ResolvedTarget, error) {
-			target, err := a.remoteHostTarget(hostDeviceID)
+			target, err := a.remoteHostTargetWithPreference(hostDeviceID, preferRelay || a.currentSettings().RemoteControl.ForceRelayOnly)
 			if err != nil {
 				return nil, controllercore.ResolvedTarget{HostDeviceID: hostDeviceID}, toCoreError(err)
 			}
-			if preferRelay && strings.TrimSpace(target.RelayClient.BaseURL) != "" && strings.TrimSpace(target.RelayClient.Token) != "" {
+			if (preferRelay || a.currentSettings().RemoteControl.ForceRelayOnly) && strings.TrimSpace(target.RelayClient.BaseURL) != "" && strings.TrimSpace(target.RelayClient.Token) != "" {
 				target = controlClientRelayTarget(target)
 			}
 			conn, activeTarget, err := controlClientOpenTargetWithTransports(ctx, target, a.store, controlClientTransportPlan(target))
@@ -109,6 +109,9 @@ func (a *app) newControllerManagedTransport() *controllercore.ManagedTransport {
 			if a != nil {
 				a.refreshMeshStateAsync(discover)
 			}
+		},
+		ForceRelayOnly: func() bool {
+			return a != nil && a.currentSettings().RemoteControl.ForceRelayOnly
 		},
 	})
 }

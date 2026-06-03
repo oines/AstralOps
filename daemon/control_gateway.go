@@ -30,6 +30,7 @@ const (
 
 const (
 	ControlActionHostSnapshot               = "core.read.host_snapshot"
+	ControlActionWorkbench                  = "core.read.workbench"
 	ControlActionPing                       = "core.read.ping"
 	ControlActionSessionView                = "core.read.session_view"
 	ControlActionSessions                   = "core.read.sessions"
@@ -148,7 +149,7 @@ func (s *remoteControlService) dispatchAuthorizedControlRequest(ctx context.Cont
 
 func controlActionCapability(action string) string {
 	switch action {
-	case ControlActionHostSnapshot, ControlActionPing, ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionWorkspaceConnection, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
+	case ControlActionHostSnapshot, ControlActionWorkbench, ControlActionPing, ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionWorkspaceConnection, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
 		return CapabilityCoreRead
 	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionWorkspaceCreate, ControlActionWorkspaceConnect, ControlActionWorkspaceDisconnect, ControlActionWorkspaceDelete, ControlActionSessionCreate, ControlActionSessionFork, ControlActionSessionDelete:
 		return CapabilityCoreControl
@@ -197,6 +198,8 @@ func (s *remoteControlService) dispatchControlAction(ctx context.Context, req Co
 			return nil, err
 		}
 		return s.buildHostSnapshot(params), nil
+	case ControlActionWorkbench:
+		return s.buildWorkbenchState(), nil
 	case ControlActionSessionView:
 		var params struct {
 			SessionID string `json:"session_id"`

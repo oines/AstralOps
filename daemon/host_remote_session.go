@@ -539,17 +539,17 @@ func (s *hostRemoteSession) beginRequest() func() {
 
 func (s *hostRemoteSession) Workbench(ctx context.Context) (workbenchState, error) {
 	s.activate()
-	response, err := s.Request(ctx, CapabilityCoreRead, ControlActionHostSnapshot, map[string]any{"event_limit": 1})
+	response, err := s.Request(ctx, CapabilityCoreRead, ControlActionWorkbench, nil)
 	if err != nil {
 		s.setWorkbenchState(hostWorkbenchStateFailed, err)
 		return workbenchState{}, err
 	}
 	if !response.OK {
-		err := controlResponseActionError(response, ControlActionHostSnapshot)
+		err := controlResponseActionError(response, ControlActionWorkbench)
 		s.setWorkbenchState(hostWorkbenchStateFailed, err)
 		return workbenchState{}, err
 	}
-	workbench, err := remoteWorkbenchFromSnapshotResult(response.Result)
+	workbench, err := remoteWorkbenchFromResult(response.Result)
 	if err != nil {
 		s.setWorkbenchState(hostWorkbenchStateFailed, err)
 		return workbenchState{}, err

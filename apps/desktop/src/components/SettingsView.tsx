@@ -105,7 +105,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   workspace: { default_opener: "vscode", ssh_auto_reconnect: true },
   notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
   diagnostics: { logging_enabled: false },
-  remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true },
+  remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true, force_relay_only: false },
   cloud: { enabled: false, base_url: DEFAULT_CLOUD_BASE_URL },
   updates: { auto_check: true },
 };

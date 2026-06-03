@@ -415,6 +415,38 @@ func TestControlGatewayReadsHostSnapshot(t *testing.T) {
 	}
 }
 
+func TestControlGatewayReadsWorkbench(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	workspace.LocalProjectionRoot = "/host/private/projection"
+	session.NativeSessionID = "session-native-id"
+	app.store.mu.Lock()
+	app.store.workspaces[workspace.ID] = workspace
+	app.store.sessions[session.ID] = session
+	app.store.mu.Unlock()
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionWorkbench,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workbench, ok := response.Result.(workbenchState)
+	if !ok {
+		t.Fatalf("workbench result = %#v, want workbenchState", response.Result)
+	}
+	remoteWorkspace := workbench.Workspaces[workspace.ID]
+	if remoteWorkspace.ID != workspace.ID || remoteWorkspace.LocalProjectionRoot != "" || remoteWorkspace.LocalCWD != "" {
+		t.Fatalf("remote workbench workspace = %#v, want sanitized workspace", remoteWorkspace)
+	}
+	remoteSession := workbench.Sessions[session.ID]
+	if remoteSession.ID != session.ID || remoteSession.NativeSessionID != "" {
+		t.Fatalf("remote workbench session = %#v, want sanitized session", remoteSession)
+	}
+}
+
 func TestControlGatewayReadsWorkspaceConnectionFromHostState(t *testing.T) {
 	app, _, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	workspace, err := app.store.createWorkspace(createWorkspaceRequest{

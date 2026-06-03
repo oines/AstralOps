@@ -16,6 +16,7 @@ type remoteControlService struct {
 	controlRelaySessions *map[string]*controlRelaySession
 
 	buildHostSnapshotFn                  func(hostSnapshotParams) hostSnapshotResult
+	buildWorkbenchStateFn                func() workbenchState
 	buildSessionViewFn                   func(string) (sessionView, bool)
 	workspaceServiceFn                   func() *workspaceService
 	prepareControlEventSubscriptionFn    func(eventSubscriptionParams) (eventSubscriptionResult, error)
@@ -59,6 +60,7 @@ func remoteControlServiceDepsFromApp(a *app) remoteControlService {
 		controlSessions:                      &a.controlSessions,
 		controlRelaySessions:                 &a.controlRelaySessions,
 		buildHostSnapshotFn:                  a.buildHostSnapshot,
+		buildWorkbenchStateFn:                a.buildWorkbenchState,
 		buildSessionViewFn:                   a.buildSessionView,
 		workspaceServiceFn:                   a.workspaceService,
 		prepareControlEventSubscriptionFn:    a.prepareControlEventSubscription,
@@ -89,6 +91,13 @@ func (s *remoteControlService) buildHostSnapshot(params hostSnapshotParams) host
 		return hostSnapshotResult{}
 	}
 	return s.buildHostSnapshotFn(params)
+}
+
+func (s *remoteControlService) buildWorkbenchState() workbenchState {
+	if s.buildWorkbenchStateFn == nil {
+		return workbenchState{}
+	}
+	return s.buildWorkbenchStateFn()
 }
 
 func (s *remoteControlService) buildSessionView(sessionID string) (sessionView, bool) {
@@ -304,6 +313,10 @@ func (a *app) buildRemoteHostRecords(ctx context.Context, discover bool) []remot
 
 func (a *app) remoteHostTarget(hostDeviceID string) (controlClientTarget, error) {
 	return a.remoteControlService().remoteHostTarget(hostDeviceID)
+}
+
+func (a *app) remoteHostTargetWithPreference(hostDeviceID string, preferRelay bool) (controlClientTarget, error) {
+	return a.remoteControlService().remoteHostTargetWithPreference(hostDeviceID, preferRelay)
 }
 
 func (a *app) remoteControlResponse(hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {

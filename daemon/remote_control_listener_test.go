@@ -214,6 +214,63 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 	}
 }
 
+func TestRemoteHostSnapshotHydratesWorkbenchState(t *testing.T) {
+	hostApp, workspace := newRemoteControlHandlerTestApp(t)
+	session := hostApp.store.createSession(workspace, AgentCodex)
+	if _, err := hostApp.store.appendEvent(AstralEvent{
+		WorkspaceID: workspace.ID,
+		SessionID:   session.ID,
+		Agent:       session.Agent,
+		Kind:        "message.user",
+		Normalized:  map[string]any{"text": "hello"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
+	defer hostServer.Close()
+
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestCloudMembership(t, controllerStore, false, true)
+	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead}); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+
+	snapshotReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/snapshot?event_limit=10&restore_on_launch=1", nil)
+	snapshotResp := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(snapshotResp, snapshotReq)
+	if snapshotResp.Code != http.StatusOK {
+		t.Fatalf("remote snapshot status = %d body = %s", snapshotResp.Code, snapshotResp.Body.String())
+	}
+	var snapshot hostSnapshotResult
+	if err := json.Unmarshal(snapshotResp.Body.Bytes(), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Sessions) != 1 || snapshot.Sessions[0].ID != session.ID {
+		t.Fatalf("snapshot sessions = %#v, want remote session %s", snapshot.Sessions, session.ID)
+	}
+	if len(snapshot.InitialSessionEvents) != 1 || snapshot.InitialSessionEvents[0].SessionID != session.ID {
+		t.Fatalf("initial session events = %#v, want selected session events", snapshot.InitialSessionEvents)
+	}
+
+	stateReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/state", nil)
+	stateResp := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(stateResp, stateReq)
+	if stateResp.Code != http.StatusOK {
+		t.Fatalf("remote state status = %d body = %s", stateResp.Code, stateResp.Body.String())
+	}
+	var state remoteHostSessionState
+	if err := json.Unmarshal(stateResp.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Workbench.State != hostWorkbenchStateLive {
+		t.Fatalf("workbench state = %#v, want live after snapshot hydration", state.Workbench)
+	}
+}
+
 func TestRemoteHostTargetUsesCachedBaseURLBeforeDiscovery(t *testing.T) {
 	hostApp, _ := newRemoteControlHandlerTestApp(t)
 	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))

@@ -252,6 +252,36 @@ func TestManagedTransportClearLANFailureRestoresLANPreference(t *testing.T) {
 	}
 }
 
+func TestManagedTransportForceRelayOnlyReplacesActiveLANSession(t *testing.T) {
+	forceRelayOnly := false
+	opener := &fakeManagedOpener{
+		transport: func(index int, _ bool) string {
+			if index == 0 {
+				return TransportLAN
+			}
+			return TransportRelay
+		},
+	}
+	manager := NewManagedTransport(ManagedTransportConfig{
+		OpenFrameConn:  opener.open,
+		ForceRelayOnly: func() bool { return forceRelayOnly },
+	})
+
+	if _, err := manager.Request(context.Background(), "dev_host", CapabilityCoreRead, ActionHostSnapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	forceRelayOnly = true
+	if _, err := manager.Request(context.Background(), "dev_host", CapabilityCoreRead, ActionWorkbench, nil); err != nil {
+		t.Fatal(err)
+	}
+	if opener.count() != 2 {
+		t.Fatalf("open count = %d, want LAN session replaced by relay session", opener.count())
+	}
+	if !opener.preferRelayAt(1) {
+		t.Fatal("relay-only request did not force relay on replacement session")
+	}
+}
+
 type fakeManagedOpener struct {
 	mu        sync.Mutex
 	conns     []*fakeManagedFrameConn

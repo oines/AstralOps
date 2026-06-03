@@ -510,6 +510,10 @@ func (r remoteTargetResolver) ResolveControlClient(opts controlClientTargetOptio
 }
 
 func (r remoteTargetResolver) ResolveKnownHost(hostDeviceID string) (controlClientTarget, error) {
+	return r.ResolveKnownHostPreferred(hostDeviceID, false)
+}
+
+func (r remoteTargetResolver) ResolveKnownHostPreferred(hostDeviceID string, preferRelay bool) (controlClientTarget, error) {
 	if r.currentDeviceCloudRevoked != nil && r.currentDeviceCloudRevoked() {
 		return controlClientTarget{}, newActionError(http.StatusForbidden, "cloud_device_revoked", "current device has been removed from cloud mesh")
 	}
@@ -523,6 +527,12 @@ func (r remoteTargetResolver) ResolveKnownHost(hostDeviceID string) (controlClie
 	known = normalizeKnownHost(known)
 	if knownHostRevoked(known) {
 		return controlClientTarget{}, newActionError(http.StatusForbidden, "known_host_revoked", "remote Host has been removed from mesh")
+	}
+	if preferRelay {
+		if relay, err := r.cachedRelayKnownHostTarget(known); err == nil {
+			return relay, nil
+		}
+		return r.cloudRelayKnownHostTarget(known)
 	}
 	if target, err := r.cachedKnownHostTarget(known); err == nil {
 		return r.attachCloudRelayFallback(known, target), nil

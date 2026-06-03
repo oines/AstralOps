@@ -156,7 +156,7 @@ func normalizedRemoteControlSettings(settings RemoteControlSettings) RemoteContr
 func remoteControlSettingsChanged(left, right RemoteControlSettings) bool {
 	left = normalizedRemoteControlSettings(left)
 	right = normalizedRemoteControlSettings(right)
-	return left.Enabled != right.Enabled || left.ListenAddr != right.ListenAddr || left.LANDiscovery != right.LANDiscovery
+	return left.Enabled != right.Enabled || left.ListenAddr != right.ListenAddr || left.LANDiscovery != right.LANDiscovery || left.ForceRelayOnly != right.ForceRelayOnly
 }
 
 func validateRemoteControlListenAddr(addr string) error {

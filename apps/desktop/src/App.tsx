@@ -66,7 +66,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   workspace: { default_opener: "vscode", ssh_auto_reconnect: true },
   notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
   diagnostics: { logging_enabled: false },
-  remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true },
+  remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true, force_relay_only: false },
   cloud: { enabled: false, base_url: DEFAULT_CLOUD_BASE_URL },
   updates: { auto_check: true },
 };
@@ -514,7 +514,6 @@ export function App(): React.JSX.Element {
       includeWorkspaceConnections?: boolean;
       isCurrent?: () => boolean;
       preserveSelection?: boolean;
-      remoteBootstrap?: boolean;
       restoreOnLaunch?: boolean;
       updateLocalHostInfo?: boolean;
     } = {},
@@ -528,27 +527,19 @@ export function App(): React.JSX.Element {
     let snapshotViews: SessionView[] = [];
     let snapshotConnections: WorkspaceConnection[] = [];
 
-    if (options.remoteBootstrap) {
-      workbench = await client.workbench();
-      if (options.isCurrent && !options.isCurrent()) return [];
-      workspaceResponse = sortWorkspacesByUpdated(workbenchValues(workbench.workspaces));
-      sessionResponse = sortSessionsByUpdated(workbenchValues(workbench.sessions));
-      recentEvents = await client.events({ limit: EVENT_WINDOW_SIZE });
-    } else {
-      const snapshot = await client.hostSnapshot({
-        event_limit: EVENT_WINDOW_SIZE,
-        restore_on_launch: Boolean(options.restoreOnLaunch),
-      });
-      if (options.isCurrent && !options.isCurrent()) return [];
-      workbench = snapshot.workbench;
-      hostResponse = snapshot.host;
-      workspaceResponse = workbench ? sortWorkspacesByUpdated(workbenchValues(workbench.workspaces)) : snapshot.workspaces;
-      sessionResponse = workbench ? sortSessionsByUpdated(workbenchValues(workbench.sessions)) : snapshot.sessions;
-      recentEvents = snapshot.events;
-      snapshotViews = snapshot.session_views;
-      snapshotConnections = snapshot.workspace_connections ?? [];
-      sessionEvents = snapshot.initial_session_events ?? [];
-    }
+    const snapshot = await client.hostSnapshot({
+      event_limit: EVENT_WINDOW_SIZE,
+      restore_on_launch: Boolean(options.restoreOnLaunch),
+    });
+    if (options.isCurrent && !options.isCurrent()) return [];
+    workbench = snapshot.workbench;
+    hostResponse = snapshot.host;
+    workspaceResponse = workbench ? sortWorkspacesByUpdated(workbenchValues(workbench.workspaces)) : snapshot.workspaces;
+    sessionResponse = workbench ? sortSessionsByUpdated(workbenchValues(workbench.sessions)) : snapshot.sessions;
+    recentEvents = snapshot.events;
+    snapshotViews = snapshot.session_views;
+    snapshotConnections = snapshot.workspace_connections ?? [];
+    sessionEvents = snapshot.initial_session_events ?? [];
 
     const connectionMap: Record<string, WorkspaceConnection> = {};
     if (options.includeWorkspaceConnections || workbench) {
@@ -563,10 +554,7 @@ export function App(): React.JSX.Element {
     for (const view of views) {
       viewMap[view.session.id] = view;
     }
-    if (options.remoteBootstrap && initialSession) {
-      sessionEvents = await client.events({ session_id: initialSession.id, limit: EVENT_WINDOW_SIZE });
-      if (options.isCurrent && !options.isCurrent()) return [];
-    } else if (!options.remoteBootstrap && initialSession && sessionEvents.length === 0) {
+    if (initialSession && sessionEvents.length === 0) {
       sessionEvents = recentEvents.filter((event) => event.session_id === initialSession.id);
     }
     const eventResponse = [...recentEvents, ...sessionEvents];
@@ -1198,7 +1186,6 @@ export function App(): React.JSX.Element {
         const initialEvents = await loadHostState(client, {
           includeWorkspaceConnections: true,
           isCurrent: isCurrentHost,
-          remoteBootstrap: !activeHostIsLocal,
           restoreOnLaunch: appSettingsRef.current.general.restore_on_launch,
           updateLocalHostInfo: activeHostIsLocal,
         });
@@ -1239,7 +1226,6 @@ export function App(): React.JSX.Element {
             void loadHostState(client, {
               includeWorkspaceConnections: true,
               isCurrent: isCurrentHost,
-              remoteBootstrap: !activeHostIsLocal,
               restoreOnLaunch: false,
               updateLocalHostInfo: activeHostIsLocal,
               preserveSelection: true,

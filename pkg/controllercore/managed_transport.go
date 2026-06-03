@@ -36,12 +36,13 @@ type ResolvedTarget struct {
 }
 
 type ManagedTransportConfig struct {
-	OpenFrameConn func(ctx context.Context, hostDeviceID string, preferRelay bool) (FrameConn, ResolvedTarget, error)
-	SelfDeviceID  func() string
-	DecodeEvent   func(json.RawMessage) (EventEnvelope, bool)
-	StateChanged  func(hostDeviceID string, state ControlState)
-	Activity      func(hostDeviceID string)
-	RefreshMesh   func(discover bool)
+	OpenFrameConn  func(ctx context.Context, hostDeviceID string, preferRelay bool) (FrameConn, ResolvedTarget, error)
+	SelfDeviceID   func() string
+	DecodeEvent    func(json.RawMessage) (EventEnvelope, bool)
+	StateChanged   func(hostDeviceID string, state ControlState)
+	Activity       func(hostDeviceID string)
+	RefreshMesh    func(discover bool)
+	ForceRelayOnly func() bool
 }
 
 type ManagedTransport struct {
@@ -320,16 +321,27 @@ func (m *ManagedTransport) getSession(ctx context.Context, hostDeviceID string) 
 	if m == nil || m.config.OpenFrameConn == nil {
 		return nil, errors.New("controller transport opener is not initialized")
 	}
+	forceRelayOnly := m.forceRelayOnly()
 	m.mu.Lock()
 	if session := m.sessions[hostDeviceID]; session != nil && !session.isClosed() {
+		if forceRelayOnly && session.target.Transport != TransportRelay {
+			delete(m.sessions, hostDeviceID)
+			m.mu.Unlock()
+			session.closeWithError(errors.New("remote control session invalidated: force_relay_only"))
+			m.setControlState(hostDeviceID, StateReconnecting, ResolvedTarget{HostDeviceID: hostDeviceID, Transport: session.target.Transport}, errors.New("force_relay_only"))
+		} else {
+			m.mu.Unlock()
+			return session, nil
+		}
+	} else {
 		m.mu.Unlock()
-		return session, nil
 	}
+	m.mu.Lock()
 	delete(m.sessions, hostDeviceID)
 	m.mu.Unlock()
 
 	m.setControlState(hostDeviceID, StateConnecting, ResolvedTarget{}, nil)
-	preferRelay := m.lanSuppressed(hostDeviceID)
+	preferRelay := forceRelayOnly || m.lanSuppressed(hostDeviceID)
 	conn, target, err := m.config.OpenFrameConn(ctx, hostDeviceID, preferRelay)
 	if err != nil {
 		if !preferRelay {
@@ -962,6 +974,7 @@ func requestCanRetry(capability, action string) bool {
 	}
 	switch action {
 	case ActionHostSnapshot,
+		ActionWorkbench,
 		ActionSessionView,
 		ActionSessions,
 		ActionWorkspaces,
@@ -973,6 +986,13 @@ func requestCanRetry(capability, action string) bool {
 	default:
 		return false
 	}
+}
+
+func (m *ManagedTransport) forceRelayOnly() bool {
+	if m == nil || m.config.ForceRelayOnly == nil {
+		return false
+	}
+	return m.config.ForceRelayOnly()
 }
 
 func requestRoundTripTimeout(transportTimeout time.Duration, req ControlRequest) time.Duration {

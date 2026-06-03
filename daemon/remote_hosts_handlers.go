@@ -373,9 +373,9 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 		a.writeRemoteWorkbenchResult(w, hostDeviceID)
 	case len(route) == 1 && route[0] == "snapshot" && r.Method == http.MethodGet:
 		eventLimit, _ := strconv.Atoi(r.URL.Query().Get("event_limit"))
-		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreRead, ControlActionHostSnapshot, map[string]any{
-			"event_limit":       eventLimit,
-			"restore_on_launch": truthyQuery(r.URL.Query().Get("restore_on_launch")),
+		a.writeRemoteHostSnapshotResult(w, r.Context(), hostDeviceID, hostSnapshotParams{
+			EventLimit:      eventLimit,
+			RestoreOnLaunch: truthyQuery(r.URL.Query().Get("restore_on_launch")),
 		})
 	case len(route) == 1 && route[0] == "host" && r.Method == http.MethodGet:
 		target, err := a.remoteHostTarget(hostDeviceID)
@@ -617,6 +617,65 @@ func (a *app) writeRemoteWorkbenchResult(w http.ResponseWriter, hostDeviceID str
 	writeJSON(w, http.StatusOK, workbench)
 }
 
+func (a *app) writeRemoteHostSnapshotResult(w http.ResponseWriter, ctx context.Context, hostDeviceID string, params hostSnapshotParams) {
+	snapshot, err := a.remoteHostSnapshot(ctx, hostDeviceID, params)
+	if err != nil {
+		writeRemoteHostError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
+}
+
+func (a *app) remoteHostSnapshot(ctx context.Context, hostDeviceID string, params hostSnapshotParams) (hostSnapshotResult, error) {
+	manager := a.hostRemoteSessionManager()
+	if manager == nil {
+		return hostSnapshotResult{}, errors.New("remote Host session manager is not initialized")
+	}
+	workbench, err := manager.session(hostDeviceID).Workbench(ctx)
+	if err != nil {
+		return hostSnapshotResult{}, err
+	}
+	eventLimit := normalizedHostSnapshotEventLimit(params.EventLimit)
+	response, err := manager.Request(ctx, hostDeviceID, CapabilityCoreRead, ControlActionEvents, map[string]any{"limit": eventLimit})
+	if err != nil {
+		return hostSnapshotResult{}, fmt.Errorf("remote control request failed: %w", err)
+	}
+	if !response.OK {
+		return hostSnapshotResult{}, controlResponseActionError(response, ControlActionEvents)
+	}
+	events, err := remoteEventsFromResult(response.Result)
+	if err != nil {
+		return hostSnapshotResult{}, err
+	}
+	workspaces, sessions, sessionViews, connections := flattenRemoteWorkbenchState(workbench)
+	result := hostSnapshotResult{
+		Host:                 a.remoteHostSnapshotHostInfo(hostDeviceID),
+		Workspaces:           workspaces,
+		Sessions:             sessions,
+		WorkspaceConnections: connections,
+		Events:               events,
+		SessionViews:         sessionViews,
+		Workbench:            workbench,
+	}
+	if params.RestoreOnLaunch && len(sessions) > 0 {
+		initialResponse, err := manager.Request(ctx, hostDeviceID, CapabilityCoreRead, ControlActionEvents, map[string]any{
+			"session_id": sessions[0].ID,
+			"limit":      eventLimit,
+		})
+		if err != nil {
+			return hostSnapshotResult{}, fmt.Errorf("remote control request failed: %w", err)
+		}
+		if !initialResponse.OK {
+			return hostSnapshotResult{}, controlResponseActionError(initialResponse, ControlActionEvents)
+		}
+		result.InitialSessionEvents, err = remoteEventsFromResult(initialResponse.Result)
+		if err != nil {
+			return hostSnapshotResult{}, err
+		}
+	}
+	return result, nil
+}
+
 func (a *app) handleRemoteHostWorkbenchSSE(w http.ResponseWriter, r *http.Request, hostDeviceID string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -653,21 +712,100 @@ func (a *app) handleRemoteHostWorkbenchSSE(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-func remoteWorkbenchFromSnapshotResult(result any) (workbenchState, error) {
+func remoteWorkbenchFromResult(result any) (workbenchState, error) {
 	body, err := json.Marshal(result)
 	if err != nil {
 		return workbenchState{}, err
 	}
-	var snapshot struct {
-		Workbench workbenchState `json:"workbench"`
-	}
-	if err := json.Unmarshal(body, &snapshot); err != nil {
+	var workbench workbenchState
+	if err := json.Unmarshal(body, &workbench); err != nil {
 		return workbenchState{}, err
 	}
-	if snapshot.Workbench.Workspaces == nil {
-		return workbenchState{}, errors.New("remote snapshot response missing workbench")
+	if workbench.Workspaces == nil {
+		return workbenchState{}, errors.New("remote workbench response missing workspaces")
 	}
-	return snapshot.Workbench, nil
+	return workbench, nil
+}
+
+func remoteEventsFromResult(result any) ([]AstralEvent, error) {
+	body, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+	var events []AstralEvent
+	if err := json.Unmarshal(body, &events); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func flattenRemoteWorkbenchState(workbench workbenchState) ([]Workspace, []Session, []sessionView, []WorkspaceConnection) {
+	workspaces := make([]Workspace, 0, len(workbench.Workspaces))
+	for _, workspace := range workbench.Workspaces {
+		workspaces = append(workspaces, workspace)
+	}
+	sort.Slice(workspaces, func(i, j int) bool { return workspaces[i].UpdatedAt > workspaces[j].UpdatedAt })
+
+	sessions := make([]Session, 0, len(workbench.Sessions))
+	for _, session := range workbench.Sessions {
+		sessions = append(sessions, session)
+	}
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].UpdatedAt > sessions[j].UpdatedAt })
+
+	sessionViews := make([]sessionView, 0, len(workbench.SessionViews))
+	for _, session := range sessions {
+		if view, ok := workbench.SessionViews[session.ID]; ok {
+			sessionViews = append(sessionViews, view)
+		}
+	}
+	for sessionID, view := range workbench.SessionViews {
+		found := false
+		for _, session := range sessions {
+			if session.ID == sessionID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			sessionViews = append(sessionViews, view)
+		}
+	}
+
+	connections := make([]WorkspaceConnection, 0, len(workbench.WorkspaceConnections))
+	for _, workspace := range workspaces {
+		if connection, ok := workbench.WorkspaceConnections[workspace.ID]; ok {
+			connections = append(connections, connection)
+		}
+	}
+	for workspaceID, connection := range workbench.WorkspaceConnections {
+		found := false
+		for _, workspace := range workspaces {
+			if workspace.ID == workspaceID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			connections = append(connections, connection)
+		}
+	}
+	return workspaces, sessions, sessionViews, connections
+}
+
+func (a *app) remoteHostSnapshotHostInfo(hostDeviceID string) HostInfo {
+	hostDeviceID = strings.TrimSpace(hostDeviceID)
+	if a != nil && a.store != nil {
+		if known, ok := a.store.knownHost(hostDeviceID); ok {
+			known = normalizeKnownHost(known)
+			return HostInfo{Identity: DeviceIdentity{
+				DeviceID:             known.DeviceID,
+				DeviceName:           known.DeviceName,
+				PublicKey:            known.PublicKey,
+				PublicKeyFingerprint: known.PublicKeyFingerprint,
+			}}
+		}
+	}
+	return HostInfo{Identity: DeviceIdentity{DeviceID: hostDeviceID}}
 }
 
 func (a *app) handleRemoteHostStateSSE(w http.ResponseWriter, r *http.Request, hostDeviceID string) {
@@ -833,10 +971,14 @@ func controlResponseMessage(response ControlResponse) string {
 }
 
 func (a *remoteControlService) remoteHostTarget(hostDeviceID string) (controlClientTarget, error) {
+	return a.remoteHostTargetWithPreference(hostDeviceID, false)
+}
+
+func (a *remoteControlService) remoteHostTargetWithPreference(hostDeviceID string, preferRelay bool) (controlClientTarget, error) {
 	if !a.cloudMeshActiveFor(cloudMembershipRole{CanControl: true}) {
 		return controlClientTarget{}, cloudMeshInactiveError()
 	}
-	return a.remoteTargetResolver().ResolveKnownHost(hostDeviceID)
+	return a.remoteTargetResolver().ResolveKnownHostPreferred(hostDeviceID, preferRelay)
 }
 
 func (a *remoteControlService) rememberRemoteHostLANRoute(hostInfo HostInfo, baseURL string, fallback KnownHost) KnownHost {
