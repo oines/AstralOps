@@ -514,36 +514,63 @@ export function App(): React.JSX.Element {
       includeWorkspaceConnections?: boolean;
       isCurrent?: () => boolean;
       preserveSelection?: boolean;
+      remoteBootstrap?: boolean;
       restoreOnLaunch?: boolean;
       updateLocalHostInfo?: boolean;
     } = {},
   ) => {
-    const snapshot = await client.hostSnapshot({
-      event_limit: EVENT_WINDOW_SIZE,
-      restore_on_launch: Boolean(options.restoreOnLaunch),
-    });
-    if (options.isCurrent && !options.isCurrent()) return [];
-    const workbench: WorkbenchState | undefined = snapshot.workbench;
-    const hostResponse = snapshot.host;
-    const workspaceResponse = workbench ? sortWorkspacesByUpdated(workbenchValues(workbench.workspaces)) : snapshot.workspaces;
-    const sessionResponse = workbench ? sortSessionsByUpdated(workbenchValues(workbench.sessions)) : snapshot.sessions;
-    const recentEvents = snapshot.events;
+    let workbench: WorkbenchState | undefined;
+    let hostResponse: HostInfo | undefined;
+    let workspaceResponse: Workspace[] = [];
+    let sessionResponse: Session[] = [];
+    let recentEvents: AstralEvent[] = [];
+    let sessionEvents: AstralEvent[] = [];
+    let snapshotViews: SessionView[] = [];
+    let snapshotConnections: WorkspaceConnection[] = [];
+
+    if (options.remoteBootstrap) {
+      workbench = await client.workbench();
+      if (options.isCurrent && !options.isCurrent()) return [];
+      workspaceResponse = sortWorkspacesByUpdated(workbenchValues(workbench.workspaces));
+      sessionResponse = sortSessionsByUpdated(workbenchValues(workbench.sessions));
+      recentEvents = await client.events({ limit: EVENT_WINDOW_SIZE });
+    } else {
+      const snapshot = await client.hostSnapshot({
+        event_limit: EVENT_WINDOW_SIZE,
+        restore_on_launch: Boolean(options.restoreOnLaunch),
+      });
+      if (options.isCurrent && !options.isCurrent()) return [];
+      workbench = snapshot.workbench;
+      hostResponse = snapshot.host;
+      workspaceResponse = workbench ? sortWorkspacesByUpdated(workbenchValues(workbench.workspaces)) : snapshot.workspaces;
+      sessionResponse = workbench ? sortSessionsByUpdated(workbenchValues(workbench.sessions)) : snapshot.sessions;
+      recentEvents = snapshot.events;
+      snapshotViews = snapshot.session_views;
+      snapshotConnections = snapshot.workspace_connections ?? [];
+      sessionEvents = snapshot.initial_session_events ?? [];
+    }
+
     const connectionMap: Record<string, WorkspaceConnection> = {};
     if (options.includeWorkspaceConnections || workbench) {
-      const connections = workbench ? workbenchValues(workbench.workspace_connections) : snapshot.workspace_connections ?? [];
+      const connections = workbench ? workbenchValues(workbench.workspace_connections) : snapshotConnections;
       for (const connection of connections) {
         connectionMap[connection.workspace_id] = connection;
       }
     }
     const initialSession = options.restoreOnLaunch ? sessionResponse[0] ?? null : null;
     const viewMap: Record<string, SessionView> = {};
-    const views = workbench ? workbenchValues(workbench.session_views) : snapshot.session_views;
+    const views = workbench ? workbenchValues(workbench.session_views) : snapshotViews;
     for (const view of views) {
       viewMap[view.session.id] = view;
     }
-    const sessionEvents = initialSession ? snapshot.initial_session_events ?? recentEvents.filter((event) => event.session_id === initialSession.id) : [];
+    if (options.remoteBootstrap && initialSession) {
+      sessionEvents = await client.events({ session_id: initialSession.id, limit: EVENT_WINDOW_SIZE });
+      if (options.isCurrent && !options.isCurrent()) return [];
+    } else if (!options.remoteBootstrap && initialSession && sessionEvents.length === 0) {
+      sessionEvents = recentEvents.filter((event) => event.session_id === initialSession.id);
+    }
     const eventResponse = [...recentEvents, ...sessionEvents];
-    if (options.updateLocalHostInfo) setLocalHostInfo(hostResponse);
+    if (options.updateLocalHostInfo && hostResponse) setLocalHostInfo(hostResponse);
     setLastSessionAgent(sessionResponse[0]?.agent ?? "claude");
     setWorkspaces(workspaceResponse);
     setWorkspaceConnections(connectionMap);
@@ -1171,6 +1198,7 @@ export function App(): React.JSX.Element {
         const initialEvents = await loadHostState(client, {
           includeWorkspaceConnections: true,
           isCurrent: isCurrentHost,
+          remoteBootstrap: !activeHostIsLocal,
           restoreOnLaunch: appSettingsRef.current.general.restore_on_launch,
           updateLocalHostInfo: activeHostIsLocal,
         });
@@ -1211,6 +1239,7 @@ export function App(): React.JSX.Element {
             void loadHostState(client, {
               includeWorkspaceConnections: true,
               isCurrent: isCurrentHost,
+              remoteBootstrap: !activeHostIsLocal,
               restoreOnLaunch: false,
               updateLocalHostInfo: activeHostIsLocal,
               preserveSelection: true,

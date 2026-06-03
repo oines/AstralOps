@@ -2297,6 +2297,9 @@ func controlClientOpenTargetWithTransports(ctx context.Context, target controlCl
 	if len(transports) == 0 {
 		return nil, target, fmt.Errorf("control transport is not configured")
 	}
+	if target.UseRelay {
+		target = controlClientRelayTarget(target)
+	}
 	failures := make([]controlClientTransportFailure, 0, len(transports))
 	activeTarget := target
 	for _, transport := range transports {
@@ -2325,11 +2328,18 @@ func controlClientTransportPlan(target controlClientTarget) []controlClientTrans
 		transports = append(transports, controlClientExplicitHostTransport{})
 	}
 	if strings.TrimSpace(target.RelayClient.BaseURL) != "" && strings.TrimSpace(target.RelayClient.Token) != "" {
-		relayTarget := target
-		relayTarget.UseRelay = true
+		relayTarget := controlClientRelayTarget(target)
 		transports = append(transports, controlClientTargetTransport{target: relayTarget, transport: controlClientRelayTransport{}})
 	}
 	return transports
+}
+
+func controlClientRelayTarget(target controlClientTarget) controlClientTarget {
+	target.UseRelay = true
+	if target.Timeout <= 0 || target.Timeout < controlRelayRoundTripTimeout {
+		target.Timeout = controlRelayRoundTripTimeout
+	}
+	return target
 }
 
 func controlClientPrimaryTransportPlan(target controlClientTarget) []controlClientTransport {

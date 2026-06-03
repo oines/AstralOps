@@ -185,6 +185,7 @@ func TestControlClientTransportPlanOrdersDirectFallbackRelay(t *testing.T) {
 	transports := controlClientTransportPlan(controlClientTarget{
 		BaseURL:      "http://lan-host",
 		FallbackHost: "http://explicit-host",
+		Timeout:      remoteHostLANTimeout,
 		RelayClient:  RelayClient{BaseURL: "https://relay.example.test", Token: "account-token"},
 	})
 	kinds := controlClientTransportKinds(transports)
@@ -196,6 +197,16 @@ func TestControlClientTransportPlanOrdersDirectFallbackRelay(t *testing.T) {
 		if kinds[i] != want[i] {
 			t.Fatalf("transport plan = %#v, want %#v", kinds, want)
 		}
+	}
+	relayTransport, ok := transports[2].(controlClientTargetTransport)
+	if !ok {
+		t.Fatalf("relay transport = %T, want controlClientTargetTransport", transports[2])
+	}
+	if !relayTransport.target.UseRelay {
+		t.Fatal("relay fallback target is not marked for relay")
+	}
+	if relayTransport.target.Timeout != controlRelayRoundTripTimeout {
+		t.Fatalf("relay fallback timeout = %s, want %s", relayTransport.target.Timeout, controlRelayRoundTripTimeout)
 	}
 }
 
@@ -209,6 +220,25 @@ func TestControlClientTransportPlanUsesOnlyRelayForForcedRelay(t *testing.T) {
 	kinds := controlClientTransportKinds(transports)
 	if len(kinds) != 1 || kinds[0] != controlClientTransportRelay {
 		t.Fatalf("transport plan = %#v, want forced relay only", kinds)
+	}
+}
+
+func TestControlClientRelayTargetUsesRelayTimeout(t *testing.T) {
+	target := controlClientRelayTarget(controlClientTarget{
+		BaseURL: "http://lan-host",
+		Timeout: remoteHostLANTimeout,
+	})
+	if !target.UseRelay {
+		t.Fatal("relay target is not marked for relay")
+	}
+	if target.Timeout != controlRelayRoundTripTimeout {
+		t.Fatalf("relay target timeout = %s, want %s", target.Timeout, controlRelayRoundTripTimeout)
+	}
+
+	longTimeout := 30 * time.Second
+	target = controlClientRelayTarget(controlClientTarget{Timeout: longTimeout})
+	if target.Timeout != longTimeout {
+		t.Fatalf("relay target long timeout = %s, want %s", target.Timeout, longTimeout)
 	}
 }
 

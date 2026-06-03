@@ -82,6 +82,7 @@ type hostRemoteSession struct {
 	healthStarted             bool
 	lastSeenAt                time.Time
 	missedHeartbeatCount      int
+	pendingRequests           int
 	activeTransport           string
 	reconnectAttemptStartedAt time.Time
 }
@@ -241,7 +242,7 @@ func (m *hostRemoteSessionManager) ApplyControlState(hostDeviceID string, state 
 		}
 		reason := firstString(state.LastErrorCode, state.State)
 		message := firstString(state.LastError, reason)
-		session.markConnectionUntrusted(reason, errors.New(message))
+		session.markTransportReconnecting(reason, errors.New(message))
 	}
 }
 
@@ -351,7 +352,7 @@ func (s *hostRemoteSession) shouldProbeHealth() bool {
 		return false
 	}
 	s.mu.Lock()
-	if !s.active {
+	if !s.active || s.pendingRequests > 0 {
 		s.mu.Unlock()
 		return false
 	}
@@ -435,6 +436,14 @@ func (s *hostRemoteSession) recordPingFailure(err error) {
 }
 
 func (s *hostRemoteSession) markConnectionUntrusted(reason string, err error) {
+	s.markConnectionInterrupted(reason, err, true)
+}
+
+func (s *hostRemoteSession) markTransportReconnecting(reason string, err error) {
+	s.markConnectionInterrupted(reason, err, false)
+}
+
+func (s *hostRemoteSession) markConnectionInterrupted(reason string, err error, invalidate bool) {
 	if s == nil {
 		return
 	}
@@ -458,7 +467,7 @@ func (s *hostRemoteSession) markConnectionUntrusted(reason string, err error) {
 	s.state.Terminals = cloneRemoteHostTerminalStates(s.terminals)
 	s.mu.Unlock()
 	s.setHostState(hostRemoteStateReconnecting, "", err)
-	if s.manager != nil && s.manager.deps.invalidate != nil {
+	if invalidate && s.manager != nil && s.manager.deps.invalidate != nil {
 		s.invalidateControlSession(reason)
 	}
 }
@@ -495,6 +504,8 @@ func (s *hostRemoteSession) Request(ctx context.Context, capability, action stri
 		return ControlResponse{}, errors.New("remote control manager is not initialized")
 	}
 	s.activate()
+	done := s.beginRequest()
+	defer done()
 	s.setConnectingIfNotLive()
 	response, err := s.manager.deps.request(ctx, s.hostDeviceID, capability, action, params)
 	if err != nil {
@@ -508,6 +519,22 @@ func (s *hostRemoteSession) Request(ctx context.Context, capability, action stri
 	s.markActivity("")
 	s.setHostState(hostRemoteStateLive, "", nil)
 	return response, nil
+}
+
+func (s *hostRemoteSession) beginRequest() func() {
+	if s == nil {
+		return func() {}
+	}
+	s.mu.Lock()
+	s.pendingRequests++
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		if s.pendingRequests > 0 {
+			s.pendingRequests--
+		}
+		s.mu.Unlock()
+	}
 }
 
 func (s *hostRemoteSession) Workbench(ctx context.Context) (workbenchState, error) {

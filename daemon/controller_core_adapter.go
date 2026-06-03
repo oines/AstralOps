@@ -62,7 +62,7 @@ func (a *app) newControllerManagedTransport() *controllercore.ManagedTransport {
 				return nil, controllercore.ResolvedTarget{HostDeviceID: hostDeviceID}, toCoreError(err)
 			}
 			if preferRelay && strings.TrimSpace(target.RelayClient.BaseURL) != "" && strings.TrimSpace(target.RelayClient.Token) != "" {
-				target.UseRelay = true
+				target = controlClientRelayTarget(target)
 			}
 			conn, activeTarget, err := controlClientOpenTargetWithTransports(ctx, target, a.store, controlClientTransportPlan(target))
 			resolved := toCoreResolvedTarget(hostDeviceID, activeTarget)
