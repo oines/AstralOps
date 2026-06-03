@@ -84,13 +84,13 @@ func (c *Core) Start(configJSON string) (string, error) {
 		c.identity = *config.Identity
 		c.privateKey = privateKey
 	} else if strings.TrimSpace(c.identity.DeviceID) == "" {
-		identity, privateKey, err := newMobileStoredIdentity(config.DeviceName)
+		stored, privateKey, err := newMobileStoredIdentity(config.DeviceName)
 		if err != nil {
 			c.mu.Unlock()
 			c.emitError(err)
 			return "", err
 		}
-		c.identity = identity
+		c.identity = stored.DeviceIdentity
 		c.privateKey = privateKey
 	}
 	if c.forceRelayOnly != config.ForceRelayOnly && c.remote != nil {
@@ -99,11 +99,13 @@ func (c *Core) Start(configJSON string) (string, error) {
 	c.forceRelayOnly = config.ForceRelayOnly
 	c.started = true
 	identity := c.identity
+	stored := storedIdentityFromFacts(identity, c.privateKey)
 	c.mu.Unlock()
 	return encode(map[string]any{
-		"ok":       true,
-		"started":  true,
-		"identity": identity,
+		"ok":              true,
+		"started":         true,
+		"identity":        identity,
+		"stored_identity": stored,
 	})
 }
 
@@ -138,13 +140,13 @@ func (c *Core) SetCloudSession(sessionJSON string) (string, error) {
 		}
 	}
 	if strings.TrimSpace(c.identity.DeviceID) == "" {
-		identity, privateKey, err := newMobileStoredIdentity("")
+		stored, privateKey, err := newMobileStoredIdentity("")
 		if err != nil {
 			c.mu.Unlock()
 			c.emitError(err)
 			return "", err
 		}
-		c.identity = identity
+		c.identity = stored.DeviceIdentity
 		c.privateKey = privateKey
 	}
 	identity := c.identity
@@ -186,20 +188,36 @@ func (c *Core) Logout() (string, error) {
 		cancel()
 	}
 
-	nextIdentity, nextPrivateKey, err := newMobileStoredIdentity("")
+	nextStored, nextPrivateKey, err := newMobileStoredIdentity("")
 	if err != nil {
 		c.emitError(err)
 		return "", err
 	}
 	c.mu.Lock()
-	c.identity = nextIdentity
+	c.identity = nextStored.DeviceIdentity
 	c.privateKey = nextPrivateKey
 	c.mu.Unlock()
 	return encode(map[string]any{
-		"ok":            true,
-		"cloud_removed": cloudRemoved,
-		"mesh_reset":    true,
-		"identity":      nextIdentity,
+		"ok":              true,
+		"cloud_removed":   cloudRemoved,
+		"mesh_reset":      true,
+		"identity":        nextStored.DeviceIdentity,
+		"stored_identity": nextStored,
+	})
+}
+
+func (c *Core) CloudSession() (string, error) {
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	if strings.TrimSpace(session.BaseURL) == "" || strings.TrimSpace(session.AccountToken) == "" {
+		err := controllercore.NewActionError(http.StatusUnauthorized, "cloud_session_missing", "cloud session is not configured")
+		c.emitError(err)
+		return "", err
+	}
+	return encode(map[string]any{
+		"ok":      true,
+		"session": session,
 	})
 }
 
@@ -246,6 +264,26 @@ func (c *Core) SendInput(hostDeviceID, sessionID, inputJSON string) (string, err
 	}
 	params["session_id"] = strings.TrimSpace(sessionID)
 	response, err := c.controllerCore().Request(context.Background(), hostDeviceID, controllercore.CapabilityCoreControl, controllercore.ActionSessionInput, params)
+	if err != nil {
+		c.emitError(err)
+		return "", err
+	}
+	return encode(response)
+}
+
+func (c *Core) RespondInteraction(hostDeviceID, interactionID, responseJSON string) (string, error) {
+	responsePayload := map[string]any{}
+	if strings.TrimSpace(responseJSON) != "" {
+		if err := json.Unmarshal([]byte(responseJSON), &responsePayload); err != nil {
+			c.emitError(err)
+			return "", err
+		}
+	}
+	params := map[string]any{
+		"interaction_id": strings.TrimSpace(interactionID),
+		"response":       responsePayload,
+	}
+	response, err := c.controllerCore().Request(context.Background(), hostDeviceID, controllercore.CapabilityInteractionRespond, controllercore.ActionInteractionRespond, params)
 	if err != nil {
 		c.emitError(err)
 		return "", err
@@ -746,16 +784,23 @@ func (c *Core) cloudFacts() (cloudmesh.DeviceIdentity, ed25519.PrivateKey, cloud
 	return c.identity, c.privateKey, c.session, nil
 }
 
-func newMobileStoredIdentity(deviceName string) (cloudmesh.DeviceIdentity, []byte, error) {
+func newMobileStoredIdentity(deviceName string) (deviceidentity.StoredIdentity, []byte, error) {
 	stored, privateKey, err := deviceidentity.NewStored(deviceidentity.Options{
 		DeviceKind:   deviceidentity.DeviceKindMobile,
 		DeviceName:   defaultMobileDeviceName(deviceName),
 		Capabilities: deviceidentity.MobileControllerCapabilities(),
 	})
 	if err != nil {
-		return cloudmesh.DeviceIdentity{}, nil, err
+		return deviceidentity.StoredIdentity{}, nil, err
 	}
-	return stored.DeviceIdentity, privateKey, nil
+	return stored, privateKey, nil
+}
+
+func storedIdentityFromFacts(identity cloudmesh.DeviceIdentity, privateKey ed25519.PrivateKey) deviceidentity.StoredIdentity {
+	return deviceidentity.StoredIdentity{
+		DeviceIdentity: identity,
+		PrivateKey:     base64.StdEncoding.EncodeToString(privateKey),
+	}
 }
 
 func defaultMobileDeviceName(value string) string {

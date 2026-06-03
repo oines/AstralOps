@@ -26,6 +26,9 @@ func TestMobileCoreFacadeDelegatesRemoteActionsToGoController(t *testing.T) {
 	if _, err := core.SendInput("dev_host", "session_1", mustJSON(t, map[string]any{"input": "hello"})); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := core.RespondInteraction("dev_host", "approval_1", mustJSON(t, map[string]any{"decision": "accept"})); err != nil {
+		t.Fatal(err)
+	}
 	body, err := core.OpenTerminal("dev_host", "workspace_1")
 	if err != nil {
 		t.Fatal(err)
@@ -49,11 +52,57 @@ func TestMobileCoreFacadeDelegatesRemoteActionsToGoController(t *testing.T) {
 	if transport.requestCount(controllercore.ActionSessionInput) != 1 {
 		t.Fatalf("session input requests = %d, want 1", transport.requestCount(controllercore.ActionSessionInput))
 	}
+	if transport.requestCount(controllercore.ActionInteractionRespond) != 1 {
+		t.Fatalf("interaction respond requests = %d, want 1", transport.requestCount(controllercore.ActionInteractionRespond))
+	}
+	if response := transport.requestForAction(controllercore.ActionInteractionRespond); response.Params["interaction_id"] != "approval_1" {
+		t.Fatalf("interaction params = %#v, want approval_1", response.Params)
+	}
 	if transport.terminal.input != "pwd\n" {
 		t.Fatalf("terminal input = %q, want pwd", transport.terminal.input)
 	}
 	if transport.terminal.cols != 100 || transport.terminal.rows != 40 {
 		t.Fatalf("terminal resize = %dx%d, want 100x40", transport.terminal.cols, transport.terminal.rows)
+	}
+}
+
+func TestStartReturnsPersistentStoredIdentity(t *testing.T) {
+	core := New()
+	body, err := core.Start(mustJSON(t, map[string]any{"device_name": "iPhone"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Started        bool                          `json:"started"`
+		Identity       cloudmesh.DeviceIdentity      `json:"identity"`
+		StoredIdentity deviceidentity.StoredIdentity `json:"stored_identity"`
+	}
+	if err := json.Unmarshal([]byte(body), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Started || result.Identity.DeviceID == "" {
+		t.Fatalf("start result = %#v, want started identity", result)
+	}
+	if result.StoredIdentity.DeviceID != result.Identity.DeviceID || strings.TrimSpace(result.StoredIdentity.PrivateKey) == "" {
+		t.Fatalf("stored_identity = %#v, want persistent identity for %q", result.StoredIdentity, result.Identity.DeviceID)
+	}
+	if _, _, err := deviceidentity.ValidateStored(result.StoredIdentity, deviceidentity.MobileControllerCapabilities()); err != nil {
+		t.Fatalf("stored_identity invalid: %v", err)
+	}
+
+	body, err = core.Start(mustJSON(t, map[string]any{"stored_identity": result.StoredIdentity}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restarted struct {
+		Identity       cloudmesh.DeviceIdentity      `json:"identity"`
+		StoredIdentity deviceidentity.StoredIdentity `json:"stored_identity"`
+	}
+	if err := json.Unmarshal([]byte(body), &restarted); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Identity.DeviceID != result.Identity.DeviceID || restarted.StoredIdentity.PrivateKey != result.StoredIdentity.PrivateKey {
+		t.Fatalf("restarted = %#v, want same persistent identity", restarted)
 	}
 }
 
@@ -162,6 +211,17 @@ func (f *fakeMobileCoreTransport) requestCount(action string) int {
 		}
 	}
 	return count
+}
+
+func (f *fakeMobileCoreTransport) requestForAction(action string) controllercore.ControlRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, request := range f.requests {
+		if request.Action == action {
+			return request
+		}
+	}
+	return controllercore.ControlRequest{}
 }
 
 type fakeMobileCoreTerminal struct {
@@ -325,6 +385,23 @@ func TestSetCloudSessionCanExchangeLoginCode(t *testing.T) {
 	if state.Cloud == nil || state.Cloud.AccountIDHash != "acct_test" {
 		t.Fatalf("state = %#v, want exchanged cloud state", state)
 	}
+	sessionBody, err := core.CloudSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sessionResult struct {
+		OK      bool `json:"ok"`
+		Session struct {
+			BaseURL      string `json:"base_url"`
+			AccountToken string `json:"account_token"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal([]byte(sessionBody), &sessionResult); err != nil {
+		t.Fatal(err)
+	}
+	if !sessionResult.OK || sessionResult.Session.BaseURL != server.URL || sessionResult.Session.AccountToken != "token_test" {
+		t.Fatalf("cloud session = %#v, want exchanged token for keychain persistence", sessionResult)
+	}
 }
 
 func TestLogoutRemovesCloudDeviceAndResetsMeshIdentity(t *testing.T) {
@@ -366,9 +443,10 @@ func TestLogoutRemovesCloudDeviceAndResetsMeshIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var result struct {
-		CloudRemoved bool                     `json:"cloud_removed"`
-		MeshReset    bool                     `json:"mesh_reset"`
-		Identity     cloudmesh.DeviceIdentity `json:"identity"`
+		CloudRemoved   bool                          `json:"cloud_removed"`
+		MeshReset      bool                          `json:"mesh_reset"`
+		Identity       cloudmesh.DeviceIdentity       `json:"identity"`
+		StoredIdentity deviceidentity.StoredIdentity  `json:"stored_identity"`
 	}
 	if err := json.Unmarshal([]byte(body), &result); err != nil {
 		t.Fatal(err)
@@ -378,6 +456,12 @@ func TestLogoutRemovesCloudDeviceAndResetsMeshIdentity(t *testing.T) {
 	}
 	if result.Identity.DeviceID == "" || result.Identity.DeviceID == identity.DeviceID {
 		t.Fatalf("identity = %#v, want fresh mobile identity", result.Identity)
+	}
+	if result.StoredIdentity.DeviceID != result.Identity.DeviceID || strings.TrimSpace(result.StoredIdentity.PrivateKey) == "" {
+		t.Fatalf("stored_identity = %#v, want fresh persistent identity", result.StoredIdentity)
+	}
+	if _, _, err := deviceidentity.ValidateStored(result.StoredIdentity, deviceidentity.MobileControllerCapabilities()); err != nil {
+		t.Fatalf("stored_identity invalid: %v", err)
 	}
 	if _, err := core.RefreshMesh(); controllercore.ErrorCode(err) != "cloud_session_missing" {
 		t.Fatalf("RefreshMesh error = %v, want cloud_session_missing", err)

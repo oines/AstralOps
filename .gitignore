@@ -17,6 +17,7 @@ proxy-agent/astral-proxy-agent
 .npmrc.local
 .vercel/
 apps/mobile/.expo/
+apps/ios/Frameworks/
 secrets/
 credentials/
 private/
