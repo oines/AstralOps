@@ -359,6 +359,14 @@ func TestControlGatewayCoreReadHidesHostWorkspaceAndSessionInternals(t *testing.
 
 func TestControlGatewayReadsHostSnapshot(t *testing.T) {
 	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	app.agents = map[AgentKind]agentInfo{
+		AgentCodex: {
+			Path:         filepath.Join(t.TempDir(), "codex"),
+			Available:    true,
+			CurrentModel: "gpt-test",
+			Models:       []modelInfo{{ID: "gpt-test", Label: "GPT Test"}},
+		},
+	}
 	workspace.LocalProjectionRoot = "/host/private/projection"
 	workspace.NativeSessionID = "workspace-native-session"
 	app.store.mu.Lock()
@@ -406,6 +414,9 @@ func TestControlGatewayReadsHostSnapshot(t *testing.T) {
 	}
 	if len(snapshot.SessionViews) != 1 || snapshot.SessionViews[0].Session.NativeSessionID != "" {
 		t.Fatalf("snapshot session views = %#v, want sanitized session view", snapshot.SessionViews)
+	}
+	if got := snapshot.Agents[AgentCodex]; got.Path != "" || got.CurrentModel != "gpt-test" || len(got.Models) != 1 {
+		t.Fatalf("snapshot agents = %#v, want model info without Host path", snapshot.Agents)
 	}
 	if len(snapshot.Events) != 1 || snapshot.Events[0].Raw != nil {
 		t.Fatalf("snapshot events = %#v, want sanitized events", snapshot.Events)

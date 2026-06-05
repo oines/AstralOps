@@ -26,13 +26,6 @@ struct SettingsSheet: View {
                             Label(authenticatingProvider == "github" ? "Signing in..." : "Sign in with GitHub", systemImage: "person.crop.circle.badge.checkmark")
                         }
                         .disabled(authenticatingProvider != nil)
-
-                        Button {
-                            beginCloudAuth(provider: "google")
-                        } label: {
-                            Label(authenticatingProvider == "google" ? "Signing in..." : "Sign in with Google", systemImage: "person.crop.circle.badge.checkmark")
-                        }
-                        .disabled(authenticatingProvider != nil)
                     }
                 }
 
@@ -47,6 +40,63 @@ struct SettingsSheet: View {
                         set: { model.toggleForceRelayOnly($0) }
                     ))
                     LabeledContent("Relay status", value: model.mesh?.cloud?.relayURL ?? "Not connected")
+                }
+
+                Section("Host Management") {
+                    Button {
+                        Task { await model.loadHostManagement() }
+                    } label: {
+                        Label("Refresh Host management", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(model.selectedHost == nil)
+
+                    if !model.pairingRequests.isEmpty {
+                        ForEach(model.pairingRequests) { request in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(request.controllerDeviceName ?? request.controllerDeviceID)
+                                    .font(.body.weight(.semibold))
+                                Text([request.status, request.scope].compactMap { $0 }.joined(separator: " · "))
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                HStack {
+                                    Button {
+                                        Task { await model.resolvePairingRequest(request, approve: true) }
+                                    } label: {
+                                        Label("Approve", systemImage: "checkmark.circle")
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    Button(role: .destructive) {
+                                        Task { await model.resolvePairingRequest(request, approve: false) }
+                                    } label: {
+                                        Label("Deny", systemImage: "xmark.circle")
+                                    }
+                                    .buttonStyle(.bordered)
+                                }
+                                .font(.footnote.weight(.semibold))
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+
+                    if !model.trustGrants.isEmpty {
+                        ForEach(model.trustGrants) { grant in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(grant.controllerDeviceName ?? grant.controllerDeviceID)
+                                    .font(.body.weight(.semibold))
+                                Text([grant.status, grant.scope].compactMap { $0 }.joined(separator: " · "))
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                Button(role: .destructive) {
+                                    Task { await model.revokeTrust(grant) }
+                                } label: {
+                                    Label("Revoke", systemImage: "person.crop.circle.badge.xmark")
+                                }
+                                .buttonStyle(.bordered)
+                                .font(.footnote.weight(.semibold))
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
                 }
 
                 Section("Diagnostics") {
@@ -72,7 +122,7 @@ struct SettingsSheet: View {
                 let code = try await oauth.requestLoginCode(provider: provider, baseURL: baseURL)
                 await model.login(baseURL: code.baseURL, loginCode: code.loginCode)
             } catch {
-                model.errorMessage = error.localizedDescription
+                model.presentError(error)
             }
         }
     }

@@ -16,14 +16,15 @@ type hostSnapshotParams struct {
 }
 
 type hostSnapshotResult struct {
-	Host                 HostInfo              `json:"host"`
-	Workspaces           []Workspace           `json:"workspaces"`
-	Sessions             []Session             `json:"sessions"`
-	WorkspaceConnections []WorkspaceConnection `json:"workspace_connections,omitempty"`
-	Events               []AstralEvent         `json:"events"`
-	SessionViews         []sessionView         `json:"session_views"`
-	InitialSessionEvents []AstralEvent         `json:"initial_session_events,omitempty"`
-	Workbench            workbenchState        `json:"workbench"`
+	Host                 HostInfo                `json:"host"`
+	Agents               map[AgentKind]agentInfo `json:"agents,omitempty"`
+	Workspaces           []Workspace             `json:"workspaces"`
+	Sessions             []Session               `json:"sessions"`
+	WorkspaceConnections []WorkspaceConnection   `json:"workspace_connections,omitempty"`
+	Events               []AstralEvent           `json:"events"`
+	SessionViews         []sessionView           `json:"session_views"`
+	InitialSessionEvents []AstralEvent           `json:"initial_session_events,omitempty"`
+	Workbench            workbenchState          `json:"workbench"`
 }
 
 func (a *app) handleHostSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -66,6 +67,7 @@ func (a *app) buildHostSnapshot(params hostSnapshotParams) hostSnapshotResult {
 
 	result := hostSnapshotResult{
 		Host:                 a.store.hostInfo(),
+		Agents:               sanitizeControlAgents(a.agents),
 		Workspaces:           sanitizeControlWorkspaces(workspaces),
 		Sessions:             sanitizeControlSessions(sessions),
 		WorkspaceConnections: connections,

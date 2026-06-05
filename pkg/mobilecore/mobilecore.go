@@ -20,6 +20,73 @@ import (
 
 const defaultCloudBaseURL = "https://cloud-astralops.oines.dev"
 
+var mobileControlActionCapabilities = map[string]string{
+	"core.read.host_snapshot":           "core.read",
+	"core.read.workbench":               "core.read",
+	"core.read.ping":                    "core.read",
+	"core.read.session_view":            "core.read",
+	"core.read.sessions":                "core.read",
+	"core.read.workspaces":              "core.read",
+	"core.read.workspace.connection":    "core.read",
+	"core.read.events":                  "core.read",
+	"core.subscribe.events":             "core.read",
+	"core.unsubscribe.events":           "core.read",
+	"core.control.session_input":        "core.control",
+	"core.control.interrupt":            "core.control",
+	"core.control.queue.cancel":         "core.control",
+	"core.control.queue.steer":          "core.control",
+	"core.control.workspace.create":     "core.control",
+	"core.control.workspace.connect":    "core.control",
+	"core.control.workspace.disconnect": "core.control",
+	"core.control.workspace.delete":     "core.control",
+	"core.control.session.create":       "core.control",
+	"core.control.session.fork":         "core.control",
+	"core.control.session.delete":       "core.control",
+	"interaction.respond":               "interaction.respond",
+	"session.edit":                      "session.edit",
+	"attachment.ingest":                 "attachment.ingest",
+	"attachment.ingest.start":           "attachment.ingest",
+	"attachment.ingest.chunk":           "attachment.ingest",
+	"attachment.ingest.finish":          "attachment.ingest",
+	"media.read":                        "media.read",
+	"media.download":                    "media.download",
+	"media.stream":                      "media.stream",
+	"media.stream.cancel":               "media.stream",
+	"workspace.files.read":              "workspace.files.read",
+	"workspace.files.write":             "workspace.files.write",
+	"workspace.files.apply_patch":       "workspace.files.write",
+	"workspace.files.delete":            "workspace.files.write",
+	"workspace.files.move":              "workspace.files.write",
+	"workspace.files.stream":            "workspace.files.read",
+	"workspace.files.stream.cancel":     "workspace.files.read",
+	"workspace.exec":                    "workspace.exec",
+	"terminal.open":                     "terminal.open",
+	"terminal.list":                     "terminal.open",
+	"terminal.attach":                   "terminal.open",
+	"terminal.detach":                   "terminal.open",
+	"terminal.heartbeat_ack":            "terminal.open",
+	"terminal.input":                    "terminal.input",
+	"terminal.resize":                   "terminal.input",
+	"terminal.close":                    "terminal.input",
+	"host.fs.browse":                    "host.fs.browse",
+	"host.trust.list":                   "host.manage",
+	"host.trust.revoke":                 "host.manage",
+	"host.pairing.list":                 "host.manage",
+	"host.pairing.approve":              "host.manage",
+	"host.pairing.deny":                 "host.manage",
+}
+
+func mobileCloudHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:             http.ProxyFromEnvironment,
+			DisableKeepAlives: true,
+			ForceAttemptHTTP2: false,
+		},
+	}
+}
+
 type Callback interface {
 	OnHostState(payload string)
 	OnWorkbenchPatch(payload string)
@@ -181,7 +248,7 @@ func (c *Core) Logout() (string, error) {
 	cloudRemoved := false
 	if strings.TrimSpace(identity.DeviceID) != "" && strings.TrimSpace(session.BaseURL) != "" && strings.TrimSpace(session.AccountToken) != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		client := cloudmesh.Client{BaseURL: session.BaseURL, Token: session.AccountToken, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+		client := cloudmesh.Client{BaseURL: session.BaseURL, Token: session.AccountToken, HTTPClient: mobileCloudHTTPClient(5 * time.Second)}
 		if _, err := client.RemoveDevice(ctx, identity.DeviceID); err == nil {
 			cloudRemoved = true
 		}
@@ -291,6 +358,35 @@ func (c *Core) RespondInteraction(hostDeviceID, interactionID, responseJSON stri
 	return encode(response)
 }
 
+func (c *Core) ControlRequest(hostDeviceID, capability, action, paramsJSON string) (string, error) {
+	capability = strings.TrimSpace(capability)
+	action = strings.TrimSpace(action)
+	requiredCapability, ok := mobileControlActionCapabilities[action]
+	if !ok {
+		err := controllercore.NewActionError(http.StatusNotFound, "control_action_unknown", "control action not found")
+		c.emitError(err)
+		return "", err
+	}
+	if capability != requiredCapability {
+		err := controllercore.NewActionError(http.StatusForbidden, "capability_mismatch", "control capability does not match action")
+		c.emitError(err)
+		return "", err
+	}
+	params := map[string]any{}
+	if strings.TrimSpace(paramsJSON) != "" {
+		if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
+			c.emitError(err)
+			return "", err
+		}
+	}
+	response, err := c.controllerCore().Request(context.Background(), hostDeviceID, capability, action, params)
+	if err != nil {
+		c.emitError(err)
+		return "", err
+	}
+	return encode(response)
+}
+
 func (c *Core) SubscribeEvents(hostDeviceID, optionsJSON string) (string, error) {
 	params := controllercore.EventSubscriptionParams{}
 	if strings.TrimSpace(optionsJSON) != "" {
@@ -309,6 +405,10 @@ func (c *Core) SubscribeEvents(hostDeviceID, optionsJSON string) (string, error)
 	return encode(map[string]any{"ok": true, "host_device_id": hostDeviceID})
 }
 
+func (c *Core) ListTerminals(hostDeviceID string) (string, error) {
+	return c.ControlRequest(hostDeviceID, "terminal.open", "terminal.list", "")
+}
+
 func (c *Core) OpenTerminal(hostDeviceID, workspaceID string) (string, error) {
 	session := c.controllerCore().OpenHostSession(hostDeviceID)
 	stream, err := session.OpenTerminal(context.Background(), workspaceID, 0)
@@ -322,6 +422,7 @@ func (c *Core) OpenTerminal(hostDeviceID, workspaceID string) (string, error) {
 }
 
 func (c *Core) AttachTerminal(hostDeviceID, terminalID string, afterSeq int64) (string, error) {
+	c.detachCachedTerminal(hostDeviceID, terminalID)
 	session := c.controllerCore().OpenHostSession(hostDeviceID)
 	stream, err := session.AttachTerminal(context.Background(), terminalID, afterSeq)
 	if err != nil {
@@ -358,6 +459,33 @@ func (c *Core) TerminalResize(hostDeviceID, terminalID string, cols, rows int) (
 		c.emitError(err)
 		return "", err
 	}
+	return encode(map[string]any{"ok": true})
+}
+
+func (c *Core) TerminalHeartbeatAck(hostDeviceID, terminalID string, heartbeatSeq, renderedSeq int64) (string, error) {
+	stream := c.terminal(hostDeviceID, terminalID)
+	if stream == nil {
+		err := controllercore.NewActionError(http.StatusConflict, controllercore.TerminalViewerNotReadyCode, "terminal viewer is not live")
+		c.emitError(err)
+		return "", err
+	}
+	if err := stream.AckHeartbeat(heartbeatSeq, renderedSeq); err != nil {
+		c.emitError(err)
+		return "", err
+	}
+	return encode(map[string]any{"ok": true})
+}
+
+func (c *Core) DetachTerminal(hostDeviceID, terminalID string) (string, error) {
+	stream := c.terminal(hostDeviceID, terminalID)
+	if stream == nil {
+		return encode(map[string]any{"ok": true})
+	}
+	if err := stream.Detach(); err != nil {
+		c.emitError(err)
+		return "", err
+	}
+	c.deleteTerminal(hostDeviceID, terminalID)
 	return encode(map[string]any{"ok": true})
 }
 
@@ -460,7 +588,7 @@ func (t mobileTransport) MeshState(ctx context.Context, discover bool) (controll
 	if err != nil {
 		return controllercore.MeshState{}, err
 	}
-	client := cloudmesh.Client{BaseURL: session.BaseURL, Token: session.AccountToken, HTTPClient: &http.Client{Timeout: 10 * time.Second}}
+	client := cloudmesh.Client{BaseURL: session.BaseURL, Token: session.AccountToken, HTTPClient: mobileCloudHTTPClient(10 * time.Second)}
 	account, err := client.GetAccount(ctx)
 	if err != nil {
 		return controllercore.MeshState{}, controllercore.NewActionError(http.StatusBadGateway, "cloud_request_failed", err.Error())
@@ -517,7 +645,7 @@ func (t mobileTransport) RequestPairing(ctx context.Context, hostDeviceID string
 	if err != nil {
 		return controllercore.PairingSignal{}, err
 	}
-	client := cloudmesh.Client{BaseURL: session.BaseURL, Token: session.AccountToken, HTTPClient: &http.Client{Timeout: 10 * time.Second}}
+	client := cloudmesh.Client{BaseURL: session.BaseURL, Token: session.AccountToken, HTTPClient: mobileCloudHTTPClient(10 * time.Second)}
 	account, err := client.GetAccount(ctx)
 	if err != nil {
 		return controllercore.PairingSignal{}, controllercore.NewActionError(http.StatusBadGateway, "cloud_request_failed", err.Error())
@@ -641,7 +769,7 @@ func (c *Core) refreshCloudFacts(ctx context.Context) (cloudmesh.DeviceIdentity,
 	if err != nil {
 		return cloudmesh.DeviceIdentity{}, nil, cloudSession{}, cloudmesh.Account{}, nil, err
 	}
-	client := cloudmesh.Client{BaseURL: session.BaseURL, Token: session.AccountToken, HTTPClient: &http.Client{Timeout: 10 * time.Second}}
+	client := cloudmesh.Client{BaseURL: session.BaseURL, Token: session.AccountToken, HTTPClient: mobileCloudHTTPClient(10 * time.Second)}
 	account, err := client.GetAccount(ctx)
 	if err != nil {
 		return cloudmesh.DeviceIdentity{}, nil, cloudSession{}, cloudmesh.Account{}, nil, controllercore.NewActionError(http.StatusBadGateway, "cloud_request_failed", err.Error())
@@ -733,7 +861,7 @@ func (c *Core) resolveCloudSession(input cloudSessionInput, identity cloudmesh.D
 		baseURL := firstNonEmpty(input.BaseURL, sessionBaseURL(input.Session), defaultCloudBaseURL)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		exchanged, err := cloudmesh.ExchangeLoginCode(ctx, baseURL, input.LoginCode, identity, false, true, &http.Client{Timeout: 15 * time.Second})
+		exchanged, err := cloudmesh.ExchangeLoginCode(ctx, baseURL, input.LoginCode, identity, false, true, mobileCloudHTTPClient(15*time.Second))
 		if err != nil {
 			return cloudSession{}, controllercore.NewActionError(http.StatusBadGateway, "cloud_request_failed", err.Error())
 		}
@@ -1000,6 +1128,15 @@ func (c *Core) storeTerminal(hostDeviceID string, stream controllercore.Terminal
 	}
 	c.terminals[terminalKey(hostDeviceID, stream.TerminalID())] = stream
 	c.mu.Unlock()
+}
+
+func (c *Core) detachCachedTerminal(hostDeviceID, terminalID string) {
+	stream := c.terminal(hostDeviceID, terminalID)
+	if stream == nil {
+		return
+	}
+	c.deleteTerminal(hostDeviceID, terminalID)
+	_ = stream.Detach()
 }
 
 func (c *Core) terminal(hostDeviceID, terminalID string) controllercore.TerminalStream {

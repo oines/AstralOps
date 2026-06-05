@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +31,12 @@ func TestMobileCoreFacadeDelegatesRemoteActionsToGoController(t *testing.T) {
 	if _, err := core.RespondInteraction("dev_host", "approval_1", mustJSON(t, map[string]any{"decision": "accept"})); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := core.ControlRequest("dev_host", "workspace.files.read", "workspace.files.read", mustJSON(t, map[string]any{"workspace_id": "workspace_1", "path": "."})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.ListTerminals("dev_host"); err != nil {
+		t.Fatal(err)
+	}
 	body, err := core.OpenTerminal("dev_host", "workspace_1")
 	if err != nil {
 		t.Fatal(err)
@@ -46,6 +54,12 @@ func TestMobileCoreFacadeDelegatesRemoteActionsToGoController(t *testing.T) {
 	if _, err := core.TerminalResize("dev_host", "term_1", 100, 40); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := core.TerminalHeartbeatAck("dev_host", "term_1", 3, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.DetachTerminal("dev_host", "term_1"); err != nil {
+		t.Fatal(err)
+	}
 	if transport.requestCount(controllercore.ActionHostSnapshot) != 1 {
 		t.Fatalf("snapshot requests = %d, want 1", transport.requestCount(controllercore.ActionHostSnapshot))
 	}
@@ -58,11 +72,65 @@ func TestMobileCoreFacadeDelegatesRemoteActionsToGoController(t *testing.T) {
 	if response := transport.requestForAction(controllercore.ActionInteractionRespond); response.Params["interaction_id"] != "approval_1" {
 		t.Fatalf("interaction params = %#v, want approval_1", response.Params)
 	}
+	if response := transport.requestForAction("workspace.files.read"); response.Params["workspace_id"] != "workspace_1" {
+		t.Fatalf("workspace files params = %#v, want workspace_1", response.Params)
+	}
+	if transport.requestCount("terminal.list") != 1 {
+		t.Fatalf("terminal list requests = %d, want 1", transport.requestCount("terminal.list"))
+	}
 	if transport.terminal.input != "pwd\n" {
 		t.Fatalf("terminal input = %q, want pwd", transport.terminal.input)
 	}
 	if transport.terminal.cols != 100 || transport.terminal.rows != 40 {
 		t.Fatalf("terminal resize = %dx%d, want 100x40", transport.terminal.cols, transport.terminal.rows)
+	}
+	if transport.terminal.heartbeatSeq != 3 || transport.terminal.renderedSeq != 2 {
+		t.Fatalf("terminal heartbeat ack = %d/%d, want 3/2", transport.terminal.heartbeatSeq, transport.terminal.renderedSeq)
+	}
+	if !transport.terminal.detached {
+		t.Fatal("terminal was not detached")
+	}
+}
+
+func TestMobileCoreReplacingTerminalViewerDetachesPreviousStream(t *testing.T) {
+	first := newFakeMobileCoreTerminal("term_1")
+	second := newFakeMobileCoreTerminal("term_1")
+	transport := &fakeMobileCoreTransport{terminals: []*fakeMobileCoreTerminal{first, second}}
+	core := New()
+	core.controller = controllercore.New(transport)
+
+	if _, err := core.OpenTerminal("dev_host", "workspace_1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.AttachTerminal("dev_host", "term_1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if !first.detached {
+		t.Fatal("previous terminal viewer was not detached")
+	}
+	if second.detached {
+		t.Fatal("new terminal viewer was detached")
+	}
+	if _, err := core.TerminalInput("dev_host", "term_1", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if first.input != "" {
+		t.Fatalf("old terminal input = %q, want empty", first.input)
+	}
+	if second.input != "x" {
+		t.Fatalf("new terminal input = %q, want x", second.input)
+	}
+}
+
+func TestMobileCoreControlRequestRejectsUnsupportedAction(t *testing.T) {
+	core := New()
+	core.controller = controllercore.New(&fakeMobileCoreTransport{terminal: newFakeMobileCoreTerminal("term_1")})
+
+	if _, err := core.ControlRequest("dev_host", "core.read", "workspace.files.read", "{}"); controllercore.ErrorCode(err) != "capability_mismatch" {
+		t.Fatalf("capability mismatch error = %v, want capability_mismatch", err)
+	}
+	if _, err := core.ControlRequest("dev_host", "core.read", "core.control.unknown", "{}"); controllercore.ErrorCode(err) != "control_action_unknown" {
+		t.Fatalf("unknown action error = %v, want control_action_unknown", err)
 	}
 }
 
@@ -169,9 +237,10 @@ func TestSetCloudSessionRefreshesMeshThroughGoCore(t *testing.T) {
 }
 
 type fakeMobileCoreTransport struct {
-	mu       sync.Mutex
-	requests []controllercore.ControlRequest
-	terminal *fakeMobileCoreTerminal
+	mu        sync.Mutex
+	requests  []controllercore.ControlRequest
+	terminal  *fakeMobileCoreTerminal
+	terminals []*fakeMobileCoreTerminal
 }
 
 func (f *fakeMobileCoreTransport) ControlState(string) controllercore.ControlState {
@@ -192,14 +261,25 @@ func (f *fakeMobileCoreTransport) SubscribeEvents(context.Context, string, contr
 }
 
 func (f *fakeMobileCoreTransport) OpenTerminal(context.Context, string, string, int64) (controllercore.TerminalStream, error) {
-	return f.terminal, nil
+	return f.nextTerminal(), nil
 }
 
 func (f *fakeMobileCoreTransport) AttachTerminal(context.Context, string, string, int64) (controllercore.TerminalStream, error) {
-	return f.terminal, nil
+	return f.nextTerminal(), nil
 }
 
 func (f *fakeMobileCoreTransport) Invalidate(string, string) {}
+
+func (f *fakeMobileCoreTransport) nextTerminal() *fakeMobileCoreTerminal {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.terminals) > 0 {
+		terminal := f.terminals[0]
+		f.terminals = f.terminals[1:]
+		return terminal
+	}
+	return f.terminal
+}
 
 func (f *fakeMobileCoreTransport) requestCount(action string) int {
 	f.mu.Lock()
@@ -225,21 +305,34 @@ func (f *fakeMobileCoreTransport) requestForAction(action string) controllercore
 }
 
 type fakeMobileCoreTerminal struct {
-	terminalID string
-	frames     chan controllercore.TerminalFrame
-	input      string
-	cols       int
-	rows       int
+	terminalID   string
+	viewerID     string
+	inputLeaseID string
+	frames       chan controllercore.TerminalFrame
+	input        string
+	cols         int
+	rows         int
+	heartbeatSeq int64
+	renderedSeq  int64
+	detached     bool
 }
 
+var fakeMobileCoreTerminalSeq int64
+
 func newFakeMobileCoreTerminal(terminalID string) *fakeMobileCoreTerminal {
-	return &fakeMobileCoreTerminal{terminalID: terminalID, frames: make(chan controllercore.TerminalFrame)}
+	suffix := strconv.FormatInt(atomic.AddInt64(&fakeMobileCoreTerminalSeq, 1), 10)
+	return &fakeMobileCoreTerminal{
+		terminalID:   terminalID,
+		viewerID:     "viewer_" + terminalID + "_" + suffix,
+		inputLeaseID: "lease_" + terminalID + "_" + suffix,
+		frames:       make(chan controllercore.TerminalFrame),
+	}
 }
 
 func (f *fakeMobileCoreTerminal) TerminalID() string { return f.terminalID }
-func (f *fakeMobileCoreTerminal) ViewerID() string   { return "viewer_1" }
+func (f *fakeMobileCoreTerminal) ViewerID() string   { return f.viewerID }
 func (f *fakeMobileCoreTerminal) InputLeaseID() string {
-	return "lease_1"
+	return f.inputLeaseID
 }
 func (f *fakeMobileCoreTerminal) Shell() string    { return "zsh" }
 func (f *fakeMobileCoreTerminal) CWD() string      { return "/" }
@@ -256,9 +349,16 @@ func (f *fakeMobileCoreTerminal) Resize(cols, rows int) error {
 	f.rows = rows
 	return nil
 }
-func (f *fakeMobileCoreTerminal) AckHeartbeat(int64, int64) error { return nil }
-func (f *fakeMobileCoreTerminal) Close() error                    { return nil }
-func (f *fakeMobileCoreTerminal) Detach() error                   { return nil }
+func (f *fakeMobileCoreTerminal) AckHeartbeat(seq, renderedSeq int64) error {
+	f.heartbeatSeq = seq
+	f.renderedSeq = renderedSeq
+	return nil
+}
+func (f *fakeMobileCoreTerminal) Close() error { return nil }
+func (f *fakeMobileCoreTerminal) Detach() error {
+	f.detached = true
+	return nil
+}
 
 func TestRequestPairingUsesCloudMeshClient(t *testing.T) {
 	stored := testMobileStoredIdentity(t)
@@ -445,8 +545,8 @@ func TestLogoutRemovesCloudDeviceAndResetsMeshIdentity(t *testing.T) {
 	var result struct {
 		CloudRemoved   bool                          `json:"cloud_removed"`
 		MeshReset      bool                          `json:"mesh_reset"`
-		Identity       cloudmesh.DeviceIdentity       `json:"identity"`
-		StoredIdentity deviceidentity.StoredIdentity  `json:"stored_identity"`
+		Identity       cloudmesh.DeviceIdentity      `json:"identity"`
+		StoredIdentity deviceidentity.StoredIdentity `json:"stored_identity"`
 	}
 	if err := json.Unmarshal([]byte(body), &result); err != nil {
 		t.Fatal(err)

@@ -16,6 +16,7 @@ enum MobileCoreBridgeError: Error, LocalizedError {
     case unavailable
     case invalidUTF8
     case emptyResponse
+    case controlError(ControlErrorEnvelope)
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +26,8 @@ enum MobileCoreBridgeError: Error, LocalizedError {
             "Mobile Core returned invalid UTF-8 JSON."
         case .emptyResponse:
             "Mobile Core returned an empty response."
+        case .controlError(let error):
+            error.message.isEmpty ? error.code : error.message
         }
     }
 }
@@ -43,11 +46,15 @@ protocol MobileCoreRawClient: AnyObject {
     func snapshot(hostDeviceID: String, optionsJSON: String) async throws -> String
     func sendInput(hostDeviceID: String, sessionID: String, inputJSON: String) async throws -> String
     func respondInteraction(hostDeviceID: String, interactionID: String, responseJSON: String) async throws -> String
+    func controlRequest(hostDeviceID: String, capability: String, action: String, paramsJSON: String) async throws -> String
     func subscribeEvents(hostDeviceID: String, optionsJSON: String) async throws -> String
+    func listTerminals(hostDeviceID: String) async throws -> String
     func openTerminal(hostDeviceID: String, workspaceID: String) async throws -> String
     func attachTerminal(hostDeviceID: String, terminalID: String, afterSeq: Int) async throws -> String
     func terminalInput(hostDeviceID: String, terminalID: String, data: String) async throws -> String
     func terminalResize(hostDeviceID: String, terminalID: String, cols: Int, rows: Int) async throws -> String
+    func terminalHeartbeatAck(hostDeviceID: String, terminalID: String, heartbeatSeq: Int, renderedSeq: Int) async throws -> String
+    func detachTerminal(hostDeviceID: String, terminalID: String) async throws -> String
     func terminalClose(hostDeviceID: String, terminalID: String) async throws -> String
 }
 
@@ -117,13 +124,27 @@ final class MobileCoreBridge: ObservableObject {
         return envelope.result ?? SnapshotResult(workbench: nil, events: nil, initialSessionEvents: nil)
     }
 
-    func sendInput(hostDeviceID: String, sessionID: String, text: String) async throws {
-        let input = JSONValue.object(["input": .string(text)])
+    func sendInput(hostDeviceID: String, sessionID: String, text: String, options: JSONValue = .object([:])) async throws {
+        var input = options.objectValue ?? [:]
+        input["input"] = .string(text)
         _ = try await raw.sendInput(hostDeviceID: hostDeviceID, sessionID: sessionID, inputJSON: jsonString(input))
     }
 
     func respondInteraction(hostDeviceID: String, interactionID: String, response: JSONValue) async throws {
         _ = try await raw.respondInteraction(hostDeviceID: hostDeviceID, interactionID: interactionID, responseJSON: jsonString(response))
+    }
+
+    func controlRequest(hostDeviceID: String, capability: String, action: String, params: JSONValue = .object([:])) async throws -> JSONValue {
+        let envelope = try await call(ControlResponseEnvelope<JSONValue>.self) {
+            try await raw.controlRequest(hostDeviceID: hostDeviceID, capability: capability, action: action, paramsJSON: jsonString(params))
+        }
+        if envelope.ok == false, let error = envelope.error {
+            throw MobileCoreBridgeError.controlError(error)
+        }
+        if let result = envelope.result {
+            return result
+        }
+        return .object(["ok": .bool(envelope.ok ?? false)])
     }
 
     func subscribeEvents(hostDeviceID: String, sessionID: String?) async throws {
@@ -132,6 +153,16 @@ final class MobileCoreBridge: ObservableObject {
             payload["session_id"] = .string(sessionID)
         }
         _ = try await raw.subscribeEvents(hostDeviceID: hostDeviceID, optionsJSON: jsonString(JSONValue.object(payload)))
+    }
+
+    func listTerminals(hostDeviceID: String) async throws -> [TerminalTab] {
+        let envelope = try await call(ControlResponseEnvelope<[TerminalTab]>.self) {
+            try await raw.listTerminals(hostDeviceID: hostDeviceID)
+        }
+        if envelope.ok == false, let error = envelope.error {
+            throw MobileCoreBridgeError.controlError(error)
+        }
+        return envelope.result ?? []
     }
 
     func openTerminal(hostDeviceID: String, workspaceID: String) async throws -> JSONValue {
@@ -146,12 +177,24 @@ final class MobileCoreBridge: ObservableObject {
         }
     }
 
+    func attachTerminal(hostDeviceID: String, terminalID: String) async throws -> JSONValue {
+        try await attachTerminal(hostDeviceID: hostDeviceID, terminalID: terminalID, afterSeq: 0)
+    }
+
     func terminalInput(hostDeviceID: String, terminalID: String, data: String) async throws {
         _ = try await raw.terminalInput(hostDeviceID: hostDeviceID, terminalID: terminalID, data: data)
     }
 
     func terminalResize(hostDeviceID: String, terminalID: String, cols: Int, rows: Int) async throws {
         _ = try await raw.terminalResize(hostDeviceID: hostDeviceID, terminalID: terminalID, cols: cols, rows: rows)
+    }
+
+    func terminalHeartbeatAck(hostDeviceID: String, terminalID: String, heartbeatSeq: Int, renderedSeq: Int) async throws {
+        _ = try await raw.terminalHeartbeatAck(hostDeviceID: hostDeviceID, terminalID: terminalID, heartbeatSeq: heartbeatSeq, renderedSeq: renderedSeq)
+    }
+
+    func detachTerminal(hostDeviceID: String, terminalID: String) async throws {
+        _ = try await raw.detachTerminal(hostDeviceID: hostDeviceID, terminalID: terminalID)
     }
 
     func terminalClose(hostDeviceID: String, terminalID: String) async throws {
@@ -197,42 +240,59 @@ final class UnavailableMobileCoreRawClient: MobileCoreRawClient {
     func snapshot(hostDeviceID: String, optionsJSON: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
     func sendInput(hostDeviceID: String, sessionID: String, inputJSON: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
     func respondInteraction(hostDeviceID: String, interactionID: String, responseJSON: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
+    func controlRequest(hostDeviceID: String, capability: String, action: String, paramsJSON: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
     func subscribeEvents(hostDeviceID: String, optionsJSON: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
+    func listTerminals(hostDeviceID: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
     func openTerminal(hostDeviceID: String, workspaceID: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
     func attachTerminal(hostDeviceID: String, terminalID: String, afterSeq: Int) async throws -> String { throw MobileCoreBridgeError.unavailable }
     func terminalInput(hostDeviceID: String, terminalID: String, data: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
     func terminalResize(hostDeviceID: String, terminalID: String, cols: Int, rows: Int) async throws -> String { throw MobileCoreBridgeError.unavailable }
+    func terminalHeartbeatAck(hostDeviceID: String, terminalID: String, heartbeatSeq: Int, renderedSeq: Int) async throws -> String { throw MobileCoreBridgeError.unavailable }
+    func detachTerminal(hostDeviceID: String, terminalID: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
     func terminalClose(hostDeviceID: String, terminalID: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
 }
 
 #if canImport(Mobilecore)
+private final class GoMobileCoreBox: @unchecked Sendable {
+    let core: MobilecoreCore
+
+    init() {
+        core = MobilecoreNew()!
+    }
+}
+
 @MainActor
 final class GoMobileCoreRawClient: NSObject, MobileCoreRawClient, MobilecoreCallbackProtocol {
     var onEvent: ((MobileCoreEvent) -> Void)?
-    private let core: MobilecoreCore
+    private let box: GoMobileCoreBox
+    private let queue = DispatchQueue(label: "dev.oines.astralops.mobilecore")
 
     override init() {
-        self.core = MobilecoreNew()!
+        self.box = GoMobileCoreBox()
         super.init()
-        core.setCallback(self)
+        box.core.setCallback(self)
     }
 
-    func start(_ configJSON: String) async throws -> String { try invoke { core.start(configJSON, error: $0) } }
-    func setCloudSession(_ sessionJSON: String) async throws -> String { try invoke { core.setCloudSession(sessionJSON, error: $0) } }
-    func cloudSession() async throws -> String { try invoke { core.cloudSession($0) } }
-    func logout() async throws -> String { try invoke { core.logout($0) } }
-    func refreshMesh() async throws -> String { try invoke { core.refreshMesh($0) } }
-    func requestPairing(hostDeviceID: String) async throws -> String { try invoke { core.requestPairing(hostDeviceID, error: $0) } }
-    func openHostSession(hostDeviceID: String) async throws -> String { try invoke { core.openHostSession(hostDeviceID, error: $0) } }
-    func snapshot(hostDeviceID: String, optionsJSON: String) async throws -> String { try invoke { core.snapshot(hostDeviceID, optionsJSON: optionsJSON, error: $0) } }
-    func sendInput(hostDeviceID: String, sessionID: String, inputJSON: String) async throws -> String { try invoke { core.sendInput(hostDeviceID, sessionID: sessionID, inputJSON: inputJSON, error: $0) } }
-    func respondInteraction(hostDeviceID: String, interactionID: String, responseJSON: String) async throws -> String { try invoke { core.respondInteraction(hostDeviceID, interactionID: interactionID, responseJSON: responseJSON, error: $0) } }
-    func subscribeEvents(hostDeviceID: String, optionsJSON: String) async throws -> String { try invoke { core.subscribeEvents(hostDeviceID, optionsJSON: optionsJSON, error: $0) } }
-    func openTerminal(hostDeviceID: String, workspaceID: String) async throws -> String { try invoke { core.openTerminal(hostDeviceID, workspaceID: workspaceID, error: $0) } }
-    func attachTerminal(hostDeviceID: String, terminalID: String, afterSeq: Int) async throws -> String { try invoke { core.attachTerminal(hostDeviceID, terminalID: terminalID, afterSeq: Int64(afterSeq), error: $0) } }
-    func terminalInput(hostDeviceID: String, terminalID: String, data: String) async throws -> String { try invoke { core.terminalInput(hostDeviceID, terminalID: terminalID, data: data, error: $0) } }
-    func terminalResize(hostDeviceID: String, terminalID: String, cols: Int, rows: Int) async throws -> String { try invoke { core.terminalResize(hostDeviceID, terminalID: terminalID, cols: cols, rows: rows, error: $0) } }
-    func terminalClose(hostDeviceID: String, terminalID: String) async throws -> String { try invoke { core.terminalClose(hostDeviceID, terminalID: terminalID, error: $0) } }
+    func start(_ configJSON: String) async throws -> String { try await invoke { core, error in core.start(configJSON, error: error) } }
+    func setCloudSession(_ sessionJSON: String) async throws -> String { try await invoke { core, error in core.setCloudSession(sessionJSON, error: error) } }
+    func cloudSession() async throws -> String { try await invoke { core, error in core.cloudSession(error) } }
+    func logout() async throws -> String { try await invoke { core, error in core.logout(error) } }
+    func refreshMesh() async throws -> String { try await invoke { core, error in core.refreshMesh(error) } }
+    func requestPairing(hostDeviceID: String) async throws -> String { try await invoke { core, error in core.requestPairing(hostDeviceID, error: error) } }
+    func openHostSession(hostDeviceID: String) async throws -> String { try await invoke { core, error in core.openHostSession(hostDeviceID, error: error) } }
+    func snapshot(hostDeviceID: String, optionsJSON: String) async throws -> String { try await invoke { core, error in core.snapshot(hostDeviceID, optionsJSON: optionsJSON, error: error) } }
+    func sendInput(hostDeviceID: String, sessionID: String, inputJSON: String) async throws -> String { try await invoke { core, error in core.sendInput(hostDeviceID, sessionID: sessionID, inputJSON: inputJSON, error: error) } }
+    func respondInteraction(hostDeviceID: String, interactionID: String, responseJSON: String) async throws -> String { try await invoke { core, error in core.respondInteraction(hostDeviceID, interactionID: interactionID, responseJSON: responseJSON, error: error) } }
+    func controlRequest(hostDeviceID: String, capability: String, action: String, paramsJSON: String) async throws -> String { try await invoke { core, error in core.controlRequest(hostDeviceID, capability: capability, action: action, paramsJSON: paramsJSON, error: error) } }
+    func subscribeEvents(hostDeviceID: String, optionsJSON: String) async throws -> String { try await invoke { core, error in core.subscribeEvents(hostDeviceID, optionsJSON: optionsJSON, error: error) } }
+    func listTerminals(hostDeviceID: String) async throws -> String { try await invoke { core, error in core.listTerminals(hostDeviceID, error: error) } }
+    func openTerminal(hostDeviceID: String, workspaceID: String) async throws -> String { try await invoke { core, error in core.openTerminal(hostDeviceID, workspaceID: workspaceID, error: error) } }
+    func attachTerminal(hostDeviceID: String, terminalID: String, afterSeq: Int) async throws -> String { try await invoke { core, error in core.attachTerminal(hostDeviceID, terminalID: terminalID, afterSeq: Int64(afterSeq), error: error) } }
+    func terminalInput(hostDeviceID: String, terminalID: String, data: String) async throws -> String { try await invoke { core, error in core.terminalInput(hostDeviceID, terminalID: terminalID, data: data, error: error) } }
+    func terminalResize(hostDeviceID: String, terminalID: String, cols: Int, rows: Int) async throws -> String { try await invoke { core, error in core.terminalResize(hostDeviceID, terminalID: terminalID, cols: cols, rows: rows, error: error) } }
+    func terminalHeartbeatAck(hostDeviceID: String, terminalID: String, heartbeatSeq: Int, renderedSeq: Int) async throws -> String { try await invoke { core, error in core.terminalHeartbeatAck(hostDeviceID, terminalID: terminalID, heartbeatSeq: Int64(heartbeatSeq), renderedSeq: Int64(renderedSeq), error: error) } }
+    func detachTerminal(hostDeviceID: String, terminalID: String) async throws -> String { try await invoke { core, error in core.detachTerminal(hostDeviceID, terminalID: terminalID, error: error) } }
+    func terminalClose(hostDeviceID: String, terminalID: String) async throws -> String { try await invoke { core, error in core.terminalClose(hostDeviceID, terminalID: terminalID, error: error) } }
 
     nonisolated func onHostState(_ payload: String?) {
         dispatch(event(payload, MobileCoreEvent.hostState))
@@ -254,13 +314,19 @@ final class GoMobileCoreRawClient: NSObject, MobileCoreRawClient, MobilecoreCall
         dispatch(event(payload, MobileCoreEvent.error))
     }
 
-    private func invoke(_ operation: (NSErrorPointer) -> String) throws -> String {
-        var error: NSError?
-        let result = operation(&error)
-        if let error {
-            throw error
+    private func invoke(_ operation: @escaping @Sendable (MobilecoreCore, NSErrorPointer) -> String) async throws -> String {
+        let box = box
+        return try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                var error: NSError?
+                let result = operation(box.core, &error)
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: result)
+                }
+            }
         }
-        return result
     }
 
     private nonisolated func event(_ payload: String?, _ make: (Data) -> MobileCoreEvent) -> MobileCoreEvent? {

@@ -40,3 +40,15 @@ type modelInfo struct {
 	EffectiveContextWindow        int      `json:"effective_context_window,omitempty"`
 	EffectiveContextWindowPercent int      `json:"effective_context_window_percent,omitempty"`
 }
+
+func sanitizeControlAgents(agents map[AgentKind]agentInfo) map[AgentKind]agentInfo {
+	if len(agents) == 0 {
+		return nil
+	}
+	out := make(map[AgentKind]agentInfo, len(agents))
+	for agent, info := range agents {
+		info.Path = ""
+		out[agent] = info
+	}
+	return out
+}

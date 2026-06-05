@@ -17,6 +17,8 @@ Swift must not derive Mesh state, implement a terminal state machine, semantical
 node apps/ios/scripts/build-web-assets.mjs
 ```
 
+Generated `apps/ios/Resources/*.html` WebView bundles are local build artifacts and are not committed.
+
 ## Build Go Mobile Framework
 
 ```bash

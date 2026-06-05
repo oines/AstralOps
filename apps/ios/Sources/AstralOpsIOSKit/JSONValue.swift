@@ -49,9 +49,84 @@ extension JSONValue {
         return nil
     }
 
+    var arrayValue: [JSONValue]? {
+        if case .array(let value) = self { return value }
+        return nil
+    }
+
     var stringValue: String? {
         if case .string(let value) = self { return value }
         return nil
+    }
+
+    var boolValue: Bool? {
+        if case .bool(let value) = self { return value }
+        return nil
+    }
+
+    var numberValue: Double? {
+        if case .number(let value) = self { return value }
+        return nil
+    }
+
+    var intValue: Int? {
+        guard let numberValue else { return nil }
+        return Int(numberValue)
+    }
+
+    var displayString: String {
+        switch self {
+        case .null:
+            return ""
+        case .bool(let value):
+            return value ? "true" : "false"
+        case .number(let value):
+            if value.rounded() == value {
+                return String(Int64(value))
+            }
+            return String(value)
+        case .string(let value):
+            return value
+        case .array, .object:
+            guard let data = try? JSONCoding.encode(self), let value = String(data: data, encoding: .utf8) else { return "" }
+            return value
+        }
+    }
+
+    static func string(_ value: String?) -> JSONValue {
+        guard let value else { return .null }
+        return .string(value)
+    }
+
+    static func number(_ value: Int) -> JSONValue {
+        .number(Double(value))
+    }
+
+    static func from(_ value: Any?) -> JSONValue {
+        switch value {
+        case nil:
+            return .null
+        case let value as JSONValue:
+            return value
+        case let value as Bool:
+            return .bool(value)
+        case let value as Int:
+            return .number(Double(value))
+        case let value as Int64:
+            return .number(Double(value))
+        case let value as Double:
+            return .number(value)
+        case let value as String:
+            return .string(value)
+        case let value as [String]:
+            return .array(value.map { .string($0) })
+        case let value as [JSONValue]:
+            return .array(value)
+        case let value as [String: JSONValue]:
+            return .object(value)
+        default:
+            return .null
+        }
     }
 }
 

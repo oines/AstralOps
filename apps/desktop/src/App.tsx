@@ -25,6 +25,7 @@ import { useSessionCommands } from "./hooks/useSessionCommands";
 import { useSessionEventWindow } from "./hooks/useSessionEventWindow";
 import i18n, { resolveAppLanguage } from "./i18n";
 import type {
+  AgentInfo,
   AgentKind,
   AppSettings,
   AppSettingsPatch,
@@ -108,6 +109,7 @@ export function App(): React.JSX.Element {
   const [pendingPairingCount, setPendingPairingCount] = useState(0);
   const [requestingPairingHostId, setRequestingPairingHostId] = useState("");
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [hostAgents, setHostAgents] = useState<Partial<Record<AgentKind, AgentInfo>>>({});
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [settingsSavingKeys, setSettingsSavingKeys] = useState<Set<string>>(() => new Set());
   const [settingsError, setSettingsError] = useState("");
@@ -240,6 +242,8 @@ export function App(): React.JSX.Element {
     else delete node.dataset.rightPanelResizing;
   }, []);
 
+  const localHostDeviceId = localHostInfo?.identity.device_id || LOCAL_HOST_ID;
+  const selectedHostIsLocal = selectedHostId === LOCAL_HOST_ID || selectedHostId === localHostDeviceId;
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null,
     [activeWorkspaceId, workspaces],
@@ -292,7 +296,7 @@ export function App(): React.JSX.Element {
               ? t("desktop:composer.continueInterject")
               : t("desktop:composer.continueAfterCurrent")
           : t("desktop:composer.defaultPlaceholder");
-  const activeAgentInfo = activeAgent ? health?.agents[activeAgent] : undefined;
+  const activeAgentInfo = activeAgent ? hostAgents[activeAgent] ?? (selectedHostIsLocal ? health?.agents[activeAgent] : undefined) : undefined;
   const modelOptions = useMemo(() => activeAgentInfo?.models ?? [], [activeAgentInfo]);
   const currentModel = activeAgentInfo?.current_model;
   const currentEffort = activeAgentInfo?.current_effort;
@@ -379,6 +383,20 @@ export function App(): React.JSX.Element {
   const applyWorkbenchPatch = useCallback((patch: WorkbenchPatch) => {
     for (const op of patch.ops) {
       switch (op.collection) {
+        case "agents": {
+          const agent = op.id as AgentKind;
+          if (op.op === "remove") {
+            setHostAgents((current) => {
+              const next = { ...current };
+              delete next[agent];
+              return next;
+            });
+            continue;
+          }
+          const info = op.value as AgentInfo;
+          if (info) setHostAgents((current) => ({ ...current, [agent]: info }));
+          break;
+        }
         case "workspaces": {
           if (op.op === "remove") {
             const workspaceID = op.id;
@@ -534,6 +552,7 @@ export function App(): React.JSX.Element {
     if (options.isCurrent && !options.isCurrent()) return [];
     workbench = snapshot.workbench;
     hostResponse = snapshot.host;
+    setHostAgents(workbench?.agents ?? snapshot.agents ?? {});
     workspaceResponse = workbench ? sortWorkspacesByUpdated(workbenchValues(workbench.workspaces)) : snapshot.workspaces;
     sessionResponse = workbench ? sortSessionsByUpdated(workbenchValues(workbench.sessions)) : snapshot.sessions;
     recentEvents = snapshot.events;
@@ -588,6 +607,7 @@ export function App(): React.JSX.Element {
 
   const clearDisplayedWorkbenchState = useCallback(() => {
     setWorkspaces([]);
+    setHostAgents({});
     setWorkspaceConnections({});
     setTerminalTabs({});
     setSessions([]);
@@ -1059,8 +1079,6 @@ export function App(): React.JSX.Element {
   const composerVisible = Boolean(activeWorkspace && activeSession);
   const nativeVibrancy = isMacDesktop && appSettings.appearance.mac_sidebar_effect;
   const preferredSessionAgent: AgentKind = appSettings.session.default_agent === "remember" ? lastSessionAgent : appSettings.session.default_agent;
-  const localHostDeviceId = localHostInfo?.identity.device_id || LOCAL_HOST_ID;
-  const selectedHostIsLocal = selectedHostId === LOCAL_HOST_ID || selectedHostId === localHostDeviceId;
   const visibleRemoteHosts = useMemo(() => {
     if (selectedHostIsLocal || remoteHosts.some((host) => host.device_id === selectedHostId)) return remoteHosts;
     const cached = remoteHostCacheRef.current[selectedHostId];

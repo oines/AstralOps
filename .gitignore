@@ -18,6 +18,8 @@ proxy-agent/astral-proxy-agent
 .vercel/
 apps/mobile/.expo/
 apps/ios/Frameworks/
+apps/ios/Resources/terminal-*.html
+apps/ios/Resources/transcript-*.html
 secrets/
 credentials/
 private/

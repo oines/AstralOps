@@ -17,6 +17,13 @@ targets:
       - path: App
       - path: Sources/AstralOpsIOSKit
       - path: Resources
+    preBuildScripts:
+      - name: Generate WebView Resources
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          cd "$SRCROOT/../.."
+          /usr/bin/env node apps/ios/scripts/build-web-assets.mjs
     dependencies:
       - framework: Frameworks/Mobilecore.xcframework
         embed: true

@@ -275,6 +275,7 @@ export type HostSnapshotRequest = {
 
 export type HostSnapshotResponse = {
   host: HostInfo;
+  agents?: Record<AgentKind, AgentInfo>;
   workspaces: Workspace[];
   sessions: Session[];
   workspace_connections?: WorkspaceConnection[];
@@ -308,6 +309,7 @@ export type WorkbenchPanel = {
 export type WorkbenchState = {
   version: number;
   updated_at: string;
+  agents?: Record<AgentKind, AgentInfo>;
   workspaces: Record<string, Workspace>;
   sessions: Record<string, Session>;
   session_views: Record<string, SessionView>;
@@ -317,6 +319,7 @@ export type WorkbenchState = {
 };
 
 export type WorkbenchCollectionName =
+  | "agents"
   | "workspaces"
   | "sessions"
   | "session_views"

@@ -650,6 +650,7 @@ func (a *app) remoteHostSnapshot(ctx context.Context, hostDeviceID string, param
 	workspaces, sessions, sessionViews, connections := flattenRemoteWorkbenchState(workbench)
 	result := hostSnapshotResult{
 		Host:                 a.remoteHostSnapshotHostInfo(hostDeviceID),
+		Agents:               sanitizeControlAgents(workbench.Agents),
 		Workspaces:           workspaces,
 		Sessions:             sessions,
 		WorkspaceConnections: connections,

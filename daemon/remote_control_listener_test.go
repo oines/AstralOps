@@ -216,6 +216,14 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 
 func TestRemoteHostSnapshotHydratesWorkbenchState(t *testing.T) {
 	hostApp, workspace := newRemoteControlHandlerTestApp(t)
+	hostApp.agents = map[AgentKind]agentInfo{
+		AgentCodex: {
+			Path:         "/private/bin/codex",
+			Available:    true,
+			CurrentModel: "gpt-remote",
+			Models:       []modelInfo{{ID: "gpt-remote", Label: "GPT Remote"}},
+		},
+	}
 	session := hostApp.store.createSession(workspace, AgentCodex)
 	if _, err := hostApp.store.appendEvent(AstralEvent{
 		WorkspaceID: workspace.ID,
@@ -254,6 +262,9 @@ func TestRemoteHostSnapshotHydratesWorkbenchState(t *testing.T) {
 	}
 	if len(snapshot.InitialSessionEvents) != 1 || snapshot.InitialSessionEvents[0].SessionID != session.ID {
 		t.Fatalf("initial session events = %#v, want selected session events", snapshot.InitialSessionEvents)
+	}
+	if got := snapshot.Agents[AgentCodex]; got.Path != "" || got.CurrentModel != "gpt-remote" || len(got.Models) != 1 {
+		t.Fatalf("snapshot agents = %#v, want remote model info without Host path", snapshot.Agents)
 	}
 
 	stateReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/state", nil)
