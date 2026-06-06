@@ -1680,6 +1680,86 @@ func TestNativeHistoryDiscoveryAndProjection(t *testing.T) {
 	}
 }
 
+func TestCodexNativeAttachmentManifestProjectsCleanUserMedia(t *testing.T) {
+	dir := t.TempDir()
+	st, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Native Attachment", Target: "local", Agent: AgentCodex, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	imagePath := filepath.Join(dir, "photo.jpg")
+	imageBody := []byte("jpeg-body")
+	if err := os.WriteFile(imagePath, imageBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifestText := "describe this\n\nAttached files available to the agent:\n- [image] photo.jpg (image/jpeg): " + imagePath + "\n<image name=[Image #1]> </image>"
+	nativePath := filepath.Join(dir, "codex-native.jsonl")
+	lines := strings.Join([]string{
+		`{"timestamp":"2026-06-01T00:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":` + strconv.Quote(manifestText) + `}]}}`,
+		`{"timestamp":"2026-06-01T00:00:00Z","type":"event_msg","payload":{"type":"user_message","message":` + strconv.Quote(manifestText) + `,"images":[],"local_images":[]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(nativePath, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := st.createSession(workspace, AgentCodex)
+	session.NativeRef = &NativeSessionRef{Agent: AgentCodex, LocalPath: nativePath, NativeThreadID: "thread_attachments", WorkspaceCWD: dir}
+	st.mu.Lock()
+	st.sessions[session.ID] = session
+	st.mu.Unlock()
+
+	app := &app{store: st, hub: newEventHub()}
+	events := app.eventProjection().QueryEvents(workspace.ID, session.ID, 0)
+	userEvents := []AstralEvent{}
+	for _, event := range events {
+		if event.Kind == "message.user" {
+			userEvents = append(userEvents, event)
+		}
+	}
+	if len(userEvents) != 1 {
+		t.Fatalf("user events = %#v, want one deduped native user message", userEvents)
+	}
+	value := mapValue(userEvents[0].Normalized)
+	if stringValue(value["text"]) != "describe this" {
+		t.Fatalf("message.user text = %#v, want manifest stripped", value)
+	}
+	attachments := attachmentsFromNormalized(value["attachments"])
+	if len(attachments) != 1 || attachments[0].Path != imagePath || attachments[0].MIMEType != "image/jpeg" || attachments[0].ID == "" {
+		t.Fatalf("attachments = %#v, want Host-local media reference", attachments)
+	}
+	if strings.Contains(attachments[0].ID, imagePath) {
+		t.Fatalf("attachment id leaked path: %#v", attachments[0])
+	}
+
+	sanitized := sanitizeControlEvents([]AstralEvent{userEvents[0]})
+	projected := mapValue(sanitized[0].Normalized)
+	projectedAttachment := mapValue(arrayValue(projected["attachments"])[0])
+	if stringValue(projectedAttachment["path"]) != "" || stringValue(projectedAttachment["saved_path"]) != "" {
+		t.Fatalf("remote attachment projection leaked path: %#v", projectedAttachment)
+	}
+	if stringValue(projectedAttachment["media_id"]) != attachments[0].ID {
+		t.Fatalf("projected attachment = %#v, want media id", projectedAttachment)
+	}
+
+	media, err := app.mediaService().readControlMedia(mediaReadParams{
+		SessionID: session.ID,
+		EventSeq:  userEvents[0].Seq,
+		MediaID:   attachments[0].ID,
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(media.ContentBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != string(imageBody) || media.MIMEType != "image/jpeg" {
+		t.Fatalf("media = %#v body=%q, want native image bytes", media, string(decoded))
+	}
+}
+
 func TestGetSessionResolvesManagedSessionNativeRefOnDemand(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

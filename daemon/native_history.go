@@ -780,10 +780,9 @@ func normalizeClaudeNativeHistoryLine(session Session, line []byte) []AstralEven
 			return normalizeClaudeNativeAssistantLine(session, raw, line)
 		case "user":
 			if text := claudeUserMessageText(raw); text != "" {
-				return []AstralEvent{nativeEvent(session, "message.user", map[string]any{
-					"source": "claude",
-					"text":   text,
-				})}
+				if normalized := nativeUserMessageNormalized("claude", text); len(normalized) > 0 {
+					return []AstralEvent{nativeEvent(session, "message.user", normalized)}
+				}
 			}
 		case "attachment":
 			return normalizeClaudeNativeAttachment(session, raw)
@@ -1234,7 +1233,8 @@ func codexNativeEventUserMessageText(raw map[string]any) string {
 	if isCodexHiddenUserContext(text) {
 		return ""
 	}
-	return text
+	visible, _ := splitNativeAttachmentManifest(text)
+	return visible
 }
 
 func codexTranscriptTextKey(text string) string {
@@ -1352,10 +1352,9 @@ func normalizeCodexNativeEventMsg(session Session, payload map[string]any) []Ast
 	case "user_message":
 		text := stringValue(payload["message"])
 		if text != "" && !isCodexHiddenUserContext(text) {
-			return []AstralEvent{nativeEvent(session, "message.user", map[string]any{
-				"source": "codex",
-				"text":   text,
-			})}
+			if normalized := nativeUserMessageNormalized("codex", text); len(normalized) > 0 {
+				return []AstralEvent{nativeEvent(session, "message.user", normalized)}
+			}
 		}
 	case "agent_message":
 		if text := stringValue(payload["message"]); text != "" {
@@ -1455,14 +1454,11 @@ func normalizeCodexNativeResponseItem(session Session, payload map[string]any, t
 		role := stringValue(payload["role"])
 		switch role {
 		case "user":
-			text := codexUserMessageText(payload)
-			if text == "" {
+			normalized := codexUserMessageNormalized(payload)
+			if len(normalized) == 0 {
 				return nil
 			}
-			return []AstralEvent{nativeEvent(session, "message.user", map[string]any{
-				"source": "codex",
-				"text":   text,
-			})}
+			return []AstralEvent{nativeEvent(session, "message.user", normalized)}
 		case "assistant":
 			text := codexMessageText(payload)
 			if text == "" {
@@ -1819,6 +1815,117 @@ func nativeEvent(session Session, kind string, normalized map[string]any) Astral
 	}
 }
 
+const nativeAttachmentManifestHeader = "Attached files available to the agent:"
+
+func nativeUserMessageNormalized(source string, text string) map[string]any {
+	visible, attachments := splitNativeAttachmentManifest(text)
+	if strings.TrimSpace(visible) == "" && len(attachments) == 0 {
+		return nil
+	}
+	normalized := map[string]any{
+		"source": source,
+		"text":   strings.TrimSpace(visible),
+	}
+	if len(attachments) > 0 {
+		normalized["attachments"] = transcriptAttachmentValues(attachments)
+	}
+	return normalized
+}
+
+func splitNativeAttachmentManifest(text string) (string, []InputAttachment) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", nil
+	}
+	index := strings.Index(text, nativeAttachmentManifestHeader)
+	if index < 0 {
+		return stripNativeImagePlaceholders(text), nil
+	}
+	visible := stripNativeImagePlaceholders(strings.TrimSpace(text[:index]))
+	manifest := text[index+len(nativeAttachmentManifestHeader):]
+	return visible, parseNativeAttachmentManifest(manifest)
+}
+
+func parseNativeAttachmentManifest(manifest string) []InputAttachment {
+	attachments := []InputAttachment{}
+	for _, line := range strings.Split(manifest, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "<image ") || !strings.HasPrefix(line, "- [") {
+			continue
+		}
+		attachment, ok := nativeAttachmentFromManifestLine(line)
+		if ok {
+			attachments = append(attachments, attachment)
+		}
+	}
+	return attachments
+}
+
+func nativeAttachmentFromManifestLine(line string) (InputAttachment, bool) {
+	rest, ok := strings.CutPrefix(line, "- [")
+	if !ok {
+		return InputAttachment{}, false
+	}
+	kind, rest, ok := strings.Cut(rest, "] ")
+	if !ok {
+		return InputAttachment{}, false
+	}
+	separator := strings.LastIndex(rest, ": ")
+	if separator < 0 {
+		return InputAttachment{}, false
+	}
+	label := strings.TrimSpace(rest[:separator])
+	path := strings.TrimSpace(rest[separator+2:])
+	if marker := strings.Index(path, " <image "); marker >= 0 {
+		path = strings.TrimSpace(path[:marker])
+	}
+	if path == "" || strings.HasPrefix(path, "<image ") {
+		return InputAttachment{}, false
+	}
+	name := label
+	mimeType := ""
+	if strings.HasSuffix(label, ")") {
+		if open := strings.LastIndex(label, " ("); open >= 0 {
+			mimeType = strings.TrimSpace(strings.TrimSuffix(label[open+2:], ")"))
+			name = strings.TrimSpace(label[:open])
+		}
+	}
+	if kind != "image" {
+		kind = "file"
+	}
+	if name == "" {
+		name = filepath.Base(path)
+	}
+	size := int64(0)
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		size = info.Size()
+	}
+	return InputAttachment{
+		ID:       nativeAttachmentID(path),
+		Kind:     kind,
+		Path:     path,
+		Name:     name,
+		MIMEType: mimeType,
+		Size:     size,
+	}, true
+}
+
+func nativeAttachmentID(path string) string {
+	sum := sha1.Sum([]byte(filepath.Clean(path)))
+	return "native_" + hex.EncodeToString(sum[:])[:24]
+}
+
+func stripNativeImagePlaceholders(text string) string {
+	lines := []string{}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "<image ") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
 func codexMessageText(payload map[string]any) string {
 	parts := []string{}
 	for _, item := range arrayValue(payload["content"]) {
@@ -1845,6 +1952,34 @@ func codexFunctionCallInput(value any) any {
 	return decoded
 }
 
+func codexUserMessageNormalized(payload map[string]any) map[string]any {
+	parts := []string{}
+	attachments := []InputAttachment{}
+	for _, item := range arrayValue(payload["content"]) {
+		value := mapValue(item)
+		switch stringValue(value["type"]) {
+		case "input_text", "text":
+			text := stringValue(value["text"])
+			if text == "" || isCodexHiddenUserContext(text) {
+				continue
+			}
+			visible, parsed := splitNativeAttachmentManifest(text)
+			if visible != "" {
+				parts = append(parts, visible)
+			}
+			attachments = append(attachments, parsed...)
+		}
+	}
+	normalized := nativeUserMessageNormalized("codex", strings.Join(parts, "\n"))
+	if len(normalized) == 0 && len(attachments) > 0 {
+		normalized = map[string]any{"source": "codex", "text": ""}
+	}
+	if len(attachments) > 0 {
+		normalized["attachments"] = transcriptAttachmentValues(attachments)
+	}
+	return normalized
+}
+
 func codexUserMessageText(payload map[string]any) string {
 	parts := []string{}
 	for _, item := range arrayValue(payload["content"]) {
@@ -1853,7 +1988,10 @@ func codexUserMessageText(payload map[string]any) string {
 		case "input_text", "text":
 			text := stringValue(value["text"])
 			if text != "" && !isCodexHiddenUserContext(text) {
-				parts = append(parts, text)
+				visible, _ := splitNativeAttachmentManifest(text)
+				if visible != "" {
+					parts = append(parts, visible)
+				}
 			}
 		}
 	}

@@ -1226,6 +1226,9 @@ final class AppModel: ObservableObject {
         if lower.contains("cloud request failed") || lower.contains("cloud-astralops.oines.dev") || lower.contains("/v1/") || lower.contains("eof") {
             return "Cloud request failed. Check your network and try again."
         }
+        if lower.contains("context deadline exceeded") || lower.contains("remote control request failed") && lower.contains("deadline") {
+            return "Host request timed out. Check the connection and try again."
+        }
         return message.isEmpty ? "Something went wrong." : message
     }
 

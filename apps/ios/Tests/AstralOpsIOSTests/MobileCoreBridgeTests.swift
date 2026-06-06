@@ -251,6 +251,14 @@ final class MobileCoreBridgeTests: XCTestCase {
         XCTAssertEqual(AppModel.errorDisplayMessage(for: error), "Cloud request failed. Check your network and try again.")
     }
 
+    func testRemoteControlDeadlineErrorUsesUserReadableMessage() {
+        let error = NSError(domain: "gomobile", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "remote control request failed: context deadline exceeded"
+        ])
+
+        XCTAssertEqual(AppModel.errorDisplayMessage(for: error), "Host request timed out. Check the connection and try again.")
+    }
+
     func testBrowseAndWorkspaceEntriesTreatDirKindAsDirectory() throws {
         let hostEntry = try JSONCoding.decode(HostFileSystemEntry.self, from: Data(#"{"name":"src","path":"/repo/src","kind":"dir"}"#.utf8))
         let workspaceEntry = try JSONCoding.decode(WorkspaceFileEntry.self, from: Data(#"{"name":"src","path":"/repo/src","kind":"dir"}"#.utf8))
