@@ -68,9 +68,9 @@ struct RootView: View {
             .shadow(color: .black.opacity(0.2 * clampedProgress), radius: 24 * clampedProgress, x: -6 * clampedProgress, y: 8 * clampedProgress)
             .scaleEffect(1.0 - (0.045 * clampedProgress))
             .offset(x: drawerOffset)
-            .allowsHitTesting(clampedProgress < 0.001)
+            .allowsHitTesting(!model.showSideMenu)
 
-            if clampedProgress > 0 {
+            if model.showSideMenu {
                 DrawerGestureOverlay(
                     capturesWholeView: true,
                     edgeWidth: edgeGestureWidth,
@@ -149,6 +149,9 @@ struct RootView: View {
             Button("OK", role: .cancel) { model.errorMessage = "" }
         } message: {
             Text(model.errorMessage)
+        }
+        .onChange(of: model.showSideMenu) { _, _ in
+            resetDrawerDrag()
         }
     }
 
