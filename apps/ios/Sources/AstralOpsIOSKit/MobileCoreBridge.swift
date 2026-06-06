@@ -118,8 +118,12 @@ final class MobileCoreBridge: ObservableObject {
     }
 
     func snapshot(hostDeviceID: String) async throws -> SnapshotResult {
+        let optionsJSON = try jsonString(JSONValue.object([
+            "restore_on_launch": .bool(true),
+            "event_limit": .number(1000)
+        ]))
         let envelope = try await call(ControlResponseEnvelope<SnapshotResult>.self) {
-            try await raw.snapshot(hostDeviceID: hostDeviceID, optionsJSON: "{}")
+            try await raw.snapshot(hostDeviceID: hostDeviceID, optionsJSON: optionsJSON)
         }
         return envelope.result ?? SnapshotResult(workbench: nil, events: nil, initialSessionEvents: nil)
     }

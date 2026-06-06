@@ -800,22 +800,12 @@ struct PairingRequest: Codable, Identifiable {
 struct SnapshotResult: Codable {
     var workbench: WorkbenchState?
     var events: [AstralEvent]?
-    var initialSessionEvents: [SessionEvents]?
+    var initialSessionEvents: [AstralEvent]?
 
     enum CodingKeys: String, CodingKey {
         case workbench
         case events
         case initialSessionEvents = "initial_session_events"
-    }
-}
-
-struct SessionEvents: Codable {
-    var sessionID: String
-    var events: [AstralEvent]
-
-    enum CodingKeys: String, CodingKey {
-        case sessionID = "session_id"
-        case events
     }
 }
 

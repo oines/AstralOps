@@ -119,6 +119,36 @@ final class MobileCoreBridgeTests: XCTestCase {
         XCTAssertEqual(raw.calls.last?.payload, "term_1:0")
     }
 
+    func testSnapshotRequestsLaunchEventsAndDecodesInitialEventArray() async throws {
+        let raw = FakeRawClient()
+        raw.responses["snapshot"] = """
+        {
+          "ok": true,
+          "result": {
+            "initial_session_events": [
+              {
+                "seq": 1,
+                "session_id": "sess_1",
+                "kind": "message.user",
+                "normalized": {"text": "hello"}
+              }
+            ]
+          }
+        }
+        """
+        let bridge = MobileCoreBridge(raw: raw)
+        let decoded = try JSONCoding.decode(ControlResponseEnvelope<SnapshotResult>.self, from: try XCTUnwrap(raw.responses["snapshot"]?.data(using: .utf8)))
+        XCTAssertEqual(decoded.result?.initialSessionEvents?.count, 1)
+
+        let snapshot = try await bridge.snapshot(hostDeviceID: "dev_host")
+
+        XCTAssertEqual(raw.calls.last?.name, "snapshot")
+        XCTAssertTrue(raw.calls.last?.payload.contains("\"restore_on_launch\":true") ?? false)
+        XCTAssertTrue(raw.calls.last?.payload.contains("\"event_limit\":1000") ?? false)
+        XCTAssertEqual(snapshot.initialSessionEvents?.count, 1)
+        XCTAssertEqual(snapshot.initialSessionEvents?.first?.sessionID, "sess_1")
+    }
+
     func testCloudTransportErrorUsesUserReadableMessage() {
         let error = NSError(domain: "gomobile", code: 1, userInfo: [
             NSLocalizedDescriptionKey: #"Get "https://cloud-astralops.oines.dev/v1/account": EOF"#
@@ -214,7 +244,7 @@ private final class FakeRawClient: MobileCoreRawClient {
 
     func snapshot(hostDeviceID: String, optionsJSON: String) async throws -> String {
         calls.append(Call(name: "snapshot", hostDeviceID: hostDeviceID, payload: optionsJSON))
-        return #"{"ok":true,"result":{}}"#
+        return responses["snapshot"] ?? #"{"ok":true,"result":{}}"#
     }
 
     func sendInput(hostDeviceID: String, sessionID: String, inputJSON: String) async throws -> String {

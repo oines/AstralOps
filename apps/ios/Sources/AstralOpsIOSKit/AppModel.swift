@@ -22,10 +22,9 @@ enum AppModelError: Error, LocalizedError {
 @MainActor
 final class AppModel: ObservableObject {
     enum Page: Int {
-        case navigator = 0
-        case transcript = 1
-        case files = 2
-        case terminal = 3
+        case transcript = 0
+        case files = 1
+        case terminal = 2
     }
 
     @Published var page: Page = .transcript
@@ -34,6 +33,7 @@ final class AppModel: ObservableObject {
     @Published var mesh: MeshState?
     @Published var hosts: [RemoteHostRecord] = []
     @Published var workbench: WorkbenchState = .empty
+    @Published var globalWorkbenches: [String: WorkbenchState] = [:]
     @Published var selectedHostID = ""
     @Published var selectedWorkspaceID = ""
     @Published var selectedSessionID = ""
@@ -71,6 +71,7 @@ final class AppModel: ObservableObject {
     private var eventsBySession: [String: [AstralEvent]] = [:]
     private var eventTask: Task<Void, Never>?
     private var storedSelection: StoredControllerSelection
+    private var sessionEventLoads = Set<String>()
 
     private let storedIdentityAccount = "stored_identity"
     private let cloudSessionAccount = "cloud_session"
@@ -116,6 +117,66 @@ final class AppModel: ObservableObject {
 
     var selectedSessionView: SessionView? {
         workbench.sessionViews[selectedSessionID]
+    }
+
+    var allPendingInteractions: [(session: SessionRecord, interaction: PendingInteractionView)] {
+        var results: [(SessionRecord, PendingInteractionView)] = []
+        for session in sessions {
+            if let view = workbench.sessionViews[session.id], let interaction = view.pendingInteraction {
+                results.append((session, interaction))
+            }
+        }
+        return results
+    }
+
+    var allQueuedInputs: [(session: SessionRecord, queued: QueuedInputView)] {
+        var results: [(SessionRecord, QueuedInputView)] = []
+        for session in sessions {
+            if let view = workbench.sessionViews[session.id], let queued = view.queuedInputs {
+                for q in queued {
+                    results.append((session, q))
+                }
+            }
+        }
+        return results
+    }
+
+    var allGlobalTerminals: [(host: RemoteHostRecord, tab: TerminalTab)] {
+        var results: [(host: RemoteHostRecord, tab: TerminalTab)] = []
+        for host in hosts {
+            if let w = globalWorkbenches[host.deviceID] {
+                for tab in w.terminalTabs.values {
+                    results.append((host, tab))
+                }
+            }
+        }
+        return results.sorted(by: { ($0.tab.outputSeq ?? 0) > ($1.tab.outputSeq ?? 0) })
+    }
+
+    var allGlobalSessions: [(host: RemoteHostRecord, session: SessionRecord)] {
+        var results: [(host: RemoteHostRecord, session: SessionRecord)] = []
+        for host in hosts {
+            if let w = globalWorkbenches[host.deviceID] {
+                for session in w.sessions.values {
+                    results.append((host, session))
+                }
+            }
+        }
+        return results.sorted(by: { ($0.session.updatedAt ?? "") > ($1.session.updatedAt ?? "") })
+    }
+
+    var allGlobalPending: [(host: RemoteHostRecord, interaction: PendingInteractionView, session: SessionRecord)] {
+        var results: [(RemoteHostRecord, PendingInteractionView, SessionRecord)] = []
+        for host in hosts {
+            if let w = globalWorkbenches[host.deviceID] {
+                for session in w.sessions.values {
+                    if let view = w.sessionViews[session.id], let interaction = view.pendingInteraction {
+                        results.append((host, interaction, session))
+                    }
+                }
+            }
+        }
+        return results
     }
 
     var selectedSession: SessionRecord? {
@@ -242,12 +303,8 @@ final class AppModel: ObservableObject {
     }
 
     func selectHost(_ host: RemoteHostRecord) {
-        selectedHostID = host.deviceID
-        workbench = .empty
-        selectedWorkspaceID = ""
-        selectedSessionID = ""
-        selectedTerminalID = ""
-        eventsBySession = [:]
+        setActiveHost(host)
+        reconcileSelection()
         saveCurrentSelection()
         renderTranscript()
         Task { await loadSnapshot(for: host.deviceID) }
@@ -270,10 +327,34 @@ final class AppModel: ObservableObject {
         reconcileRunModelSelection()
         saveCurrentSelection()
         renderTranscript()
+        let sessionID = session.id
         Task {
             if let hostID = selectedHost?.deviceID {
-                try? await bridge.subscribeEvents(hostDeviceID: hostID, sessionID: session.id)
+                try? await bridge.subscribeEvents(hostDeviceID: hostID, sessionID: sessionID)
+                if selectedHostID == hostID, selectedSessionID == sessionID {
+                    await loadSnapshot(for: hostID, silent: true)
+                    await loadLatestSessionEvents(sessionID: sessionID, hostID: hostID)
+                }
             }
+        }
+    }
+
+    func selectSession(_ session: SessionRecord, on host: RemoteHostRecord) {
+        setActiveHost(host)
+        selectSession(session)
+    }
+
+    func selectTerminal(_ tab: TerminalTab, on host: RemoteHostRecord? = nil) async {
+        if let host {
+            setActiveHost(host)
+        }
+        selectedWorkspaceID = tab.workspaceID
+        selectedTerminalID = tab.terminalID
+        page = .terminal
+        saveCurrentSelection()
+        await attachTerminal(tab)
+        if let hostID = selectedHost?.deviceID {
+            await loadSnapshot(for: hostID, silent: true)
         }
     }
 
@@ -367,7 +448,36 @@ final class AppModel: ObservableObject {
     }
 
     func deleteSelectedWorkspace() async {
-        await workspaceReferenceAction(action: .workspaceDelete)
+        if let workspace = selectedWorkspace {
+            await deleteWorkspace(workspace)
+        } else {
+            await workspaceReferenceAction(action: .workspaceDelete)
+        }
+    }
+
+    func deleteWorkspace(_ workspace: Workspace) async {
+        do {
+            _ = try await controlValue(
+                capability: .capabilityCoreControl,
+                action: .workspaceDelete,
+                params: .object(["workspace_id": .string(workspace.id)])
+            )
+            let removedSessionIDs = workbench.sessions.values
+                .filter { $0.workspaceID == workspace.id }
+                .map(\.id)
+            for sessionID in removedSessionIDs {
+                eventsBySession.removeValue(forKey: sessionID)
+            }
+            if selectedWorkspaceID == workspace.id {
+                selectedWorkspaceID = ""
+                selectedSessionID = ""
+                selectedTerminalID = ""
+            }
+            await loadSnapshot(for: try requireHost().deviceID, silent: true)
+            renderTranscript()
+        } catch {
+            presentError(error)
+        }
     }
 
     func createSession(agent: String = "") async {
@@ -399,7 +509,12 @@ final class AppModel: ObservableObject {
                 action: .sessionDelete,
                 params: .object(["session_id": .string(session.id)])
             )
+            eventsBySession.removeValue(forKey: session.id)
+            if selectedSessionID == session.id {
+                selectedSessionID = ""
+            }
             await loadSnapshot(for: try requireHost().deviceID, silent: true)
+            renderTranscript()
         } catch {
             presentError(error)
         }
@@ -479,6 +594,8 @@ final class AppModel: ObservableObject {
             if !mediaID.isEmpty {
                 Task { await previewMedia(sessionID: sessionID, eventSeq: eventSeq, mediaID: mediaID, download: false) }
             }
+        case "open_files":
+            page = .files
         default:
             break
         }
@@ -1070,25 +1187,51 @@ final class AppModel: ObservableObject {
         do {
             _ = try await bridge.openHostSession(hostDeviceID: hostID)
             let snapshot = try await bridge.snapshot(hostDeviceID: hostID)
+            globalWorkbenches[hostID] = snapshot.workbench ?? .empty
             if let nextWorkbench = snapshot.workbench {
                 guard selectedHostID == hostID else { return }
                 workbench = nextWorkbench
                 reconcileSelection()
             }
+            if let initial = snapshot.initialSessionEvents {
+                mergeEvents(initial)
+            }
             if let events = snapshot.events {
                 mergeEvents(events)
-            }
-            if let initial = snapshot.initialSessionEvents {
-                for entry in initial {
-                    eventsBySession[entry.sessionID] = entry.events
-                }
             }
             pendingInteraction = workbench.sessionViews[selectedSessionID]?.pendingInteraction
             reconcileRunModelSelection()
             renderTranscript()
             try? await bridge.subscribeEvents(hostDeviceID: hostID, sessionID: selectedSessionID.isEmpty ? nil : selectedSessionID)
+            if !selectedSessionID.isEmpty {
+                await loadLatestSessionEvents(sessionID: selectedSessionID, hostID: hostID)
+            }
         } catch {
             if !silent { presentError(error) }
+        }
+    }
+
+    private func loadLatestSessionEvents(sessionID: String, hostID: String) async {
+        guard !sessionID.isEmpty, selectedHostID == hostID else { return }
+        let loadKey = "\(hostID):\(sessionID)"
+        guard !sessionEventLoads.contains(loadKey) else { return }
+        sessionEventLoads.insert(loadKey)
+        defer { sessionEventLoads.remove(loadKey) }
+        do {
+            let events = try await controlResult(
+                [AstralEvent].self,
+                capability: .capabilityCoreRead,
+                action: .events,
+                params: .object([
+                    "session_id": .string(sessionID),
+                    "limit": .number(1000)
+                ])
+            )
+            guard selectedHostID == hostID else { return }
+            mergeEvents(events, fallbackSessionID: sessionID)
+            renderTranscript()
+        } catch {
+            presentError(error)
         }
     }
 
@@ -1116,8 +1259,25 @@ final class AppModel: ObservableObject {
         if selectedHostID.isEmpty || !hosts.contains(where: { $0.deviceID == selectedHostID }) {
             selectedHostID = restoredHostID(from: hosts) ?? hosts.first?.deviceID ?? ""
         }
-        if !selectedHostID.isEmpty {
-            Task { await loadSnapshot(for: selectedHostID, silent: true) }
+        for host in hosts {
+            Task { await loadSnapshot(for: host.deviceID, silent: true) }
+        }
+    }
+
+    private func setActiveHost(_ host: RemoteHostRecord) {
+        let changingHost = selectedHostID != host.deviceID
+        selectedHostID = host.deviceID
+        if let cachedWorkbench = globalWorkbenches[host.deviceID] {
+            workbench = cachedWorkbench
+        } else if changingHost {
+            workbench = .empty
+        }
+        if changingHost {
+            selectedWorkspaceID = ""
+            selectedSessionID = ""
+            selectedTerminalID = ""
+            pendingInteraction = nil
+            eventsBySession = [:]
         }
     }
 
@@ -1126,6 +1286,7 @@ final class AppModel: ObservableObject {
         mesh = nil
         hosts = []
         workbench = .empty
+        globalWorkbenches = [:]
         selectedHostID = ""
         selectedWorkspaceID = ""
         selectedSessionID = ""
@@ -1230,12 +1391,16 @@ final class AppModel: ObservableObject {
         return selection
     }
 
-    private func mergeEvents(_ events: [AstralEvent]) {
+    private func mergeEvents(_ events: [AstralEvent], fallbackSessionID: String? = nil) {
         for event in events {
-            guard let sessionID = event.sessionID else { continue }
+            var nextEvent = event
+            if nextEvent.sessionID == nil {
+                nextEvent.sessionID = fallbackSessionID
+            }
+            guard let sessionID = nextEvent.sessionID else { continue }
             var current = eventsBySession[sessionID] ?? []
-            if !current.contains(where: { $0.seq == event.seq }) {
-                current.append(event)
+            if !current.contains(where: { $0.seq == nextEvent.seq }) {
+                current.append(nextEvent)
                 current.sort { $0.seq < $1.seq }
             }
             eventsBySession[sessionID] = current

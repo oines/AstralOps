@@ -53,8 +53,6 @@ struct RootView: View {
 
             Group {
                 switch model.page {
-                case .navigator:
-                    NavigatorView()
                 case .transcript:
                     TranscriptPage()
                 case .files:
@@ -159,8 +157,6 @@ struct RootView: View {
             return IOSColors.pageBackground
         }
         switch model.page {
-        case .navigator:
-            return IOSColors.groupedPageBackground
         case .terminal:
             return IOSColors.terminalBackground
         case .files:

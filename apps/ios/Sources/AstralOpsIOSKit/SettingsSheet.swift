@@ -99,6 +99,17 @@ struct SettingsSheet: View {
                     }
                 }
 
+                Section("Discovered Hosts") {
+                    if model.hosts.isEmpty {
+                        Text("No hosts found")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(model.hosts) { host in
+                            HostListItem(host: host, selected: host.deviceID == model.selectedHostID)
+                        }
+                    }
+                }
+
                 Section("Diagnostics") {
                     LabeledContent("Hosts", value: "\(model.hosts.count)")
                     LabeledContent("Workspaces", value: "\(model.workspaces.count)")
@@ -125,5 +136,72 @@ struct SettingsSheet: View {
                 model.presentError(error)
             }
         }
+    }
+}
+
+private struct HostListItem: View {
+    @EnvironmentObject private var model: AppModel
+    let host: RemoteHostRecord
+    let selected: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                model.selectHost(host)
+            } label: {
+                HostRow(host: host, selected: selected)
+            }
+            .buttonStyle(.plain)
+
+            if host.authorizationState == "needs_pairing" {
+                if host.pairingStatus == "pending" {
+                    Label("Pairing requested", systemImage: "clock")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Button {
+                        Task { await model.requestPairing(host) }
+                    } label: {
+                        Label("Request pairing", systemImage: "person.badge.plus")
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct HostRow: View {
+    let host: RemoteHostRecord
+    let selected: Bool
+
+    private var statusText: String {
+        [host.connection, host.authorizationState, host.status].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "desktopcomputer")
+                .foregroundStyle(selected ? .white : .primary)
+                .frame(width: 30, height: 30)
+                .background(selected ? Color.accentColor : Color.secondary.opacity(0.16), in: Circle())
+            VStack(alignment: .leading, spacing: 3) {
+                Text(host.deviceName ?? "Desktop Host")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(statusText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if selected {
+                Image(systemName: "checkmark")
+                    .foregroundStyle(.tint)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(host.deviceName ?? "Desktop Host")
+        .accessibilityValue(selected ? "Selected, \(statusText)" : statusText)
     }
 }

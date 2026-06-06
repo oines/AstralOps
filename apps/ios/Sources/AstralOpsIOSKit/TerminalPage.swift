@@ -102,7 +102,7 @@ struct TerminalPage: View {
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     TerminalShortcutBar()
                 }
-                .task {
+                .task(id: model.selectedTerminalID) {
                     await model.activateTerminalPage()
                 }
             }
