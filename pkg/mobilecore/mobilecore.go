@@ -19,7 +19,14 @@ import (
 	"github.com/oines/astralops/pkg/relaymesh"
 )
 
-const defaultCloudBaseURL = "https://cloud-astralops.oines.dev"
+const (
+	defaultCloudBaseURL              = "https://cloud-astralops.oines.dev"
+	mobileMeshLANDiscoveryTimeout    = 750 * time.Millisecond
+	mobileConnectLANDiscoveryTimeout = 900 * time.Millisecond
+	mobileLANDialTimeout             = 1200 * time.Millisecond
+	mobileOpenHostSessionTimeout     = 4 * time.Second
+	mobileCloudFactsCacheTTL         = 20 * time.Second
+)
 
 func mobileCloudHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
@@ -51,10 +58,15 @@ type Core struct {
 	session        cloudSession
 	forceRelayOnly bool
 	terminals      map[string]controllercore.TerminalStream
+	lanCandidates  map[string]controllercore.LanHostCandidate
+	cloudCache     mobileCloudFactsCache
 }
 
 func New() *Core {
-	core := &Core{terminals: map[string]controllercore.TerminalStream{}}
+	core := &Core{
+		terminals:     map[string]controllercore.TerminalStream{},
+		lanCandidates: map[string]controllercore.LanHostCandidate{},
+	}
 	core.controller = controllercore.New(mobileTransport{core: core})
 	return core
 }
@@ -109,6 +121,9 @@ func (c *Core) Start(configJSON string) (string, error) {
 		c.remote.InvalidateAll("mobile_route_config_changed")
 	}
 	c.forceRelayOnly = config.ForceRelayOnly
+	if config.ForceRelayOnly {
+		c.lanCandidates = map[string]controllercore.LanHostCandidate{}
+	}
 	c.started = true
 	identity := c.identity
 	stored := storedIdentityFromFacts(identity, c.privateKey)
@@ -172,6 +187,7 @@ func (c *Core) SetCloudSession(sessionJSON string) (string, error) {
 
 	c.mu.Lock()
 	c.session = session
+	c.cloudCache = mobileCloudFactsCache{}
 	if c.controller == nil {
 		c.controller = controllercore.New(mobileTransport{core: c})
 	}
@@ -187,6 +203,8 @@ func (c *Core) Logout() (string, error) {
 		c.remote.InvalidateAll("cloud_logout")
 	}
 	c.session = cloudSession{}
+	c.cloudCache = mobileCloudFactsCache{}
+	c.lanCandidates = map[string]controllercore.LanHostCandidate{}
 	c.terminals = map[string]controllercore.TerminalStream{}
 	c.mu.Unlock()
 
@@ -254,11 +272,27 @@ func (c *Core) RequestPairing(hostDeviceID string) (string, error) {
 }
 
 func (c *Core) OpenHostSession(hostDeviceID string) (string, error) {
+	hostDeviceID = strings.TrimSpace(hostDeviceID)
+	if hostDeviceID == "" {
+		err := controllercore.NewActionError(http.StatusBadRequest, "remote_host_required", "remote Host device id is required")
+		c.emitError(err)
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), mobileOpenHostSessionTimeout)
+	defer cancel()
+	_, _ = c.controllerCore().Request(ctx, hostDeviceID, controllercore.CapabilityCoreRead, controllercore.ActionPing, nil)
 	return encode(c.controllerCore().State(hostDeviceID))
 }
 
 func (c *Core) Snapshot(hostDeviceID, optionsJSON string) (string, error) {
-	response, err := c.controllerCore().Request(context.Background(), hostDeviceID, controllercore.CapabilityCoreRead, controllercore.ActionHostSnapshot, nil)
+	params := map[string]any{}
+	if strings.TrimSpace(optionsJSON) != "" {
+		if err := json.Unmarshal([]byte(optionsJSON), &params); err != nil {
+			c.emitError(err)
+			return "", err
+		}
+	}
+	response, err := c.controllerCore().Request(context.Background(), hostDeviceID, controllercore.CapabilityCoreRead, controllercore.ActionHostSnapshot, params)
 	if err != nil {
 		c.emitError(err)
 		return "", err
@@ -534,6 +568,14 @@ func (t mobileTransport) MeshState(ctx context.Context, discover bool) (controll
 	if err != nil {
 		return controllercore.MeshState{}, err
 	}
+	lanCh := make(chan []controllercore.LanHostCandidate, 1)
+	if discover && !t.core.forceRelayOnlyEnabled() {
+		go func() {
+			lanCh <- discoverMobileLANCandidates(ctx, mobileMeshLANDiscoveryTimeout)
+		}()
+	} else {
+		lanCh <- nil
+	}
 	client := cloudmesh.Client{BaseURL: session.BaseURL, Token: session.AccountToken, HTTPClient: mobileCloudHTTPClient(10 * time.Second)}
 	account, err := client.GetAccount(ctx)
 	if err != nil {
@@ -559,6 +601,10 @@ func (t mobileTransport) MeshState(ctx context.Context, discover bool) (controll
 	if err != nil {
 		signals = nil
 	}
+	session = sessionWithCloudFacts(session, account, self)
+	t.core.storeCloudFacts(session, account, devices)
+	lanCandidates := t.core.mergeLANCandidates(<-lanCh)
+	controlStates := t.core.controlStatesForDevices(devices)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	return controllercore.MeshState{
 		Self: controllercore.MeshSelfState{
@@ -576,7 +622,7 @@ func (t mobileTransport) MeshState(ctx context.Context, discover bool) (controll
 			RelayURL:            relayURL,
 			CredentialExpiresAt: relayCredentialExpiresAt(relay),
 		},
-		Hosts:               mobileRemoteHosts(identity.DeviceID, devices, signals, relayURL, now),
+		Hosts:               mobileRemoteHosts(identity.DeviceID, devices, signals, relayURL, now, lanCandidates, controlStates),
 		PendingPairingCount: pendingPairingCount(identity.DeviceID, signals),
 		UpdatedAt:           now,
 	}, nil
@@ -651,6 +697,12 @@ func (t mobileTransport) openFrameConn(ctx context.Context, hostDeviceID string,
 	forceRelay := t.core.forceRelayOnlyEnabled()
 	if !forceRelay && !preferRelay {
 		if conn, target, err := t.openLAN(ctx, known, hostInfo, credentials); err == nil {
+			t.core.rememberLANCandidate(controllercore.LanHostCandidate{
+				DeviceID:             known.DeviceID,
+				DeviceName:           known.DeviceName,
+				PublicKeyFingerprint: known.PublicKeyFingerprint,
+				BaseURL:              target.BaseURL,
+			})
 			return conn, controllercore.ResolvedTarget{HostDeviceID: hostDeviceID, Transport: controllercore.TransportLAN, Timeout: target.Timeout, HasRelay: relayConfigured(session, account)}, nil
 		}
 	}
@@ -662,24 +714,30 @@ func (t mobileTransport) openFrameConn(ctx context.Context, hostDeviceID string,
 }
 
 func (t mobileTransport) openLAN(ctx context.Context, known controllercore.KnownHost, fallbackHostInfo controllercore.HostInfo, credentials controllercore.ClientCredentials) (controllercore.FrameConn, controllercore.ClientTarget, error) {
-	discoverCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	candidate, ok, err := controllercore.DiscoverLANHost(discoverCtx, controllercore.DefaultDiscoveryPort, func(candidate controllercore.LanHostCandidate) bool {
-		return candidate.DeviceID == known.DeviceID && candidate.PublicKeyFingerprint == known.PublicKeyFingerprint
-	})
-	if err != nil {
-		return nil, controllercore.ClientTarget{}, err
-	}
+	candidate, ok := t.core.cachedLANCandidate(known.DeviceID, known.PublicKeyFingerprint)
 	if !ok {
+		discoverCtx, cancel := context.WithTimeout(ctx, mobileConnectLANDiscoveryTimeout)
+		defer cancel()
+		var err error
+		candidate, ok, err = controllercore.DiscoverLANHost(discoverCtx, controllercore.DefaultDiscoveryPort, func(candidate controllercore.LanHostCandidate) bool {
+			return candidate.DeviceID == known.DeviceID && candidate.PublicKeyFingerprint == known.PublicKeyFingerprint
+		})
+		if err != nil {
+			return nil, controllercore.ClientTarget{}, err
+		}
+	}
+	if !ok || strings.TrimSpace(candidate.BaseURL) == "" {
 		return nil, controllercore.ClientTarget{}, errors.New("known Host was not found on LAN")
 	}
-	infoCtx, infoCancel := context.WithTimeout(ctx, 2*time.Second)
+	infoCtx, infoCancel := context.WithTimeout(ctx, mobileLANDialTimeout)
 	defer infoCancel()
-	hostInfo, err := controllercore.FetchHostInfo(infoCtx, candidate.BaseURL, 2*time.Second)
+	hostInfo, err := controllercore.FetchHostInfo(infoCtx, candidate.BaseURL, mobileLANDialTimeout)
 	if err != nil {
+		t.core.forgetLANCandidate(known.DeviceID, candidate.BaseURL)
 		return nil, controllercore.ClientTarget{}, err
 	}
 	if err := controllercore.ValidateKnownHost(known, hostInfo); err != nil {
+		t.core.forgetLANCandidate(known.DeviceID, candidate.BaseURL)
 		return nil, controllercore.ClientTarget{}, err
 	}
 	if hostInfo.Identity.DeviceID == "" {
@@ -688,10 +746,16 @@ func (t mobileTransport) openLAN(ctx context.Context, known controllercore.Known
 	target := controllercore.ClientTarget{
 		HostInfo:           hostInfo,
 		BaseURL:            candidate.BaseURL,
-		Timeout:            2 * time.Second,
+		Timeout:            mobileLANDialTimeout,
 		ControllerDeviceID: credentials.Identity.DeviceID,
 	}
-	return controllercore.DialDirectFrameConn(ctx, target, credentials)
+	conn, activeTarget, err := controllercore.DialDirectFrameConn(ctx, target, credentials)
+	if err != nil {
+		t.core.forgetLANCandidate(known.DeviceID, candidate.BaseURL)
+		return nil, controllercore.ClientTarget{}, err
+	}
+	t.core.rememberLANCandidate(candidate)
+	return conn, activeTarget, nil
 }
 
 func (t mobileTransport) openRelay(ctx context.Context, session cloudSession, account cloudmesh.Account, hostInfo controllercore.HostInfo, credentials controllercore.ClientCredentials) (controllercore.FrameConn, controllercore.ClientTarget, error) {
@@ -715,6 +779,9 @@ func (c *Core) refreshCloudFacts(ctx context.Context) (cloudmesh.DeviceIdentity,
 	if err != nil {
 		return cloudmesh.DeviceIdentity{}, nil, cloudSession{}, cloudmesh.Account{}, nil, err
 	}
+	if cachedSession, account, devices, ok := c.cachedCloudFacts(session); ok {
+		return identity, privateKey, cachedSession, account, devices, nil
+	}
 	client := cloudmesh.Client{BaseURL: session.BaseURL, Token: session.AccountToken, HTTPClient: mobileCloudHTTPClient(10 * time.Second)}
 	account, err := client.GetAccount(ctx)
 	if err != nil {
@@ -732,18 +799,8 @@ func (c *Core) refreshCloudFacts(ctx context.Context) (cloudmesh.DeviceIdentity,
 	if err != nil {
 		return cloudmesh.DeviceIdentity{}, nil, cloudSession{}, cloudmesh.Account{}, nil, controllercore.NewActionError(http.StatusBadGateway, "cloud_request_failed", err.Error())
 	}
-	session.AccountIDHash = firstNonEmpty(account.AccountIDHash, self.AccountIDHash, session.AccountIDHash)
-	session.MembershipSigningPublicKey = firstNonEmpty(account.MembershipSigningPublicKey, session.MembershipSigningPublicKey)
-	session.MembershipLease = firstMembershipLease(self.MembershipLease, session.MembershipLease)
-	if account.Relay != nil {
-		session.RelayID = firstNonEmpty(account.Relay.RelayID, session.RelayID)
-		session.RelayURL = firstNonEmpty(account.Relay.RelayURL, session.RelayURL)
-		session.RelayCredential = firstNonEmpty(account.Relay.Credential, session.RelayCredential)
-		session.ExpiresAt = firstNonEmpty(account.Relay.CredentialExpiresAt, session.ExpiresAt)
-	}
-	c.mu.Lock()
-	c.session = session
-	c.mu.Unlock()
+	session = sessionWithCloudFacts(session, account, self)
+	c.storeCloudFacts(session, account, devices)
 	return identity, privateKey, session, account, devices, nil
 }
 
@@ -765,6 +822,13 @@ type cloudSession struct {
 	MembershipSigningPublicKey string                     `json:"membership_signing_public_key,omitempty"`
 	MembershipLease            *cloudmesh.MembershipLease `json:"membership_lease,omitempty"`
 	ExpiresAt                  string                     `json:"expires_at,omitempty"`
+}
+
+type mobileCloudFactsCache struct {
+	Session   cloudSession
+	Account   cloudmesh.Account
+	Devices   []cloudmesh.DeviceRecord
+	UpdatedAt time.Time
 }
 
 type cloudSessionInput struct {
@@ -858,6 +922,51 @@ func (c *Core) cloudFacts() (cloudmesh.DeviceIdentity, ed25519.PrivateKey, cloud
 	return c.identity, c.privateKey, c.session, nil
 }
 
+func (c *Core) cachedCloudFacts(session cloudSession) (cloudSession, cloudmesh.Account, []cloudmesh.DeviceRecord, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cache := c.cloudCache
+	if cache.UpdatedAt.IsZero() || time.Since(cache.UpdatedAt) > mobileCloudFactsCacheTTL {
+		return cloudSession{}, cloudmesh.Account{}, nil, false
+	}
+	if strings.TrimSpace(cache.Session.BaseURL) != strings.TrimSpace(session.BaseURL) || strings.TrimSpace(cache.Session.AccountToken) != strings.TrimSpace(session.AccountToken) {
+		return cloudSession{}, cloudmesh.Account{}, nil, false
+	}
+	if strings.TrimSpace(cache.Session.RelayURL) == "" || strings.TrimSpace(cache.Session.RelayCredential) == "" || cache.Session.MembershipLease == nil {
+		return cloudSession{}, cloudmesh.Account{}, nil, false
+	}
+	return cache.Session, cache.Account, cloneDeviceRecords(cache.Devices), true
+}
+
+func (c *Core) storeCloudFacts(session cloudSession, account cloudmesh.Account, devices []cloudmesh.DeviceRecord) {
+	c.mu.Lock()
+	c.session = session
+	c.cloudCache = mobileCloudFactsCache{
+		Session:   session,
+		Account:   account,
+		Devices:   cloneDeviceRecords(devices),
+		UpdatedAt: time.Now(),
+	}
+	c.mu.Unlock()
+}
+
+func sessionWithCloudFacts(session cloudSession, account cloudmesh.Account, self cloudmesh.DeviceRecord) cloudSession {
+	session.AccountIDHash = firstNonEmpty(account.AccountIDHash, self.AccountIDHash, session.AccountIDHash)
+	session.MembershipSigningPublicKey = firstNonEmpty(account.MembershipSigningPublicKey, session.MembershipSigningPublicKey)
+	session.MembershipLease = firstMembershipLease(self.MembershipLease, session.MembershipLease)
+	if account.Relay != nil {
+		session.RelayID = firstNonEmpty(account.Relay.RelayID, session.RelayID)
+		session.RelayURL = firstNonEmpty(account.Relay.RelayURL, session.RelayURL)
+		session.RelayCredential = firstNonEmpty(account.Relay.Credential, session.RelayCredential)
+		session.ExpiresAt = firstNonEmpty(account.Relay.CredentialExpiresAt, session.ExpiresAt)
+	}
+	return session
+}
+
+func cloneDeviceRecords(devices []cloudmesh.DeviceRecord) []cloudmesh.DeviceRecord {
+	return append([]cloudmesh.DeviceRecord(nil), devices...)
+}
+
 func newMobileStoredIdentity(deviceName string) (deviceidentity.StoredIdentity, []byte, error) {
 	stored, privateKey, err := deviceidentity.NewStored(deviceidentity.Options{
 		DeviceKind:   deviceidentity.DeviceKindMobile,
@@ -904,15 +1013,119 @@ func isStoredIdentity(identity *deviceidentity.StoredIdentity) bool {
 	return identity != nil && strings.TrimSpace(identity.DeviceID) != "" && strings.TrimSpace(identity.PrivateKey) != ""
 }
 
-func mobileRemoteHosts(selfDeviceID string, devices []cloudmesh.DeviceRecord, signals []cloudmesh.PairingSignal, relayURL, now string) []controllercore.RemoteHostRecord {
+func discoverMobileLANCandidates(ctx context.Context, timeout time.Duration) []controllercore.LanHostCandidate {
+	if timeout <= 0 {
+		timeout = mobileMeshLANDiscoveryTimeout
+	}
+	discoverCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	candidates, err := controllercore.DiscoverLANHosts(discoverCtx, controllercore.DefaultDiscoveryPort)
+	if err != nil {
+		return nil
+	}
+	return candidates
+}
+
+func (c *Core) mergeLANCandidates(candidates []controllercore.LanHostCandidate) map[string]controllercore.LanHostCandidate {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lanCandidates == nil {
+		c.lanCandidates = map[string]controllercore.LanHostCandidate{}
+	}
+	for _, candidate := range candidates {
+		candidate = normalizeLANCandidate(candidate)
+		if candidate.DeviceID == "" || candidate.PublicKeyFingerprint == "" || candidate.BaseURL == "" {
+			continue
+		}
+		c.lanCandidates[candidate.DeviceID] = candidate
+	}
+	out := make(map[string]controllercore.LanHostCandidate, len(c.lanCandidates))
+	for id, candidate := range c.lanCandidates {
+		out[id] = candidate
+	}
+	return out
+}
+
+func (c *Core) rememberLANCandidate(candidate controllercore.LanHostCandidate) {
+	candidate = normalizeLANCandidate(candidate)
+	if candidate.DeviceID == "" || candidate.BaseURL == "" {
+		return
+	}
+	c.mu.Lock()
+	if c.lanCandidates == nil {
+		c.lanCandidates = map[string]controllercore.LanHostCandidate{}
+	}
+	c.lanCandidates[candidate.DeviceID] = candidate
+	c.mu.Unlock()
+}
+
+func (c *Core) cachedLANCandidate(deviceID, fingerprint string) (controllercore.LanHostCandidate, bool) {
+	deviceID = strings.TrimSpace(deviceID)
+	fingerprint = strings.TrimSpace(fingerprint)
+	c.mu.Lock()
+	candidate := c.lanCandidates[deviceID]
+	c.mu.Unlock()
+	candidate = normalizeLANCandidate(candidate)
+	if candidate.DeviceID != deviceID || candidate.BaseURL == "" {
+		return controllercore.LanHostCandidate{}, false
+	}
+	if fingerprint != "" && candidate.PublicKeyFingerprint != "" && candidate.PublicKeyFingerprint != fingerprint {
+		return controllercore.LanHostCandidate{}, false
+	}
+	return candidate, true
+}
+
+func (c *Core) forgetLANCandidate(deviceID, baseURL string) {
+	deviceID = strings.TrimSpace(deviceID)
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if deviceID == "" {
+		return
+	}
+	c.mu.Lock()
+	candidate := normalizeLANCandidate(c.lanCandidates[deviceID])
+	if baseURL == "" || candidate.BaseURL == baseURL {
+		delete(c.lanCandidates, deviceID)
+	}
+	c.mu.Unlock()
+}
+
+func (c *Core) controlStatesForDevices(devices []cloudmesh.DeviceRecord) map[string]controllercore.ControlState {
+	remote := c.managedTransport()
+	out := map[string]controllercore.ControlState{}
+	for _, device := range devices {
+		if !device.CanHost || strings.TrimSpace(device.DeviceID) == "" {
+			continue
+		}
+		state := remote.ControlState(device.DeviceID)
+		if state.State != "" && state.State != controllercore.StateIdle || state.Transport != "" {
+			out[device.DeviceID] = state
+		}
+	}
+	return out
+}
+
+func normalizeLANCandidate(candidate controllercore.LanHostCandidate) controllercore.LanHostCandidate {
+	candidate.DeviceID = strings.TrimSpace(candidate.DeviceID)
+	candidate.DeviceName = strings.TrimSpace(candidate.DeviceName)
+	candidate.PublicKeyFingerprint = strings.TrimSpace(candidate.PublicKeyFingerprint)
+	candidate.Host = strings.TrimSpace(candidate.Host)
+	candidate.BaseURL = strings.TrimRight(strings.TrimSpace(candidate.BaseURL), "/")
+	return candidate
+}
+
+func mobileRemoteHosts(selfDeviceID string, devices []cloudmesh.DeviceRecord, signals []cloudmesh.PairingSignal, relayURL, now string, lanCandidates map[string]controllercore.LanHostCandidate, controlStates map[string]controllercore.ControlState) []controllercore.RemoteHostRecord {
 	latest := latestPairingSignalsByHost(signals, selfDeviceID)
 	hosts := make([]controllercore.RemoteHostRecord, 0, len(devices))
 	for _, device := range devices {
 		if device.DeviceID == selfDeviceID || !device.CanHost || device.Status == cloudmesh.DeviceStatusRevoked {
 			continue
 		}
+		lanCandidate, hasLAN := lanCandidates[device.DeviceID]
+		lanCandidate = normalizeLANCandidate(lanCandidate)
 		connection := "offline"
-		if device.Status == cloudmesh.DeviceStatusOnline && strings.TrimSpace(firstNonEmpty(device.RelayURL, relayURL)) != "" {
+		if hasLAN && lanCandidate.BaseURL != "" && (lanCandidate.PublicKeyFingerprint == "" || lanCandidate.PublicKeyFingerprint == device.PublicKeyFingerprint) {
+			connection = controllercore.TransportLAN
+		} else if device.Status == cloudmesh.DeviceStatusOnline && strings.TrimSpace(firstNonEmpty(device.RelayURL, relayURL)) != "" {
 			connection = controllercore.TransportRelay
 		}
 		signal := latest[device.DeviceID]
@@ -921,11 +1134,21 @@ func mobileRemoteHosts(selfDeviceID string, devices []cloudmesh.DeviceRecord, si
 			auth = signal.Status
 		}
 		control := controllercore.ControlState{State: controllercore.StateIdle, RouteGeneration: 0, UpdatedAt: firstNonEmpty(device.UpdatedAt, now)}
+		if current, ok := controlStates[device.DeviceID]; ok && (current.State != "" || current.Transport != "") {
+			control = current
+		}
 		if auth != controllercore.PairingStatusApproved {
 			control.State = controllercore.StateNeedsPairing
 		}
-		if connection == controllercore.TransportRelay {
-			control.Transport = controllercore.TransportRelay
+		if control.Transport == "" && (connection == controllercore.TransportLAN || connection == controllercore.TransportRelay) {
+			control.Transport = connection
+		}
+		if activeControlTransport(control) {
+			connection = control.Transport
+		}
+		status := normalizeCloudDeviceStatus(device.Status)
+		if connection == controllercore.TransportLAN {
+			status = cloudmesh.DeviceStatusOnline
 		}
 		hosts = append(hosts, controllercore.RemoteHostRecord{
 			DeviceID:             device.DeviceID,
@@ -933,17 +1156,30 @@ func mobileRemoteHosts(selfDeviceID string, devices []cloudmesh.DeviceRecord, si
 			DeviceKind:           device.DeviceKind,
 			PublicKeyFingerprint: device.PublicKeyFingerprint,
 			KnownIdentity:        strings.TrimSpace(device.PublicKey) != "",
-			Status:               normalizeCloudDeviceStatus(device.Status),
+			Status:               status,
 			Connection:           connection,
 			AuthorizationState:   auth,
 			PairingRequestID:     signal.RequestID,
 			PairingStatus:        signal.Status,
 			LastBaseURL:          firstNonEmpty(device.RelayURL, relayURL),
+			LANBaseURL:           lanCandidate.BaseURL,
 			Capabilities:         cloudmesh.NormalizeCapabilities(device.Capabilities),
 			Control:              control,
 		})
 	}
 	return hosts
+}
+
+func activeControlTransport(control controllercore.ControlState) bool {
+	if control.Transport == "" {
+		return false
+	}
+	switch control.State {
+	case controllercore.StateConnecting, controllercore.StateLive, controllercore.StateReconnecting:
+		return true
+	default:
+		return false
+	}
 }
 
 func latestPairingSignalsByHost(signals []cloudmesh.PairingSignal, controllerDeviceID string) map[string]cloudmesh.PairingSignal {

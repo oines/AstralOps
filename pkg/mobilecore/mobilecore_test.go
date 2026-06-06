@@ -135,6 +135,44 @@ func TestMobileCoreControlRequestRejectsUnsupportedAction(t *testing.T) {
 	}
 }
 
+func TestMobileCoreOpenHostSessionPrewarmsControlConnection(t *testing.T) {
+	transport := &fakeMobileCoreTransport{}
+	core := New()
+	core.controller = controllercore.New(transport)
+
+	body, err := core.OpenHostSession("dev_host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state controllercore.HostSessionState
+	if err := json.Unmarshal([]byte(body), &state); err != nil {
+		t.Fatal(err)
+	}
+	if transport.requestCount(controllercore.ActionPing) != 1 {
+		t.Fatalf("ping requests = %d, want prewarm ping", transport.requestCount(controllercore.ActionPing))
+	}
+	if state.State != controllercore.StateLive {
+		t.Fatalf("state = %#v, want live after prewarm", state)
+	}
+}
+
+func TestMobileCoreSnapshotPassesOptionsToControlRequest(t *testing.T) {
+	transport := &fakeMobileCoreTransport{}
+	core := New()
+	core.controller = controllercore.New(transport)
+
+	if _, err := core.Snapshot("dev_host", mustJSON(t, map[string]any{"restore_on_launch": true, "event_limit": 1000})); err != nil {
+		t.Fatal(err)
+	}
+	request := transport.requestForAction(controllercore.ActionHostSnapshot)
+	if requestParam(request, "restore_on_launch") != true {
+		t.Fatalf("restore_on_launch param = %#v, want true", requestParam(request, "restore_on_launch"))
+	}
+	if requestParam(request, "event_limit") != float64(1000) {
+		t.Fatalf("event_limit param = %#v, want 1000", requestParam(request, "event_limit"))
+	}
+}
+
 func TestStartReturnsPersistentStoredIdentity(t *testing.T) {
 	core := New()
 	body, err := core.Start(mustJSON(t, map[string]any{"device_name": "iPhone"}))
@@ -234,6 +272,47 @@ func TestSetCloudSessionRefreshesMeshThroughGoCore(t *testing.T) {
 	}
 	if state.Hosts[0].AuthorizationState != controllercore.PairingStatusApproved || state.Hosts[0].Connection != controllercore.TransportRelay {
 		t.Fatalf("host = %#v, want approved relay host", state.Hosts[0])
+	}
+}
+
+func TestMobileRemoteHostsPreferLANCandidateOverRelayRecord(t *testing.T) {
+	host := cloudmesh.DeviceRecord{
+		AccountIDHash:        "acct_test",
+		DeviceID:             "dev_host",
+		DeviceName:           "Desktop",
+		DeviceKind:           deviceidentity.DeviceKindDesktop,
+		PublicKey:            "host-public-key",
+		PublicKeyFingerprint: "sha256:HOST",
+		CanHost:              true,
+		CanControl:           true,
+		Status:               cloudmesh.DeviceStatusOnline,
+		RelayURL:             "http://relay.test",
+		UpdatedAt:            "2026-01-01T00:00:00Z",
+	}
+	hosts := mobileRemoteHosts("dev_mobile", []cloudmesh.DeviceRecord{host}, []cloudmesh.PairingSignal{{
+		RequestID:          "pair_1",
+		HostDeviceID:       host.DeviceID,
+		ControllerDeviceID: "dev_mobile",
+		Status:             controllercore.PairingStatusApproved,
+		UpdatedAt:          "2026-01-01T00:00:00Z",
+	}}, "http://relay.test", "2026-01-01T00:00:01Z", map[string]controllercore.LanHostCandidate{
+		host.DeviceID: {
+			DeviceID:             host.DeviceID,
+			DeviceName:           host.DeviceName,
+			PublicKeyFingerprint: host.PublicKeyFingerprint,
+			Host:                 "192.168.0.40",
+			Port:                 controllercore.DefaultDiscoveryPort,
+			BaseURL:              "http://192.168.0.40:43900",
+		},
+	}, nil)
+	if len(hosts) != 1 {
+		t.Fatalf("hosts = %#v, want one host", hosts)
+	}
+	if hosts[0].Connection != controllercore.TransportLAN || hosts[0].LANBaseURL != "http://192.168.0.40:43900" {
+		t.Fatalf("host = %#v, want LAN connection with LAN base URL", hosts[0])
+	}
+	if hosts[0].Control.Transport != controllercore.TransportLAN {
+		t.Fatalf("control = %#v, want LAN transport", hosts[0].Control)
 	}
 }
 
