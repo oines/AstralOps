@@ -108,6 +108,52 @@ final class MobileCoreBridgeTests: XCTestCase {
         XCTAssertEqual(raw.calls.last?.payload, "term_1")
     }
 
+    func testTerminalViewerLifecycleErrorRecoversWithoutGlobalAlert() async throws {
+        let raw = FakeRawClient()
+        raw.errors["terminalInput"] = MobileCoreBridgeError.controlError(ControlErrorEnvelope(status: 409, code: "terminal_viewer_not_live", message: "terminal viewer is not live"))
+        raw.responses["attachTerminal"] = #"{"terminal_id":"term_1","viewer_id":"viewer_1","input_lease_id":"lease_1","output_seq":5}"#
+        let model = AppModel(bridge: MobileCoreBridge(raw: raw))
+        model.hosts = [
+            RemoteHostRecord(
+                deviceID: "dev_host",
+                deviceName: nil,
+                deviceKind: nil,
+                publicKeyFingerprint: nil,
+                knownIdentity: true,
+                status: "online",
+                connection: "lan",
+                authorizationState: nil,
+                pairingRequestID: nil,
+                pairingStatus: nil,
+                capabilities: nil,
+                control: nil
+            )
+        ]
+        model.selectedHostID = "dev_host"
+        model.selectedWorkspaceID = "ws_1"
+        model.selectedTerminalID = "term_1"
+        var workbench = WorkbenchState.empty
+        workbench.terminalTabs["term_1"] = TerminalTab(
+            terminalID: "term_1",
+            workspaceID: "ws_1",
+            target: nil,
+            shell: "/bin/zsh",
+            cwd: "/repo",
+            status: "live",
+            writerDeviceID: nil,
+            outputSeq: 4,
+            canInput: true
+        )
+        model.workbench = workbench
+
+        model.sendTerminalInput("x")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(model.errorMessage, "")
+        XCTAssertTrue(raw.calls.contains { $0.name == "attachTerminal" && $0.payload == "term_1:0" })
+        XCTAssertEqual(raw.calls.filter { $0.name == "terminalInput" }.count, 2)
+    }
+
     func testAttachTerminalDefaultsToFullReplay() async throws {
         let raw = FakeRawClient()
         let bridge = MobileCoreBridge(raw: raw)
@@ -213,6 +259,7 @@ private final class FakeRawClient: MobileCoreRawClient {
 
     var onEvent: ((MobileCoreEvent) -> Void)?
     var responses: [String: String] = [:]
+    var errors: [String: Error] = [:]
     var calls: [Call] = []
 
     func start(_ configJSON: String) async throws -> String {
@@ -292,16 +339,25 @@ private final class FakeRawClient: MobileCoreRawClient {
 
     func terminalInput(hostDeviceID: String, terminalID: String, data: String) async throws -> String {
         calls.append(Call(name: "terminalInput", hostDeviceID: hostDeviceID, payload: data))
+        if let error = errors["terminalInput"] {
+            throw error
+        }
         return "{}"
     }
 
     func terminalResize(hostDeviceID: String, terminalID: String, cols: Int, rows: Int) async throws -> String {
         calls.append(Call(name: "terminalResize", hostDeviceID: hostDeviceID, payload: "\(cols)x\(rows)"))
+        if let error = errors["terminalResize"] {
+            throw error
+        }
         return "{}"
     }
 
     func terminalHeartbeatAck(hostDeviceID: String, terminalID: String, heartbeatSeq: Int, renderedSeq: Int) async throws -> String {
         calls.append(Call(name: "terminalHeartbeatAck", hostDeviceID: hostDeviceID, payload: "\(terminalID):\(heartbeatSeq):\(renderedSeq)"))
+        if let error = errors["terminalHeartbeatAck"] {
+            throw error
+        }
         return "{}"
     }
 

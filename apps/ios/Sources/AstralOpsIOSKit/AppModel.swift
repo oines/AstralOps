@@ -72,6 +72,7 @@ final class AppModel: ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var storedSelection: StoredControllerSelection
     private var sessionEventLoads = Set<String>()
+    private var terminalRecoveryInFlight = Set<String>()
 
     private let storedIdentityAccount = "stored_identity"
     private let cloudSessionAccount = "cloud_session"
@@ -848,12 +849,17 @@ final class AppModel: ObservableObject {
     }
 
     func sendTerminalInput(_ data: String) {
-        guard let host = selectedHost, !selectedTerminalID.isEmpty else { return }
+        let terminalID = selectedTerminalID
+        guard let host = selectedHost, !terminalID.isEmpty else { return }
         Task {
             do {
-                try await bridge.terminalInput(hostDeviceID: host.deviceID, terminalID: selectedTerminalID, data: data)
+                try await bridge.terminalInput(hostDeviceID: host.deviceID, terminalID: terminalID, data: data)
             } catch {
-                presentError(error)
+                if Self.isTerminalViewerLifecycleError(error) {
+                    await recoverTerminalViewer(terminalID: terminalID, retryInput: data)
+                } else {
+                    presentError(error)
+                }
             }
         }
     }
@@ -864,7 +870,11 @@ final class AppModel: ObservableObject {
             do {
                 try await bridge.terminalResize(hostDeviceID: host.deviceID, terminalID: terminalID, cols: cols, rows: rows)
             } catch {
-                presentError(error)
+                if Self.isTerminalViewerLifecycleError(error) {
+                    await recoverTerminalViewer(terminalID: terminalID)
+                } else {
+                    presentError(error)
+                }
             }
         }
     }
@@ -875,7 +885,11 @@ final class AppModel: ObservableObject {
             do {
                 try await bridge.terminalHeartbeatAck(hostDeviceID: host.deviceID, terminalID: terminalID, heartbeatSeq: heartbeatSeq, renderedSeq: renderedSeq)
             } catch {
-                presentError(error)
+                if Self.isTerminalViewerLifecycleError(error) {
+                    await recoverTerminalViewer(terminalID: terminalID)
+                } else {
+                    presentError(error)
+                }
             }
         }
     }
@@ -1185,8 +1199,46 @@ final class AppModel: ObservableObject {
         return message.isEmpty ? "Something went wrong." : message
     }
 
+    static func isTerminalViewerLifecycleError(_ error: Error) -> Bool {
+        if case MobileCoreBridgeError.controlError(let envelope) = error {
+            if envelope.code == "terminal_viewer_not_live" {
+                return true
+            }
+            let message = envelope.message.lowercased()
+            return message == "terminal viewer is not live"
+                || message == "terminal viewer is not attached"
+                || message == "terminal input requires an attached healthy viewer"
+        }
+        let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return message == "terminal viewer is not live"
+            || message == "terminal viewer is not attached"
+            || message == "terminal input requires an attached healthy viewer"
+    }
+
     func terminalShortcut(_ value: String) {
         sendTerminalInput(value)
+    }
+
+    private func recoverTerminalViewer(terminalID: String, retryInput: String? = nil) async {
+        guard terminalID == selectedTerminalID else { return }
+        guard !terminalRecoveryInFlight.contains(terminalID) else { return }
+        guard let tab = workbench.terminalTabs[terminalID] ?? terminalTabs.first(where: { $0.terminalID == terminalID }) else { return }
+        terminalRecoveryInFlight.insert(terminalID)
+        defer { terminalRecoveryInFlight.remove(terminalID) }
+        do {
+            selectedWorkspaceID = tab.workspaceID
+            selectedTerminalID = tab.terminalID
+            let hostID = try requireHost().deviceID
+            let info = try await bridge.attachTerminal(hostDeviceID: hostID, terminalID: terminalID)
+            renderTerminal(tab: tab, streamInfo: info)
+            if let retryInput, !retryInput.isEmpty {
+                try await bridge.terminalInput(hostDeviceID: hostID, terminalID: terminalID, data: retryInput)
+            }
+        } catch {
+            if !Self.isTerminalViewerLifecycleError(error) {
+                presentError(error)
+            }
+        }
     }
 
     private func loadSnapshot(for hostID: String, silent: Bool = false) async {
