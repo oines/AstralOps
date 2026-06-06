@@ -34,6 +34,7 @@ type NativeTranscriptMessage = {
     activeSession?: NativeSession | null;
     editableUserMessage?: { event_seq: number; text: string } | null;
     events?: AstralEvent[];
+    mediaDataUrls?: Record<string, string>;
     sourceSessionExists?: boolean;
     empty?: NativeEmptyState;
   };
@@ -48,6 +49,7 @@ type TranscriptState = {
   activeSession: Session | null;
   editableUserMessage: { event_seq: number; text: string } | null;
   events: AstralEvent[];
+  mediaDataUrls: Record<string, string>;
   sourceSessionExists: boolean;
   empty: NativeEmptyState | null;
 };
@@ -96,6 +98,7 @@ function App(): React.JSX.Element {
     activeSession: null,
     editableUserMessage: null,
     events: [],
+    mediaDataUrls: {},
     sourceSessionExists: false,
     empty: null,
   });
@@ -114,6 +117,7 @@ function App(): React.JSX.Element {
         activeSession: normalizeSession(payload.activeSession, sessionKey),
         editableUserMessage: payload.editableUserMessage ?? null,
         events: payload.events ?? [],
+        mediaDataUrls: payload.mediaDataUrls ?? {},
         sourceSessionExists: payload.sourceSessionExists ?? false,
         empty: payload.empty ?? null,
       });
@@ -127,6 +131,10 @@ function App(): React.JSX.Element {
   }
 
   function mediaUrl(sessionId: string, eventSeq: number, mediaId: string, download = false): string {
+    const key = `${sessionId || state.activeSession?.id || ""}:${eventSeq}:${mediaId}`;
+    if (!download && state.mediaDataUrls[key]) {
+      return state.mediaDataUrls[key];
+    }
     const params = new URLSearchParams({
       session_id: sessionId || state.activeSession?.id || "",
       event_seq: String(eventSeq),

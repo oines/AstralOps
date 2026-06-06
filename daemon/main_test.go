@@ -1696,9 +1696,10 @@ func TestCodexNativeAttachmentManifestProjectsCleanUserMedia(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestText := "describe this\n\nAttached files available to the agent:\n- [image] photo.jpg (image/jpeg): " + imagePath + "\n<image name=[Image #1]> </image>"
+	segmentedManifestText := "describe this\n\nAttached files available to the agent:\n- [image] photo.jpg (image/jpeg): " + imagePath
 	nativePath := filepath.Join(dir, "codex-native.jsonl")
 	lines := strings.Join([]string{
-		`{"timestamp":"2026-06-01T00:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":` + strconv.Quote(manifestText) + `}]}}`,
+		`{"timestamp":"2026-06-01T00:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":` + strconv.Quote(segmentedManifestText) + `},{"type":"input_text","text":"<image name=[Image #1]>"},{"type":"input_image","image_url":"data:image/jpeg;base64,ZmFrZQ=="},{"type":"input_text","text":"</image>"}]}}`,
 		`{"timestamp":"2026-06-01T00:00:00Z","type":"event_msg","payload":{"type":"user_message","message":` + strconv.Quote(manifestText) + `,"images":[],"local_images":[]}}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(nativePath, []byte(lines), 0o600); err != nil {

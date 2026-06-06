@@ -5,8 +5,27 @@ import UIKit
 import WebKit
 
 struct WebViewMediaResponse {
+    static let defaultChunkBytes = 128 * 1024
+
     var data: Data
     var mimeType: String
+
+    func urlResponse(for url: URL) -> URLResponse {
+        URLResponse(url: url, mimeType: mimeType, expectedContentLength: data.count, textEncodingName: nil)
+    }
+
+    func chunks(maxBytes: Int = Self.defaultChunkBytes) -> [Data] {
+        let chunkSize = max(1, maxBytes)
+        guard data.count > chunkSize else { return [data] }
+        var chunks: [Data] = []
+        var offset = 0
+        while offset < data.count {
+            let end = min(offset + chunkSize, data.count)
+            chunks.append(data.subdata(in: offset..<end))
+            offset = end
+        }
+        return chunks
+    }
 }
 
 @MainActor
@@ -261,6 +280,8 @@ struct LocalHTMLWebView: UIViewRepresentable {
 
 final class MediaSchemeHandler: NSObject, WKURLSchemeHandler {
     var onMediaRequest: ((URL) async throws -> WebViewMediaResponse)?
+    private let stoppedTasksLock = NSLock()
+    private var stoppedTasks: Set<ObjectIdentifier> = []
 
     init(onMediaRequest: ((URL) async throws -> WebViewMediaResponse)?) {
         self.onMediaRequest = onMediaRequest
@@ -271,25 +292,59 @@ final class MediaSchemeHandler: NSObject, WKURLSchemeHandler {
             urlSchemeTask.didFailWithError(NSError(domain: "AstralOpsIOS", code: 404, userInfo: [NSLocalizedDescriptionKey: "Media is unavailable."]))
             return
         }
+        let taskID = ObjectIdentifier(urlSchemeTask)
+        markTaskActive(taskID)
         Task {
             do {
                 let media = try await onMediaRequest(url)
-                let response = URLResponse(
-                    url: url,
-                    mimeType: media.mimeType,
-                    expectedContentLength: media.data.count,
-                    textEncodingName: nil
-                )
-                urlSchemeTask.didReceive(response)
-                urlSchemeTask.didReceive(media.data)
-                urlSchemeTask.didFinish()
+                await MainActor.run {
+                    guard !self.isTaskStopped(taskID) else { return }
+                    urlSchemeTask.didReceive(media.urlResponse(for: url))
+                    for chunk in media.chunks() {
+                        guard !self.isTaskStopped(taskID) else { return }
+                        urlSchemeTask.didReceive(chunk)
+                    }
+                    urlSchemeTask.didFinish()
+                    self.clearTask(taskID)
+                }
             } catch {
-                urlSchemeTask.didFailWithError(error)
+                await MainActor.run {
+                    guard !self.isTaskStopped(taskID) else { return }
+                    urlSchemeTask.didFailWithError(error)
+                    self.clearTask(taskID)
+                }
             }
         }
     }
 
-    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+        markTaskStopped(ObjectIdentifier(urlSchemeTask))
+    }
+
+    private func markTaskActive(_ id: ObjectIdentifier) {
+        stoppedTasksLock.lock()
+        stoppedTasks.remove(id)
+        stoppedTasksLock.unlock()
+    }
+
+    private func markTaskStopped(_ id: ObjectIdentifier) {
+        stoppedTasksLock.lock()
+        stoppedTasks.insert(id)
+        stoppedTasksLock.unlock()
+    }
+
+    private func clearTask(_ id: ObjectIdentifier) {
+        stoppedTasksLock.lock()
+        stoppedTasks.remove(id)
+        stoppedTasksLock.unlock()
+    }
+
+    private func isTaskStopped(_ id: ObjectIdentifier) -> Bool {
+        stoppedTasksLock.lock()
+        let stopped = stoppedTasks.contains(id)
+        stoppedTasksLock.unlock()
+        return stopped
+    }
 }
 
 final class LocalHTMLWKWebView: WKWebView {

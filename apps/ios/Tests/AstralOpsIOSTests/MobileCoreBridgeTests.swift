@@ -259,6 +259,19 @@ final class MobileCoreBridgeTests: XCTestCase {
         XCTAssertEqual(AppModel.errorDisplayMessage(for: error), "Host request timed out. Check the connection and try again.")
     }
 
+    func testWebViewMediaResponseUsesImageMetadataAndChunksLargePayloads() throws {
+        let url = try XCTUnwrap(URL(string: "astralmedia://media?session_id=sess_1&event_seq=7&media_id=img_1"))
+        let media = WebViewMediaResponse(data: Data(repeating: 0x42, count: 300_000), mimeType: "image/png")
+
+        let response = media.urlResponse(for: url)
+        let chunks = media.chunks()
+
+        XCTAssertEqual(response.mimeType, "image/png")
+        XCTAssertEqual(response.expectedContentLength, 300_000)
+        XCTAssertEqual(chunks.count, 3)
+        XCTAssertEqual(chunks.map(\.count), [131_072, 131_072, 37_856])
+    }
+
     func testBrowseAndWorkspaceEntriesTreatDirKindAsDirectory() throws {
         let hostEntry = try JSONCoding.decode(HostFileSystemEntry.self, from: Data(#"{"name":"src","path":"/repo/src","kind":"dir"}"#.utf8))
         let workspaceEntry = try JSONCoding.decode(WorkspaceFileEntry.self, from: Data(#"{"name":"src","path":"/repo/src","kind":"dir"}"#.utf8))

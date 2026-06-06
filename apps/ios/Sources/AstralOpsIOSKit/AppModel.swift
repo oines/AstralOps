@@ -77,6 +77,8 @@ final class AppModel: ObservableObject {
     private var storedSelection: StoredControllerSelection
     private var sessionEventLoads = Set<String>()
     private var terminalRecoveryInFlight = Set<String>()
+    private var transcriptMediaDataURLs: [String: String] = [:]
+    private var transcriptMediaLoads = Set<String>()
 
     private let storedIdentityAccount = "stored_identity"
     private let cloudSessionAccount = "cloud_session"
@@ -1501,12 +1503,17 @@ final class AppModel: ObservableObject {
     }
 
     private func renderTranscript() {
+        let events = activeTranscriptEvents
+        let mediaRefs = transcriptMediaReferences(in: events)
+        let activeMediaKeys = Set(mediaRefs.map(\.key))
+        transcriptMediaDataURLs = transcriptMediaDataURLs.filter { activeMediaKeys.contains($0.key) }
         let session = workbench.sessions[selectedSessionID]
         let payload = TranscriptNativePayload(
             sessionKey: selectedSessionID,
             activeSession: session,
             editableUserMessage: selectedSessionView?.editableUserMessage,
-            events: activeTranscriptEvents,
+            events: events,
+            mediaDataUrls: transcriptMediaDataURLs,
             sourceSessionExists: sourceSessionExists(for: session),
             empty: TranscriptEmptyState(
                 title: selectedSessionID.isEmpty ? "Select a session" : "No transcript",
@@ -1516,6 +1523,68 @@ final class AppModel: ObservableObject {
         if let data = try? JSONCoding.encode(payload) {
             transcriptBridge.postNative(type: "transcript.events", payload: data)
         }
+        scheduleTranscriptMediaPrefetch(mediaRefs)
+    }
+
+    private func scheduleTranscriptMediaPrefetch(_ refs: [TranscriptMediaReference]) {
+        guard selectedHost != nil else { return }
+        for ref in refs {
+            guard transcriptMediaDataURLs[ref.key] == nil, !transcriptMediaLoads.contains(ref.key) else { continue }
+            transcriptMediaLoads.insert(ref.key)
+            Task { [weak self] in
+                await self?.loadTranscriptMediaDataURL(ref)
+            }
+        }
+    }
+
+    private func loadTranscriptMediaDataURL(_ ref: TranscriptMediaReference) async {
+        defer { transcriptMediaLoads.remove(ref.key) }
+        do {
+            let media = try await loadMedia(sessionID: ref.sessionID, eventSeq: ref.eventSeq, mediaID: ref.mediaID)
+            let mimeType = media.mimeType ?? ref.mimeType ?? "application/octet-stream"
+            guard media.kind == "image" || mimeType.hasPrefix("image/") else { return }
+            guard selectedSessionID == ref.sessionID else { return }
+            let activeKeys = Set(transcriptMediaReferences(in: activeTranscriptEvents).map(\.key))
+            guard activeKeys.contains(ref.key) else { return }
+            transcriptMediaDataURLs[ref.key] = "data:\(mimeType);base64,\(media.contentBase64)"
+            renderTranscript()
+        } catch {
+            // Keep transcript rendering resilient; the existing media URL fallback can still be used.
+        }
+    }
+
+    private func transcriptMediaReferences(in events: [AstralEvent]) -> [TranscriptMediaReference] {
+        var refs: [TranscriptMediaReference] = []
+        var seen = Set<String>()
+        for event in events {
+            if event.kind == "message.media",
+               let ref = transcriptMediaReference(from: event.normalized.objectValue, event: event),
+               !seen.contains(ref.key) {
+                seen.insert(ref.key)
+                refs.append(ref)
+            }
+            let attachments = event.normalized.objectValue?["attachments"]?.arrayValue ?? []
+            for attachment in attachments {
+                if let ref = transcriptMediaReference(from: attachment.objectValue, event: event),
+                   !seen.contains(ref.key) {
+                    seen.insert(ref.key)
+                    refs.append(ref)
+                }
+            }
+        }
+        return refs
+    }
+
+    private func transcriptMediaReference(from value: [String: JSONValue]?, event: AstralEvent) -> TranscriptMediaReference? {
+        guard let value else { return nil }
+        let mediaID = value["media_id"]?.stringValue ?? value["id"]?.stringValue ?? value["item_id"]?.stringValue ?? ""
+        guard !mediaID.isEmpty else { return nil }
+        let sessionID = event.sessionID ?? selectedSessionID
+        guard !sessionID.isEmpty else { return nil }
+        let kind = value["kind"]?.stringValue ?? ""
+        let mimeType = value["mime_type"]?.stringValue
+        guard kind == "image" || (mimeType?.hasPrefix("image/") ?? false) else { return nil }
+        return TranscriptMediaReference(sessionID: sessionID, eventSeq: event.seq, mediaID: mediaID, mimeType: mimeType)
     }
 
     private func loadStoredIdentity() throws -> StoredIdentity? {
@@ -1587,8 +1656,24 @@ private struct TranscriptNativePayload: Codable {
     var activeSession: SessionRecord?
     var editableUserMessage: EditableUserMessageView?
     var events: [AstralEvent]
+    var mediaDataUrls: [String: String]
     var sourceSessionExists: Bool
     var empty: TranscriptEmptyState
+}
+
+private struct TranscriptMediaReference {
+    var sessionID: String
+    var eventSeq: Int
+    var mediaID: String
+    var mimeType: String?
+
+    var key: String {
+        Self.key(sessionID: sessionID, eventSeq: eventSeq, mediaID: mediaID)
+    }
+
+    static func key(sessionID: String, eventSeq: Int, mediaID: String) -> String {
+        "\(sessionID):\(eventSeq):\(mediaID)"
+    }
 }
 
 private struct TranscriptEmptyState: Codable {

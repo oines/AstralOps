@@ -1918,12 +1918,26 @@ func nativeAttachmentID(path string) string {
 func stripNativeImagePlaceholders(text string) string {
 	lines := []string{}
 	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "<image ") {
+		trimmed := strings.TrimSpace(line)
+		if isNativeImagePlaceholderLine(trimmed) {
 			continue
 		}
-		lines = append(lines, line)
+		line = strings.ReplaceAll(line, "</image>", "")
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func isNativeImagePlaceholderLine(text string) bool {
+	if text == "" {
+		return false
+	}
+	if text == "</image>" {
+		return true
+	}
+	return strings.HasPrefix(text, "<image") && strings.HasSuffix(text, ">")
 }
 
 func codexMessageText(payload map[string]any) string {
