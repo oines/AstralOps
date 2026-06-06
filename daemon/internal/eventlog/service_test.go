@@ -24,7 +24,8 @@ func TestPublishAppendsProjectsBroadcastsAndBuildsNotification(t *testing.T) {
 			SessionID:   sessionID,
 			Agent:       source.Agent,
 			Kind:        "control.notification",
-			Normalized:  map[string]any{"reason": "turn_completed"},
+			Normalized: protocol.EventNormalized("control.notification",
+				map[string]any{"reason": "turn_completed"}),
 		}, true
 	}}
 	service := New(Options{
@@ -39,7 +40,8 @@ func TestPublishAppendsProjectsBroadcastsAndBuildsNotification(t *testing.T) {
 		SessionID:   "sess",
 		Agent:       protocol.AgentCodex,
 		Kind:        "turn.completed",
-		Normalized:  map[string]any{"ok": true},
+		Normalized: protocol.EventNormalized("turn.completed",
+			map[string]any{"ok": true}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -75,10 +77,6 @@ func (s *fakeStore) AppendEvent(event protocol.AstralEvent) (protocol.AstralEven
 	event.Seq = int64(len(s.events) + 1)
 	s.events = append(s.events, event)
 	return event, nil
-}
-
-func (s *fakeStore) AllEvents() []protocol.AstralEvent {
-	return append([]protocol.AstralEvent(nil), s.events...)
 }
 
 type fakeProjectionSink struct {

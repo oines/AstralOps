@@ -722,7 +722,7 @@ func (m *sshManager) emitConnection(ws Workspace, state WorkspaceConnection) {
 	if m == nil || m.deps.emit == nil {
 		return
 	}
-	m.deps.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.connection", Normalized: state})
+	m.deps.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.connection", Normalized: eventNormalized("workspace.connection", state)})
 }
 
 func (m *sshManager) watchProxy(ws Workspace, proxy *proxyClient) {

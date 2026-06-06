@@ -1,9 +1,12 @@
 package apperrors
 
+import "github.com/oines/astralops/pkg/protocol"
+
 type ActionError struct {
 	Status  int
-	Code    string
+	Code    protocol.ControlErrorCode
 	Message string
+	Details map[string]string
 }
 
 func (e *ActionError) Error() string {
@@ -14,5 +17,5 @@ func (e *ActionError) Error() string {
 }
 
 func New(status int, code string, message string) *ActionError {
-	return &ActionError{Status: status, Code: code, Message: message}
+	return &ActionError{Status: status, Code: protocol.ControlErrorCode(code), Message: message}
 }

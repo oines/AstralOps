@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 func randomID(n int) string {
@@ -52,6 +54,9 @@ func writeJSONFile(path string, value any, mode os.FileMode) error {
 }
 
 func mapValue(v any) map[string]any {
+	if payload, ok := v.(protocol.AstralEventNormalized); ok {
+		return protocol.NormalizedMap(payload)
+	}
 	m, _ := v.(map[string]any)
 	if m == nil {
 		return map[string]any{}

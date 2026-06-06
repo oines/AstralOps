@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/oines/astralops/pkg/controlwire"
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 const (
@@ -143,13 +144,17 @@ func (m *ManagedTransport) ClearLANFailure(hostDeviceID string) {
 	m.clearLANFailure(hostDeviceID)
 }
 
-func (m *ManagedTransport) Request(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
+func (m *ManagedTransport) Request(ctx context.Context, hostDeviceID string, capability ControlCapability, action ControlAction, params map[string]any) (ControlResponse, error) {
+	rawParams, err := protocol.MarshalControlParams(params)
+	if err != nil {
+		return ControlResponse{}, err
+	}
 	req := func() ControlRequest {
 		return ControlRequest{
 			RequestID:  managedRequestPrefix + randomID(12),
 			Capability: capability,
 			Action:     action,
-			Params:     params,
+			Params:     rawParams,
 		}
 	}
 	response, err := m.requestOnce(ctx, hostDeviceID, req())
@@ -175,12 +180,12 @@ func (m *ManagedTransport) SubscribeEvents(ctx context.Context, hostDeviceID str
 		RequestID:  managedRequestPrefix + "events_" + randomID(12),
 		Capability: CapabilityCoreRead,
 		Action:     ActionEventsSubscribe,
-		Params: map[string]any{
+		Params: mustControlParams(map[string]any{
 			"workspace_id": params.WorkspaceID,
 			"session_id":   params.SessionID,
 			"after_seq":    params.AfterSeq,
 			"replay_limit": params.ReplayLimit,
-		},
+		}),
 	})
 	if err != nil {
 		return EventStream{}, fmt.Errorf("remote event subscription failed: %w", err)
@@ -237,7 +242,7 @@ func (m *ManagedTransport) SubscribeEvents(ctx context.Context, hostDeviceID str
 				RequestID:  managedRequestPrefix + "events_close_" + randomID(8),
 				Capability: CapabilityCoreRead,
 				Action:     ActionEventsUnsubscribe,
-				Params:     map[string]any{"stream_id": streamID},
+				Params:     mustControlParams(map[string]any{"stream_id": streamID}),
 			})
 		})
 	}
@@ -387,7 +392,7 @@ func (m *ManagedTransport) attachTerminal(ctx context.Context, session *managedS
 		RequestID:  managedRequestPrefix + "pty_attach_" + randomID(12),
 		Capability: CapabilityTerminalOpen,
 		Action:     ActionTerminalAttach,
-		Params:     map[string]any{"terminal_id": terminalID, "after_seq": afterSeq},
+		Params:     mustControlParams(map[string]any{"terminal_id": terminalID, "after_seq": afterSeq}),
 	})
 	if err != nil {
 		unregister()
@@ -607,7 +612,7 @@ func (s *managedSession) remoteTerminalForWorkspace(ctx context.Context, workspa
 		RequestID:  managedRequestPrefix + "pty_open_" + randomID(12),
 		Capability: CapabilityTerminalOpen,
 		Action:     ActionTerminalOpen,
-		Params:     map[string]any{"workspace_id": workspaceID, "cols": 80, "rows": 24},
+		Params:     mustControlParams(map[string]any{"workspace_id": workspaceID, "cols": 80, "rows": 24}),
 	})
 	if err != nil {
 		return "", "", "", false, fmt.Errorf("remote terminal open failed: %w", err)
@@ -673,7 +678,7 @@ func (s *managedSession) remoteTerminalClose(terminalID string) error {
 		RequestID:  managedRequestPrefix + "pty_close_" + randomID(8),
 		Capability: CapabilityTerminalInput,
 		Action:     ActionTerminalClose,
-		Params:     map[string]any{"terminal_id": terminalID},
+		Params:     mustControlParams(map[string]any{"terminal_id": terminalID}),
 	})
 }
 
@@ -685,7 +690,7 @@ func (s *managedSession) remoteTerminalDetach(terminalID string) error {
 		RequestID:  managedRequestPrefix + "pty_detach_" + randomID(8),
 		Capability: CapabilityTerminalOpen,
 		Action:     ActionTerminalDetach,
-		Params:     map[string]any{"terminal_id": terminalID},
+		Params:     mustControlParams(map[string]any{"terminal_id": terminalID}),
 	})
 }
 
@@ -968,7 +973,7 @@ func (t *managedTerminalStream) Detach() error {
 	return t.session.remoteTerminalDetach(t.terminalID)
 }
 
-func requestCanRetry(capability, action string) bool {
+func requestCanRetry(capability ControlCapability, action ControlAction) bool {
 	if capability != CapabilityCoreRead && capability != CapabilityWorkspaceFilesRead && capability != CapabilityMediaRead {
 		return false
 	}
@@ -1115,6 +1120,14 @@ func maxDuration(left, right time.Duration) time.Duration {
 		return left
 	}
 	return right
+}
+
+func mustControlParams(params any) json.RawMessage {
+	raw, err := protocol.MarshalControlParams(params)
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }
 
 func randomID(n int) string {

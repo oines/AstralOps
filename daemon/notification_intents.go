@@ -36,23 +36,24 @@ func notificationEventForSource(source AstralEvent, title string, targetSessionI
 		SessionID:   targetSessionID,
 		Agent:       source.Agent,
 		Kind:        "control.notification",
-		Normalized: map[string]any{
-			"source":          "astralops",
-			"visibility":      "debug",
-			"notification_id": id,
-			"reason":          reason,
-			"title":           truncateNotificationBody(title, 80),
-			"body":            truncateNotificationBody(summary, 180),
-			"target": map[string]any{
-				"kind":         notificationTargetKind(targetSessionID),
-				"session_id":   targetSessionID,
-				"workspace_id": source.WorkspaceID,
-			},
-			"source_event": map[string]any{
-				"seq":  source.Seq,
-				"kind": source.Kind,
-			},
-		},
+		Normalized: eventNormalized("control.notification",
+			map[string]any{
+				"source":          "astralops",
+				"visibility":      "debug",
+				"notification_id": id,
+				"reason":          reason,
+				"title":           truncateNotificationBody(title, 80),
+				"body":            truncateNotificationBody(summary, 180),
+				"target": map[string]any{
+					"kind":         notificationTargetKind(targetSessionID),
+					"session_id":   targetSessionID,
+					"workspace_id": source.WorkspaceID,
+				},
+				"source_event": map[string]any{
+					"seq":  source.Seq,
+					"kind": source.Kind,
+				},
+			}),
 	}, true
 }
 

@@ -19,6 +19,11 @@ func (s *Service) EditLastUserMessage(sessionID string, req protocol.EditLastUse
 	if !ok {
 		return nil, apperrors.New(http.StatusNotFound, "session_not_found", "session not found")
 	}
+	var err error
+	ss, err = s.ensureLinkedForControl(ss)
+	if err != nil {
+		return nil, err
+	}
 	if ss.Agent != protocol.AgentCodex {
 		return nil, apperrors.New(http.StatusNotImplemented, "edit_unsupported", "Claude Code does not support editing and resending the last user message")
 	}
@@ -51,13 +56,13 @@ func (s *Service) EditLastUserMessage(sessionID string, req protocol.EditLastUse
 		return nil, apperrors.New(statusCode, "edit_failed", err.Error())
 	}
 	if startSeq, endSeq := userTurnSeqRange(s.store.QueryEvents("", sessionID, 0), req.EventSeq); startSeq > 0 && endSeq >= startSeq {
-		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "turn.replaced", Normalized: map[string]any{
+		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "turn.replaced", Normalized: protocol.EventNormalized("turn.replaced", map[string]any{
 			"source":         "astralops",
 			"user_event_seq": req.EventSeq,
 			"start_seq":      startSeq,
 			"end_seq":        endSeq,
 			"hidden":         true,
-		}})
+		})})
 	}
 	return map[string]any{"ok": true}, nil
 }

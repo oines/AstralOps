@@ -6,6 +6,7 @@ build/
 coverage/
 tmp/
 release/
+.cache/
 daemon/astralopsd
 proxy-agent/astral-proxy-agent
 

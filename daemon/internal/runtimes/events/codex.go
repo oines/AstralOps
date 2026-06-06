@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 func NormalizeCodexMessage(session Session, raw map[string]any) []AstralEvent {
@@ -415,9 +417,10 @@ func baseCodexEvent(session Session, kind string, normalized any, raw any) Astra
 		WorkspaceID: session.WorkspaceID,
 		SessionID:   session.ID,
 		Agent:       session.Agent,
-		Kind:        kind,
-		Normalized:  normalized,
-		Raw:         raw,
+		Kind:        protocol.AstralEventKind(kind),
+		Normalized: protocol.EventNormalized(protocol.AstralEventKind(kind),
+			normalized),
+		Raw: raw,
 	}
 }
 
@@ -477,6 +480,9 @@ func lifecycleTodoStatus(lifecycle string) string {
 }
 
 func mapValue(v any) map[string]any {
+	if payload, ok := v.(protocol.AstralEventNormalized); ok {
+		return protocol.NormalizedMap(payload)
+	}
 	m, _ := v.(map[string]any)
 	if m == nil {
 		return map[string]any{}

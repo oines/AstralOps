@@ -9,7 +9,6 @@ import (
 
 type Store interface {
 	AppendEvent(protocol.AstralEvent) (protocol.AstralEvent, error)
-	AllEvents() []protocol.AstralEvent
 }
 
 type ProjectionSink interface {
@@ -25,6 +24,8 @@ type NotificationPolicy interface {
 	Build(source protocol.AstralEvent, title string, sessionID string, events []protocol.AstralEvent) (protocol.AstralEvent, bool)
 }
 
+type HistoryProvider func(protocol.AstralEvent, string) []protocol.AstralEvent
+
 type DiagnosticLogger func(protocol.AstralEvent)
 
 type Service struct {
@@ -32,6 +33,7 @@ type Service struct {
 	projections   ProjectionSink
 	broadcaster   Broadcaster
 	notifications NotificationPolicy
+	history       HistoryProvider
 	diagnostics   DiagnosticLogger
 }
 
@@ -40,6 +42,7 @@ type Options struct {
 	Projections   ProjectionSink
 	Broadcaster   Broadcaster
 	Notifications NotificationPolicy
+	History       HistoryProvider
 	Diagnostics   DiagnosticLogger
 }
 
@@ -49,6 +52,7 @@ func New(options Options) *Service {
 		projections:   options.Projections,
 		broadcaster:   options.Broadcaster,
 		notifications: options.Notifications,
+		history:       options.History,
 		diagnostics:   options.Diagnostics,
 	}
 }
@@ -65,7 +69,11 @@ func (s *Service) Publish(_ context.Context, event protocol.AstralEvent) (protoc
 	s.publishSaved(saved)
 	if s.notifications != nil {
 		title, sessionID := s.notifications.Target(saved)
-		if notification, ok := s.notifications.Build(saved, title, sessionID, s.store.AllEvents()); ok {
+		events := []protocol.AstralEvent{saved}
+		if s.history != nil {
+			events = s.history(saved, sessionID)
+		}
+		if notification, ok := s.notifications.Build(saved, title, sessionID, events); ok {
 			savedNotification, err := s.store.AppendEvent(notification)
 			if err != nil {
 				log.Printf("append notification event: %v", err)

@@ -266,7 +266,8 @@ func TestRestorePersistedConnectionsHonorsSetting(t *testing.T) {
 		WorkspaceID: ws.ID,
 		Agent:       ws.Agent,
 		Kind:        "workspace.connection",
-		Normalized:  initialSSHConnection(ws, connectionConnected),
+		Normalized: eventNormalized("workspace.connection",
+			initialSSHConnection(ws, connectionConnected)),
 	})
 	st.mu.Unlock()
 

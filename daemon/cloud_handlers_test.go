@@ -192,7 +192,7 @@ func TestCloudHandlersRemoveDeviceCanRevokeLocalTrust(t *testing.T) {
 		ControllerDeviceName:           controller.DeviceName,
 		ControllerPublicKey:            controller.PublicKey,
 		ControllerPublicKeyFingerprint: controller.PublicKeyFingerprint,
-		Capabilities:                   []string{CapabilityCoreRead},
+		Capabilities:                   []string{string(CapabilityCoreRead)},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -212,8 +212,8 @@ func TestCloudHandlersRemoveDeviceCanRevokeLocalTrust(t *testing.T) {
 	if _, ok := app.store.trustedControlGrant("dev_phone"); ok {
 		t.Fatal("trusted local grant still active after cloud remove with local revoke")
 	}
-	if !containsEventKind(app.store.queryEvents("", "", 0), "control.trust.revoked") {
-		t.Fatalf("events = %#v, want trust revoked audit event", eventKinds(app.store.queryEvents("", "", 0)))
+	if !containsEventKind(testQueryEvents(app.store, "", "", 0), "control.trust.revoked") {
+		t.Fatalf("events = %#v, want trust revoked audit event", eventKinds(testQueryEvents(app.store, "", "", 0)))
 	}
 }
 
@@ -414,7 +414,7 @@ func TestCloudRuntimeImportsPendingPairingSignalWithoutGrantingTrust(t *testing.
 		HostDeviceID:       app.store.hostInfo().Identity.DeviceID,
 		ControllerDeviceID: controller.DeviceID,
 		Scope:              TrustScopeFull,
-		Capabilities:       []string{CapabilityCoreRead, CapabilityTerminalOpen},
+		Capabilities:       []string{string(CapabilityCoreRead), string(CapabilityTerminalOpen)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -437,8 +437,8 @@ func TestCloudRuntimeImportsPendingPairingSignalWithoutGrantingTrust(t *testing.
 	if _, ok := app.store.trustedControlGrant(controller.DeviceID); ok {
 		t.Fatal("cloud pending pairing wrote local trust grant")
 	}
-	if !containsEventKind(app.store.queryEvents("", "", 0), "control.pairing.requested") {
-		t.Fatalf("events = %#v, want pairing requested event", eventKinds(app.store.queryEvents("", "", 0)))
+	if !containsEventKind(testQueryEvents(app.store, "", "", 0), "control.pairing.requested") {
+		t.Fatalf("events = %#v, want pairing requested event", eventKinds(testQueryEvents(app.store, "", "", 0)))
 	}
 }
 
@@ -464,7 +464,7 @@ func TestCloudPairingApprovalResolvesCloudSignalAfterLocalTrust(t *testing.T) {
 		HostDeviceID:       app.store.hostInfo().Identity.DeviceID,
 		ControllerDeviceID: controller.DeviceID,
 		Scope:              TrustScopeFull,
-		Capabilities:       []string{CapabilityCoreRead, CapabilityTerminalOpen},
+		Capabilities:       []string{string(CapabilityCoreRead), string(CapabilityTerminalOpen)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -523,7 +523,7 @@ func TestCloudRuntimeRevokedDeviceRevokesLocalTrustAndKnownHost(t *testing.T) {
 		ControllerDeviceName:           other.DeviceName,
 		ControllerPublicKey:            other.PublicKey,
 		ControllerPublicKeyFingerprint: other.PublicKeyFingerprint,
-		Capabilities:                   []string{CapabilityCoreRead},
+		Capabilities:                   []string{string(CapabilityCoreRead)},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -560,8 +560,8 @@ func TestCloudRuntimeRevokedDeviceRevokesLocalTrustAndKnownHost(t *testing.T) {
 	} else {
 		assertActionError(t, err, http.StatusForbidden, "known_host_revoked")
 	}
-	if !containsEventKind(app.store.queryEvents("", "", 0), "control.trust.revoked") {
-		t.Fatalf("events = %#v, want trust revoked audit event", eventKinds(app.store.queryEvents("", "", 0)))
+	if !containsEventKind(testQueryEvents(app.store, "", "", 0), "control.trust.revoked") {
+		t.Fatalf("events = %#v, want trust revoked audit event", eventKinds(testQueryEvents(app.store, "", "", 0)))
 	}
 }
 
@@ -619,7 +619,7 @@ func TestRemoteHostsImportsApprovedCloudPairingAsKnownHost(t *testing.T) {
 		HostDeviceID:       hostStore.hostInfo().Identity.DeviceID,
 		ControllerDeviceID: app.store.hostInfo().Identity.DeviceID,
 		Scope:              TrustScopeFull,
-		Capabilities:       []string{CapabilityCoreRead, CapabilityTerminalOpen},
+		Capabilities:       []string{string(CapabilityCoreRead), string(CapabilityTerminalOpen)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -794,7 +794,7 @@ func testControllerRegistration(t *testing.T, deviceID string) cloudDeviceRegist
 		DeviceKind:           identity.DeviceKind,
 		PublicKey:            identity.PublicKey,
 		PublicKeyFingerprint: identity.PublicKeyFingerprint,
-		Capabilities:         []string{CapabilityCoreRead},
+		Capabilities:         []string{string(CapabilityCoreRead)},
 		CanHost:              false,
 		CanControl:           true,
 	}
@@ -816,7 +816,7 @@ func testCloudDeviceRegistration(t *testing.T, deviceID, kind string, canHost, c
 		DeviceKind:           identity.DeviceKind,
 		PublicKey:            identity.PublicKey,
 		PublicKeyFingerprint: identity.PublicKeyFingerprint,
-		Capabilities:         []string{CapabilityCoreRead, CapabilityTerminalOpen},
+		Capabilities:         []string{string(CapabilityCoreRead), string(CapabilityTerminalOpen)},
 		CanHost:              canHost,
 		CanControl:           canControl,
 	}

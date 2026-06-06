@@ -1,6 +1,11 @@
 package main
 
+import "github.com/oines/astralops/pkg/protocol"
+
 func mapValue(v any) map[string]any {
+	if payload, ok := v.(protocol.AstralEventNormalized); ok {
+		return protocol.NormalizedMap(payload)
+	}
 	m, _ := v.(map[string]any)
 	if m == nil {
 		return map[string]any{}
@@ -11,6 +16,23 @@ func mapValue(v any) map[string]any {
 func stringValue(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func stringSlice(v any) []string {
+	switch values := v.(type) {
+	case []string:
+		return values
+	case []any:
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			if text := stringValue(value); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func firstString(values ...any) string {

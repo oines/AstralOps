@@ -41,42 +41,21 @@ func (a *app) handleHostSnapshot(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) buildHostSnapshot(params hostSnapshotParams) hostSnapshotResult {
 	eventLimit := normalizedHostSnapshotEventLimit(params.EventLimit)
-	workspaces := a.store.listWorkspaces()
-	sessions := a.store.listSessions("")
-	workspaceByID := map[string]Workspace{}
-	for _, workspace := range workspaces {
-		workspaceByID[workspace.ID] = workspace
-	}
-
-	connections := make([]WorkspaceConnection, 0)
-	for _, workspace := range workspaces {
-		if workspace.Target != "ssh" {
-			continue
-		}
-		connections = append(connections, sanitizeControlWorkspaceConnection(a.ssh.getConnection(workspace)))
-	}
-
-	views := make([]sessionView, 0, len(sessions))
-	for _, session := range sessions {
-		view, ok := a.buildSessionView(session.ID)
-		if !ok {
-			continue
-		}
-		views = append(views, sanitizeControlSessionView(view, workspaceByID[view.Session.WorkspaceID]))
-	}
+	workbench := a.buildWorkbenchState()
+	workspaces, sessions, _, connections := flattenRemoteWorkbenchState(workbench)
 
 	result := hostSnapshotResult{
 		Host:                 a.store.hostInfo(),
 		Agents:               sanitizeControlAgents(a.agents),
-		Workspaces:           sanitizeControlWorkspaces(workspaces),
-		Sessions:             sanitizeControlSessions(sessions),
+		Workspaces:           workspaces,
+		Sessions:             sessions,
 		WorkspaceConnections: connections,
-		Events:               sanitizeControlEvents(a.store.queryEventsWindow("", "", 0, 0, eventLimit)),
-		SessionViews:         views,
-		Workbench:            a.buildWorkbenchState(),
+		Events:               []AstralEvent{},
+		SessionViews:         []sessionView{},
+		Workbench:            workbench,
 	}
 	if params.RestoreOnLaunch && len(sessions) > 0 {
-		result.InitialSessionEvents = sanitizeControlEvents(a.store.queryEventsWindow("", sessions[0].ID, 0, 0, eventLimit))
+		result.InitialSessionEvents = sanitizeControlEvents(a.eventProjection().QueryEventsWindow("", sessions[0].ID, 0, 0, eventLimit))
 	}
 	return result
 }

@@ -25,10 +25,10 @@ func TestControlGatewayReadsWorkspaceFileWithoutHostRoot(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesRead,
 		Action:             ControlActionWorkspaceFilesRead,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "note.txt",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -70,11 +70,11 @@ func TestControlGatewayListsWorkspaceDirectory(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesRead,
 		Action:             ControlActionWorkspaceFilesRead,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "dir",
 			"mode":         "list",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -96,11 +96,11 @@ func TestControlGatewayWritesWorkspaceFile(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesWrite,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id":   workspace.ID,
 			"path":           "nested/out.txt",
 			"content_base64": base64.StdEncoding.EncodeToString([]byte("written remotely")),
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -129,11 +129,11 @@ func TestControlGatewayRejectsLargeWorkspaceFileWrite(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesWrite,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "too-large.txt",
 			"content":      strings.Repeat("x", workspaceFileWriteMaxBytes+1),
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusRequestEntityTooLarge, "workspace_file_too_large")
 	if _, statErr := os.Stat(filepath.Join(workspace.LocalCWD, "too-large.txt")); !os.IsNotExist(statErr) {
@@ -152,7 +152,7 @@ func TestControlGatewayAppliesWorkspacePatch(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesApplyPatch,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "note.txt",
 			"edits": []map[string]any{
@@ -161,7 +161,7 @@ func TestControlGatewayAppliesWorkspacePatch(t *testing.T) {
 					"new_string": "new line\n",
 				},
 			},
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +193,7 @@ func TestControlGatewayRejectsAmbiguousWorkspacePatch(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesApplyPatch,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "note.txt",
 			"edits": []map[string]any{
@@ -202,7 +202,7 @@ func TestControlGatewayRejectsAmbiguousWorkspacePatch(t *testing.T) {
 					"new_string": "changed",
 				},
 			},
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusConflict, "workspace_patch_old_string_ambiguous")
 }
@@ -219,7 +219,7 @@ func TestControlGatewayRejectsLargeWorkspacePatchPayload(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesApplyPatch,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "note.txt",
 			"edits": []map[string]any{
@@ -228,7 +228,7 @@ func TestControlGatewayRejectsLargeWorkspacePatchPayload(t *testing.T) {
 					"new_string": strings.Repeat("x", workspaceFileWriteMaxBytes+1),
 				},
 			},
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusRequestEntityTooLarge, "workspace_file_too_large")
 	body, readErr := os.ReadFile(path)
@@ -253,7 +253,7 @@ func TestControlGatewayRejectsLargeWorkspacePatchResult(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesApplyPatch,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "note.txt",
 			"edits": []map[string]any{
@@ -263,7 +263,7 @@ func TestControlGatewayRejectsLargeWorkspacePatchResult(t *testing.T) {
 					"replace_all": true,
 				},
 			},
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusRequestEntityTooLarge, "workspace_file_too_large")
 	body, readErr := os.ReadFile(path)
@@ -286,7 +286,7 @@ func TestControlGatewayWorkspacePatchRequiresWriteCapability(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesApplyPatch,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "note.txt",
 			"edits": []map[string]any{
@@ -295,7 +295,7 @@ func TestControlGatewayWorkspacePatchRequiresWriteCapability(t *testing.T) {
 					"new_string": "new",
 				},
 			},
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }
@@ -312,10 +312,10 @@ func TestControlGatewayDeletesWorkspaceFile(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesDelete,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "old.txt",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -346,10 +346,10 @@ func TestControlGatewayWorkspaceDeleteRequiresRecursiveForDirectory(t *testing.T
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesDelete,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "dir",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "workspace_delete_recursive_required")
 
@@ -357,11 +357,11 @@ func TestControlGatewayWorkspaceDeleteRequiresRecursiveForDirectory(t *testing.T
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesDelete,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "dir",
 			"recursive":    true,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -387,12 +387,12 @@ func TestControlGatewayMovesWorkspaceFile(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesMove,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id":     workspace.ID,
 			"path":             "from.txt",
 			"destination_path": "nested/to.txt",
 			"create_parents":   true,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -430,11 +430,11 @@ func TestControlGatewayWorkspaceMoveRejectsExistingDestination(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesMove,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id":     workspace.ID,
 			"path":             "from.txt",
 			"destination_path": "to.txt",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusConflict, "workspace_destination_exists")
 }
@@ -450,10 +450,10 @@ func TestControlGatewayWorkspaceDeleteRequiresWriteCapability(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesDelete,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "old.txt",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }
@@ -469,9 +469,9 @@ func TestControlGatewayWorkspaceFileStreamCancelCancelsRegisteredStream(t *testi
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesRead,
 		Action:             ControlActionWorkspaceFilesStreamCancel,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"stream_id": "workspace_file_1",
-		},
+		}),
 	}, conn)
 	if err != nil {
 		t.Fatal(err)
@@ -523,10 +523,10 @@ func TestControlGatewayDeletesAndMovesRemoteWorkspacePaths(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesDelete,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "delete.txt",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -543,11 +543,11 @@ func TestControlGatewayDeletesAndMovesRemoteWorkspacePaths(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesMove,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id":     workspace.ID,
 			"path":             "from.txt",
 			"destination_path": "nested/to.txt",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -572,11 +572,11 @@ func TestControlGatewayRejectsWorkspacePathEscape(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesWrite,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "../outside.txt",
 			"content":      "nope",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
 }
@@ -597,10 +597,10 @@ func TestControlGatewayRejectsWorkspaceReadSymlinkEscape(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesRead,
 		Action:             ControlActionWorkspaceFilesRead,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "secret-link.txt",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
 }
@@ -621,10 +621,10 @@ func TestControlGatewayRejectsWorkspaceStreamSymlinkEscape(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesRead,
 		Action:             ControlActionWorkspaceFilesStream,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "secret-stream.bin",
-		},
+		}),
 	}, &controlWSConn{})
 	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
 }
@@ -642,11 +642,11 @@ func TestControlGatewayRejectsWorkspaceWriteThroughSymlinkParent(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesWrite,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "escape/out.txt",
 			"content":      "nope",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
 	if _, statErr := os.Stat(filepath.Join(outside, "out.txt")); !os.IsNotExist(statErr) {
@@ -671,10 +671,10 @@ func TestControlGatewayRejectsWorkspaceDeleteThroughSymlinkParent(t *testing.T) 
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceFilesWrite,
 		Action:             ControlActionWorkspaceFilesDelete,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"path":         "escape/secret.txt",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
 	if got, readErr := os.ReadFile(outsideFile); readErr != nil || string(got) != "keep" {
@@ -695,11 +695,11 @@ func TestControlGatewayRejectsWorkspaceExecCWDThroughSymlink(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceExec,
 		Action:             ControlActionWorkspaceExec,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"command":      "pwd",
 			"cwd":          "escape",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
 }
@@ -719,11 +719,11 @@ func TestControlGatewayExecutesWorkspaceCommand(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceExec,
 		Action:             ControlActionWorkspaceExec,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"command":      command,
 			"timeout_ms":   5000,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -748,11 +748,11 @@ func TestControlGatewayWorkspaceExecTruncatesLargeOutput(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceExec,
 		Action:             ControlActionWorkspaceExec,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"command":      fmt.Sprintf("yes x | head -c %d", workspaceExecOutputMaxBytes+128),
 			"timeout_ms":   5000,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -784,11 +784,11 @@ func TestControlGatewayWorkspaceExecUsesControlConnectionContext(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceExec,
 		Action:             ControlActionWorkspaceExec,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"command":      "sleep 2; printf ran > should-not-run.txt",
 			"timeout_ms":   5000,
-		},
+		}),
 	}, conn)
 	if err != nil {
 		t.Fatal(err)
@@ -812,7 +812,7 @@ func TestControlGatewayWorkspaceExecHonorsRequireApprovalPolicy(t *testing.T) {
 	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	if _, err := app.store.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  "device_mobile",
-		Capabilities:        []string{CapabilityWorkspaceExec},
+		Capabilities:        capabilityStrings(CapabilityWorkspaceExec),
 		WorkspaceExecPolicy: WorkspaceExecPolicyRequireApproval,
 	}); err != nil {
 		t.Fatal(err)
@@ -827,10 +827,10 @@ func TestControlGatewayWorkspaceExecHonorsRequireApprovalPolicy(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceExec,
 		Action:             ControlActionWorkspaceExec,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"command":      command,
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusConflict, "workspace_exec_approval_required")
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
@@ -842,7 +842,7 @@ func TestControlGatewayWorkspaceExecHonorsDisabledPolicy(t *testing.T) {
 	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	if _, err := app.store.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  "device_mobile",
-		Capabilities:        []string{CapabilityWorkspaceExec},
+		Capabilities:        capabilityStrings(CapabilityWorkspaceExec),
 		WorkspaceExecPolicy: WorkspaceExecPolicyDisabled,
 	}); err != nil {
 		t.Fatal(err)
@@ -852,10 +852,10 @@ func TestControlGatewayWorkspaceExecHonorsDisabledPolicy(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceExec,
 		Action:             ControlActionWorkspaceExec,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"command":      "pwd",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "workspace_exec_disabled")
 }
@@ -868,10 +868,10 @@ func TestControlGatewayWorkspaceExecRequiresCapability(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityWorkspaceExec,
 		Action:             ControlActionWorkspaceExec,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"command":      "pwd",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 func runControlDevClient(args []string) bool {
@@ -161,7 +162,7 @@ func runControlDevClientCommand(args []string) error {
 			RequestID:  "dev_sessions",
 			Capability: CapabilityCoreRead,
 			Action:     ControlActionSessions,
-			Params:     map[string]any{"workspace_id": *workspaceID},
+			Params:     controlParams(map[string]any{"workspace_id": *workspaceID}),
 		})
 		if err != nil {
 			return err
@@ -197,7 +198,7 @@ func runControlDevClientCommand(args []string) error {
 			RequestID:  "dev_session_view",
 			Capability: CapabilityCoreRead,
 			Action:     ControlActionSessionView,
-			Params:     map[string]any{"session_id": *sessionID},
+			Params:     controlParams(map[string]any{"session_id": *sessionID}),
 		})
 		if err != nil {
 			return err
@@ -234,13 +235,13 @@ func runControlDevClientCommand(args []string) error {
 			RequestID:  "dev_events",
 			Capability: CapabilityCoreRead,
 			Action:     ControlActionEvents,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": *workspaceID,
 				"session_id":   *sessionID,
 				"after_seq":    *afterSeq,
 				"before_seq":   *beforeSeq,
 				"limit":        *limit,
-			},
+			}),
 		})
 		if err != nil {
 			return err
@@ -310,12 +311,20 @@ func runControlDevClientCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		response, err := controlClientRequestToTarget(target, st, ControlRequest{
-			RequestID:  *requestID,
-			Capability: *capability,
-			Action:     *action,
-			Params:     decodedParams,
-		})
+		actionValue, ok := protocol.ParseControlAction(*action)
+		if !ok {
+			return newActionError(http.StatusNotFound, "control_action_unknown", "control action not found")
+		}
+		capabilityValue, ok := protocol.ParseControlCapability(*capability)
+		if !ok || capabilityValue != protocol.RequiredCapability(actionValue) {
+			return newActionError(http.StatusForbidden, "capability_mismatch", "control capability does not match action")
+		}
+		req, err := protocol.NewControlRequest(capabilityValue, actionValue, decodedParams)
+		if err != nil {
+			return err
+		}
+		req.RequestID = *requestID
+		response, err := controlClientRequestToTarget(target, st, req)
 		if err != nil {
 			return err
 		}
@@ -455,8 +464,8 @@ type controlClientSmokeResult struct {
 
 type controlClientSmokeStep struct {
 	Name       string         `json:"name"`
-	Capability string         `json:"capability"`
-	Action     string         `json:"action"`
+	Capability any            `json:"capability"`
+	Action     any            `json:"action"`
 	OK         bool           `json:"ok"`
 	Error      *ControlError  `json:"error,omitempty"`
 	Summary    map[string]any `json:"summary,omitempty"`
@@ -1029,7 +1038,7 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 	}
 	conn, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, st)
 	if err != nil {
-		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "connect_failed", Message: err.Error()}}
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: ControlErrorCode("connect_failed"), Message: err.Error()}}
 		return step, err
 	}
 	defer conn.Close()
@@ -1038,20 +1047,20 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 		RequestID:  "smoke_" + name,
 		Capability: CapabilityWorkspaceFilesRead,
 		Action:     ControlActionWorkspaceFilesStream,
-		Params:     params,
+		Params:     controlParams(params),
 	}
 	if err := conn.WritePlain(controlPlainFrame{Type: "request", Request: &req}); err != nil {
-		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: ControlErrorCode("write_failed"), Message: err.Error()}}
 		return step, err
 	}
 	plain, err := conn.ReadPlain(activeTarget.Timeout)
 	if err != nil {
-		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "read_failed", Message: err.Error()}}
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: ControlErrorCode("read_failed"), Message: err.Error()}}
 		return step, err
 	}
 	if plain.Response == nil {
 		err := fmt.Errorf("remote did not return a response frame")
-		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: "invalid_response", Message: err.Error()}}
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityWorkspaceFilesRead, Action: ControlActionWorkspaceFilesStream, OK: false, Error: &ControlError{Code: ControlErrorCode("invalid_response"), Message: err.Error()}}
 		return step, err
 	}
 	step := controlClientSmokeStepFromResponse(name, CapabilityWorkspaceFilesRead, ControlActionWorkspaceFilesStream, *plain.Response, controlClientWorkspaceFileStreamSmokeSummary(*plain.Response))
@@ -1062,7 +1071,7 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 	if streamID == "" {
 		err := fmt.Errorf("smoke step %s failed: stream_id missing", name)
 		step.OK = false
-		step.Error = &ControlError{Code: "stream_id_missing", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("stream_id_missing"), Message: err.Error()}
 		return step, err
 	}
 
@@ -1072,13 +1081,13 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 		frame, err := conn.ReadPlain(activeTarget.Timeout)
 		if err != nil {
 			step.OK = false
-			step.Error = &ControlError{Code: "stream_read_failed", Message: err.Error()}
+			step.Error = &ControlError{Code: ControlErrorCode("stream_read_failed"), Message: err.Error()}
 			return step, err
 		}
 		if frame.WorkspaceFile == nil || frame.WorkspaceFile.StreamID != streamID {
 			err := fmt.Errorf("unexpected workspace file stream frame")
 			step.OK = false
-			step.Error = &ControlError{Code: "unexpected_stream_frame", Message: err.Error()}
+			step.Error = &ControlError{Code: ControlErrorCode("unexpected_stream_frame"), Message: err.Error()}
 			return step, err
 		}
 		switch frame.Type {
@@ -1086,7 +1095,7 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 			body, err := base64.StdEncoding.DecodeString(frame.WorkspaceFile.DataBase64)
 			if err != nil {
 				step.OK = false
-				step.Error = &ControlError{Code: "stream_chunk_invalid", Message: err.Error()}
+				step.Error = &ControlError{Code: ControlErrorCode("stream_chunk_invalid"), Message: err.Error()}
 				return step, err
 			}
 			chunks++
@@ -1102,12 +1111,12 @@ func controlClientSmokeWorkspaceFileStream(st *store, target controlClientTarget
 		case workspaceFileStreamFrameError:
 			err := fmt.Errorf("workspace file stream failed: %s", frame.WorkspaceFile.ErrorMessage)
 			step.OK = false
-			step.Error = &ControlError{Code: firstString(frame.WorkspaceFile.ErrorCode, "stream_error"), Message: err.Error()}
+			step.Error = &ControlError{Code: ControlErrorCode(firstString(frame.WorkspaceFile.ErrorCode, "stream_error")), Message: err.Error()}
 			return step, err
 		default:
 			err := fmt.Errorf("unexpected workspace file stream frame type %q", frame.Type)
 			step.OK = false
-			step.Error = &ControlError{Code: "unexpected_stream_frame", Message: err.Error()}
+			step.Error = &ControlError{Code: ControlErrorCode("unexpected_stream_frame"), Message: err.Error()}
 			return step, err
 		}
 	}
@@ -1125,7 +1134,7 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 	}
 	conn, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, st)
 	if err != nil {
-		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "connect_failed", Message: err.Error()}}
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: ControlErrorCode("connect_failed"), Message: err.Error()}}
 		return step, err
 	}
 	defer conn.Close()
@@ -1134,20 +1143,20 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 		RequestID:  "smoke_" + name,
 		Capability: CapabilityMediaStream,
 		Action:     ControlActionMediaStream,
-		Params:     params,
+		Params:     controlParams(params),
 	}
 	if err := conn.WritePlain(controlPlainFrame{Type: "request", Request: &req}); err != nil {
-		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: ControlErrorCode("write_failed"), Message: err.Error()}}
 		return step, err
 	}
 	plain, err := conn.ReadPlain(activeTarget.Timeout)
 	if err != nil {
-		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "read_failed", Message: err.Error()}}
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: ControlErrorCode("read_failed"), Message: err.Error()}}
 		return step, err
 	}
 	if plain.Response == nil {
 		err := fmt.Errorf("remote did not return a response frame")
-		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: "invalid_response", Message: err.Error()}}
+		step := controlClientSmokeStep{Name: name, Capability: CapabilityMediaStream, Action: ControlActionMediaStream, OK: false, Error: &ControlError{Code: ControlErrorCode("invalid_response"), Message: err.Error()}}
 		return step, err
 	}
 	step := controlClientSmokeStepFromResponse(name, CapabilityMediaStream, ControlActionMediaStream, *plain.Response, controlClientMediaStreamSmokeSummary(*plain.Response))
@@ -1158,7 +1167,7 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 	if streamID == "" {
 		err := fmt.Errorf("smoke step %s failed: stream_id missing", name)
 		step.OK = false
-		step.Error = &ControlError{Code: "stream_id_missing", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("stream_id_missing"), Message: err.Error()}
 		return step, err
 	}
 
@@ -1168,13 +1177,13 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 		frame, err := conn.ReadPlain(activeTarget.Timeout)
 		if err != nil {
 			step.OK = false
-			step.Error = &ControlError{Code: "stream_read_failed", Message: err.Error()}
+			step.Error = &ControlError{Code: ControlErrorCode("stream_read_failed"), Message: err.Error()}
 			return step, err
 		}
 		if frame.Media == nil || frame.Media.StreamID != streamID {
 			err := fmt.Errorf("unexpected media stream frame")
 			step.OK = false
-			step.Error = &ControlError{Code: "unexpected_stream_frame", Message: err.Error()}
+			step.Error = &ControlError{Code: ControlErrorCode("unexpected_stream_frame"), Message: err.Error()}
 			return step, err
 		}
 		switch frame.Type {
@@ -1182,7 +1191,7 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 			body, err := base64.StdEncoding.DecodeString(frame.Media.DataBase64)
 			if err != nil {
 				step.OK = false
-				step.Error = &ControlError{Code: "stream_chunk_invalid", Message: err.Error()}
+				step.Error = &ControlError{Code: ControlErrorCode("stream_chunk_invalid"), Message: err.Error()}
 				return step, err
 			}
 			chunks++
@@ -1198,12 +1207,12 @@ func controlClientSmokeMediaStream(st *store, target controlClientTarget, sessio
 		case mediaStreamFrameError:
 			err := fmt.Errorf("media stream failed: %s", frame.Media.ErrorMessage)
 			step.OK = false
-			step.Error = &ControlError{Code: firstString(frame.Media.ErrorCode, "stream_error"), Message: err.Error()}
+			step.Error = &ControlError{Code: ControlErrorCode(firstString(frame.Media.ErrorCode, "stream_error")), Message: err.Error()}
 			return step, err
 		default:
 			err := fmt.Errorf("unexpected media stream frame type %q", frame.Type)
 			step.OK = false
-			step.Error = &ControlError{Code: "unexpected_stream_frame", Message: err.Error()}
+			step.Error = &ControlError{Code: ControlErrorCode("unexpected_stream_frame"), Message: err.Error()}
 			return step, err
 		}
 	}
@@ -1279,7 +1288,7 @@ func controlClientSmokeWorkspaceWriteFlow(st *store, target controlClientTarget,
 func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, workspaceID string) ([]controlClientSmokeStep, error) {
 	conn, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, st)
 	if err != nil {
-		return []controlClientSmokeStep{{Name: "terminal_open", Capability: CapabilityTerminalOpen, Action: ControlActionTerminalOpen, Error: &ControlError{Code: "connect_failed", Message: err.Error()}}}, err
+		return []controlClientSmokeStep{{Name: "terminal_open", Capability: CapabilityTerminalOpen, Action: ControlActionTerminalOpen, Error: &ControlError{Code: ControlErrorCode("connect_failed"), Message: err.Error()}}}, err
 	}
 	defer conn.Close()
 
@@ -1296,7 +1305,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 		RequestID:  "smoke_terminal_open",
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalOpen,
-		Params:     map[string]any{"workspace_id": workspaceID, "cols": 80, "rows": 24},
+		Params:     controlParams(map[string]any{"workspace_id": workspaceID, "cols": 80, "rows": 24}),
 	})
 	steps = append(steps, controlClientSmokeStepFromResponse("terminal_open", CapabilityTerminalOpen, ControlActionTerminalOpen, open, controlClientTerminalSmokeSummary(open)))
 	if err != nil {
@@ -1309,7 +1318,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 	if terminalID == "" {
 		err := fmt.Errorf("smoke step terminal_open failed: terminal_id missing")
 		steps[len(steps)-1].OK = false
-		steps[len(steps)-1].Error = &ControlError{Code: "terminal_id_missing", Message: err.Error()}
+		steps[len(steps)-1].Error = &ControlError{Code: ControlErrorCode("terminal_id_missing"), Message: err.Error()}
 		return steps, err
 	}
 
@@ -1317,7 +1326,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 		RequestID:  "smoke_terminal_attach",
 		Capability: CapabilityTerminalOpen,
 		Action:     ControlActionTerminalAttach,
-		Params:     map[string]any{"terminal_id": terminalID},
+		Params:     controlParams(map[string]any{"terminal_id": terminalID}),
 	})
 	steps = append(steps, controlClientSmokeStepFromResponse("terminal_attach", CapabilityTerminalOpen, ControlActionTerminalAttach, attach, controlClientTerminalAttachSmokeSummary(attach)))
 	if err != nil {
@@ -1340,7 +1349,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 			Data:         "printf '%s\\n' " + marker + "\n",
 		},
 	}); err != nil {
-		step := controlClientSmokeStep{Name: "terminal_input", Capability: CapabilityTerminalInput, Action: ControlActionTerminalInput, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
+		step := controlClientSmokeStep{Name: "terminal_input", Capability: CapabilityTerminalInput, Action: ControlActionTerminalInput, Error: &ControlError{Code: ControlErrorCode("write_failed"), Message: err.Error()}}
 		steps = append(steps, step)
 		return steps, err
 	}
@@ -1351,7 +1360,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 	for i := 0; i < 1000 && time.Now().Before(deadline) && !sawMarker; i++ {
 		frame, err := conn.ReadPlain(activeTarget.Timeout)
 		if err != nil {
-			step := controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "terminal_read_failed", Message: err.Error()}}
+			step := controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: ControlErrorCode("terminal_read_failed"), Message: err.Error()}}
 			steps = appendTerminalInputStep(steps)
 			steps = append(steps, step)
 			return steps, err
@@ -1361,7 +1370,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 			if frame.Terminal == nil || frame.Terminal.TerminalID != terminalID {
 				err := fmt.Errorf("unexpected terminal output frame")
 				steps = appendTerminalInputStep(steps)
-				steps = append(steps, controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "unexpected_terminal_frame", Message: err.Error()}})
+				steps = append(steps, controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: ControlErrorCode("unexpected_terminal_frame"), Message: err.Error()}})
 				return steps, err
 			}
 			outputFrames++
@@ -1381,7 +1390,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 		case terminalFrameClosed:
 			err := fmt.Errorf("terminal closed before smoke output was observed")
 			steps = appendTerminalInputStep(steps)
-			steps = append(steps, controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: "terminal_closed", Message: err.Error()}})
+			steps = append(steps, controlClientSmokeStep{Name: "terminal_output", Capability: CapabilityTerminalOpen, Action: terminalFrameOutput, Error: &ControlError{Code: ControlErrorCode("terminal_closed"), Message: err.Error()}})
 			return steps, err
 		}
 	}
@@ -1400,7 +1409,7 @@ func controlClientSmokeTerminalFlow(st *store, target controlClientTarget, works
 	}
 	if !sawMarker {
 		err := fmt.Errorf("smoke step terminal_output failed: marker output missing")
-		outputStep.Error = &ControlError{Code: "terminal_output_missing", Message: err.Error()}
+		outputStep.Error = &ControlError{Code: ControlErrorCode("terminal_output_missing"), Message: err.Error()}
 		steps = append(steps, outputStep)
 		return steps, err
 	}
@@ -1444,11 +1453,11 @@ func controlClientSmokeTerminalClose(conn controlClientFrameConn, timeout time.D
 		RequestID:  "smoke_terminal_close",
 		Capability: CapabilityTerminalInput,
 		Action:     ControlActionTerminalClose,
-		Params:     map[string]any{"terminal_id": terminalID},
+		Params:     controlParams(map[string]any{"terminal_id": terminalID}),
 	}
 	req.ControllerDeviceID = st.deviceIdentity.DeviceID
 	if err := conn.WritePlain(controlPlainFrame{Type: "request", Request: &req}); err != nil {
-		step := controlClientSmokeStep{Name: "terminal_close", Capability: CapabilityTerminalInput, Action: ControlActionTerminalClose, Error: &ControlError{Code: "write_failed", Message: err.Error()}}
+		step := controlClientSmokeStep{Name: "terminal_close", Capability: CapabilityTerminalInput, Action: ControlActionTerminalClose, Error: &ControlError{Code: ControlErrorCode("write_failed"), Message: err.Error()}}
 		return []controlClientSmokeStep{step}, err
 	}
 	var closeResponse *ControlResponse
@@ -1457,7 +1466,7 @@ func controlClientSmokeTerminalClose(conn controlClientFrameConn, timeout time.D
 		frame, err := conn.ReadPlain(timeout)
 		if err != nil {
 			steps := appendTerminalCloseStep(nil, closeResponse, sawClosedFrame)
-			steps = append(steps, controlClientSmokeStep{Name: "terminal_closed", Capability: CapabilityTerminalOpen, Action: terminalFrameClosed, Error: &ControlError{Code: "terminal_read_failed", Message: err.Error()}})
+			steps = append(steps, controlClientSmokeStep{Name: "terminal_closed", Capability: CapabilityTerminalOpen, Action: terminalFrameClosed, Error: &ControlError{Code: ControlErrorCode("terminal_read_failed"), Message: err.Error()}})
 			return steps, err
 		}
 		switch frame.Type {
@@ -1475,7 +1484,7 @@ func controlClientSmokeTerminalClose(conn controlClientFrameConn, timeout time.D
 	steps := appendTerminalCloseStep(nil, closeResponse, sawClosedFrame)
 	if closeResponse == nil {
 		err := fmt.Errorf("smoke step terminal_close failed: response missing")
-		steps[0].Error = &ControlError{Code: "terminal_close_response_missing", Message: err.Error()}
+		steps[0].Error = &ControlError{Code: ControlErrorCode("terminal_close_response_missing"), Message: err.Error()}
 		return steps, err
 	}
 	if err := controlClientSmokeResponseError("terminal_close", *closeResponse); err != nil {
@@ -1483,7 +1492,7 @@ func controlClientSmokeTerminalClose(conn controlClientFrameConn, timeout time.D
 	}
 	if !sawClosedFrame {
 		err := fmt.Errorf("smoke step terminal_closed failed: closed frame missing")
-		steps = append(steps, controlClientSmokeStep{Name: "terminal_closed", Capability: CapabilityTerminalOpen, Action: terminalFrameClosed, Error: &ControlError{Code: "terminal_closed_frame_missing", Message: err.Error()}})
+		steps = append(steps, controlClientSmokeStep{Name: "terminal_closed", Capability: CapabilityTerminalOpen, Action: terminalFrameClosed, Error: &ControlError{Code: ControlErrorCode("terminal_closed_frame_missing"), Message: err.Error()}})
 		return steps, err
 	}
 	steps = append(steps, controlClientSmokeStep{
@@ -1508,12 +1517,12 @@ func appendTerminalCloseStep(steps []controlClientSmokeStep, response *ControlRe
 	return append(steps, step)
 }
 
-func controlClientSmokeRequest(st *store, target controlClientTarget, requestID, capability, action string, params map[string]any) (ControlResponse, error) {
+func controlClientSmokeRequest(st *store, target controlClientTarget, requestID string, capability ControlCapability, action ControlAction, params map[string]any) (ControlResponse, error) {
 	return controlClientRequestToTarget(target, st, ControlRequest{
 		RequestID:  "smoke_" + requestID,
 		Capability: capability,
 		Action:     action,
-		Params:     params,
+		Params:     controlParams(params),
 	})
 }
 
@@ -1522,7 +1531,7 @@ func controlClientSmokeEventSubscription(st *store, target controlClientTarget, 
 	step := controlClientSmokeStep{Name: name, Capability: CapabilityCoreRead, Action: ControlActionEventsSubscribe}
 	conn, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, st)
 	if err != nil {
-		step.Error = &ControlError{Code: "connect_failed", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("connect_failed"), Message: err.Error()}
 		return step, err
 	}
 	defer conn.Close()
@@ -1531,15 +1540,15 @@ func controlClientSmokeEventSubscription(st *store, target controlClientTarget, 
 		RequestID:  "smoke_event_subscription",
 		Capability: CapabilityCoreRead,
 		Action:     ControlActionEventsSubscribe,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspaceID,
 			"session_id":   sessionID,
 			"replay_limit": replayLimit,
-		},
+		}),
 	})
 	step = controlClientSmokeStepFromResponse(name, CapabilityCoreRead, ControlActionEventsSubscribe, response, controlClientEventSubscriptionSmokeSummary(response))
 	if err != nil {
-		step.Error = &ControlError{Code: "event_subscription_failed", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("event_subscription_failed"), Message: err.Error()}
 		return step, err
 	}
 	if err := controlClientSmokeResponseError(name, response); err != nil {
@@ -1548,25 +1557,25 @@ func controlClientSmokeEventSubscription(st *store, target controlClientTarget, 
 	streamID := stringValue(mapValue(response.Result)["stream_id"])
 	if streamID == "" {
 		err := fmt.Errorf("smoke step %s failed: stream_id missing", name)
-		step.Error = &ControlError{Code: "event_subscription_stream_id_missing", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("event_subscription_stream_id_missing"), Message: err.Error()}
 		return step, err
 	}
 
 	plain, err := conn.ReadPlain(activeTarget.Timeout)
 	if err != nil {
-		step.Error = &ControlError{Code: "event_subscription_read_failed", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("event_subscription_read_failed"), Message: err.Error()}
 		return step, err
 	}
 	if plain.Type != eventStreamFrameEvent || plain.Event == nil || plain.Event.StreamID != streamID {
 		err := fmt.Errorf("unexpected event subscription frame")
-		step.Error = &ControlError{Code: "unexpected_event_subscription_frame", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("unexpected_event_subscription_frame"), Message: err.Error()}
 		return step, err
 	}
 	if step.Summary == nil {
 		step.Summary = map[string]any{}
 	}
 	step.Summary["event_seq"] = plain.Event.Seq
-	step.Summary["event_kind"] = plain.Event.Event.Kind
+	step.Summary["event_kind"] = string(plain.Event.Event.Kind)
 	return step, nil
 }
 
@@ -1576,24 +1585,24 @@ func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, s
 	path = strings.TrimSpace(path)
 	info, err := os.Stat(path)
 	if err != nil {
-		step.Error = &ControlError{Code: "attachment_file_not_found", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("attachment_file_not_found"), Message: err.Error()}
 		return step, err
 	}
 	if info.IsDir() {
 		err := fmt.Errorf("attachment path is a directory")
-		step.Error = &ControlError{Code: "attachment_path_is_directory", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("attachment_path_is_directory"), Message: err.Error()}
 		return step, err
 	}
 	chunkSize = controlClientAttachmentChunkSize(chunkSize)
 	sha, err := fileSHA256Hex(path)
 	if err != nil {
-		step.Error = &ControlError{Code: "attachment_hash_failed", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("attachment_hash_failed"), Message: err.Error()}
 		return step, err
 	}
 
 	conn, activeTarget, err := controlClientOpenTargetWithRelayFallback(target, st)
 	if err != nil {
-		step.Error = &ControlError{Code: "connect_failed", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("connect_failed"), Message: err.Error()}
 		return step, err
 	}
 	defer conn.Close()
@@ -1602,16 +1611,16 @@ func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, s
 		RequestID:  "smoke_attachment_start",
 		Capability: CapabilityAttachmentIngest,
 		Action:     ControlActionAttachmentIngestStart,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": sessionID,
 			"name":       filepath.Base(path),
 			"mime_type":  attachmentMIMEType(filepath.Base(path), "", nil),
 			"size":       info.Size(),
 			"sha256":     sha,
-		},
+		}),
 	})
 	if err != nil {
-		step.Error = &ControlError{Code: "attachment_start_failed", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("attachment_start_failed"), Message: err.Error()}
 		return step, err
 	}
 	if err := controlClientSmokeResponseError("attachment_ingest.start", start); err != nil {
@@ -1621,13 +1630,13 @@ func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, s
 	uploadID := stringValue(mapValue(start.Result)["upload_id"])
 	if uploadID == "" {
 		err := fmt.Errorf("smoke step attachment_ingest.start failed: upload_id missing")
-		step.Error = &ControlError{Code: "attachment_upload_id_missing", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("attachment_upload_id_missing"), Message: err.Error()}
 		return step, err
 	}
 
 	file, err := os.Open(path)
 	if err != nil {
-		step.Error = &ControlError{Code: "attachment_file_open_failed", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("attachment_file_open_failed"), Message: err.Error()}
 		return step, err
 	}
 	defer file.Close()
@@ -1643,16 +1652,16 @@ func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, s
 				RequestID:  fmt.Sprintf("smoke_attachment_chunk_%d", seq),
 				Capability: CapabilityAttachmentIngest,
 				Action:     ControlActionAttachmentIngestChunk,
-				Params: map[string]any{
+				Params: controlParams(map[string]any{
 					"session_id":  sessionID,
 					"upload_id":   uploadID,
 					"seq":         seq,
 					"offset":      offset,
 					"data_base64": base64.StdEncoding.EncodeToString(chunk),
-				},
+				}),
 			})
 			if err != nil {
-				step.Error = &ControlError{Code: "attachment_chunk_failed", Message: err.Error()}
+				step.Error = &ControlError{Code: ControlErrorCode("attachment_chunk_failed"), Message: err.Error()}
 				return step, err
 			}
 			if err := controlClientSmokeResponseError("attachment_ingest.chunk", response); err != nil {
@@ -1667,7 +1676,7 @@ func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, s
 		if readErr == io.EOF {
 			break
 		}
-		step.Error = &ControlError{Code: "attachment_file_read_failed", Message: readErr.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("attachment_file_read_failed"), Message: readErr.Error()}
 		return step, readErr
 	}
 
@@ -1675,13 +1684,13 @@ func controlClientSmokeAttachmentIngest(st *store, target controlClientTarget, s
 		RequestID:  "smoke_attachment_finish",
 		Capability: CapabilityAttachmentIngest,
 		Action:     ControlActionAttachmentIngestFinish,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": sessionID,
 			"upload_id":  uploadID,
-		},
+		}),
 	})
 	if err != nil {
-		step.Error = &ControlError{Code: "attachment_finish_failed", Message: err.Error()}
+		step.Error = &ControlError{Code: ControlErrorCode("attachment_finish_failed"), Message: err.Error()}
 		return step, err
 	}
 	if err := controlClientSmokeResponseError("attachment_ingest.finish", finish); err != nil {
@@ -1713,11 +1722,11 @@ func controlClientAttachmentChunkSize(requested int) int {
 	return requested
 }
 
-func controlClientSmokeStepFromResponse(name, capability, action string, response ControlResponse, summary map[string]any) controlClientSmokeStep {
+func controlClientSmokeStepFromResponse(name string, capability ControlCapability, action ControlAction, response ControlResponse, summary map[string]any) controlClientSmokeStep {
 	step := controlClientSmokeStep{
 		Name:       name,
-		Capability: capability,
-		Action:     action,
+		Capability: string(capability),
+		Action:     string(action),
 		OK:         response.OK,
 		Error:      response.Error,
 		Summary:    summary,

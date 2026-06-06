@@ -178,6 +178,8 @@ export interface CoreClient {
   runWorkspaceCommand(id: string, command: string): Promise<WorkspaceCommandResponse>;
   deleteWorkspace(id: string): Promise<{ ok: boolean }>;
   listSessions(workspaceId?: string): Promise<Session[]>;
+  listNativeSessions(workspaceId: string): Promise<Session[]>;
+  importNativeSession(workspaceId: string, sessionId: string): Promise<Session>;
   createSession(workspaceId: string, agent?: Workspace["agent"]): Promise<Session>;
   sessionView(sessionId: string): Promise<SessionView>;
   sessionCommands(sessionId: string): Promise<SessionCommandListResponse>;
@@ -831,6 +833,19 @@ export class LocalCoreClient implements CoreClient {
   listSessions(workspaceId?: string): Promise<Session[]> {
     const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : "";
     return this.channel.request("GET", `/v1/sessions${query}`);
+  }
+
+  async listNativeSessions(workspaceId: string): Promise<Session[]> {
+    const response = await this.channel.request<{ sessions?: Session[] }>("GET", `/v1/workspaces/${workspaceId}/native-sessions`);
+    return Array.isArray(response.sessions) ? response.sessions : [];
+  }
+
+  async importNativeSession(workspaceId: string, sessionId: string): Promise<Session> {
+    const response = await this.channel.request<{ session?: Session }>("POST", `/v1/workspaces/${workspaceId}/native-sessions/import`, { session_id: sessionId });
+    if (!response.session) {
+      throw new Error("native import response missing session");
+    }
+    return response.session;
   }
 
   createSession(workspaceId: string, agent?: Workspace["agent"]): Promise<Session> {

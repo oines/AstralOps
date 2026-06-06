@@ -11,82 +11,80 @@ import (
 )
 
 const (
-	CapabilityCoreRead             = "core.read"
-	CapabilityCoreControl          = "core.control"
-	CapabilityInteractionRespond   = "interaction.respond"
-	CapabilitySessionEdit          = "session.edit"
-	CapabilityAttachmentIngest     = "attachment.ingest"
-	CapabilityMediaRead            = "media.read"
-	CapabilityMediaDownload        = "media.download"
-	CapabilityMediaStream          = "media.stream"
-	CapabilityWorkspaceFilesRead   = "workspace.files.read"
-	CapabilityWorkspaceFilesWrite  = "workspace.files.write"
-	CapabilityWorkspaceExec        = "workspace.exec"
-	CapabilityTerminalOpen         = "terminal.open"
-	CapabilityTerminalInput        = "terminal.input"
-	CapabilityHostFileSystemBrowse = "host.fs.browse"
-	CapabilityHostManage           = "host.manage"
+	CapabilityCoreRead             = protocol.CapabilityCoreRead
+	CapabilityCoreControl          = protocol.CapabilityCoreControl
+	CapabilityInteractionRespond   = protocol.CapabilityInteractionRespond
+	CapabilitySessionEdit          = protocol.CapabilitySessionEdit
+	CapabilityAttachmentIngest     = protocol.CapabilityAttachmentIngest
+	CapabilityMediaRead            = protocol.CapabilityMediaRead
+	CapabilityMediaDownload        = protocol.CapabilityMediaDownload
+	CapabilityMediaStream          = protocol.CapabilityMediaStream
+	CapabilityWorkspaceFilesRead   = protocol.CapabilityWorkspaceFilesRead
+	CapabilityWorkspaceFilesWrite  = protocol.CapabilityWorkspaceFilesWrite
+	CapabilityWorkspaceExec        = protocol.CapabilityWorkspaceExec
+	CapabilityTerminalOpen         = protocol.CapabilityTerminalOpen
+	CapabilityTerminalInput        = protocol.CapabilityTerminalInput
+	CapabilityHostFileSystemBrowse = protocol.CapabilityHostFileSystemBrowse
+	CapabilityHostManage           = protocol.CapabilityHostManage
 )
 
 const (
-	ControlActionHostSnapshot               = "core.read.host_snapshot"
-	ControlActionWorkbench                  = "core.read.workbench"
-	ControlActionPing                       = "core.read.ping"
-	ControlActionSessionView                = "core.read.session_view"
-	ControlActionSessions                   = "core.read.sessions"
-	ControlActionWorkspaces                 = "core.read.workspaces"
-	ControlActionWorkspaceConnection        = "core.read.workspace.connection"
-	ControlActionEvents                     = "core.read.events"
-	ControlActionEventsSubscribe            = "core.subscribe.events"
-	ControlActionEventsUnsubscribe          = "core.unsubscribe.events"
-	ControlActionSessionInput               = "core.control.session_input"
-	ControlActionInterrupt                  = "core.control.interrupt"
-	ControlActionQueueCancel                = "core.control.queue.cancel"
-	ControlActionQueueSteer                 = "core.control.queue.steer"
-	ControlActionWorkspaceCreate            = "core.control.workspace.create"
-	ControlActionWorkspaceConnect           = "core.control.workspace.connect"
-	ControlActionWorkspaceDisconnect        = "core.control.workspace.disconnect"
-	ControlActionWorkspaceDelete            = "core.control.workspace.delete"
-	ControlActionSessionCreate              = "core.control.session.create"
-	ControlActionSessionFork                = "core.control.session.fork"
-	ControlActionSessionDelete              = "core.control.session.delete"
-	ControlActionInteractionRespond         = "interaction.respond"
-	ControlActionSessionEdit                = "session.edit"
-	ControlActionAttachmentIngest           = "attachment.ingest"
-	ControlActionAttachmentIngestStart      = "attachment.ingest.start"
-	ControlActionAttachmentIngestChunk      = "attachment.ingest.chunk"
-	ControlActionAttachmentIngestFinish     = "attachment.ingest.finish"
-	ControlActionMediaRead                  = "media.read"
-	ControlActionMediaDownload              = "media.download"
-	ControlActionMediaStream                = "media.stream"
-	ControlActionMediaStreamCancel          = "media.stream.cancel"
-	ControlActionWorkspaceFilesRead         = "workspace.files.read"
-	ControlActionWorkspaceFilesWrite        = "workspace.files.write"
-	ControlActionWorkspaceFilesApplyPatch   = "workspace.files.apply_patch"
-	ControlActionWorkspaceFilesDelete       = "workspace.files.delete"
-	ControlActionWorkspaceFilesMove         = "workspace.files.move"
-	ControlActionWorkspaceFilesStream       = "workspace.files.stream"
-	ControlActionWorkspaceFilesStreamCancel = "workspace.files.stream.cancel"
-	ControlActionWorkspaceExec              = "workspace.exec"
-	ControlActionTerminalOpen               = "terminal.open"
-	ControlActionTerminalList               = "terminal.list"
-	ControlActionTerminalAttach             = "terminal.attach"
-	ControlActionTerminalDetach             = "terminal.detach"
-	ControlActionTerminalHeartbeatAck       = "terminal.heartbeat_ack"
-	ControlActionTerminalInput              = "terminal.input"
-	ControlActionTerminalResize             = "terminal.resize"
-	ControlActionTerminalClose              = "terminal.close"
-	ControlActionHostFileSystemBrowse       = "host.fs.browse"
-	ControlActionHostTrustList              = "host.trust.list"
-	ControlActionHostTrustRevoke            = "host.trust.revoke"
-	ControlActionHostPairingList            = "host.pairing.list"
-	ControlActionHostPairingApprove         = "host.pairing.approve"
-	ControlActionHostPairingDeny            = "host.pairing.deny"
+	ControlActionHostSnapshot               = protocol.ControlActionHostSnapshot
+	ControlActionWorkbench                  = protocol.ControlActionWorkbench
+	ControlActionPing                       = protocol.ControlActionPing
+	ControlActionSessionView                = protocol.ControlActionSessionView
+	ControlActionSessions                   = protocol.ControlActionSessions
+	ControlActionNativeSessions             = protocol.ControlActionNativeSessions
+	ControlActionWorkspaces                 = protocol.ControlActionWorkspaces
+	ControlActionWorkspaceConnection        = protocol.ControlActionWorkspaceConnection
+	ControlActionEvents                     = protocol.ControlActionEvents
+	ControlActionEventsSubscribe            = protocol.ControlActionEventsSubscribe
+	ControlActionEventsUnsubscribe          = protocol.ControlActionEventsUnsubscribe
+	ControlActionSessionInput               = protocol.ControlActionSessionInput
+	ControlActionInterrupt                  = protocol.ControlActionInterrupt
+	ControlActionQueueCancel                = protocol.ControlActionQueueCancel
+	ControlActionQueueSteer                 = protocol.ControlActionQueueSteer
+	ControlActionWorkspaceCreate            = protocol.ControlActionWorkspaceCreate
+	ControlActionWorkspaceConnect           = protocol.ControlActionWorkspaceConnect
+	ControlActionWorkspaceDisconnect        = protocol.ControlActionWorkspaceDisconnect
+	ControlActionWorkspaceDelete            = protocol.ControlActionWorkspaceDelete
+	ControlActionSessionCreate              = protocol.ControlActionSessionCreate
+	ControlActionSessionFork                = protocol.ControlActionSessionFork
+	ControlActionSessionDelete              = protocol.ControlActionSessionDelete
+	ControlActionNativeSessionImport        = protocol.ControlActionNativeSessionImport
+	ControlActionInteractionRespond         = protocol.ControlActionInteractionRespond
+	ControlActionSessionEdit                = protocol.ControlActionSessionEdit
+	ControlActionAttachmentIngest           = protocol.ControlActionAttachmentIngest
+	ControlActionAttachmentIngestStart      = protocol.ControlActionAttachmentIngestStart
+	ControlActionAttachmentIngestChunk      = protocol.ControlActionAttachmentIngestChunk
+	ControlActionAttachmentIngestFinish     = protocol.ControlActionAttachmentIngestFinish
+	ControlActionMediaRead                  = protocol.ControlActionMediaRead
+	ControlActionMediaDownload              = protocol.ControlActionMediaDownload
+	ControlActionMediaStream                = protocol.ControlActionMediaStream
+	ControlActionMediaStreamCancel          = protocol.ControlActionMediaStreamCancel
+	ControlActionWorkspaceFilesRead         = protocol.ControlActionWorkspaceFilesRead
+	ControlActionWorkspaceFilesWrite        = protocol.ControlActionWorkspaceFilesWrite
+	ControlActionWorkspaceFilesApplyPatch   = protocol.ControlActionWorkspaceFilesApplyPatch
+	ControlActionWorkspaceFilesDelete       = protocol.ControlActionWorkspaceFilesDelete
+	ControlActionWorkspaceFilesMove         = protocol.ControlActionWorkspaceFilesMove
+	ControlActionWorkspaceFilesStream       = protocol.ControlActionWorkspaceFilesStream
+	ControlActionWorkspaceFilesStreamCancel = protocol.ControlActionWorkspaceFilesStreamCancel
+	ControlActionWorkspaceExec              = protocol.ControlActionWorkspaceExec
+	ControlActionTerminalOpen               = protocol.ControlActionTerminalOpen
+	ControlActionTerminalList               = protocol.ControlActionTerminalList
+	ControlActionTerminalAttach             = protocol.ControlActionTerminalAttach
+	ControlActionTerminalDetach             = protocol.ControlActionTerminalDetach
+	ControlActionTerminalHeartbeatAck       = protocol.ControlActionTerminalHeartbeatAck
+	ControlActionTerminalInput              = protocol.ControlActionTerminalInput
+	ControlActionTerminalResize             = protocol.ControlActionTerminalResize
+	ControlActionTerminalClose              = protocol.ControlActionTerminalClose
+	ControlActionHostFileSystemBrowse       = protocol.ControlActionHostFileSystemBrowse
+	ControlActionHostTrustList              = protocol.ControlActionHostTrustList
+	ControlActionHostTrustRevoke            = protocol.ControlActionHostTrustRevoke
+	ControlActionHostPairingList            = protocol.ControlActionHostPairingList
+	ControlActionHostPairingApprove         = protocol.ControlActionHostPairingApprove
+	ControlActionHostPairingDeny            = protocol.ControlActionHostPairingDeny
 )
-
-type ControlRequest = protocol.ControlRequest
-type ControlResponse = protocol.ControlResponse
-type ControlError = protocol.ControlError
 
 func (s *remoteControlService) executeControlRequest(req ControlRequest) (ControlResponse, error) {
 	return s.executeControlRequestWithConnection(req, nil)
@@ -120,7 +118,7 @@ func (s *remoteControlService) executeControlRequestWithContext(ctx context.Cont
 		return ControlResponse{RequestID: req.RequestID}, newActionError(http.StatusForbidden, "capability_mismatch", "control capability does not match action")
 	}
 	grant, ok := s.store.trustedControlGrant(req.ControllerDeviceID)
-	if !ok || !trustGrantAllows(grant, requiredCapability) {
+	if !ok || !trustGrantAllows(grant, string(requiredCapability)) {
 		return ControlResponse{RequestID: req.RequestID}, newActionError(http.StatusForbidden, "capability_denied", "controller is not allowed to use capability")
 	}
 
@@ -147,41 +145,8 @@ func (s *remoteControlService) dispatchAuthorizedControlRequest(ctx context.Cont
 	return ControlResponse{RequestID: req.RequestID, OK: true, Result: result}, nil
 }
 
-func controlActionCapability(action string) string {
-	switch action {
-	case ControlActionHostSnapshot, ControlActionWorkbench, ControlActionPing, ControlActionSessionView, ControlActionSessions, ControlActionWorkspaces, ControlActionWorkspaceConnection, ControlActionEvents, ControlActionEventsSubscribe, ControlActionEventsUnsubscribe:
-		return CapabilityCoreRead
-	case ControlActionSessionInput, ControlActionInterrupt, ControlActionQueueCancel, ControlActionQueueSteer, ControlActionWorkspaceCreate, ControlActionWorkspaceConnect, ControlActionWorkspaceDisconnect, ControlActionWorkspaceDelete, ControlActionSessionCreate, ControlActionSessionFork, ControlActionSessionDelete:
-		return CapabilityCoreControl
-	case ControlActionInteractionRespond:
-		return CapabilityInteractionRespond
-	case ControlActionSessionEdit:
-		return CapabilitySessionEdit
-	case ControlActionAttachmentIngest, ControlActionAttachmentIngestStart, ControlActionAttachmentIngestChunk, ControlActionAttachmentIngestFinish:
-		return CapabilityAttachmentIngest
-	case ControlActionMediaRead:
-		return CapabilityMediaRead
-	case ControlActionMediaDownload:
-		return CapabilityMediaDownload
-	case ControlActionMediaStream, ControlActionMediaStreamCancel:
-		return CapabilityMediaStream
-	case ControlActionWorkspaceFilesRead, ControlActionWorkspaceFilesStream, ControlActionWorkspaceFilesStreamCancel:
-		return CapabilityWorkspaceFilesRead
-	case ControlActionWorkspaceFilesWrite, ControlActionWorkspaceFilesApplyPatch, ControlActionWorkspaceFilesDelete, ControlActionWorkspaceFilesMove:
-		return CapabilityWorkspaceFilesWrite
-	case ControlActionWorkspaceExec:
-		return CapabilityWorkspaceExec
-	case ControlActionTerminalOpen, ControlActionTerminalList, ControlActionTerminalAttach, ControlActionTerminalDetach, ControlActionTerminalHeartbeatAck:
-		return CapabilityTerminalOpen
-	case ControlActionTerminalInput, ControlActionTerminalResize, ControlActionTerminalClose:
-		return CapabilityTerminalInput
-	case ControlActionHostFileSystemBrowse:
-		return CapabilityHostFileSystemBrowse
-	case ControlActionHostTrustList, ControlActionHostTrustRevoke, ControlActionHostPairingList, ControlActionHostPairingApprove, ControlActionHostPairingDeny:
-		return CapabilityHostManage
-	default:
-		return ""
-	}
+func controlActionCapability(action ControlAction) ControlCapability {
+	return protocol.RequiredCapability(action)
 }
 
 func (s *remoteControlService) dispatchControlAction(ctx context.Context, req ControlRequest, conn controlConnection, grant TrustGrant) (any, error) {
@@ -221,6 +186,17 @@ func (s *remoteControlService) dispatchControlAction(ctx context.Context, req Co
 			return nil, err
 		}
 		return sanitizeControlSessions(s.store.listSessions(params.WorkspaceID)), nil
+	case ControlActionNativeSessions:
+		var params protocol.NativeSessionsReadParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		if _, ok := s.store.getWorkspace(params.WorkspaceID); !ok {
+			return nil, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found")
+		}
+		return protocol.NativeSessionListResponse{
+			Sessions: sanitizeControlSessions(s.store.listNativeSessionCandidates(params.WorkspaceID)),
+		}, nil
 	case ControlActionWorkspaces:
 		return sanitizeControlWorkspaces(s.store.listWorkspaces()), nil
 	case ControlActionWorkspaceConnection:
@@ -244,7 +220,7 @@ func (s *remoteControlService) dispatchControlAction(ctx context.Context, req Co
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return sanitizeControlEvents(s.store.queryEventsWindow(params.WorkspaceID, params.SessionID, params.AfterSeq, params.BeforeSeq, params.Limit)), nil
+		return sanitizeControlEvents(s.queryEventsWindow(params.WorkspaceID, params.SessionID, params.AfterSeq, params.BeforeSeq, params.Limit)), nil
 	case ControlActionEventsSubscribe:
 		if conn == nil {
 			return nil, newActionError(http.StatusBadRequest, "control_connection_required", "core.subscribe.events requires an encrypted control connection")
@@ -367,6 +343,20 @@ func (s *remoteControlService) dispatchControlAction(ctx context.Context, req Co
 			return nil, err
 		}
 		return s.sessions().deleteSessionByID(params.SessionID)
+	case ControlActionNativeSessionImport:
+		var params protocol.NativeSessionImportParams
+		if err := decodeControlParams(req.Params, &params); err != nil {
+			return nil, err
+		}
+		if _, ok := s.store.getWorkspace(params.WorkspaceID); !ok {
+			return nil, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found")
+		}
+		session, err := s.store.importNativeSession(params.WorkspaceID, params.SessionID)
+		if err != nil {
+			return nil, newActionError(http.StatusNotFound, "native_session_not_found", err.Error())
+		}
+		s.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: eventNormalized("session.started", session)})
+		return protocol.NativeSessionImportResponse{Session: sanitizeControlSession(session)}, nil
 	case ControlActionInteractionRespond:
 		var params struct {
 			InteractionID string         `json:"interaction_id"`
@@ -592,13 +582,6 @@ func (s *remoteControlService) dispatchControlAction(ctx context.Context, req Co
 	}
 }
 
-func decodeControlParams(params map[string]any, target any) error {
-	body, err := json.Marshal(params)
-	if err != nil {
-		return newActionError(http.StatusBadRequest, "invalid_params", err.Error())
-	}
-	if err := json.Unmarshal(body, target); err != nil {
-		return newActionError(http.StatusBadRequest, "invalid_params", err.Error())
-	}
-	return nil
+func decodeControlParams(params json.RawMessage, target any) error {
+	return protocol.DecodeControlParamsInto("", params, target)
 }

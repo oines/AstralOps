@@ -30,10 +30,19 @@ func (a *app) eventPublisher() *eventlog.Service {
 			Projections:   a.sessionProjections(),
 			Broadcaster:   a.hub,
 			Notifications: appNotificationPolicy{target: a.notificationTarget},
+			History:       a.notificationHistory,
 			Diagnostics:   logDiagnosticEvent,
 		})
 	}
 	return a.eventLog
+}
+
+func (a *app) notificationHistory(source AstralEvent, targetSessionID string) []AstralEvent {
+	if a == nil || a.store == nil {
+		return []AstralEvent{source}
+	}
+	sessionID := firstString(targetSessionID, source.SessionID)
+	return a.eventProjection().QueryEvents(source.WorkspaceID, sessionID, 0)
 }
 
 type appNotificationPolicy struct {

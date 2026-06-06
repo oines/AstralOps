@@ -1,6 +1,16 @@
 import type {
   AgentKind as GeneratedAgentKind,
   AstralEvent as GeneratedAstralEvent,
+  AstralEventFamily as GeneratedAstralEventFamily,
+  AstralEventKind as GeneratedAstralEventKind,
+  AstralEventNormalized as GeneratedAstralEventNormalized,
+  ControlAction as GeneratedControlAction,
+  ControlActionParamMap as GeneratedControlActionParamMap,
+  ControlActionParams as GeneratedControlActionParams,
+  ControlActionResult as GeneratedControlActionResult,
+  ControlActionResultMap as GeneratedControlActionResultMap,
+  ControlCapability as GeneratedControlCapability,
+  ControlErrorCode as GeneratedControlErrorCode,
   Workspace as GeneratedWorkspace,
   WorkspaceConnection as GeneratedWorkspaceConnection,
   WorkspaceTarget as GeneratedWorkspaceTarget,
@@ -10,6 +20,12 @@ export * as GeneratedProtocol from "./generated";
 
 export type AgentKind = GeneratedAgentKind;
 export type WorkspaceTarget = GeneratedWorkspaceTarget;
+export type AstralEventFamily = GeneratedAstralEventFamily;
+export type AstralEventKind = GeneratedAstralEventKind;
+export type AstralEventNormalized = GeneratedAstralEventNormalized;
+export type ControlAction = GeneratedControlAction;
+export type ControlCapability = GeneratedControlCapability;
+export type ControlErrorCode = GeneratedControlErrorCode;
 
 export type Workspace = Omit<GeneratedWorkspace, "target"> & {
   target: WorkspaceTarget;
@@ -28,28 +44,16 @@ export type WorkspaceConnection = Omit<GeneratedWorkspaceConnection, "target" | 
   };
 };
 
-export type AstralEvent = Omit<GeneratedAstralEvent, "kind" | "normalized"> & {
-  kind: AstralEventKind;
-  normalized: AstralNormalizedEvent;
-};
+export type AstralEvent = GeneratedAstralEvent;
 
-export type AstralEventFamily =
-  | "session"
-  | "turn"
-  | "message"
-  | "reasoning"
-  | "tool"
-  | "approval"
-  | "ask"
-  | "plan"
-  | "queue"
-  | "workspace"
-  | "memory"
-  | "subagent"
-  | "hook"
-  | "control";
-
-export type AstralEventKind = `${AstralEventFamily}.${string}`;
+export function normalizedRecord(value: AstralEvent | AstralEventNormalized | null | undefined): Record<string, unknown> {
+  if (!value || typeof value !== "object") return {};
+  if ("normalized" in value) {
+    const normalized = value.normalized;
+    return normalized && typeof normalized === "object" ? (normalized as Record<string, unknown>) : {};
+  }
+  return value as Record<string, unknown>;
+}
 
 export type AstralNormalizedBase = {
   source?: AgentKind | string;
@@ -845,79 +849,6 @@ export type WorkspaceExecResult = {
   failure?: string;
 };
 
-export type ControlCapability =
-  | "core.read"
-  | "core.control"
-  | "interaction.respond"
-  | "session.edit"
-  | "attachment.ingest"
-  | "media.read"
-  | "media.download"
-  | "media.stream"
-  | "workspace.files.read"
-  | "workspace.files.write"
-  | "workspace.exec"
-  | "terminal.open"
-  | "terminal.input"
-  | "host.fs.browse"
-  | "host.manage"
-  | (string & {});
-
-export type ControlAction =
-  | "core.read.host_snapshot"
-  | "core.read.workbench"
-  | "core.read.session_view"
-  | "core.read.sessions"
-  | "core.read.workspaces"
-  | "core.read.workspace.connection"
-  | "core.read.events"
-  | "core.subscribe.events"
-  | "core.unsubscribe.events"
-  | "core.control.session_input"
-  | "core.control.interrupt"
-  | "core.control.queue.cancel"
-  | "core.control.queue.steer"
-  | "core.control.workspace.create"
-  | "core.control.workspace.connect"
-  | "core.control.workspace.disconnect"
-  | "core.control.workspace.delete"
-  | "core.control.session.create"
-  | "core.control.session.fork"
-  | "core.control.session.delete"
-  | "interaction.respond"
-  | "session.edit"
-  | "attachment.ingest"
-  | "attachment.ingest.start"
-  | "attachment.ingest.chunk"
-  | "attachment.ingest.finish"
-  | "media.read"
-  | "media.download"
-  | "media.stream"
-  | "media.stream.cancel"
-  | "workspace.files.read"
-  | "workspace.files.write"
-  | "workspace.files.apply_patch"
-  | "workspace.files.delete"
-  | "workspace.files.move"
-  | "workspace.files.stream"
-  | "workspace.files.stream.cancel"
-  | "workspace.exec"
-  | "terminal.open"
-  | "terminal.list"
-  | "terminal.attach"
-  | "terminal.detach"
-  | "terminal.heartbeat_ack"
-  | "terminal.input"
-  | "terminal.resize"
-  | "terminal.close"
-  | "host.fs.browse"
-  | "host.trust.list"
-  | "host.trust.revoke"
-  | "host.pairing.list"
-  | "host.pairing.approve"
-  | "host.pairing.deny"
-  | (string & {});
-
 export type TerminalOpenParams = {
   workspace_id: string;
   cwd?: string;
@@ -1016,8 +947,9 @@ export type ControlRequest<A extends ControlAction = ControlAction> = {
 
 export type ControlError = {
   status?: number;
-  code: string;
+  code: ControlErrorCode;
   message: string;
+  details?: Record<string, string>;
 };
 
 export type ControlResponse<A extends ControlAction = ControlAction> = {
@@ -1515,125 +1447,15 @@ export type SessionDeleteResult = {
   session_id: string;
 };
 
-export type ControlActionParamMap = {
-  "core.read.host_snapshot": HostSnapshotRequest;
-  "core.read.workbench": undefined;
-  "core.read.session_view": SessionReferenceParams;
-  "core.read.sessions": SessionsReadParams;
-  "core.read.workspaces": undefined;
-  "core.read.workspace.connection": WorkspaceReferenceParams;
-  "core.read.events": EventWindowParams;
-  "core.subscribe.events": EventSubscriptionParams;
-  "core.unsubscribe.events": EventSubscriptionCancelParams;
-  "core.control.session_input": SessionInputControlParams;
-  "core.control.interrupt": SessionReferenceParams;
-  "core.control.queue.cancel": QueueControlParams;
-  "core.control.queue.steer": QueueControlParams;
-  "core.control.workspace.create": CreateWorkspaceRequest;
-  "core.control.workspace.connect": WorkspaceReferenceParams;
-  "core.control.workspace.disconnect": WorkspaceReferenceParams;
-  "core.control.workspace.delete": WorkspaceReferenceParams;
-  "core.control.session.create": CreateSessionRequest;
-  "core.control.session.fork": SessionForkControlParams;
-  "core.control.session.delete": SessionDeleteParams;
-  "interaction.respond": InteractionRespondParams;
-  "session.edit": SessionEditParams;
-  "attachment.ingest": AttachmentIngestParams;
-  "attachment.ingest.start": AttachmentIngestStartParams;
-  "attachment.ingest.chunk": AttachmentIngestChunkParams;
-  "attachment.ingest.finish": AttachmentIngestFinishParams;
-  "media.read": MediaReadParams;
-  "media.download": MediaDownloadParams;
-  "media.stream": MediaStreamParams;
-  "media.stream.cancel": MediaStreamCancelParams;
-  "workspace.files.read": WorkspaceFilesReadParams;
-  "workspace.files.write": WorkspaceFilesWriteParams;
-  "workspace.files.apply_patch": WorkspaceFilesApplyPatchParams;
-  "workspace.files.delete": WorkspaceFilesDeleteParams;
-  "workspace.files.move": WorkspaceFilesMoveParams;
-  "workspace.files.stream": WorkspaceFilesStreamParams;
-  "workspace.files.stream.cancel": WorkspaceFilesStreamCancelParams;
-  "workspace.exec": WorkspaceExecParams;
-  "terminal.open": TerminalOpenParams;
-  "terminal.list": undefined;
-  "terminal.attach": TerminalAttachParams;
-  "terminal.detach": TerminalDetachParams;
-  "terminal.heartbeat_ack": TerminalHeartbeatAckParams;
-  "terminal.input": TerminalInputParams;
-  "terminal.resize": TerminalResizeParams;
-  "terminal.close": TerminalCloseParams;
-  "host.fs.browse": HostFileSystemBrowseParams;
-  "host.trust.list": undefined;
-  "host.trust.revoke": HostTrustRevokeParams;
-  "host.pairing.list": undefined;
-  "host.pairing.approve": PairingRequestResolveParams;
-  "host.pairing.deny": PairingRequestResolveParams;
-};
+export type ControlActionParamMap = GeneratedControlActionParamMap;
 
-export type ControlActionResultMap = {
-  "core.read.host_snapshot": HostSnapshotResponse;
-  "core.read.workbench": WorkbenchState;
-  "core.read.session_view": SessionView;
-  "core.read.sessions": Session[];
-  "core.read.workspaces": Workspace[];
-  "core.read.workspace.connection": WorkspaceConnection;
-  "core.read.events": AstralEvent[];
-  "core.subscribe.events": EventSubscriptionResult;
-  "core.unsubscribe.events": EventSubscriptionCancelResult;
-  "core.control.session_input": SessionInputResult;
-  "core.control.interrupt": OkResult;
-  "core.control.queue.cancel": QueueControlResult;
-  "core.control.queue.steer": QueueControlResult;
-  "core.control.workspace.create": Workspace;
-  "core.control.workspace.connect": WorkspaceConnection;
-  "core.control.workspace.disconnect": WorkspaceConnection;
-  "core.control.workspace.delete": OkResult;
-  "core.control.session.create": Session;
-  "core.control.session.fork": SessionForkResponse;
-  "core.control.session.delete": SessionDeleteResult;
-  "interaction.respond": OkResult;
-  "session.edit": OkResult;
-  "attachment.ingest": AttachmentIngestResult;
-  "attachment.ingest.start": AttachmentIngestStartResult;
-  "attachment.ingest.chunk": AttachmentIngestChunkResult;
-  "attachment.ingest.finish": AttachmentIngestFinishResult;
-  "media.read": MediaReadResult;
-  "media.download": MediaReadResult;
-  "media.stream": MediaStreamResult;
-  "media.stream.cancel": MediaStreamCancelResult;
-  "workspace.files.read": WorkspaceFilesReadResult;
-  "workspace.files.write": WorkspaceFilesWriteResult;
-  "workspace.files.apply_patch": WorkspaceFilesApplyPatchResult;
-  "workspace.files.delete": WorkspaceFilesDeleteResult;
-  "workspace.files.move": WorkspaceFilesMoveResult;
-  "workspace.files.stream": WorkspaceFileStreamResult;
-  "workspace.files.stream.cancel": WorkspaceFileStreamCancelResult;
-  "workspace.exec": WorkspaceExecResult;
-  "terminal.open": TerminalOpenResult;
-  "terminal.list": TerminalListResult;
-  "terminal.attach": TerminalAttachResult;
-  "terminal.detach": TerminalAttachResult;
-  "terminal.heartbeat_ack": TerminalAckResult;
-  "terminal.input": TerminalAckResult;
-  "terminal.resize": TerminalAckResult;
-  "terminal.close": TerminalAckResult;
-  "host.fs.browse": HostFileSystemBrowseResult;
-  "host.trust.list": HostTrustListResult;
-  "host.trust.revoke": HostTrustRevokeResult;
-  "host.pairing.list": PairingRequestListResult;
-  "host.pairing.approve": PairingRequestResolveResult;
-  "host.pairing.deny": PairingRequestResolveResult;
-};
+export type ControlActionResultMap = GeneratedControlActionResultMap;
+
+export type ControlActionParams<A extends ControlAction> = GeneratedControlActionParams<A>;
+
+export type ControlActionResult<A extends ControlAction> = GeneratedControlActionResult<A>;
 
 export type KnownControlAction = keyof ControlActionParamMap;
-
-export type ControlActionParams<A extends ControlAction> = A extends keyof ControlActionParamMap
-  ? ControlActionParamMap[A]
-  : Record<string, unknown>;
-
-export type ControlActionResult<A extends ControlAction> = A extends keyof ControlActionResultMap
-  ? ControlActionResultMap[A]
-  : unknown;
 
 export type TypedControlRequest<A extends ControlAction> = ControlRequest<A>;
 

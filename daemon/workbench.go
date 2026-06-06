@@ -52,10 +52,6 @@ func (a *app) handleWorkbench(w http.ResponseWriter, r *http.Request) {
 func (a *app) buildWorkbenchState() workbenchState {
 	workspaces := sanitizeControlWorkspaces(a.store.listWorkspaces())
 	sessions := sanitizeControlSessions(a.store.listSessions(""))
-	workspaceByID := map[string]Workspace{}
-	for _, workspace := range workspaces {
-		workspaceByID[workspace.ID] = workspace
-	}
 
 	state := workbenchState{
 		Version:              a.workbenchVersion(),
@@ -76,9 +72,6 @@ func (a *app) buildWorkbenchState() workbenchState {
 	}
 	for _, session := range sessions {
 		state.Sessions[session.ID] = session
-		if view, ok := a.buildSessionView(session.ID); ok {
-			state.SessionViews[session.ID] = sanitizeControlSessionView(view, workspaceByID[view.Session.WorkspaceID])
-		}
 	}
 	a.terminalMu.Lock()
 	terminals := a.terminals
@@ -92,11 +85,7 @@ func (a *app) buildWorkbenchState() workbenchState {
 }
 
 func (a *app) workbenchVersion() int64 {
-	events := a.store.allEvents()
-	if len(events) == 0 {
-		return 0
-	}
-	return events[len(events)-1].Seq
+	return a.store.currentSeq()
 }
 
 func (a *app) handleWorkbenchSSE(w http.ResponseWriter, r *http.Request) {
@@ -120,22 +109,43 @@ func (a *app) handleWorkbenchSSE(w http.ResponseWriter, r *http.Request) {
 
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+	var patchTimer *time.Timer
+	var patchTimerC <-chan time.Time
+	defer func() {
+		if patchTimer != nil {
+			patchTimer.Stop()
+		}
+	}()
+	schedulePatch := func() {
+		if patchTimer != nil {
+			return
+		}
+		patchTimer = time.NewTimer(250 * time.Millisecond)
+		patchTimerC = patchTimer.C
+	}
+	flushPatch := func() {
+		patchTimer = nil
+		patchTimerC = nil
+		next := a.buildWorkbenchState()
+		patch := diffWorkbenchState(current, next)
+		if len(patch.Ops) > 0 {
+			writeSSE(w, flusher, "workbench.patch", patch)
+		}
+		current = next
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
 			writeSSE(w, flusher, "heartbeat", map[string]any{"ts": time.Now().UTC().Format(time.RFC3339Nano)})
+		case <-patchTimerC:
+			flushPatch()
 		case _, ok := <-client.ch:
 			if !ok {
 				return
 			}
-			next := a.buildWorkbenchState()
-			patch := diffWorkbenchState(current, next)
-			if len(patch.Ops) > 0 {
-				writeSSE(w, flusher, "workbench.patch", patch)
-			}
-			current = next
+			schedulePatch()
 		}
 	}
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { normalizedRecord } from "./types";
 import type { TFunction } from "i18next";
 import { AlertTriangle, KeyRound, LoaderCircle, PanelLeft, PanelRight, RefreshCw, X } from "lucide-react";
 import { createLocalCoreClient, createRemoteCoreClient, isCoreRequestError, readMeshState, requestRemoteHostPairing, subscribeMeshState, subscribeRemoteHostSessionState, type CoreClient, type EventSubscription } from "./api";
@@ -58,6 +59,11 @@ const EVENT_WINDOW_SIZE = 1000;
 const LOCAL_HOST_ID = "local";
 const DEFAULT_CLOUD_BASE_URL = "https://cloud-astralops.oines.dev";
 type RemoteAuthorizationOverride = "revoked" | "pending";
+
+type HostStateLoadResult = {
+  events: AstralEvent[];
+  liveAfterSeq: number;
+};
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   version: 1,
@@ -138,6 +144,10 @@ export function App(): React.JSX.Element {
   const [composerHeight, setComposerHeight] = useState(96);
   const [forkingSeq, setForkingSeq] = useState<number | null>(null);
   const [scrollTarget, setScrollTarget] = useState<{ sessionId: string; eventSeq: number } | null>(null);
+  const [nativeImportWorkspaceId, setNativeImportWorkspaceId] = useState("");
+  const [nativeImportSessions, setNativeImportSessions] = useState<Session[]>([]);
+  const [nativeImportLoading, setNativeImportLoading] = useState(false);
+  const [nativeImportError, setNativeImportError] = useState("");
 
   const isMacDesktop = window.astral.platform === "darwin";
   const sidebarToggleLeftClass = isMacDesktop ? "left-[95px]" : "left-[16px]";
@@ -199,7 +209,7 @@ export function App(): React.JSX.Element {
 
   const maybeNotifyLiveEvent = useCallback((event: AstralEvent) => {
     if (event.kind !== "control.notification") return;
-    const payload = event.normalized as Record<string, unknown>;
+    const payload = normalizedRecord(event);
     const settings = appSettingsRef.current.notifications;
     const reason = typeof payload.reason === "string" ? payload.reason : "";
     if ((reason === "turn_completed" || reason === "turn_failed") && !settings.task_complete) return;
@@ -380,6 +390,11 @@ export function App(): React.JSX.Element {
     }, delayMs);
   }, [storeSessionView]);
 
+  useEffect(() => {
+    if (!api || !activeSessionId || activeSessionView) return;
+    scheduleSessionViewRefresh(api, activeSessionId, sessionViewRefreshGenerationRef.current, 0);
+  }, [activeSessionId, activeSessionView, api, scheduleSessionViewRefresh]);
+
   const applyWorkbenchPatch = useCallback((patch: WorkbenchPatch) => {
     for (const op of patch.ops) {
       switch (op.collection) {
@@ -535,7 +550,7 @@ export function App(): React.JSX.Element {
       restoreOnLaunch?: boolean;
       updateLocalHostInfo?: boolean;
     } = {},
-  ) => {
+  ): Promise<HostStateLoadResult> => {
     let workbench: WorkbenchState | undefined;
     let hostResponse: HostInfo | undefined;
     let workspaceResponse: Workspace[] = [];
@@ -547,9 +562,9 @@ export function App(): React.JSX.Element {
 
     const snapshot = await client.hostSnapshot({
       event_limit: EVENT_WINDOW_SIZE,
-      restore_on_launch: Boolean(options.restoreOnLaunch),
+      restore_on_launch: false,
     });
-    if (options.isCurrent && !options.isCurrent()) return [];
+    if (options.isCurrent && !options.isCurrent()) return { events: [], liveAfterSeq: 0 };
     workbench = snapshot.workbench;
     hostResponse = snapshot.host;
     setHostAgents(workbench?.agents ?? snapshot.agents ?? {});
@@ -602,7 +617,7 @@ export function App(): React.JSX.Element {
       setActiveWorkspaceId(initialSession?.workspace_id || sessionResponse[0]?.workspace_id || workspaceResponse[0]?.id || "");
       setActiveSession(initialSession);
     }
-    return eventResponse;
+    return { events: eventResponse, liveAfterSeq: workbench?.version ?? 0 };
   }, []);
 
   const clearDisplayedWorkbenchState = useCallback(() => {
@@ -835,6 +850,54 @@ export function App(): React.JSX.Element {
       }
     },
     [api, storeSessionView, t, workspaces, workspaceConnections],
+  );
+
+  const openNativeImport = useCallback(
+    async (workspaceId: string) => {
+      if (!api) return;
+      setError("");
+      setNativeImportWorkspaceId(workspaceId);
+      setNativeImportSessions([]);
+      setNativeImportError("");
+      setNativeImportLoading(true);
+      try {
+        const candidates = await api.listNativeSessions(workspaceId);
+        setNativeImportSessions(candidates);
+      } catch (importError) {
+        setNativeImportError(importError instanceof Error ? importError.message : String(importError));
+      } finally {
+        setNativeImportLoading(false);
+      }
+    },
+    [api],
+  );
+
+  const closeNativeImport = useCallback(() => {
+    setNativeImportWorkspaceId("");
+    setNativeImportSessions([]);
+    setNativeImportError("");
+    setNativeImportLoading(false);
+  }, []);
+
+  const importNativeSession = useCallback(
+    async (candidate: Session) => {
+      if (!api || !nativeImportWorkspaceId) return;
+      setNativeImportError("");
+      try {
+        const imported = await api.importNativeSession(nativeImportWorkspaceId, candidate.id);
+        const view = await api.sessionView(imported.id).catch(() => null);
+        const displaySession = view ? { ...imported, ...view.session, title: view.title || view.session.title, status: view.status } : imported;
+        if (view) storeSessionView(view);
+        setSessions((current) => sortSessionsByUpdated([displaySession, ...current.filter((item) => item.id !== imported.id)]));
+        setActiveWorkspaceId(displaySession.workspace_id);
+        setActiveSession(displaySession);
+        setNativeImportSessions((current) => current.filter((session) => session.id !== candidate.id));
+        closeNativeImport();
+      } catch (importError) {
+        setNativeImportError(importError instanceof Error ? importError.message : String(importError));
+      }
+    },
+    [api, closeNativeImport, nativeImportWorkspaceId, storeSessionView],
   );
 
   const handleSelectSession = useCallback(
@@ -1201,14 +1264,14 @@ export function App(): React.JSX.Element {
         return;
       }
       try {
-        const initialEvents = await loadHostState(client, {
+        const initialState = await loadHostState(client, {
           includeWorkspaceConnections: true,
           isCurrent: isCurrentHost,
           restoreOnLaunch: appSettingsRef.current.general.restore_on_launch,
           updateLocalHostInfo: activeHostIsLocal,
         });
         if (!isCurrentHost()) return;
-        const afterSeq = Math.max(0, ...initialEvents.map((event) => event.seq));
+        const afterSeq = initialState.liveAfterSeq;
         workbenchSubscription = client.subscribeWorkbench({
           onPatch: (patch) => {
             if (!isCurrentHost()) return;
@@ -1339,6 +1402,7 @@ export function App(): React.JSX.Element {
         onDisconnectWorkspace={(workspaceId) => void handleDisconnectWorkspace(workspaceId)}
         onDeleteSession={(sessionId) => void deleteSession(sessionId)}
         onDeleteWorkspace={(workspaceId) => void deleteWorkspace(workspaceId)}
+        onImportNativeSessions={(workspaceId) => void openNativeImport(workspaceId)}
         onOpenSettings={() => setSettingsOpen(true)}
         onResize={setSidebarWidth}
         onSelectHost={handleSelectHost}
@@ -1448,6 +1512,15 @@ export function App(): React.JSX.Element {
         onCreate={handleCreateWorkspace}
       />
 
+      <NativeImportDialog
+        error={nativeImportError}
+        loading={nativeImportLoading}
+        open={Boolean(nativeImportWorkspaceId)}
+        sessions={nativeImportSessions}
+        onClose={closeNativeImport}
+        onImport={(session) => void importNativeSession(session)}
+      />
+
       <WorkspaceOpenerMenu
         defaultOpener={appSettings.workspace.default_opener}
         rightPanelOpen={rightPanelOpen}
@@ -1517,6 +1590,92 @@ function AppErrorBanner({ message, onDismiss }: { message: string; onDismiss: ()
       </div>
     </div>
   );
+}
+
+function NativeImportDialog({
+  error,
+  loading,
+  open,
+  sessions,
+  onClose,
+  onImport,
+}: {
+  error: string;
+  loading: boolean;
+  open: boolean;
+  sessions: Session[];
+  onClose: () => void;
+  onImport: (session: Session) => void;
+}): React.JSX.Element | null {
+  const { t } = useTranslation(["common", "desktop"]);
+  if (!open) return null;
+  return (
+    <div className="absolute inset-0 z-[var(--ao-z-modal)] flex items-center justify-center bg-black/20 px-6 py-10 backdrop-blur-sm">
+      <div className="w-full max-w-[520px] overflow-hidden rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)] shadow-[0_28px_80px_rgba(0,0,0,0.20),0_4px_16px_rgba(0,0,0,0.08)]">
+        <div className="flex min-w-0 items-start gap-3 border-b border-[var(--ao-border)] px-4 py-4">
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[15px] font-bold leading-6 text-[var(--ao-text)]">{t("desktop:nativeImport.title")}</h2>
+            <p className="m-0 mt-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">{t("desktop:nativeImport.description")}</p>
+          </div>
+          <button
+            className="grid size-7 shrink-0 place-items-center rounded-lg text-[var(--ao-muted-strong)] transition-colors hover:bg-black/[0.055] hover:text-[var(--ao-text)]"
+            type="button"
+            aria-label={t("common:actions.close")}
+            title={t("common:actions.close")}
+            onClick={onClose}
+          >
+            <X size={15} strokeWidth={2} />
+          </button>
+        </div>
+        <div className="max-h-[420px] overflow-auto px-3 py-3">
+          {error ? (
+            <div className="mb-3 rounded-lg border border-[#f0c8a7] bg-[#fff7ed] px-3 py-2 text-[12px] font-semibold leading-5 text-[#8a3b12]">
+              {error}
+            </div>
+          ) : null}
+          {loading ? (
+            <div className="flex min-h-[120px] items-center justify-center gap-2 text-[13px] font-semibold text-[var(--ao-muted)]">
+              <LoaderCircle className="animate-spin" size={16} strokeWidth={2} />
+              {t("desktop:nativeImport.loading")}
+            </div>
+          ) : sessions.length === 0 ? (
+            <div className="grid min-h-[120px] place-items-center rounded-lg border border-dashed border-[var(--ao-border)] text-[13px] font-semibold text-[var(--ao-muted)]">
+              {t("desktop:nativeImport.empty")}
+            </div>
+          ) : (
+            <div className="grid gap-1.5">
+              {sessions.map((session) => (
+                <div
+                  className="grid min-h-[54px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-3 py-2 transition-colors hover:bg-black/[0.035]"
+                  key={session.id}
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-[13px] font-bold leading-5 text-[var(--ao-text)]">{session.title || t("desktop:sidebar.emptySessionTitle")}</div>
+                    <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] font-semibold leading-4 text-[var(--ao-muted)]">
+                      <span>{agentDisplayName(session.agent)}</span>
+                      <span className="text-[var(--ao-subtle)]">·</span>
+                      <span className="truncate" title={session.updated_at || session.created_at}>{session.updated_at || session.created_at || session.id}</span>
+                    </div>
+                  </div>
+                  <button
+                    className="h-8 rounded-lg bg-[#202124] px-3 text-[13px] font-semibold text-white transition-colors hover:bg-[#343438]"
+                    type="button"
+                    onClick={() => onImport(session)}
+                  >
+                    {t("desktop:nativeImport.importAction")}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function agentDisplayName(agent: AgentKind | string): string {
+  return agent === "claude" ? "Claude" : agent === "codex" ? "Codex" : String(agent || "");
 }
 
 function latestWorkspaceConnection(events: AstralEvent[]): WorkspaceConnection | null {

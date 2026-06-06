@@ -12,6 +12,7 @@
 		3574D7C9C71CF2D6004A0BF2 /* MobileCoreBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 541295D8925E948E31970D30 /* MobileCoreBridge.swift */; };
 		3894AE4ADBFEE383A6E1EAAD /* MediaPreviewSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86C5D395C9E03F69EDFAFF47 /* MediaPreviewSheet.swift */; };
 		3E6620B3F3E89C9EF7C6D348 /* Mobilecore.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B0629F755679531F19AE4E41 /* Mobilecore.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		4C9628498A9B1C074F4EF505 /* GeneratedProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE0B18D3DA5BE56777004230 /* GeneratedProtocol.swift */; };
 		4EA45A9A43ED741DDD7CF79E /* CloudOAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74152150C88204E6CE036DF8 /* CloudOAuth.swift */; };
 		51D0D76F1C96F5AC1F6ADAE8 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1687770FC19005F370FEC0A1 /* AppModel.swift */; };
 		60D23526031D7E58E35D4AD8 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D28AA619A9BF8680C557F466 /* RootView.swift */; };
@@ -85,6 +86,7 @@
 		B8436392713E17F7CAA8C80C /* terminal-light.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = "terminal-light.html"; sourceTree = "<group>"; };
 		C24036068EB3A30D0146FDA3 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		CB79B4FFF9D42900D19C594C /* TerminalPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPage.swift; sourceTree = "<group>"; };
+		CE0B18D3DA5BE56777004230 /* GeneratedProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratedProtocol.swift; sourceTree = "<group>"; };
 		D28AA619A9BF8680C557F466 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		DA9023D578DBF371D6CAC55E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		E970436CA78F9FDFC7A31CCB /* MobileCoreBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileCoreBridgeTests.swift; sourceTree = "<group>"; };
@@ -118,6 +120,7 @@
 				74152150C88204E6CE036DF8 /* CloudOAuth.swift */,
 				9B2E0D2D71A9960F91A5FA01 /* ComposerView.swift */,
 				A9CA305FE2D81B21F9EEB891 /* FilesPage.swift */,
+				CE0B18D3DA5BE56777004230 /* GeneratedProtocol.swift */,
 				0D2BC5F5BE165B72376163B4 /* JSONValue.swift */,
 				6DD85DBFE041B88292D2ED61 /* KeychainStore.swift */,
 				86C5D395C9E03F69EDFAFF47 /* MediaPreviewSheet.swift */,
@@ -316,6 +319,7 @@
 				4EA45A9A43ED741DDD7CF79E /* CloudOAuth.swift in Sources */,
 				A86CC7A4D39A423B718EA456 /* ComposerView.swift in Sources */,
 				DD60690CA65A79AF431614EE /* FilesPage.swift in Sources */,
+				4C9628498A9B1C074F4EF505 /* GeneratedProtocol.swift in Sources */,
 				06AD6C33EF472314B98D6F2D /* JSONValue.swift in Sources */,
 				DB3561A2BE64A23670CCB36B /* KeychainStore.swift in Sources */,
 				3894AE4ADBFEE383A6E1EAAD /* MediaPreviewSheet.swift in Sources */,

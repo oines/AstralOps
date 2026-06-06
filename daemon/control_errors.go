@@ -18,8 +18,17 @@ func newActionError(status int, code string, message string) *actionError {
 func writeActionError(w http.ResponseWriter, err error) {
 	var actionErr *actionError
 	if errors.As(err, &actionErr) {
-		writeJSON(w, actionErr.Status, map[string]string{"error": actionErr.Message})
+		writeJSON(w, actionErr.Status, map[string]any{
+			"error":   actionErr.Message,
+			"code":    actionErr.Code,
+			"message": actionErr.Message,
+			"details": actionErr.Details,
+		})
 		return
 	}
-	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	writeJSON(w, http.StatusInternalServerError, map[string]any{
+		"error":   err.Error(),
+		"code":    "internal_error",
+		"message": err.Error(),
+	})
 }

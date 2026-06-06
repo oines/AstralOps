@@ -59,7 +59,7 @@ func TestHostRemoteSessionSkipsHealthProbeDuringRequest(t *testing.T) {
 		hostDeviceID: "dev_host",
 		manager: &hostRemoteSessionManager{
 			deps: hostRemoteSessionDeps{
-				request: func(context.Context, string, string, string, map[string]any) (ControlResponse, error) {
+				request: func(context.Context, string, ControlCapability, ControlAction, map[string]any) (ControlResponse, error) {
 					if startedOnce.CompareAndSwap(false, true) {
 						close(started)
 					}

@@ -160,10 +160,10 @@ func (r *claudeLocalRuntime) StopSession(sessionID string, reason string) {
 	}
 	if err := client.stop(reason, claudeEndSessionTimeout); err != nil {
 		session, _ := r.deps.store.getSession(sessionID)
-		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.warning", Normalized: map[string]any{
+		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.warning", Normalized: eventNormalized("control.warning", map[string]any{
 			"message": err.Error(),
 			"reason":  reason,
-		}})
+		})})
 	}
 }
 
@@ -187,10 +187,10 @@ func (r *claudeLocalRuntime) Steer(sessionID string, input string, options TurnO
 
 	startOptions := options
 	if !options.Internal && !options.SuppressUserMessage {
-		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
+		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "message.user", Normalized: eventNormalized("message.user", displayInputNormalized(input, options))})
 		startOptions.SuppressUserMessage = true
 	}
-	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.steer", Normalized: map[string]any{"status": "interrupting"}})
+	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.steer", Normalized: eventNormalized("control.steer", map[string]any{"status": "interrupting"})})
 
 	done, err := client.requestSteerInterrupt(session)
 	if err != nil {
@@ -241,10 +241,10 @@ func (r *claudeLocalRuntime) clientForTurn(session Session, cwd, path string, ar
 		delete(r.clients, session.ID)
 		r.mu.Unlock()
 		if err := client.stop("claude runtime arguments changed", claudeEndSessionTimeout); err != nil {
-			r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: AgentClaude, Kind: "control.warning", Normalized: map[string]any{
+			r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: AgentClaude, Kind: "control.warning", Normalized: eventNormalized("control.warning", map[string]any{
 				"message": err.Error(),
 				"reason":  "claude runtime arguments changed",
-			}})
+			})})
 		}
 	}
 }
@@ -393,13 +393,13 @@ func (c *claudeClient) startTurn(session Session, input string, options TurnOpti
 
 	c.runtime.deps.store.updateSessionStatus(session.ID, "running")
 	if !options.Internal && !options.SuppressUserMessage {
-		c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", displayInputNormalized(input, options))})
 	}
 	started := map[string]any{"status": "running"}
 	if options.Internal {
 		started["internal"] = true
 	}
-	c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: started})
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: eventNormalized("turn.started", started)})
 
 	if err := c.writeUserInput(input, options.Attachments); err != nil {
 		c.finishFailed(err.Error(), nil)
@@ -474,7 +474,7 @@ func (c *claudeClient) requestInterrupt(session Session, reason string, hidden b
 	c.mu.Lock()
 	c.interruptRequestID = requestID
 	c.mu.Unlock()
-	c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: AgentClaude, Kind: "control.interrupt", Normalized: map[string]any{"status": "requested", "request_id": requestID}})
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: AgentClaude, Kind: "control.interrupt", Normalized: eventNormalized("control.interrupt", map[string]any{"status": "requested", "request_id": requestID})})
 	go c.cancelTimeout(requestID)
 	return nil
 }
@@ -517,10 +517,10 @@ func (c *claudeClient) repeatInterruptIfCancelling(session Session) {
 	}
 	requestID, err := c.writeControlRequest("interrupt", "")
 	if err != nil {
-		c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: AgentClaude, Kind: "control.warning", Normalized: map[string]any{
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: AgentClaude, Kind: "control.warning", Normalized: eventNormalized("control.warning", map[string]any{
 			"message": err.Error(),
 			"reason":  "claude interrupt retry",
-		}})
+		})})
 		return
 	}
 	c.mu.Lock()
@@ -538,10 +538,10 @@ func (c *claudeClient) cancelTimeout(requestID string) {
 	if stale || !active || !cancelRequested {
 		return
 	}
-	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentClaude, Kind: "control.warning", Normalized: map[string]any{
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentClaude, Kind: "control.warning", Normalized: eventNormalized("control.warning", map[string]any{
 		"message": "Claude interrupt timed out; terminating process",
 		"reason":  "interrupt timeout",
-	}})
+	})})
 	c.finishCancelled()
 	c.forceKill()
 }
@@ -660,7 +660,7 @@ func (c *claudeClient) finishCompletedRequiresAction() {
 		return
 	}
 	c.runtime.deps.store.updateSessionStatus(c.session.ID, "idle")
-	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "turn.completed", Normalized: map[string]any{"status": "idle"}})
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"status": "idle"})})
 	c.runtime.deps.store.updateSessionStatus(c.session.ID, "requires_action")
 	c.scheduleIdleStop()
 }
@@ -702,7 +702,7 @@ func (c *claudeClient) finishTurn(kind string, message string, cause error, flag
 	switch kind {
 	case "completed":
 		c.runtime.deps.store.updateSessionStatus(c.session.ID, "idle")
-		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "turn.completed", Normalized: map[string]any{"status": "idle"}})
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"status": "idle"})})
 	case "cancelled":
 		c.runtime.deps.store.updateSessionStatus(c.session.ID, "idle")
 		normalized := map[string]any{"status": "idle"}
@@ -712,7 +712,7 @@ func (c *claudeClient) finishTurn(kind string, message string, cause error, flag
 		if hidden {
 			normalized["hidden"] = true
 		}
-		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "turn.cancelled", Normalized: normalized})
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "turn.cancelled", Normalized: eventNormalized("turn.cancelled", normalized)})
 	case "failed":
 		c.runtime.finishFailed(c.session, message, cause)
 	}
@@ -796,7 +796,7 @@ func (r *claudeLocalRuntime) claudeArgs(session Session, options TurnOptions, re
 		"--include-partial-messages",
 		"--include-hook-events",
 	}
-	if r.deps.store.hasEventKind(session.ID, "session.native") {
+	if r.deps.store.shouldResumeClaudeSession(session) {
 		args = append(args, "--resume", session.NativeSessionID)
 	} else if session.ForkedFromSessionID != "" {
 		source, ok := r.deps.store.getSession(session.ForkedFromSessionID)
@@ -936,10 +936,12 @@ func (c *claudeClient) scanClaudeStream(reader io.Reader) {
 		for _, ev := range normalizeClaudeStreamJSON(session, lineBytes) {
 			ev = r.remapProjectionEventPaths(ev)
 			for _, visibleEvent := range r.prepareClaudeVisibleEvent(session, ev, visibleText) {
-				r.deps.emit(visibleEvent)
 				if visibleEvent.Kind == "approval.requested" || visibleEvent.Kind == "ask.requested" {
 					c.markPendingInteraction()
 					r.deps.store.updateSessionStatus(session.ID, "requires_action")
+				}
+				r.deps.emit(visibleEvent)
+				if visibleEvent.Kind == "approval.requested" || visibleEvent.Kind == "ask.requested" {
 					if visibleEvent.Kind == "ask.requested" && isClaudeAskUserQuestionEvent(visibleEvent) {
 						c.pauseForApproval(session)
 					}
@@ -951,8 +953,9 @@ func (c *claudeClient) scanClaudeStream(reader io.Reader) {
 					c.repeatInterruptIfCancelling(session)
 				}
 				if approval, ok := claudeApprovalFromToolResult(session, visibleEvent, toolStarts); ok {
-					r.deps.emit(r.remapProjectionEventPaths(approval))
+					approval = r.remapProjectionEventPaths(approval)
 					r.deps.store.updateSessionStatus(session.ID, "requires_action")
+					r.deps.emit(approval)
 					c.markPendingInteraction()
 					c.pauseForApproval(session)
 				}
@@ -1035,7 +1038,7 @@ func (r *claudeLocalRuntime) prepareClaudeVisibleEvent(session Session, ev Astra
 		}
 		next := copyStringAny(value)
 		next["text"] = out
-		ev.Normalized = next
+		ev.Normalized = eventNormalized(ev.Kind, next)
 		return []AstralEvent{ev}
 	}
 	if out := stream.Flush(); out != "" {
@@ -1159,7 +1162,7 @@ func (r *claudeLocalRuntime) remapProjectionEventPaths(ev AstralEvent) AstralEve
 	if !ok || ws.Target != "ssh" || ws.SSH == nil {
 		return ev
 	}
-	ev.Normalized = remapProjectionValue(ev.Normalized, filepath.Clean(ws.LocalProjectionRoot), remotePathClean(ws.SSH.RemoteCWD))
+	ev.Normalized = eventNormalized(ev.Kind, remapProjectionValue(ev.Normalized, filepath.Clean(ws.LocalProjectionRoot), remotePathClean(ws.SSH.RemoteCWD)))
 	return ev
 }
 
@@ -1204,8 +1207,8 @@ func (r *claudeLocalRuntime) finishFailed(session Session, message string, cause
 		message = "claude turn failed"
 	}
 	r.deps.store.updateSessionStatus(session.ID, "failed")
-	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.failed", Normalized: map[string]any{
+	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.failed", Normalized: eventNormalized("turn.failed", map[string]any{
 		"status":  "failed",
 		"message": message,
-	}})
+	})})
 }

@@ -15,23 +15,85 @@ type interactionActionView = protocol.InteractionActionView
 type queuedInputView = protocol.QueuedInputView
 type editableUserMessageView = protocol.EditableUserMessageView
 
+type cachedSessionView struct {
+	key  string
+	view sessionView
+}
+
 func (a *app) buildSessionView(sessionID string) (sessionView, bool) {
 	ss, ok := a.store.getSession(sessionID)
 	if !ok {
 		return sessionView{}, false
 	}
-	events := a.store.queryEvents("", sessionID, 0)
+	cacheKey := a.sessionViewCacheKey(ss)
+	if view, ok := a.cachedSessionView(sessionID, cacheKey); ok {
+		return view, true
+	}
+	events := a.eventProjection().QueryEvents("", sessionID, 0)
 	pending := projectPendingInteraction(events)
 	status := projectedSessionStatus(ss, events, pending != nil)
+	title := projectedSessionTitle(firstString(ss.Title, a.store.sessionTitle(sessionID)), events)
 	ss.Status = status
-	return sessionView{
+	ss.Title = title
+	view := sessionView{
 		Session:             ss,
-		Title:               a.store.sessionTitle(sessionID),
+		Title:               title,
 		Status:              status,
 		PendingInteraction:  pending,
 		QueuedInputs:        projectQueuedInputs(events),
 		EditableUserMessage: projectEditableUserMessage(ss, events, status),
-	}, true
+	}
+	a.storeCachedSessionView(sessionID, cacheKey, view)
+	return view, true
+}
+
+func (a *app) sessionViewCacheKey(ss Session) string {
+	parts := []string{
+		ss.ID,
+		ss.WorkspaceID,
+		string(ss.Agent),
+		ss.Status,
+		ss.Title,
+		ss.UpdatedAt,
+		fmt.Sprint(a.store.currentSeq()),
+	}
+	if ss.NativeRef != nil {
+		parts = append(parts,
+			string(ss.NativeRef.Agent),
+			ss.NativeRef.LocalPath,
+			ss.NativeRef.NativeSessionID,
+			ss.NativeRef.NativeThreadID,
+			nativeTranscriptFingerprint(ss.NativeRef.LocalPath),
+		)
+	}
+	if ss.ForkedFromSessionID != "" {
+		if source, ok := a.store.getSession(ss.ForkedFromSessionID); ok && source.NativeRef != nil {
+			parts = append(parts, ss.ForkedFromSessionID, nativeTranscriptFingerprint(source.NativeRef.LocalPath))
+		}
+	}
+	return strings.Join(parts, "\x00")
+}
+
+func (a *app) cachedSessionView(sessionID, key string) (sessionView, bool) {
+	a.sessionViewCacheMu.Lock()
+	defer a.sessionViewCacheMu.Unlock()
+	if a.sessionViewCache == nil {
+		return sessionView{}, false
+	}
+	cached, ok := a.sessionViewCache[sessionID]
+	if !ok || cached.key != key {
+		return sessionView{}, false
+	}
+	return cached.view, true
+}
+
+func (a *app) storeCachedSessionView(sessionID, key string, view sessionView) {
+	a.sessionViewCacheMu.Lock()
+	defer a.sessionViewCacheMu.Unlock()
+	if a.sessionViewCache == nil {
+		a.sessionViewCache = map[string]cachedSessionView{}
+	}
+	a.sessionViewCache[sessionID] = cachedSessionView{key: key, view: view}
 }
 
 func projectEditableUserMessage(ss Session, events []AstralEvent, status string) *editableUserMessageView {
@@ -96,6 +158,36 @@ func projectedSessionStatus(ss Session, events []AstralEvent, hasPending bool) s
 	return status
 }
 
+func projectedSessionTitle(fallback string, events []AstralEvent) string {
+	type candidate struct {
+		text string
+		rank int
+	}
+	best := candidate{text: normalizeSessionTitleString(fallback), rank: 0}
+	for _, event := range events {
+		value := mapValue(event.Normalized)
+		text := ""
+		rank := 0
+		switch event.Kind {
+		case "session.native", "session.updated":
+			text, rank = normalizedNativeSessionTitle(value)
+		case "message.user":
+			text = normalizedSessionTitleText(value)
+			rank = 10
+		default:
+			continue
+		}
+		if text == "" {
+			continue
+		}
+		if best.text != "" && (best.rank > rank || (best.rank == rank && rank <= 10)) {
+			continue
+		}
+		best = candidate{text: text, rank: rank}
+	}
+	return best.text
+}
+
 func projectPendingInteraction(events []AstralEvent) *pendingInteractionView {
 	resolved := resolvedInteractionIDs(events)
 	hidden := replacedTranscriptSeqs(events)
@@ -108,7 +200,7 @@ func projectPendingInteraction(events []AstralEvent) *pendingInteractionView {
 			continue
 		}
 		value := mapValue(event.Normalized)
-		if isAskPermissionEchoEvent(event.Kind, value) {
+		if isAskPermissionEchoEvent(string(event.Kind), value) {
 			continue
 		}
 		ids := interactionIDsFromNormalized(value)

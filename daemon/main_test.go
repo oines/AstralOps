@@ -318,7 +318,8 @@ func TestStoreEventAppendAndQuery(t *testing.T) {
 		SessionID:   "sess_a",
 		Agent:       AgentCodex,
 		Kind:        "message.user",
-		Normalized:  map[string]any{"text": "hello"},
+		Normalized: eventNormalized("message.user",
+			map[string]any{"text": "hello"}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -327,7 +328,7 @@ func TestStoreEventAppendAndQuery(t *testing.T) {
 		t.Fatalf("seq = %d, want 1", first.Seq)
 	}
 
-	events := st.queryEvents("ws_a", "sess_a", 0)
+	events := testQueryEvents(st, "ws_a", "sess_a", 0)
 	if len(events) != 1 || events[0].Kind != "message.user" {
 		t.Fatalf("unexpected events: %#v", events)
 	}
@@ -336,9 +337,9 @@ func TestStoreEventAppendAndQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events = reloaded.queryEvents("ws_a", "sess_a", 0)
-	if len(events) != 1 || events[0].Seq != 1 {
-		t.Fatalf("event was not persisted: %#v", events)
+	events = testQueryEvents(reloaded, "ws_a", "sess_a", 0)
+	if len(events) != 0 {
+		t.Fatalf("transcript event was persisted: %#v", events)
 	}
 }
 
@@ -353,7 +354,7 @@ func TestHistoricalContextBackfillIsExplicitAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := st.createSession(workspace, workspace.Agent)
-	if _, err := st.appendEvent(AstralEvent{
+	rawEvent, err := st.appendEvent(AstralEvent{
 		WorkspaceID: workspace.ID,
 		SessionID:   session.ID,
 		Agent:       AgentClaude,
@@ -371,15 +372,17 @@ func TestHistoricalContextBackfillIsExplicitAndIdempotent(t *testing.T) {
 				},
 			},
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
+	writeLegacyEventFile(t, dir, rawEvent)
 
 	reloaded, err := loadStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if countKind(reloaded.queryEvents(workspace.ID, session.ID, 0), "control.context") != 0 {
+	if countKind(testQueryEvents(reloaded, workspace.ID, session.ID, 0), "control.context") != 0 {
 		t.Fatal("loadStore backfilled context; migration must be explicit")
 	}
 	app := &app{store: reloaded, hub: newEventHub(), projections: newSessionProjectionCache()}
@@ -390,13 +393,28 @@ func TestHistoricalContextBackfillIsExplicitAndIdempotent(t *testing.T) {
 	if err := app.backfillHistoricalContextEvents(); err != nil {
 		t.Fatal(err)
 	}
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if got := countKind(events, "control.context"); got != 1 {
 		t.Fatalf("control.context count = %d, want 1", got)
 	}
 	context := app.sessionProjections().latestContext(session.ID)
 	if got := numberValue(context["total_tokens"]); got != 20000 {
 		t.Fatalf("projected total_tokens = %v, want 20000", got)
+	}
+}
+
+func writeLegacyEventFile(t *testing.T, dataDir string, event AstralEvent) {
+	t.Helper()
+	eventDir := filepath.Join(dataDir, "events")
+	if err := os.MkdirAll(eventDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(eventDir, event.SessionID+".jsonl"), append(body, '\n'), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -411,7 +429,7 @@ func TestHistoricalContextBackfillSkipsExistingContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := st.createSession(workspace, workspace.Agent)
-	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "control.context", Normalized: map[string]any{"total_tokens": 10}}); err != nil {
+	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "control.context", Normalized: eventNormalized("control.context", map[string]any{"total_tokens": 10})}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.appendEvent(AstralEvent{
@@ -439,7 +457,7 @@ func TestHistoricalContextBackfillSkipsExistingContext(t *testing.T) {
 	if err := app.backfillHistoricalContextEvents(); err != nil {
 		t.Fatal(err)
 	}
-	if got := countKind(app.store.queryEvents(workspace.ID, session.ID, 0), "control.context"); got != 1 {
+	if got := countKind(testQueryEvents(app.store, workspace.ID, session.ID, 0), "control.context"); got != 1 {
 		t.Fatalf("control.context count = %d, want existing event only", got)
 	}
 }
@@ -478,13 +496,14 @@ func TestHistoricalContextBackfillCorrectsPersistedCodexCumulativeUsage(t *testi
 		SessionID:   session.ID,
 		Agent:       AgentCodex,
 		Kind:        "control.context",
-		Normalized: map[string]any{
-			"source":               "codex",
-			"total_tokens":         117481,
-			"input_tokens":         117089,
-			"model_context_window": 258400,
-			"used_percent":         45,
-		},
+		Normalized: eventNormalized("control.context",
+			map[string]any{
+				"source":               "codex",
+				"total_tokens":         117481,
+				"input_tokens":         117089,
+				"model_context_window": 258400,
+				"used_percent":         45,
+			}),
 		Raw: raw,
 	}); err != nil {
 		t.Fatal(err)
@@ -497,7 +516,7 @@ func TestHistoricalContextBackfillCorrectsPersistedCodexCumulativeUsage(t *testi
 	if err := app.backfillHistoricalContextEvents(); err != nil {
 		t.Fatal(err)
 	}
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if got := countKind(events, "control.context"); got != 2 {
 		t.Fatalf("control.context count = %d, want original plus one correction", got)
 	}
@@ -576,7 +595,7 @@ func TestHistoricalContextBackfillPrefersClaudeStreamUsageOverAggregateResult(t 
 	if err := app.backfillHistoricalContextEvents(); err != nil {
 		t.Fatal(err)
 	}
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if got := countKind(events, "control.context"); got != 1 {
 		t.Fatalf("control.context count = %d, want one current-window correction", got)
 	}
@@ -648,16 +667,17 @@ func TestHistoricalContextBackfillCorrectsPersistedClaudeAggregateUsage(t *testi
 		SessionID:   session.ID,
 		Agent:       AgentClaude,
 		Kind:        "control.context",
-		Normalized: map[string]any{
-			"source":               "claude",
-			"total_tokens":         658200,
-			"input_tokens":         400000,
-			"output_tokens":        58200,
-			"model_context_window": 200000,
-			"used_percent":         329,
-			"usage":                map[string]any{},
-			"model_usage":          mapValue(resultRaw["modelUsage"]),
-		},
+		Normalized: eventNormalized("control.context",
+			map[string]any{
+				"source":               "claude",
+				"total_tokens":         658200,
+				"input_tokens":         400000,
+				"output_tokens":        58200,
+				"model_context_window": 200000,
+				"used_percent":         329,
+				"usage":                map[string]any{},
+				"model_usage":          mapValue(resultRaw["modelUsage"]),
+			}),
 		Raw: resultRaw,
 	}); err != nil {
 		t.Fatal(err)
@@ -670,7 +690,7 @@ func TestHistoricalContextBackfillCorrectsPersistedClaudeAggregateUsage(t *testi
 	if err := app.backfillHistoricalContextEvents(); err != nil {
 		t.Fatal(err)
 	}
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if got := countKind(events, "control.context"); got != 2 {
 		t.Fatalf("control.context count = %d, want legacy event plus correction", got)
 	}
@@ -695,23 +715,25 @@ func TestSessionProjectionKeepsClaudeCurrentContextOverAggregateResult(t *testin
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "control.context",
-		Normalized: map[string]any{
-			"source":       "claude",
-			"scope":        "current",
-			"total_tokens": 30000,
-		},
+		Normalized: eventNormalized("control.context",
+			map[string]any{
+				"source":       "claude",
+				"scope":        "current",
+				"total_tokens": 30000,
+			}),
 	})
 	cache.apply(AstralEvent{
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "control.context",
-		Normalized: map[string]any{
-			"source":                  "claude",
-			"scope":                   "aggregate",
-			"total_tokens":            658200,
-			"cumulative_total_tokens": 658200,
-			"model_context_window":    200000,
-		},
+		Normalized: eventNormalized("control.context",
+			map[string]any{
+				"source":                  "claude",
+				"scope":                   "aggregate",
+				"total_tokens":            658200,
+				"cumulative_total_tokens": 658200,
+				"model_context_window":    200000,
+			}),
 	})
 	context := cache.latestContext("sess_claude")
 	if got := stringValue(context["scope"]); got != "current" {
@@ -737,42 +759,46 @@ func TestSessionProjectionInvalidatesContextOnCompact(t *testing.T) {
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "control.context",
-		Normalized: map[string]any{
-			"source":               "claude",
-			"scope":                "current",
-			"total_tokens":         30000,
-			"model_context_window": 200000,
-		},
+		Normalized: eventNormalized("control.context",
+			map[string]any{
+				"source":               "claude",
+				"scope":                "current",
+				"total_tokens":         30000,
+				"model_context_window": 200000,
+			}),
 	})
 	cache.apply(AstralEvent{
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "memory.compacted",
-		Normalized: map[string]any{
-			"source": "claude",
-		},
+		Normalized: eventNormalized("memory.compacted",
+			map[string]any{
+				"source": "claude",
+			}),
 	})
 	cache.apply(AstralEvent{
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "control.context",
-		Normalized: map[string]any{
-			"source":               "astralops",
-			"total_tokens":         30000,
-			"model_context_window": 200000,
-		},
+		Normalized: eventNormalized("control.context",
+			map[string]any{
+				"source":               "astralops",
+				"total_tokens":         30000,
+				"model_context_window": 200000,
+			}),
 	})
 	cache.apply(AstralEvent{
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "control.context",
-		Normalized: map[string]any{
-			"source":                  "claude",
-			"scope":                   "aggregate",
-			"total_tokens":            658200,
-			"cumulative_total_tokens": 658200,
-			"model_context_window":    200000,
-		},
+		Normalized: eventNormalized("control.context",
+			map[string]any{
+				"source":                  "claude",
+				"scope":                   "aggregate",
+				"total_tokens":            658200,
+				"cumulative_total_tokens": 658200,
+				"model_context_window":    200000,
+			}),
 	})
 	if context := cache.latestContext("sess_claude"); len(context) > 0 {
 		t.Fatalf("projected context = %#v, want compacted session to ignore aggregate-only usage", context)
@@ -781,11 +807,12 @@ func TestSessionProjectionInvalidatesContextOnCompact(t *testing.T) {
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "control.context",
-		Normalized: map[string]any{
-			"source":       "claude",
-			"scope":        "current",
-			"total_tokens": 12000,
-		},
+		Normalized: eventNormalized("control.context",
+			map[string]any{
+				"source":       "claude",
+				"scope":        "current",
+				"total_tokens": 12000,
+			}),
 	})
 	context := cache.latestContext("sess_claude")
 	if got := numberValue(context["total_tokens"]); got != 12000 {
@@ -830,9 +857,10 @@ func TestHistoricalContextBackfillDoesNotRevivePreCompactClaudeUsage(t *testing.
 		SessionID:   session.ID,
 		Agent:       AgentClaude,
 		Kind:        "memory.compacted",
-		Normalized: map[string]any{
-			"source": "claude",
-		},
+		Normalized: eventNormalized("memory.compacted",
+			map[string]any{
+				"source": "claude",
+			}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -841,7 +869,7 @@ func TestHistoricalContextBackfillDoesNotRevivePreCompactClaudeUsage(t *testing.
 	if err := app.backfillHistoricalContextEvents(); err != nil {
 		t.Fatal(err)
 	}
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if got := countKind(events, "control.context"); got != 0 {
 		t.Fatalf("control.context count = %d, want no pre-compact context backfill", got)
 	}
@@ -891,7 +919,7 @@ func TestHistoricalApprovalBackfillRestoresClaudeEditPermission(t *testing.T) {
 	if err := app.backfillHistoricalApprovalEvents(); err != nil {
 		t.Fatal(err)
 	}
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if got := countKind(events, "approval.requested"); got != 1 {
 		t.Fatalf("approval.requested count = %d, want 1", got)
 	}
@@ -912,7 +940,7 @@ func TestSessionCommandsUseProjectedContextAndClaudeSlashCommands(t *testing.T) 
 		t.Fatal(err)
 	}
 	session := st.createSession(workspace, workspace.Agent)
-	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentClaude, Kind: "control.context", Normalized: map[string]any{"total_tokens": 72000, "model_context_window": 100000}}); err != nil {
+	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentClaude, Kind: "control.context", Normalized: eventNormalized("control.context", map[string]any{"total_tokens": 72000, "model_context_window": 100000})}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.appendEvent(AstralEvent{
@@ -998,7 +1026,8 @@ func TestListSessionsIncludesTitleFromFullEventHistory(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       AgentCodex,
 		Kind:        "message.user",
-		Normalized:  map[string]any{"text": "  inspect the remote workspace  "},
+		Normalized: eventNormalized("message.user",
+			map[string]any{"text": "  inspect the remote workspace  "}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1008,7 +1037,8 @@ func TestListSessionsIncludesTitleFromFullEventHistory(t *testing.T) {
 			SessionID:   session.ID,
 			Agent:       AgentCodex,
 			Kind:        "reasoning.delta",
-			Normalized:  map[string]any{"text": "later event"},
+			Normalized: eventNormalized("reasoning.delta",
+				map[string]any{"text": "later event"}),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1045,7 +1075,8 @@ func TestListSessionsTitleSkipsInteractionFollowupText(t *testing.T) {
 			SessionID:   session.ID,
 			Agent:       AgentClaude,
 			Kind:        "message.user",
-			Normalized:  map[string]any{"text": text},
+			Normalized: eventNormalized("message.user",
+				map[string]any{"text": text}),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1082,21 +1113,24 @@ func TestListSessionsTitlePrefersNativeAgentTitle(t *testing.T) {
 			SessionID:   session.ID,
 			Agent:       AgentCodex,
 			Kind:        "session.native",
-			Normalized:  map[string]any{"source": "codex", "preview": "first user prompt", "name": nil},
+			Normalized: eventNormalized("session.native",
+				map[string]any{"source": "codex", "preview": "first user prompt", "name": nil}),
 		},
 		{
 			WorkspaceID: workspace.ID,
 			SessionID:   session.ID,
 			Agent:       AgentCodex,
 			Kind:        "message.user",
-			Normalized:  map[string]any{"text": "later follow-up should not replace preview"},
+			Normalized: eventNormalized("message.user",
+				map[string]any{"text": "later follow-up should not replace preview"}),
 		},
 		{
 			WorkspaceID: workspace.ID,
 			SessionID:   session.ID,
 			Agent:       AgentCodex,
 			Kind:        "session.updated",
-			Normalized:  map[string]any{"source": "codex", "thread_name": "Agent native title"},
+			Normalized: eventNormalized("session.updated",
+				map[string]any{"source": "codex", "thread_name": "Agent native title"}),
 		},
 	} {
 		if _, err := st.appendEvent(event); err != nil {
@@ -1275,23 +1309,24 @@ func TestStoreEventWindowQuery(t *testing.T) {
 			SessionID:   sessionID,
 			Agent:       AgentCodex,
 			Kind:        "message.user",
-			Normalized:  map[string]any{"text": sessionID},
+			Normalized: eventNormalized("message.user",
+				map[string]any{"text": sessionID}),
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	events := st.queryEventsWindow("ws_a", "sess_a", 0, 0, 3)
+	events := testQueryEventsWindow(st, "ws_a", "sess_a", 0, 0, 3)
 	if got := eventSeqs(events); !reflect.DeepEqual(got, []int64{4, 5, 6}) {
 		t.Fatalf("latest seqs = %#v, want [4 5 6]", got)
 	}
 
-	events = st.queryEventsWindow("ws_a", "sess_a", 0, 6, 2)
+	events = testQueryEventsWindow(st, "ws_a", "sess_a", 0, 6, 2)
 	if got := eventSeqs(events); !reflect.DeepEqual(got, []int64{4, 5}) {
 		t.Fatalf("before seqs = %#v, want [4 5]", got)
 	}
 
-	events = st.queryEventsWindow("ws_a", "sess_a", 3, 0, 0)
+	events = testQueryEventsWindow(st, "ws_a", "sess_a", 3, 0, 0)
 	if got := eventSeqs(events); !reflect.DeepEqual(got, []int64{4, 5, 6}) {
 		t.Fatalf("after seqs = %#v, want [4 5 6]", got)
 	}
@@ -1309,8 +1344,9 @@ func TestStoreLoadsLargeEventLines(t *testing.T) {
 		WorkspaceID: "ws_large",
 		SessionID:   "sess_large",
 		Agent:       AgentCodex,
-		Kind:        "tool.output_delta",
-		Normalized:  map[string]any{"text": largeText},
+		Kind:        "queue.queued",
+		Normalized: eventNormalized("queue.queued",
+			map[string]any{"queue_id": "queue_large", "text": largeText}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1319,13 +1355,438 @@ func TestStoreLoadsLargeEventLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := reloaded.queryEvents("ws_large", "sess_large", 0)
+	events := testQueryEvents(reloaded, "ws_large", "sess_large", 0)
 	if len(events) != 1 {
 		t.Fatalf("loaded %d events, want 1", len(events))
 	}
 	value := mapValue(events[0].Normalized)
 	if got := stringValue(value["text"]); got != largeText {
 		t.Fatalf("large event text length = %d, want %d", len(got), len(largeText))
+	}
+}
+
+func TestNativeHistoryDiscoveryAndProjection(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	resetCodexNativeIndexCacheForTest()
+
+	dir := t.TempDir()
+	st, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Native", Target: "local", Agent: AgentClaude, LocalCWD: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claudeDir := filepath.Join(home, ".claude", "projects", encodeClaudeProjectPath(cleanLocalPath(dir)))
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	claudePath := filepath.Join(claudeDir, "claude-native.jsonl")
+	claudeReadPath := filepath.ToSlash(filepath.Join(dir, "README.md"))
+	claudeLines := strings.Join([]string{
+		`{"type":"user","message":{"role":"user","content":"<local-command-caveat>Caveat: local command output follows.</local-command-caveat>"},"isMeta":true,"timestamp":"2026-06-01T00:00:00Z","cwd":"` + dir + `","sessionId":"claude-native"}`,
+		`{"type":"user","message":{"role":"user","content":"<command-name>/exit</command-name>\n<command-message>exit</command-message>\n<command-args></command-args>"},"timestamp":"2026-06-01T00:00:00Z","cwd":"` + dir + `","sessionId":"claude-native"}`,
+		`{"type":"user","message":{"role":"user","content":"<local-command-stdout>Goodbye!</local-command-stdout>"},"timestamp":"2026-06-01T00:00:00Z","cwd":"` + dir + `","sessionId":"claude-native"}`,
+		`{"type":"user","message":{"role":"user","content":"hello claude"},"timestamp":"2026-06-01T00:00:00Z","cwd":"` + dir + `","sessionId":"claude-native"}`,
+		`{"type":"assistant","uuid":"claude-reply-1","message":{"role":"assistant","content":[{"type":"text","text":"hi claude"}]},"timestamp":"2026-06-01T00:00:01Z","cwd":"` + dir + `","sessionId":"claude-native"}`,
+		`{"type":"assistant","uuid":"claude-tool-message","message":{"role":"assistant","content":[{"type":"text","text":"I will read a file."},{"type":"tool_use","id":"read_1","name":"Read","input":{"file_path":"` + claudeReadPath + `"}}]},"timestamp":"2026-06-01T00:00:01Z","cwd":"` + dir + `","sessionId":"claude-native"}`,
+		`{"type":"attachment","uuid":"claude-file-attachment","attachment":{"type":"file","filename":"` + claudeReadPath + `","content":{"type":"text","file":{"filePath":"` + claudeReadPath + `","content":"# Native read\n","startLine":1,"totalLines":1}},"displayPath":"README.md"},"timestamp":"2026-06-01T00:00:01Z","cwd":"` + dir + `","sessionId":"claude-native"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-06-01T00:00:01Z","sessionId":"claude-native","content":"queued claude prompt"}`,
+		`{"type":"permission-mode","permissionMode":"default","timestamp":"2026-06-01T00:00:01Z","sessionId":"claude-native"}`,
+		`{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":400,"message":{"role":"assistant","content":[{"type":"text","text":"Credit balance is too low"}]},"timestamp":"2026-06-01T00:00:02Z","cwd":"` + dir + `","sessionId":"claude-native"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(claudePath, []byte(claudeLines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	codexDir := filepath.Join(home, ".codex", "sessions", "2026", "06", "01")
+	if err := os.MkdirAll(codexDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	codexPath := filepath.Join(codexDir, "rollout-2026-06-01T00-00-00-codex-native.jsonl")
+	viewImagePath := filepath.Join(dir, "view.png")
+	if err := os.WriteFile(viewImagePath, []byte("view-image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	generatedImagePath := filepath.Join(dir, "generated.png")
+	if err := os.WriteFile(generatedImagePath, []byte("generated-image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	codexLines := strings.Join([]string{
+		`{"timestamp":"2026-06-01T00:00:02Z","type":"session_meta","payload":{"id":"codex-native","timestamp":"2026-06-01T00:00:02Z","cwd":"` + dir + `","originator":"Codex CLI"}}`,
+		`{"timestamp":"2026-06-01T00:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for ` + dir + `\n\n<INSTRUCTIONS>\ninternal project rules\n</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n  <cwd>` + dir + `</cwd>\n  <shell>zsh</shell>\n</environment_context>"}]}}`,
+		`{"timestamp":"2026-06-01T00:00:03Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello codex"}]}}`,
+		`{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"user_message","message":"hello codex","images":[],"local_images":[]}}`,
+		`{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"user_message","message":"event-only user","images":[],"local_images":[]}}`,
+		`{"timestamp":"2026-06-01T00:00:04Z","type":"event_msg","payload":{"type":"agent_message","message":"hi codex","phase":"final_answer"}}`,
+		`{"timestamp":"2026-06-01T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":10},"last_token_usage":{"total_tokens":5},"model_context_window":100}}}`,
+		`{"timestamp":"2026-06-01T00:00:04Z","type":"event_msg","payload":{"type":"thread_name_updated","thread_id":"codex-native","thread_name":"hello codex"}}`,
+		`{"timestamp":"2026-06-01T00:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi codex"}]}}`,
+		`{"timestamp":"2026-06-01T00:00:04Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"plan\":[{\"step\":\"Inspect native history\",\"status\":\"in_progress\"}]}","call_id":"call_plan"}}`,
+		`{"timestamp":"2026-06-01T00:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_plan","output":"Plan updated"}}`,
+		`{"timestamp":"2026-06-01T00:00:05Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"pwd\",\"workdir\":\"` + dir + `\"}","call_id":"call_pwd"}}`,
+		`{"timestamp":"2026-06-01T00:00:06Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_pwd","output":"fallback output"}}`,
+		`{"timestamp":"2026-06-01T00:00:06Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"call_pwd","turn_id":"turn_1","command":["/bin/zsh","-lc","pwd"],"parsed_cmd":[{"type":"unknown","cmd":"pwd"}],"cwd":"` + dir + `","stdout":"` + dir + `\n","stderr":"","aggregated_output":"` + dir + `\n","exit_code":0,"status":"completed"}}`,
+		`{"timestamp":"2026-06-01T00:00:07Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch","call_id":"call_patch"}}`,
+		`{"timestamp":"2026-06-01T00:00:08Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_patch","output":"Success. Updated the following files:\nM README.md\n"}}`,
+		`{"timestamp":"2026-06-01T00:00:08Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call_patch","turn_id":"turn_1","stdout":"Success. Updated the following files:\nM README.md\n","stderr":"","success":true,"changes":{"README.md":{"type":"update","unified_diff":"@@ -1 +1 @@\n-old\n+new\n"}}}}`,
+		`{"timestamp":"2026-06-01T00:00:09Z","type":"response_item","payload":{"type":"web_search_call","status":"completed","action":{"type":"search","query":"native history rendering bug"}}}`,
+		`{"timestamp":"2026-06-01T00:00:10Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"codex-native","turn_id":"turn_1","item":{"type":"Plan","id":"plan_1","text":"Do the thing"}}}`,
+		`{"timestamp":"2026-06-01T00:00:11Z","type":"event_msg","payload":{"type":"context_compacted"}}`,
+		`{"timestamp":"2026-06-01T00:00:12Z","type":"compacted","payload":{"message":"","metadata":{"reason":"manual"}}}`,
+		`{"timestamp":"2026-06-01T00:00:13Z","type":"event_msg","payload":{"type":"error","message":"native codex failed","codex_error_info":"other"}}`,
+		`{"timestamp":"2026-06-01T00:00:14Z","type":"event_msg","payload":{"type":"view_image_tool_call","call_id":"call_view","path":` + strconv.Quote(viewImagePath) + `}}`,
+		`{"timestamp":"2026-06-01T00:00:15Z","type":"event_msg","payload":{"type":"image_generation_end","call_id":"ig_1","status":"generating","revised_prompt":"draw it","saved_path":` + strconv.Quote(generatedImagePath) + `,"result":"base64-payload-must-not-be-projected"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(codexPath, []byte(codexLines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resetCodexNativeIndexCacheForTest()
+
+	if sessions := st.listSessions(workspace.ID); len(sessions) != 0 {
+		t.Fatalf("sessions = %#v, want native sessions hidden until import", sessions)
+	}
+	candidates := st.listNativeSessionCandidates(workspace.ID)
+	if len(candidates) != 2 {
+		t.Fatalf("candidates = %#v, want claude and codex native sessions", candidates)
+	}
+	byAgent := map[AgentKind]Session{}
+	for _, session := range candidates {
+		if session.Source != SessionSourceDiscovered || session.ManagedByAstralOps {
+			t.Fatalf("session source = %#v, want discovered unmanaged", session)
+		}
+		if session.NativeRef != nil && session.NativeRef.LocalPath != "" {
+			t.Fatalf("candidate native ref = %#v, must not expose local path", session.NativeRef)
+		}
+		byAgent[session.Agent] = session
+	}
+	claudeCandidate, ok := byAgent[AgentClaude]
+	if !ok {
+		t.Fatalf("candidates = %#v, missing claude", candidates)
+	}
+	codexCandidate, ok := byAgent[AgentCodex]
+	if !ok {
+		t.Fatalf("candidates = %#v, missing codex", candidates)
+	}
+	claude, err := st.importNativeSession(workspace.ID, claudeCandidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex, err := st.importNativeSession(workspace.ID, codexCandidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsEventKind(testQueryEvents(st, workspace.ID, claude.ID, 0), "message.user") {
+		t.Fatalf("claude events = %#v, want message.user", eventKinds(testQueryEvents(st, workspace.ID, claude.ID, 0)))
+	}
+	if claude.Title != "hello claude" {
+		t.Fatalf("claude title = %q, want first visible user message", claude.Title)
+	}
+	claudeEvents := testQueryEvents(st, workspace.ID, claude.ID, 0)
+	claudeUserMessages := []string{}
+	for _, event := range claudeEvents {
+		if event.Kind == "message.user" {
+			claudeUserMessages = append(claudeUserMessages, stringValue(mapValue(event.Normalized)["text"]))
+		}
+	}
+	if !reflect.DeepEqual(claudeUserMessages, []string{"hello claude"}) {
+		t.Fatalf("claude user messages = %#v, want hidden local command context filtered", claudeUserMessages)
+	}
+	claudeReadStarted := false
+	for _, event := range claudeEvents {
+		if event.Kind != "tool.started" {
+			continue
+		}
+		value := mapValue(event.Normalized)
+		if stringValue(value["id"]) == "read_1" && stringValue(value["name"]) == "Read" {
+			claudeReadStarted = true
+		}
+	}
+	if !claudeReadStarted {
+		t.Fatalf("claude events = %#v, want assistant text+tool native line to preserve tool.started", eventKinds(claudeEvents))
+	}
+	claudeFileAttachmentRead := false
+	claudeQueueQueued := false
+	claudePermissionMode := false
+	claudeAPIErrorFailed := false
+	claudeAssistantNativeUUID := false
+	claudeSyntheticCompleted := false
+	for _, event := range claudeEvents {
+		value := mapValue(event.Normalized)
+		if event.Kind == "message.assistant" && stringValue(value["text"]) == "hi claude" && stringValue(value["native_message_uuid"]) == "claude-reply-1" {
+			claudeAssistantNativeUUID = true
+		}
+		if event.Kind == "tool.completed" && stringValue(value["category"]) == "read" && stringValue(value["id"]) == "claude-file-attachment" {
+			result := mapValue(value["result"])
+			file := mapValue(mapValue(result["structuredContent"])["file"])
+			if stringValue(file["content"]) == "# Native read\n" && stringValue(file["filePath"]) == claudeReadPath {
+				claudeFileAttachmentRead = true
+			}
+		}
+		if event.Kind == "queue.queued" && stringValue(value["text"]) == "queued claude prompt" {
+			claudeQueueQueued = true
+		}
+		if event.Kind == "control.status" && stringValue(value["kind"]) == "permission_mode" && stringValue(value["permission_mode"]) == "default" {
+			claudePermissionMode = true
+		}
+		if event.Kind == "message.assistant" && strings.Contains(stringValue(value["text"]), "Credit balance is too low") {
+			t.Fatalf("claude api error rendered as assistant message: %#v", event)
+		}
+		if event.Kind == "turn.failed" && stringValue(value["message"]) == "Credit balance is too low" {
+			claudeAPIErrorFailed = true
+		}
+		if event.Kind == "turn.completed" && stringValue(value["turn_id"]) != "" {
+			claudeSyntheticCompleted = true
+		}
+	}
+	if !claudeAssistantNativeUUID {
+		t.Fatalf("claude events = %#v, want native assistant uuid for fork anchor", claudeEvents)
+	}
+	if !claudeSyntheticCompleted {
+		t.Fatalf("claude events = %#v, want native transcript turn completion boundary", eventKinds(claudeEvents))
+	}
+	if !claudeFileAttachmentRead {
+		t.Fatalf("claude events = %#v, want file attachment projected as read completion", claudeEvents)
+	}
+	if !claudeQueueQueued {
+		t.Fatalf("claude events = %#v, want queue-operation enqueue projected as queue.queued", eventKinds(claudeEvents))
+	}
+	if !claudePermissionMode {
+		t.Fatalf("claude events = %#v, want permission-mode projected as control.status", eventKinds(claudeEvents))
+	}
+	if !claudeAPIErrorFailed {
+		t.Fatalf("claude events = %#v, want api error native line projected as turn.failed", eventKinds(claudeEvents))
+	}
+	if !containsEventKind(testQueryEvents(st, workspace.ID, codex.ID, 0), "message.assistant") {
+		t.Fatalf("codex events = %#v, want message.assistant", eventKinds(testQueryEvents(st, workspace.ID, codex.ID, 0)))
+	}
+	if codex.Title != "hello codex" {
+		t.Fatalf("codex title = %q, want first visible user message", codex.Title)
+	}
+	codexEvents := testQueryEvents(st, workspace.ID, codex.ID, 0)
+	userMessages := []string{}
+	for _, event := range codexEvents {
+		if event.Kind == "message.user" {
+			userMessages = append(userMessages, stringValue(mapValue(event.Normalized)["text"]))
+		}
+	}
+	if !reflect.DeepEqual(userMessages, []string{"hello codex", "event-only user"}) {
+		t.Fatalf("codex user messages = %#v, want hidden context filtered and event_msg user fallback", userMessages)
+	}
+	assistantMessages := []string{}
+	for _, event := range codexEvents {
+		if event.Kind == "message.assistant" {
+			assistantMessages = append(assistantMessages, stringValue(mapValue(event.Normalized)["text"]))
+		}
+	}
+	if !reflect.DeepEqual(assistantMessages, []string{"hi codex"}) {
+		t.Fatalf("codex assistant messages = %#v, want duplicated native agent_message/response_item collapsed", assistantMessages)
+	}
+	codexExecStarted := false
+	for _, event := range codexEvents {
+		if event.Kind != "tool.started" {
+			continue
+		}
+		value := mapValue(event.Normalized)
+		if stringValue(value["id"]) != "call_pwd" {
+			continue
+		}
+		input := mapValue(value["input"])
+		if stringValue(input["cmd"]) == "pwd" && stringValue(value["command"]) == "pwd" && stringValue(value["cwd"]) == dir {
+			codexExecStarted = true
+		}
+	}
+	if !codexExecStarted {
+		t.Fatalf("codex events = %#v, want function_call JSON arguments decoded into command input", codexEvents)
+	}
+	codexExecCompleted := 0
+	codexPatchDiff := false
+	codexSearch := false
+	codexPlan := false
+	codexTodo := false
+	codexFakePlanCommandOutput := false
+	codexCompacted := false
+	codexError := false
+	codexViewImage := false
+	codexGeneratedImage := false
+	for _, event := range codexEvents {
+		value := mapValue(event.Normalized)
+		if event.Kind == "tool.completed" && stringValue(value["id"]) == "call_pwd" {
+			codexExecCompleted++
+			if stringValue(value["text"]) != dir+"\n" || stringValue(value["command"]) != "pwd" {
+				t.Fatalf("codex exec completed = %#v, want structured event_msg end output", value)
+			}
+		}
+		if event.Kind == "tool.diff" && strings.Contains(stringValue(value["diff"]), "README.md") && strings.Contains(stringValue(value["diff"]), "+new") {
+			codexPatchDiff = true
+		}
+		if event.Kind == "tool.completed" && stringValue(value["category"]) == "search" && stringValue(value["text"]) == "native history rendering bug" {
+			codexSearch = true
+		}
+		if event.Kind == "plan.updated" && stringValue(value["text"]) == "Do the thing" {
+			codexPlan = true
+		}
+		if event.Kind == "tool.todo" && stringValue(value["id"]) == "call_plan" {
+			codexTodo = true
+		}
+		if event.Kind == "tool.completed" && stringValue(value["text"]) == "Plan updated" {
+			codexFakePlanCommandOutput = true
+		}
+		if event.Kind == "memory.compacted" && stringValue(value["source"]) == "codex" {
+			codexCompacted = true
+		}
+		if event.Kind == "control.error" && stringValue(value["message"]) == "native codex failed" && stringValue(value["code"]) == "other" {
+			codexError = true
+		}
+		if event.Kind == "message.media" && stringValue(value["media_id"]) == "call_view" && stringValue(value["path"]) == viewImagePath {
+			codexViewImage = true
+		}
+		if event.Kind == "message.media" && stringValue(value["media_id"]) == "ig_1" && stringValue(value["path"]) == generatedImagePath && value["result"] == nil {
+			codexGeneratedImage = true
+		}
+	}
+	if codexExecCompleted != 1 {
+		t.Fatalf("codex exec completed count = %d, want one merged tool.completed for call_pwd", codexExecCompleted)
+	}
+	if !codexPatchDiff {
+		t.Fatalf("codex events = %#v, want patch_apply_end to project tool.diff", codexEvents)
+	}
+	if !codexSearch {
+		t.Fatalf("codex events = %#v, want web_search_call to render as search tool", codexEvents)
+	}
+	if !codexPlan {
+		t.Fatalf("codex events = %#v, want item_completed Plan to render as plan.updated", codexEvents)
+	}
+	if !codexTodo {
+		t.Fatalf("codex events = %#v, want update_plan function call projected as tool.todo", codexEvents)
+	}
+	if codexFakePlanCommandOutput {
+		t.Fatalf("codex events = %#v, update_plan output should not render as command output", codexEvents)
+	}
+	if !codexCompacted {
+		t.Fatalf("codex events = %#v, want context_compacted to render as memory.compacted", codexEvents)
+	}
+	if !codexError {
+		t.Fatalf("codex events = %#v, want native error projected as control.error", codexEvents)
+	}
+	if !codexViewImage {
+		t.Fatalf("codex events = %#v, want view_image_tool_call projected as message.media", codexEvents)
+	}
+	if !codexGeneratedImage {
+		t.Fatalf("codex events = %#v, want image_generation_end projected as message.media without base64 result", codexEvents)
+	}
+}
+
+func TestGetSessionResolvesManagedSessionNativeRefOnDemand(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	st, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Native Merge", Target: "local", Agent: AgentClaude, LocalCWD: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := st.createSession(workspace, AgentClaude)
+	managed.NativeSessionID = "claude-native"
+	managed.NativeRef = &NativeSessionRef{Agent: AgentClaude, NativeSessionID: "claude-native"}
+	st.mu.Lock()
+	st.sessions[managed.ID] = managed
+	st.mu.Unlock()
+
+	claudeDir := filepath.Join(home, ".claude", "projects", encodeClaudeProjectPath(cleanLocalPath(cwd)))
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nativePath := filepath.Join(claudeDir, "claude-native.jsonl")
+	line := `{"type":"user","message":{"role":"user","content":"hello"},"timestamp":"2026-06-01T00:00:00Z","cwd":"` + cwd + `","sessionId":"claude-native"}`
+	if err := os.WriteFile(nativePath, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions := st.listSessions(workspace.ID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %#v, want managed session", sessions)
+	}
+	if sessions[0].ID != managed.ID || sessions[0].Source != SessionSourceManaged {
+		t.Fatalf("session = %#v, want original managed id with native ref", sessions[0])
+	}
+	if sessions[0].NativeRef != nil && sessions[0].NativeRef.LocalPath != "" {
+		t.Fatalf("listSessions native ref = %#v, want lightweight metadata without native path resolution", sessions[0].NativeRef)
+	}
+	resolved, ok := st.getSession(managed.ID)
+	if !ok {
+		t.Fatal("managed session missing")
+	}
+	if resolved.NativeRef == nil || resolved.NativeRef.LocalPath != nativePath {
+		t.Fatalf("resolved native ref = %#v, want discovered native path", resolved.NativeRef)
+	}
+}
+
+func TestListSessionsDedupesStoredSessionsWithSameNativeRef(t *testing.T) {
+	st, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := t.TempDir()
+	workspace, err := st.createWorkspace(createWorkspaceRequest{Name: "Native Duplicate", Target: "local", Agent: AgentClaude, LocalCWD: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := st.createSession(workspace, AgentClaude)
+	second := st.createSession(workspace, AgentClaude)
+	for _, ss := range []*Session{&first, &second} {
+		ss.NativeSessionID = "claude-native"
+		ss.NativeRef = &NativeSessionRef{Agent: AgentClaude, NativeSessionID: "claude-native"}
+	}
+	st.mu.Lock()
+	st.sessions[first.ID] = first
+	st.sessions[second.ID] = second
+	st.mu.Unlock()
+
+	sessions := st.listSessions(workspace.ID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %#v, want duplicate stored native sessions collapsed", sessions)
+	}
+	if sessions[0].NativeSessionID != "claude-native" {
+		t.Fatalf("session = %#v, want native id preserved", sessions[0])
+	}
+}
+
+func resetCodexNativeIndexCacheForTest() {
+	codexNativeIndexCache.Lock()
+	codexNativeIndexCache.loadedAt = time.Time{}
+	codexNativeIndexCache.signature = ""
+	codexNativeIndexCache.entries = nil
+	codexNativeIndexCache.Unlock()
+}
+
+func TestClaudeUserMessageTextParsesCommandArgs(t *testing.T) {
+	raw := map[string]any{
+		"type": "user",
+		"message": map[string]any{
+			"role": "user",
+			"content": "<command-name>/skill-creator</command-name>\n" +
+				"<command-message>skill-creator</command-message>\n" +
+				"<command-args>make a video slicing skill</command-args>",
+		},
+	}
+	if got := claudeUserMessageText(raw); got != "/skill-creator make a video slicing skill" {
+		t.Fatalf("claudeUserMessageText = %q, want visible command args", got)
+	}
+
+	raw["message"] = map[string]any{
+		"role":    "user",
+		"content": "<command-name>/exit</command-name>\n<command-message>exit</command-message>\n<command-args></command-args>",
+	}
+	if got := claudeUserMessageText(raw); got != "" {
+		t.Fatalf("claudeUserMessageText(/exit) = %q, want hidden empty-args command", got)
 	}
 }
 
@@ -1345,7 +1806,8 @@ func TestEventsHandlerSupportsWindowQuery(t *testing.T) {
 			SessionID:   "sess_events",
 			Agent:       AgentClaude,
 			Kind:        "message.user",
-			Normalized:  map[string]any{"text": "hello"},
+			Normalized: eventNormalized("message.user",
+				map[string]any{"text": "hello"}),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1454,7 +1916,7 @@ func TestEventsSSEStreamsLiveEvents(t *testing.T) {
 		t.Fatalf("content-type = %q, want text/event-stream", contentType)
 	}
 
-	app.emit(AstralEvent{WorkspaceID: "ws_sse", SessionID: "sess_sse", Agent: AgentClaude, Kind: "message.delta", Normalized: map[string]any{"text": "hi"}})
+	app.emit(AstralEvent{WorkspaceID: "ws_sse", SessionID: "sess_sse", Agent: AgentClaude, Kind: "message.delta", Normalized: eventNormalized("message.delta", map[string]any{"text": "hi"})})
 
 	reader := bufio.NewReader(resp.Body)
 	for {
@@ -1483,10 +1945,11 @@ func TestNotificationIntentGeneratedForActionableEvent(t *testing.T) {
 		SessionID:   "sess_notify",
 		Agent:       AgentCodex,
 		Kind:        "approval.requested",
-		Normalized: map[string]any{
-			"kind":    "command",
-			"command": "npm test",
-		},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{
+				"kind":    "command",
+				"command": "npm test",
+			}),
 	}
 
 	notification, ok := notificationEventForSource(source, "回复问候", source.SessionID, nil)
@@ -1517,7 +1980,8 @@ func TestNotificationIntentSkipsNonActionableEvent(t *testing.T) {
 		SessionID:   "sess_notify",
 		Agent:       AgentCodex,
 		Kind:        "message.delta",
-		Normalized:  map[string]any{"text": "hello"},
+		Normalized: eventNormalized("message.delta",
+			map[string]any{"text": "hello"}),
 	}, "回复问候", "sess_notify", nil)
 	if ok {
 		t.Fatal("message delta generated a notification intent")
@@ -1528,10 +1992,11 @@ func TestNotificationIntentGeneratedForPairingRequest(t *testing.T) {
 	source := AstralEvent{
 		Seq:  8,
 		Kind: "control.pairing.requested",
-		Normalized: map[string]any{
-			"controller_device_id":   "dev_phone",
-			"controller_device_name": "iPhone",
-		},
+		Normalized: eventNormalized("control.pairing.requested",
+			map[string]any{
+				"controller_device_id":   "dev_phone",
+				"controller_device_name": "iPhone",
+			}),
 	}
 
 	notification, ok := notificationEventForSource(source, "", "", nil)
@@ -1556,7 +2021,8 @@ func TestNotificationIntentUsesFinalAssistantMessageForCompletedTurn(t *testing.
 			SessionID:   "sess_notify",
 			Agent:       AgentCodex,
 			Kind:        "message.assistant",
-			Normalized:  map[string]any{"text": "已经改好了：通知会显示最终回复内容。"},
+			Normalized: eventNormalized("message.assistant",
+				map[string]any{"text": "已经改好了：通知会显示最终回复内容。"}),
 		},
 	}
 	source := AstralEvent{
@@ -1565,7 +2031,8 @@ func TestNotificationIntentUsesFinalAssistantMessageForCompletedTurn(t *testing.
 		SessionID:   "sess_notify",
 		Agent:       AgentCodex,
 		Kind:        "turn.completed",
-		Normalized:  map[string]any{"status": "idle"},
+		Normalized: eventNormalized("turn.completed",
+			map[string]any{"status": "idle"}),
 	}
 
 	notification, ok := notificationEventForSource(source, "评估代码实现优雅性", source.SessionID, events)
@@ -1586,7 +2053,8 @@ func TestNotificationIntentUsesAssistantDeltasForCompletedTurn(t *testing.T) {
 			SessionID:   "sess_notify",
 			Agent:       AgentCodex,
 			Kind:        "turn.started",
-			Normalized:  map[string]any{"status": "running"},
+			Normalized: eventNormalized("turn.started",
+				map[string]any{"status": "running"}),
 		},
 		{
 			Seq:         21,
@@ -1594,7 +2062,8 @@ func TestNotificationIntentUsesAssistantDeltasForCompletedTurn(t *testing.T) {
 			SessionID:   "sess_notify",
 			Agent:       AgentCodex,
 			Kind:        "message.delta",
-			Normalized:  map[string]any{"text": "你好，"},
+			Normalized: eventNormalized("message.delta",
+				map[string]any{"text": "你好，"}),
 		},
 		{
 			Seq:         22,
@@ -1602,7 +2071,8 @@ func TestNotificationIntentUsesAssistantDeltasForCompletedTurn(t *testing.T) {
 			SessionID:   "sess_notify",
 			Agent:       AgentCodex,
 			Kind:        "message.delta",
-			Normalized:  map[string]any{"text": "已经完成了。"},
+			Normalized: eventNormalized("message.delta",
+				map[string]any{"text": "已经完成了。"}),
 		},
 	}
 	source := AstralEvent{
@@ -1611,7 +2081,8 @@ func TestNotificationIntentUsesAssistantDeltasForCompletedTurn(t *testing.T) {
 		SessionID:   "sess_notify",
 		Agent:       AgentCodex,
 		Kind:        "turn.completed",
-		Normalized:  map[string]any{"status": "idle"},
+		Normalized: eventNormalized("turn.completed",
+			map[string]any{"status": "idle"}),
 	}
 
 	notification, ok := notificationEventForSource(source, "你好", source.SessionID, events)
@@ -1631,7 +2102,8 @@ func TestNotificationIntentSkipsCompletedTurnWithoutAssistantText(t *testing.T) 
 		SessionID:   "sess_notify",
 		Agent:       AgentCodex,
 		Kind:        "turn.completed",
-		Normalized:  map[string]any{"status": "idle"},
+		Normalized: eventNormalized("turn.completed",
+			map[string]any{"status": "idle"}),
 	}, "你好", "sess_notify", nil)
 	if ok {
 		t.Fatal("completed turn without assistant text generated a notification intent")
@@ -1644,12 +2116,13 @@ func TestNotificationIntentGeneratedForUnexpectedSSHDisconnect(t *testing.T) {
 		WorkspaceID: "ws_notify",
 		Agent:       AgentCodex,
 		Kind:        "workspace.connection",
-		Normalized: WorkspaceConnection{
-			WorkspaceID: "ws_notify",
-			Target:      "ssh",
-			Status:      connectionDegraded,
-			Message:     "ssh proxy transport failed",
-		},
+		Normalized: eventNormalized("workspace.connection",
+			WorkspaceConnection{
+				WorkspaceID: "ws_notify",
+				Target:      "ssh",
+				Status:      connectionDegraded,
+				Message:     "ssh proxy transport failed",
+			}),
 	}
 
 	notification, ok := notificationEventForSource(source, "远程开发", "sess_notify", nil)
@@ -1671,12 +2144,13 @@ func TestNotificationIntentSkipsManualSSHDisconnect(t *testing.T) {
 		WorkspaceID: "ws_notify",
 		Agent:       AgentCodex,
 		Kind:        "workspace.connection",
-		Normalized: WorkspaceConnection{
-			WorkspaceID: "ws_notify",
-			Target:      "ssh",
-			Status:      connectionDisconnected,
-			Message:     "user disconnected",
-		},
+		Normalized: eventNormalized("workspace.connection",
+			WorkspaceConnection{
+				WorkspaceID: "ws_notify",
+				Target:      "ssh",
+				Status:      connectionDisconnected,
+				Message:     "user disconnected",
+			}),
 	}, "远程开发", "sess_notify", nil)
 	if ok {
 		t.Fatal("manual ssh disconnect generated a notification intent")
@@ -1690,23 +2164,24 @@ func TestSessionViewProjectsAskQuestionFields(t *testing.T) {
 		SessionID:   "sess_view",
 		Agent:       AgentCodex,
 		Kind:        "ask.requested",
-		Normalized: map[string]any{
-			"ask_id": "ask_1",
-			"kind":   "item/tool/requestUserInput",
-			"params": map[string]any{
-				"questions": []any{
-					map[string]any{
-						"id":          "choice",
-						"question":    "Pick one",
-						"multiSelect": true,
-						"isOther":     true,
-						"options": []any{
-							map[string]any{"id": "a", "label": "A", "value": "alpha", "description": "first"},
+		Normalized: eventNormalized("ask.requested",
+			map[string]any{
+				"ask_id": "ask_1",
+				"kind":   "item/tool/requestUserInput",
+				"params": map[string]any{
+					"questions": []any{
+						map[string]any{
+							"id":          "choice",
+							"question":    "Pick one",
+							"multiSelect": true,
+							"isOther":     true,
+							"options": []any{
+								map[string]any{"id": "a", "label": "A", "value": "alpha", "description": "first"},
+							},
 						},
 					},
 				},
-			},
-		},
+			}),
 	}})
 	if pending == nil {
 		t.Fatal("pending interaction = nil")
@@ -1739,17 +2214,18 @@ func TestSessionViewProjectsClaudeEditPermissionFromResult(t *testing.T) {
 		SessionID:   "sess_view",
 		Agent:       AgentClaude,
 		Kind:        "approval.requested",
-		Normalized: map[string]any{
-			"source":      "claude",
-			"approval_id": "call_edit",
-			"request_id":  "call_edit",
-			"kind":        "permission",
-			"tool_name":   "Edit",
-			"path":        "/Users/oines/tmp/codex_edit_test.txt",
-			"params": map[string]any{
-				"file_path": "/Users/oines/tmp/codex_edit_test.txt",
-			},
-		},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{
+				"source":      "claude",
+				"approval_id": "call_edit",
+				"request_id":  "call_edit",
+				"kind":        "permission",
+				"tool_name":   "Edit",
+				"path":        "/Users/oines/tmp/codex_edit_test.txt",
+				"params": map[string]any{
+					"file_path": "/Users/oines/tmp/codex_edit_test.txt",
+				},
+			}),
 		Raw: map[string]any{"type": "result"},
 	}})
 	if pending == nil {
@@ -2064,7 +2540,7 @@ func TestSSHConnectUpgradesIncompatibleRemoteHelper(t *testing.T) {
 	if got := readCounter(t, filepath.Join(dir, "proxy-count")); got != 2 {
 		t.Fatalf("proxy attempts = %d, want old helper attempt plus upgraded retry", got)
 	}
-	events := st.queryEvents(workspace.ID, "", 0)
+	events := testQueryEvents(st, workspace.ID, "", 0)
 	if !hasWorkspaceConnectionHelperStatus(events, "upgrading") {
 		t.Fatalf("events = %#v, want helper_status upgrading before retry", events)
 	}
@@ -2207,7 +2683,7 @@ func TestNormalizeClaudeStreamJSON(t *testing.T) {
 	kinds := []string{}
 	for _, line := range lines {
 		for _, event := range normalizeClaudeStreamJSON(session, []byte(line)) {
-			kinds = append(kinds, event.Kind)
+			kinds = append(kinds, string(event.Kind))
 			if event.Raw == nil {
 				t.Fatalf("event %s did not preserve raw payload", event.Kind)
 			}
@@ -2241,7 +2717,7 @@ func TestNormalizeClaudeSpecialToolEvents(t *testing.T) {
 
 	for _, tc := range cases {
 		events := normalizeClaudeStreamJSON(session, []byte(tc.line))
-		if len(events) != 1 || events[0].Kind != tc.kind {
+		if len(events) != 1 || string(events[0].Kind) != tc.kind {
 			t.Fatalf("normalize %s = %#v, want one %s", tc.kind, events, tc.kind)
 		}
 		if events[0].Raw == nil {
@@ -2288,7 +2764,7 @@ func TestNormalizeClaudeSDKSystemEvents(t *testing.T) {
 
 	for _, tc := range cases {
 		events := normalizeClaudeStreamJSON(session, []byte(tc.line))
-		if len(events) != 1 || events[0].Kind != tc.kind {
+		if len(events) != 1 || string(events[0].Kind) != tc.kind {
 			t.Fatalf("normalize %s = %#v, want one %s", tc.kind, events, tc.kind)
 		}
 		if events[0].Raw == nil {
@@ -2297,7 +2773,7 @@ func TestNormalizeClaudeSDKSystemEvents(t *testing.T) {
 	}
 
 	events := normalizeClaudeStreamJSON(session, []byte(`{"type":"system","subtype":"post_turn_summary","title":"Investigate title behavior","description":"Checked session title semantics","session_id":"native"}`))
-	value := events[0].Normalized.(map[string]any)
+	value := mapValue(events[0].Normalized)
 	if stringValue(value["title"]) != "Investigate title behavior" || stringValue(value["description"]) == "" {
 		t.Fatalf("post_turn_summary normalized = %#v, want title and description", value)
 	}
@@ -2339,7 +2815,7 @@ func TestNormalizeClaudeRealLocalFixtures(t *testing.T) {
 	if planEvent == nil {
 		t.Fatal("real-local-plan missing plan.updated event")
 	}
-	planNormalized := planEvent.Normalized.(map[string]any)
+	planNormalized := mapValue(planEvent.Normalized)
 	if stringValue(planNormalized["text"]) == "" || stringValue(planNormalized["path"]) == "" {
 		t.Fatalf("claude plan normalized = %#v, want text and path from ExitPlanMode fixture", planNormalized)
 	}
@@ -2353,7 +2829,7 @@ func TestNormalizeClaudeRealLocalFixtures(t *testing.T) {
 	if approvalEvent == nil {
 		t.Fatal("real-local-plan missing approval.requested event")
 	}
-	approvalNormalized := approvalEvent.Normalized.(map[string]any)
+	approvalNormalized := mapValue(approvalEvent.Normalized)
 	if stringValue(approvalNormalized["kind"]) != "plan" || stringValue(approvalNormalized["text"]) == "" {
 		t.Fatalf("claude plan approval normalized = %#v, want plan approval with text", approvalNormalized)
 	}
@@ -2444,7 +2920,7 @@ func TestNormalizeCodexMessage(t *testing.T) {
 	if len(threadStarted) != 1 || threadStarted[0].Kind != "session.native" {
 		t.Fatalf("thread started events = %#v, want one session.native", threadStarted)
 	}
-	threadValue := threadStarted[0].Normalized.(map[string]any)
+	threadValue := mapValue(threadStarted[0].Normalized)
 	if stringValue(threadValue["preview"]) != "first prompt from codex" || stringValue(threadValue["name"]) != "codex title" {
 		t.Fatalf("thread started normalized = %#v, want preview and name", threadValue)
 	}
@@ -2456,7 +2932,7 @@ func TestNormalizeCodexMessage(t *testing.T) {
 	if len(threadNameUpdated) != 1 || threadNameUpdated[0].Kind != "session.updated" {
 		t.Fatalf("thread name updated events = %#v, want one session.updated", threadNameUpdated)
 	}
-	nameValue := threadNameUpdated[0].Normalized.(map[string]any)
+	nameValue := mapValue(threadNameUpdated[0].Normalized)
 	if stringValue(nameValue["native_thread_id"]) != "thread_1" || stringValue(nameValue["thread_name"]) != "new codex title" {
 		t.Fatalf("thread name normalized = %#v, want thread id and title", nameValue)
 	}
@@ -2505,8 +2981,8 @@ func TestNormalizeCodexMessage(t *testing.T) {
 	if len(statusEvents) != 1 || statusEvents[0].Kind != "control.status" {
 		t.Fatalf("status events = %#v, want one control.status", statusEvents)
 	}
-	statusValue := statusEvents[0].Normalized.(map[string]any)
-	flags := statusValue["active_flags"].([]string)
+	statusValue := mapValue(statusEvents[0].Normalized)
+	flags := stringSlice(statusValue["active_flags"])
 	if len(flags) != 1 || flags[0] != "waitingOnApproval" {
 		t.Fatalf("status normalized = %#v, want waitingOnApproval active flag", statusValue)
 	}
@@ -2526,7 +3002,7 @@ func TestNormalizeCodexMessage(t *testing.T) {
 	if len(mcpFailedEvents) != 1 || mcpFailedEvents[0].Kind != "control.warning" {
 		t.Fatalf("mcp failed events = %#v, want control.warning", mcpFailedEvents)
 	}
-	mcpFailedValue := mcpFailedEvents[0].Normalized.(map[string]any)
+	mcpFailedValue := mapValue(mcpFailedEvents[0].Normalized)
 	if stringValue(mcpFailedValue["kind"]) != "mcp_server" || !strings.Contains(stringValue(mcpFailedValue["message"]), "codex_apps") {
 		t.Fatalf("mcp failed normalized = %#v, want mcp server warning details", mcpFailedValue)
 	}
@@ -2576,6 +3052,46 @@ func TestCodexTokenUsageContextUsesCurrentWindow(t *testing.T) {
 	}
 }
 
+func TestNormalizeCodexNativeTokenCountUsesLastUsage(t *testing.T) {
+	session := Session{ID: "sess_codex_native", WorkspaceID: "ws_codex", Agent: AgentCodex}
+	events := normalizeCodexNativeEventMsg(session, map[string]any{
+		"type": "token_count",
+		"info": map[string]any{
+			"total_token_usage": map[string]any{
+				"input_tokens":            2290000,
+				"cached_input_tokens":     2000000,
+				"output_tokens":           11000,
+				"reasoning_output_tokens": 5000,
+				"total_tokens":            2301000,
+			},
+			"last_token_usage": map[string]any{
+				"input_tokens":            48000,
+				"cached_input_tokens":     45000,
+				"output_tokens":           700,
+				"reasoning_output_tokens": 100,
+				"total_tokens":            48700,
+			},
+			"model_context_window": 258400,
+		},
+	})
+	if len(events) != 1 || events[0].Kind != "control.context" {
+		t.Fatalf("events = %#v, want one control.context", events)
+	}
+	value := mapValue(events[0].Normalized)
+	if got := stringValue(value["scope"]); got != "current" {
+		t.Fatalf("scope = %q, want current", got)
+	}
+	if got := numberValue(value["total_tokens"]); got != 48700 {
+		t.Fatalf("total_tokens = %v, want current last_token_usage.total_tokens", got)
+	}
+	if got := numberValue(value["cumulative_total_tokens"]); got != 2301000 {
+		t.Fatalf("cumulative_total_tokens = %v, want aggregate total_token_usage.total_tokens", got)
+	}
+	if got := numberValue(value["used_percent"]); got != 18 {
+		t.Fatalf("used_percent = %v, want current-window percent", got)
+	}
+}
+
 func TestNormalizeCodexRealLocalFixture(t *testing.T) {
 	session := Session{ID: "sess_real_codex", WorkspaceID: "ws_real_codex", Agent: AgentCodex}
 	kinds := []string{}
@@ -2588,7 +3104,7 @@ func TestNormalizeCodexRealLocalFixture(t *testing.T) {
 			continue
 		}
 		for _, event := range normalizeCodexMessage(session, raw) {
-			kinds = append(kinds, event.Kind)
+			kinds = append(kinds, string(event.Kind))
 			if event.Raw == nil {
 				t.Fatalf("event %s did not preserve raw payload", event.Kind)
 			}
@@ -2610,11 +3126,11 @@ func TestNormalizeCodexRealLocalFixture(t *testing.T) {
 			continue
 		}
 		if raw["id"] != nil && strings.Contains(stringValue(raw["method"]), "requestApproval") {
-			approvalKinds = append(approvalKinds, normalizeCodexServerRequest(session, raw).Kind)
+			approvalKinds = append(approvalKinds, string(normalizeCodexServerRequest(session, raw).Kind))
 			continue
 		}
 		for _, event := range normalizeCodexMessage(session, raw) {
-			approvalKinds = append(approvalKinds, event.Kind)
+			approvalKinds = append(approvalKinds, string(event.Kind))
 		}
 	}
 	for _, kind := range []string{"control.warning", "tool.diff", "approval.requested", "turn.completed"} {
@@ -2630,7 +3146,7 @@ func TestNormalizeCodexRealLocalFixture(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, event := range normalizeCodexMessage(session, raw) {
-			imageKinds = append(imageKinds, event.Kind)
+			imageKinds = append(imageKinds, string(event.Kind))
 			value := mapValue(event.Normalized)
 			if event.Kind == "message.media" && value["result"] != nil {
 				t.Fatalf("message.media normalized leaked base64 result: %#v", value)
@@ -2662,7 +3178,7 @@ func TestCodexCompletedPlanRequestsApproval(t *testing.T) {
 	if events[0].Kind != "plan.updated" || events[1].Kind != "approval.requested" {
 		t.Fatalf("event kinds = %#v, want plan.updated then approval.requested", eventKinds(events))
 	}
-	value := events[1].Normalized.(map[string]any)
+	value := mapValue(events[1].Normalized)
 	if stringValue(value["kind"]) != "plan" || stringValue(value["approval_id"]) != "turn_1-plan" || stringValue(value["text"]) == "" {
 		t.Fatalf("approval normalized = %#v, want codex plan approval", value)
 	}
@@ -2687,7 +3203,7 @@ func TestCodexApprovalRequestsCarryConcreteTargets(t *testing.T) {
 	})
 	client.enrichServerRequestEvent(&event)
 	value := mapValue(event.Normalized)
-	paths, _ := value["file_paths"].([]string)
+	paths := stringSlice(value["file_paths"])
 	if len(paths) != 1 || paths[0] != "/tmp/changed.txt" || value["changes"] == nil {
 		t.Fatalf("file approval normalized = %#v, want concrete file path and changes", value)
 	}
@@ -2714,7 +3230,7 @@ func TestClaudePlanFileWriteNormalizesAsPlan(t *testing.T) {
 	if len(events) != 1 || events[0].Kind != "plan.updated" {
 		t.Fatalf("events = %#v, want single plan.updated", events)
 	}
-	value := events[0].Normalized.(map[string]any)
+	value := mapValue(events[0].Normalized)
 	if stringValue(value["text"]) == "" || stringValue(value["path"]) != "/Users/alice/.claude/plans/demo.md" {
 		t.Fatalf("plan normalized = %#v, want text and path", value)
 	}
@@ -2738,7 +3254,8 @@ func TestApprovalRespondedKeepsSessionAttribution(t *testing.T) {
 		SessionID:   "sess_approval",
 		Agent:       AgentCodex,
 		Kind:        "approval.requested",
-		Normalized:  map[string]any{"approval_id": "approval_1"},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{"approval_id": "approval_1"}),
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_1/respond", strings.NewReader(`{"decision":"accept"}`))
@@ -2747,7 +3264,7 @@ func TestApprovalRespondedKeepsSessionAttribution(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
-	events := st.queryEvents("ws_approval", "sess_approval", 0)
+	events := testQueryEvents(st, "ws_approval", "sess_approval", 0)
 	if !containsEventKind(events, "approval.responded") {
 		t.Fatalf("events = %#v, want attributed approval.responded", events)
 	}
@@ -2768,7 +3285,8 @@ func TestApprovalRespondRejectsBadJSONWithoutResolvedEvent(t *testing.T) {
 		SessionID:   "sess_bad_json",
 		Agent:       AgentCodex,
 		Kind:        "approval.requested",
-		Normalized:  map[string]any{"approval_id": "approval_bad_json"},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{"approval_id": "approval_bad_json"}),
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_bad_json/respond", strings.NewReader(`{"decision":`))
@@ -2795,7 +3313,8 @@ func TestApprovalRespondRuntimeFailureDoesNotEmitResponded(t *testing.T) {
 		SessionID:   "sess_runtime_failure",
 		Agent:       AgentCodex,
 		Kind:        "approval.requested",
-		Normalized:  map[string]any{"approval_id": "approval_runtime_failure"},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{"approval_id": "approval_runtime_failure"}),
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_runtime_failure/respond", strings.NewReader(`{"decision":"accept"}`))
@@ -2821,14 +3340,16 @@ func TestApprovalRespondRejectsStaleInteraction(t *testing.T) {
 		SessionID:   "sess_stale",
 		Agent:       AgentCodex,
 		Kind:        "approval.requested",
-		Normalized:  map[string]any{"approval_id": "approval_stale"},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{"approval_id": "approval_stale"}),
 	})
 	app.emit(AstralEvent{
 		WorkspaceID: "ws_stale",
 		SessionID:   "sess_stale",
 		Agent:       AgentCodex,
 		Kind:        "approval.responded",
-		Normalized:  map[string]any{"approval_id": "approval_stale", "response": map[string]any{"decision": "accept"}},
+		Normalized: eventNormalized("approval.responded",
+			map[string]any{"approval_id": "approval_stale", "response": map[string]any{"decision": "accept"}}),
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_stale/respond", strings.NewReader(`{"decision":"decline"}`))
@@ -2852,7 +3373,8 @@ func TestApprovalRespondRejectsReplacedInteraction(t *testing.T) {
 		SessionID:   "sess_replaced_interaction",
 		Agent:       AgentCodex,
 		Kind:        "approval.requested",
-		Normalized:  map[string]any{"approval_id": "approval_replaced"},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{"approval_id": "approval_replaced"}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2862,11 +3384,12 @@ func TestApprovalRespondRejectsReplacedInteraction(t *testing.T) {
 		SessionID:   "sess_replaced_interaction",
 		Agent:       AgentCodex,
 		Kind:        "turn.replaced",
-		Normalized: map[string]any{
-			"start_seq": request.Seq,
-			"end_seq":   request.Seq,
-			"hidden":    true,
-		},
+		Normalized: eventNormalized("turn.replaced",
+			map[string]any{
+				"start_seq": request.Seq,
+				"end_seq":   request.Seq,
+				"hidden":    true,
+			}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -2898,7 +3421,8 @@ func TestCodexPlanApprovalStartsInternalFollowupTurn(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       AgentCodex,
 		Kind:        "approval.requested",
-		Normalized:  map[string]any{"approval_id": "plan_item", "request_id": "plan_item", "kind": "plan", "source": "codex"},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{"approval_id": "plan_item", "request_id": "plan_item", "kind": "plan", "source": "codex"}),
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/plan_item/respond", strings.NewReader(`{"decision":"accept"}`))
@@ -2928,7 +3452,8 @@ func TestAskResponseEmitsAskResolved(t *testing.T) {
 		SessionID:   "sess_ask",
 		Agent:       AgentCodex,
 		Kind:        "ask.requested",
-		Normalized:  map[string]any{"ask_id": "ask_1", "request_id": "ask_1"},
+		Normalized: eventNormalized("ask.requested",
+			map[string]any{"ask_id": "ask_1", "request_id": "ask_1"}),
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/ask_1/respond", strings.NewReader(`{"answers":{"q":{"answers":["A"]}}}`))
@@ -2937,7 +3462,7 @@ func TestAskResponseEmitsAskResolved(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
-	events := st.queryEvents("ws_ask", "sess_ask", 0)
+	events := testQueryEvents(st, "ws_ask", "sess_ask", 0)
 	if !containsEventKind(events, "ask.resolved") {
 		t.Fatalf("events = %#v, want attributed ask.resolved", events)
 	}
@@ -2947,12 +3472,13 @@ func TestClaudeEditPermissionApprovalAllowsEditForFollowup(t *testing.T) {
 	origin := AstralEvent{
 		Agent: AgentClaude,
 		Kind:  "approval.requested",
-		Normalized: map[string]any{
-			"source":    "claude",
-			"kind":      "permission",
-			"tool_name": "Edit",
-			"params":    map[string]any{"file_path": "/tmp/file.txt"},
-		},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{
+				"source":    "claude",
+				"kind":      "permission",
+				"tool_name": "Edit",
+				"params":    map[string]any{"file_path": "/tmp/file.txt"},
+			}),
 	}
 	tools := claudeAllowedToolsForInteraction(origin, map[string]any{"decision": "accept"}, Workspace{Target: "local"})
 	if !reflect.DeepEqual(tools, []string{"Edit"}) {
@@ -2976,7 +3502,8 @@ func TestClaudeAskResponseStartsFollowupTurn(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       AgentClaude,
 		Kind:        "ask.requested",
-		Normalized:  map[string]any{"ask_id": "ask_claude", "request_id": "ask_claude", "kind": "AskUserQuestion"},
+		Normalized: eventNormalized("ask.requested",
+			map[string]any{"ask_id": "ask_claude", "request_id": "ask_claude", "kind": "AskUserQuestion"}),
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/ask_claude/respond", strings.NewReader(`{"answers":{"q":{"answers":["A"]}}}`))
@@ -2991,7 +3518,7 @@ func TestClaudeAskResponseStartsFollowupTurn(t *testing.T) {
 	if len(runtime.options) != 1 || !runtime.options[0].Internal {
 		t.Fatalf("followup options = %#v, want internal turn", runtime.options)
 	}
-	events := st.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(st, workspace.ID, session.ID, 0)
 	if !containsEventKind(events, "ask.resolved") {
 		t.Fatalf("events = %#v, want ask.resolved", events)
 	}
@@ -3013,7 +3540,8 @@ func TestClaudeInteractionCancelInterruptsInsteadOfFollowup(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       AgentClaude,
 		Kind:        "ask.requested",
-		Normalized:  map[string]any{"ask_id": "ask_cancel", "request_id": "ask_cancel", "kind": "AskUserQuestion"},
+		Normalized: eventNormalized("ask.requested",
+			map[string]any{"ask_id": "ask_cancel", "request_id": "ask_cancel", "kind": "AskUserQuestion"}),
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/ask_cancel/respond", strings.NewReader(`{"action":"cancel","cancel":true}`))
@@ -3047,7 +3575,8 @@ func TestClaudeInteractionCancelClearsPausedApprovalWhenRuntimeIdle(t *testing.T
 		SessionID:   session.ID,
 		Agent:       AgentClaude,
 		Kind:        "approval.requested",
-		Normalized:  map[string]any{"approval_id": "approval_cancel", "request_id": "approval_cancel", "kind": "permission", "tool_name": "Bash", "command": "brew --version"},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{"approval_id": "approval_cancel", "request_id": "approval_cancel", "kind": "permission", "tool_name": "Bash", "command": "brew --version"}),
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_cancel/respond", strings.NewReader(`{"decision":"cancel","cancel":true}`))
@@ -3084,7 +3613,8 @@ func TestCodexAskCancelInterruptsInsteadOfEmptyAnswer(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       AgentCodex,
 		Kind:        "ask.requested",
-		Normalized:  map[string]any{"ask_id": "ask_cancel", "request_id": "ask_cancel", "kind": "item/tool/requestUserInput"},
+		Normalized: eventNormalized("ask.requested",
+			map[string]any{"ask_id": "ask_cancel", "request_id": "ask_cancel", "kind": "item/tool/requestUserInput"}),
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/ask_cancel/respond", strings.NewReader(`{"action":"cancel","cancel":true}`))
@@ -3413,10 +3943,11 @@ func TestCodexRuntimeEnrichesRemoteCommandEventsWithEffectiveCommand(t *testing.
 	}
 	ev := AstralEvent{
 		Kind: "tool.completed",
-		Normalized: map[string]any{
-			"category": "command",
-			"command":  "/bin/zsh -lc pwd",
-		},
+		Normalized: eventNormalized("tool.completed",
+			map[string]any{
+				"category": "command",
+				"command":  "/bin/zsh -lc pwd",
+			}),
 		Raw: map[string]any{
 			"params": map[string]any{
 				"item": map[string]any{"processId": "proc_1"},
@@ -3568,9 +4099,10 @@ func TestCodexExecServerWebSocketE2E(t *testing.T) {
 
 func TestClaudePlanAcceptFollowupIsCompactAndInternal(t *testing.T) {
 	origin := AstralEvent{
-		Agent:      AgentClaude,
-		Kind:       "approval.requested",
-		Normalized: map[string]any{"approval_id": "plan_1", "kind": "plan", "text": "long plan"},
+		Agent: AgentClaude,
+		Kind:  "approval.requested",
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{"approval_id": "plan_1", "kind": "plan", "text": "long plan"}),
 	}
 	input := claudeInteractionFollowupText(origin, map[string]any{"decision": "accept"})
 	if input != "Plan approved. Continue from the approved plan." {
@@ -3598,7 +4130,8 @@ func TestClaudePermissionAcceptPassesExactAllowedTool(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       AgentClaude,
 		Kind:        "approval.requested",
-		Normalized:  map[string]any{"approval_id": "approval_cmd", "kind": "permission", "tool_name": "Bash", "command": "sw_vers"},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{"approval_id": "approval_cmd", "kind": "permission", "tool_name": "Bash", "command": "sw_vers"}),
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_cmd/respond", strings.NewReader(`{"decision":"accept"}`))
@@ -3634,7 +4167,8 @@ func TestClaudePermissionAcceptPassesAllowedNonBashTool(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       AgentClaude,
 		Kind:        "approval.requested",
-		Normalized:  map[string]any{"approval_id": "approval_search", "kind": "permission", "tool_name": "WebSearch", "params": map[string]any{"query": "today"}},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{"approval_id": "approval_search", "kind": "permission", "tool_name": "WebSearch", "params": map[string]any{"query": "today"}}),
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/approval_search/respond", strings.NewReader(`{"decision":"accept"}`))
@@ -4040,7 +4574,7 @@ When all steps succeed, reply exactly: REMOTE_E2E_DONE`
 	}
 	waitForClaudeTerminalKind(t, app.store, session.ID, 4*time.Minute)
 
-	events := app.store.queryEvents(ws.ID, session.ID, 0)
+	events := testQueryEvents(app.store, ws.ID, session.ID, 0)
 	if containsEventKind(events, "turn.failed") {
 		t.Fatalf("claude turn failed:\n%s", summarizeSessionEvents(events))
 	}
@@ -4113,7 +4647,7 @@ func TestClaudeRemoteRealSSHRegressionPrompt(t *testing.T) {
 	}
 	waitForClaudeTerminalKind(t, app.store, session.ID, 5*time.Minute)
 
-	events := app.store.queryEvents(ws.ID, session.ID, 0)
+	events := testQueryEvents(app.store, ws.ID, session.ID, 0)
 	if containsEventKind(events, "turn.failed") {
 		t.Fatalf("claude turn failed:\n%s", summarizeSessionEvents(events))
 	}
@@ -4147,7 +4681,7 @@ func normalizeFixtureKinds(t *testing.T, session Session, path string) []string 
 	t.Helper()
 	kinds := []string{}
 	for _, event := range normalizeClaudeFixtureEvents(t, session, path) {
-		kinds = append(kinds, event.Kind)
+		kinds = append(kinds, string(event.Kind))
 	}
 	return kinds
 }
@@ -4177,7 +4711,7 @@ func containsString(values []string, target string) bool {
 
 func containsEventKind(events []AstralEvent, target string) bool {
 	for _, event := range events {
-		if event.Kind == target {
+		if string(event.Kind) == target {
 			return true
 		}
 	}
@@ -4270,6 +4804,16 @@ func TestResolveForkAnchorRequiresCompletedFinalAssistantReply(t *testing.T) {
 			target: 4,
 		},
 		{
+			name: "native started before user",
+			events: []AstralEvent{
+				testEvent(session, 1, "turn.started", map[string]any{"status": "running", "turn_id": "native-1"}),
+				testEvent(session, 2, "message.user", map[string]any{"text": "one"}),
+				testEvent(session, 3, "message.assistant", map[string]any{"text": "done", "native_message_uuid": "msg-1"}),
+				testEvent(session, 4, "turn.completed", map[string]any{"status": "idle", "turn_id": "native-1"}),
+			},
+			target: 3,
+		},
+		{
 			name: "running turn",
 			events: []AstralEvent{
 				testEvent(session, 1, "message.user", map[string]any{"text": "one"}),
@@ -4345,18 +4889,18 @@ func TestForkEndpointCreatesMetadataAndSafeProjection(t *testing.T) {
 	}
 	session := st.createSession(workspace, AgentClaude)
 	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{}}
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: session})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "first prompt"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"status": "running"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "approval.requested", Normalized: map[string]any{"approval_id": "approval-1"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "approval.resolved", Normalized: map[string]any{"approval_id": "approval-1"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "ask.requested", Normalized: map[string]any{"ask_id": "ask-1"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "ask.resolved", Normalized: map[string]any{"ask_id": "ask-1"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "queue.queued", Normalized: map[string]any{"queue_id": "queue-1"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.context", Normalized: map[string]any{"total_tokens": 123}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "answer", "native_message_uuid": "msg-1"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"status": "idle"}})
-	sourceEvents := st.queryEvents("", session.ID, 0)
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: eventNormalized("session.started", session)})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "first prompt"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"status": "running"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "approval.requested", Normalized: eventNormalized("approval.requested", map[string]any{"approval_id": "approval-1"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "approval.resolved", Normalized: eventNormalized("approval.resolved", map[string]any{"approval_id": "approval-1"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "ask.requested", Normalized: eventNormalized("ask.requested", map[string]any{"ask_id": "ask-1"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "ask.resolved", Normalized: eventNormalized("ask.resolved", map[string]any{"ask_id": "ask-1"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "queue.queued", Normalized: eventNormalized("queue.queued", map[string]any{"queue_id": "queue-1"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.context", Normalized: eventNormalized("control.context", map[string]any{"total_tokens": 123})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: eventNormalized("message.assistant", map[string]any{"text": "answer", "native_message_uuid": "msg-1"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"status": "idle"})})
+	sourceEvents := testQueryEvents(st, "", session.ID, 0)
 	targetSeq := int64(0)
 	for _, event := range sourceEvents {
 		if event.Kind == "message.assistant" {
@@ -4381,14 +4925,15 @@ func TestForkEndpointCreatesMetadataAndSafeProjection(t *testing.T) {
 	if response.Session.ForkedFromSessionID != session.ID || response.Session.ForkedFromEventSeq != targetSeq || response.Session.ForkedFromNativeAnchor != "msg-1" {
 		t.Fatalf("fork metadata = %#v", response.Session)
 	}
-	forkEvents := st.queryEvents("", response.Session.ID, 0)
+	forkEvents := testQueryEvents(st, "", response.Session.ID, 0)
 	projectedKinds := []string{}
 	for _, event := range forkEvents {
 		if event.Kind == "session.started" {
 			continue
 		}
-		projectedKinds = append(projectedKinds, event.Kind)
-		if strings.HasPrefix(event.Kind, "approval.") || strings.HasPrefix(event.Kind, "ask.") || strings.HasPrefix(event.Kind, "queue.") || strings.HasPrefix(event.Kind, "control.") || strings.HasPrefix(event.Kind, "session.") {
+		kind := string(event.Kind)
+		projectedKinds = append(projectedKinds, kind)
+		if strings.HasPrefix(kind, "approval.") || strings.HasPrefix(kind, "ask.") || strings.HasPrefix(kind, "queue.") || strings.HasPrefix(kind, "control.") || strings.HasPrefix(kind, "session.") {
 			t.Fatalf("unsafe event projected: %#v", event)
 		}
 	}
@@ -4448,17 +4993,17 @@ func TestCodexForkEndpointCallsForkRuntimeWithRollbackTurns(t *testing.T) {
 	st.mu.Unlock()
 	runtime := &recordingForkRuntime{}
 	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: session})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "one"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-1", "status": "running"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "answer", "item_id": "item-1"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn-1", "status": "idle"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "two"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-2", "status": "running"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "later", "item_id": "item-2"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn-2", "status": "idle"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: eventNormalized("session.started", session)})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "one"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"turn_id": "turn-1", "status": "running"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: eventNormalized("message.assistant", map[string]any{"text": "answer", "item_id": "item-1"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"turn_id": "turn-1", "status": "idle"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "two"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"turn_id": "turn-2", "status": "running"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: eventNormalized("message.assistant", map[string]any{"text": "later", "item_id": "item-2"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"turn_id": "turn-2", "status": "idle"})})
 	targetSeq := int64(0)
-	for _, event := range st.queryEvents("", session.ID, 0) {
+	for _, event := range testQueryEvents(st, "", session.ID, 0) {
 		if event.Kind != "message.assistant" {
 			continue
 		}
@@ -4502,14 +5047,14 @@ func TestSessionViewProjectsEditableUserMessageOnlyForCodex(t *testing.T) {
 	codexSession := st.createSession(codexWorkspace, AgentCodex)
 	claudeSession := st.createSession(claudeWorkspace, AgentClaude)
 	app := &app{store: st, hub: newEventHub()}
-	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "message.user", Normalized: map[string]any{"text": "codex prompt"}})
-	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn_codex"}})
-	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "message.assistant", Normalized: map[string]any{"text": "done"}})
-	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn_codex"}})
-	app.emit(AstralEvent{WorkspaceID: claudeWorkspace.ID, SessionID: claudeSession.ID, Agent: AgentClaude, Kind: "message.user", Normalized: map[string]any{"text": "claude prompt"}})
-	app.emit(AstralEvent{WorkspaceID: claudeWorkspace.ID, SessionID: claudeSession.ID, Agent: AgentClaude, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn_claude"}})
-	app.emit(AstralEvent{WorkspaceID: claudeWorkspace.ID, SessionID: claudeSession.ID, Agent: AgentClaude, Kind: "message.assistant", Normalized: map[string]any{"text": "done"}})
-	app.emit(AstralEvent{WorkspaceID: claudeWorkspace.ID, SessionID: claudeSession.ID, Agent: AgentClaude, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn_claude"}})
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "codex prompt"})})
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"turn_id": "turn_codex"})})
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "message.assistant", Normalized: eventNormalized("message.assistant", map[string]any{"text": "done"})})
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"turn_id": "turn_codex"})})
+	app.emit(AstralEvent{WorkspaceID: claudeWorkspace.ID, SessionID: claudeSession.ID, Agent: AgentClaude, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "claude prompt"})})
+	app.emit(AstralEvent{WorkspaceID: claudeWorkspace.ID, SessionID: claudeSession.ID, Agent: AgentClaude, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"turn_id": "turn_claude"})})
+	app.emit(AstralEvent{WorkspaceID: claudeWorkspace.ID, SessionID: claudeSession.ID, Agent: AgentClaude, Kind: "message.assistant", Normalized: eventNormalized("message.assistant", map[string]any{"text": "done"})})
+	app.emit(AstralEvent{WorkspaceID: claudeWorkspace.ID, SessionID: claudeSession.ID, Agent: AgentClaude, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"turn_id": "turn_claude"})})
 
 	codexView, ok := app.buildSessionView(codexSession.ID)
 	if !ok || codexView.EditableUserMessage == nil || codexView.EditableUserMessage.Text != "codex prompt" {
@@ -4536,23 +5081,23 @@ func TestSessionViewIgnoresPendingInteractionInsideReplacedTurn(t *testing.T) {
 	}
 	session := st.createSession(workspace, AgentCodex)
 	app := &app{store: st, hub: newEventHub()}
-	user, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: map[string]any{"text": "old prompt"}})
+	user, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "old prompt"})})
 	if err != nil {
 		t.Fatal(err)
 	}
-	approval, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "approval.requested", Normalized: map[string]any{"approval_id": "approval_old", "kind": "command"}})
+	approval, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "approval.requested", Normalized: eventNormalized("approval.requested", map[string]any{"approval_id": "approval_old", "kind": "command"})})
 	if err != nil {
 		t.Fatal(err)
 	}
-	end, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn_old"}})
+	end, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"turn_id": "turn_old"})})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.replaced", Normalized: map[string]any{
+	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.replaced", Normalized: eventNormalized("turn.replaced", map[string]any{
 		"start_seq": user.Seq,
 		"end_seq":   end.Seq,
 		"hidden":    true,
-	}}); err != nil {
+	})}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4581,10 +5126,10 @@ func TestEditLastUserMessageEndpointValidatesAndCallsCodexRuntime(t *testing.T) 
 	session := st.createSession(workspace, AgentCodex)
 	runtime := &recordingEditRuntime{}
 	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: map[string]any{"text": "old prompt"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn_1"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.assistant", Normalized: map[string]any{"text": "old answer"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn_1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "old prompt"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"turn_id": "turn_1"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.assistant", Normalized: eventNormalized("message.assistant", map[string]any{"text": "old answer"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"turn_id": "turn_1"})})
 	view, _ := app.buildSessionView(session.ID)
 	if view.EditableUserMessage == nil {
 		t.Fatal("missing editable user message")
@@ -4599,8 +5144,8 @@ func TestEditLastUserMessageEndpointValidatesAndCallsCodexRuntime(t *testing.T) 
 	if runtime.editCalls != 1 || runtime.editedInput != "new prompt" || runtime.editOptions.Model != "gpt-test" || runtime.editOptions.ReasoningEffort != "low" || runtime.editOptions.PermissionMode != "auto" {
 		t.Fatalf("runtime edit = calls %d input %q options %#v", runtime.editCalls, runtime.editedInput, runtime.editOptions)
 	}
-	if !containsEventKind(st.queryEvents("", session.ID, 0), "turn.replaced") {
-		t.Fatalf("events = %#v, want turn.replaced", st.queryEvents("", session.ID, 0))
+	if !containsEventKind(testQueryEvents(st, "", session.ID, 0), "turn.replaced") {
+		t.Fatalf("events = %#v, want turn.replaced", testQueryEvents(st, "", session.ID, 0))
 	}
 }
 
@@ -4622,9 +5167,9 @@ func TestEditLastUserMessageEndpointRejectsStaleEmptyAndClaude(t *testing.T) {
 	claudeSession := st.createSession(claudeWorkspace, AgentClaude)
 	runtime := &recordingEditRuntime{}
 	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
-	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "message.user", Normalized: map[string]any{"text": "prompt"}})
-	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn_1"}})
-	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn_1"}})
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "prompt"})})
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"turn_id": "turn_1"})})
+	app.emit(AstralEvent{WorkspaceID: codexWorkspace.ID, SessionID: codexSession.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"turn_id": "turn_1"})})
 
 	for _, tc := range []struct {
 		name      string
@@ -4672,8 +5217,9 @@ func testEvent(session Session, seq int64, kind string, normalized map[string]an
 		WorkspaceID: session.WorkspaceID,
 		SessionID:   session.ID,
 		Agent:       session.Agent,
-		Kind:        kind,
-		Normalized:  normalized,
+		Kind:        AstralEventKind(kind),
+		Normalized: eventNormalized(AstralEventKind(kind),
+			normalized),
 	}
 }
 
@@ -4768,7 +5314,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 	if !ok || updated.Status != "requires_action" {
 		t.Fatalf("session status = %#v, want requires_action", updated)
 	}
-	for _, ev := range app.store.queryEvents(workspace.ID, session.ID, 0) {
+	for _, ev := range testQueryEvents(app.store, workspace.ID, session.ID, 0) {
 		if ev.Kind == "message.delta" && strings.Contains(stringValue(mapValue(ev.Normalized)["text"]), "should not continue") {
 			t.Fatalf("claude continued after approval request: %#v", ev)
 		}
@@ -4795,7 +5341,7 @@ printf '%s\n' '{"type":"result","subtype":"success","terminal_reason":"completed
 	if !ok || updated.Status != "requires_action" {
 		t.Fatalf("session status = %#v, want requires_action", updated)
 	}
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	askCount := 0
 	for _, ev := range events {
 		if ev.Kind == "ask.requested" {
@@ -4832,7 +5378,7 @@ printf '%s\n' '{"type":"result","subtype":"success","terminal_reason":"completed
 	if !ok || updated.Status != "requires_action" {
 		t.Fatalf("session status = %#v, want requires_action", updated)
 	}
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	var approval *AstralEvent
 	for i := range events {
 		if events[i].Kind == "approval.requested" {
@@ -4888,7 +5434,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"o
 	waitForKind(t, app.store, session.ID, "turn.completed")
 	waitForKind(t, app.store, session.ID, "control.notification")
 
-	gotKinds := eventKinds(app.store.queryEvents(workspace.ID, session.ID, 0))
+	gotKinds := eventKinds(testQueryEvents(app.store, workspace.ID, session.ID, 0))
 	wantKinds := []string{"message.user", "turn.started", "session.native", "message.delta", "control.raw", "turn.completed", "control.notification"}
 	if !reflect.DeepEqual(gotKinds, wantKinds) {
 		t.Fatalf("kinds = %#v, want %#v", gotKinds, wantKinds)
@@ -5228,7 +5774,7 @@ rl.on("line", (line) => {
 	}
 	app.runtimes[AgentClaude].(SessionStopper).StopSession(session.ID, "test cleanup")
 	waitForClaudeClientDone(t, client)
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if !containsEventKind(events, "turn.cancelled") {
 		t.Fatalf("events = %#v, want cancelled turn before steered turn", events)
 	}
@@ -5281,7 +5827,7 @@ rl.on("line", (line) => {
 
 	waitForKindCount(t, app.store, session.ID, "message.user", 2)
 	waitForKind(t, app.store, session.ID, "turn.completed")
-	events := app.store.queryEvents("", session.ID, 0)
+	events := testQueryEvents(app.store, "", session.ID, 0)
 	if containsEventKind(events, "queue.queued") {
 		t.Fatalf("events = %#v, want running Claude input to steer instead of queue", events)
 	}
@@ -5315,7 +5861,7 @@ func TestCodexSessionInputSteersWhileRuntimeIsBusy(t *testing.T) {
 	waitForKindCount(t, app.store, session.ID, "message.user", 2)
 	waitForKind(t, app.store, session.ID, "control.steer")
 	waitForKind(t, app.store, session.ID, "turn.completed")
-	events := app.store.queryEvents("", session.ID, 0)
+	events := testQueryEvents(app.store, "", session.ID, 0)
 	if containsEventKind(events, "queue.queued") {
 		t.Fatalf("events = %#v, want running Codex input to steer instead of queue", events)
 	}
@@ -5342,7 +5888,7 @@ func TestCancelQueuedTurnEmitsCancelled(t *testing.T) {
 	turn := app.enqueueTurn(session, "queued prompt", TurnOptions{})
 	app.cancelQueuedTurn(session.ID, turn.ID)
 
-	events := st.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(st, workspace.ID, session.ID, 0)
 	if !containsEventKind(events, "queue.queued") || !containsEventKind(events, "queue.cancelled") {
 		t.Fatalf("events = %#v, want queue.queued and queue.cancelled", events)
 	}
@@ -5371,7 +5917,7 @@ func TestSteerQueuedTurnInjectsAndRemovesQueuedMessage(t *testing.T) {
 		t.Fatal("queued turn should be removed after steering")
 	}
 
-	events := st.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(st, workspace.ID, session.ID, 0)
 	if !containsEventKind(events, "queue.queued") || !containsEventKind(events, "queue.steered") {
 		t.Fatalf("events = %#v, want queue.queued and queue.steered", events)
 	}
@@ -5432,16 +5978,17 @@ func TestSessionMediaEndpointServesOnlyEventReferencedMedia(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       AgentCodex,
 		Kind:        "message.user",
-		Normalized: map[string]any{"text": "", "attachments": []map[string]any{{
-			"id":        "att_1",
-			"media_id":  "att_1",
-			"kind":      "image",
-			"path":      imagePath,
-			"name":      "clip.png",
-			"mime_type": "image/png",
-		}}},
+		Normalized: eventNormalized("message.user",
+			map[string]any{"text": "", "attachments": []map[string]any{{
+				"id":        "att_1",
+				"media_id":  "att_1",
+				"kind":      "image",
+				"path":      imagePath,
+				"name":      "clip.png",
+				"mime_type": "image/png",
+			}}}),
 	})
-	events := st.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(st, workspace.ID, session.ID, 0)
 	seq := events[0].Seq
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/sessions/%s/media/%d/att_1?download=1", session.ID, seq), nil)
 	rr := httptest.NewRecorder()
@@ -5482,7 +6029,7 @@ func TestStopWorkspaceSessionsInterruptsAndClearsQueue(t *testing.T) {
 	if len(app.queues[session.ID]) != 0 {
 		t.Fatalf("queue was not cleared: %#v", app.queues[session.ID])
 	}
-	events := st.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(st, workspace.ID, session.ID, 0)
 	if !containsEventKind(events, "queue.cancelled") {
 		t.Fatalf("events = %#v, want queue.cancelled", events)
 	}
@@ -5529,7 +6076,7 @@ func TestSSHCallRetriesFiveTransportFailuresThenStopsWorkspace(t *testing.T) {
 	if len(app.queues[session.ID]) != 0 {
 		t.Fatalf("queue was not cleared: %#v", app.queues[session.ID])
 	}
-	events := st.queryEvents(workspace.ID, "", 0)
+	events := testQueryEvents(st, workspace.ID, "", 0)
 	if !hasWorkspaceConnectionRetry(events, sshProxyMaxAttempts, sshProxyMaxAttempts) {
 		t.Fatalf("events = %#v, want reconnecting %d/%d", events, sshProxyMaxAttempts, sshProxyMaxAttempts)
 	}
@@ -5573,7 +6120,7 @@ func TestSSHCallRetriesTransparentlyUntilSuccess(t *testing.T) {
 	if stringValue(out["hostname"]) != "host" {
 		t.Fatalf("hello result = %#v", out)
 	}
-	events := st.queryEvents(workspace.ID, "", 0)
+	events := testQueryEvents(st, workspace.ID, "", 0)
 	if !hasWorkspaceConnectionRetry(events, 1, sshProxyMaxAttempts) {
 		t.Fatalf("events = %#v, want reconnecting 1/%d", events, sshProxyMaxAttempts)
 	}
@@ -5598,7 +6145,7 @@ func TestSSHRestoreReconnectsPreviouslyConnectedWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	connected := initialSSHConnection(workspace, connectionConnected)
-	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: workspace.Agent, Kind: "workspace.connection", Normalized: connected}); err != nil {
+	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: workspace.Agent, Kind: "workspace.connection", Normalized: eventNormalized("workspace.connection", connected)}); err != nil {
 		t.Fatal(err)
 	}
 	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}}
@@ -5631,7 +6178,7 @@ func TestSSHRestoreDoesNotReconnectDisconnectedWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	disconnected := initialSSHConnection(workspace, connectionDisconnected)
-	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: workspace.Agent, Kind: "workspace.connection", Normalized: disconnected}); err != nil {
+	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: workspace.Agent, Kind: "workspace.connection", Normalized: eventNormalized("workspace.connection", disconnected)}); err != nil {
 		t.Fatal(err)
 	}
 	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}}
@@ -5806,7 +6353,7 @@ func TestCodexLocalRuntimeStreamsFakeAppServer(t *testing.T) {
 	waitForKind(t, app.store, session.ID, "turn.completed")
 	waitForKind(t, app.store, session.ID, "control.notification")
 
-	gotKinds := eventKinds(app.store.queryEvents(workspace.ID, session.ID, 0))
+	gotKinds := eventKinds(testQueryEvents(app.store, workspace.ID, session.ID, 0))
 	wantKinds := []string{
 		"message.user",
 		"control.raw",
@@ -5849,7 +6396,7 @@ func TestCodexLocalRuntimeSendsImageAttachments(t *testing.T) {
 	}
 	waitForKind(t, app.store, session.ID, "turn.completed")
 
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	userValue := mapValue(events[0].Normalized)
 	if len(attachmentsFromNormalized(userValue["attachments"])) != 1 {
 		t.Fatalf("message.user normalized = %#v, want attachment metadata", userValue)
@@ -5983,7 +6530,7 @@ func TestCodexLocalRuntimeResumesPersistedThreadAfterReload(t *testing.T) {
 	if err := reloadedApp.runtimes[AgentCodex].StartTurn(reloadedSession, workspace, "second turn", TurnOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	waitForKindCount(t, reloadedApp.store, session.ID, "turn.completed", 2)
+	waitForKind(t, reloadedApp.store, session.ID, "turn.completed")
 
 	methods, err := os.ReadFile(methodsPath)
 	if err != nil {
@@ -6083,6 +6630,7 @@ func TestCodexLocalRuntimeEditRunningTurnInterruptsBeforeRollback(t *testing.T) 
 	app, session, workspace := newTestCodexApp(t, fakeCodexScript(t))
 	methodsPath := filepath.Join(t.TempDir(), "codex-methods.log")
 	t.Setenv("ASTRALOPS_TEST_CODEX_METHODS", methodsPath)
+	t.Setenv("ASTRALOPS_TEST_CODEX_KEEP_ALIVE_ON_INTERRUPT", "1")
 
 	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "old running prompt", TurnOptions{}); err != nil {
 		t.Fatal(err)
@@ -6465,18 +7013,18 @@ func TestFindInteractionEventDoesNotMatchCodexNativeRequestID(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := &app{store: st, hub: newEventHub()}
-	app.emit(AstralEvent{WorkspaceID: "ws_a", SessionID: "sess_a", Agent: AgentCodex, Kind: "approval.requested", Normalized: map[string]any{
+	app.emit(AstralEvent{WorkspaceID: "ws_a", SessionID: "sess_a", Agent: AgentCodex, Kind: "approval.requested", Normalized: eventNormalized("approval.requested", map[string]any{
 		"source":      "codex",
 		"approval_id": "sess_a:0",
 		"request_id":  float64(0),
 		"kind":        "command",
-	}})
-	app.emit(AstralEvent{WorkspaceID: "ws_b", SessionID: "sess_b", Agent: AgentCodex, Kind: "approval.requested", Normalized: map[string]any{
+	})})
+	app.emit(AstralEvent{WorkspaceID: "ws_b", SessionID: "sess_b", Agent: AgentCodex, Kind: "approval.requested", Normalized: eventNormalized("approval.requested", map[string]any{
 		"source":      "codex",
 		"approval_id": "sess_b:0",
 		"request_id":  float64(0),
 		"kind":        "command",
-	}})
+	})})
 	if _, ok := app.findInteractionEvent("0"); ok {
 		t.Fatal("findInteractionEvent matched raw Codex request_id 0; want only Astral approval_id")
 	}
@@ -6991,7 +7539,10 @@ rl.on("line", (line) => {
   if (msg.method === "turn/interrupt") {
     if (turnTimer) clearTimeout(turnTimer);
     write({ id: msg.id, result: {} });
-    setImmediate(() => process.exit(0));
+    write({ method: "turn/completed", params: { threadId: "thread_fake", turn: { id: "turn_fake", status: { type: "cancelled" }, durationMs: 1 } } });
+    if (!process.env.ASTRALOPS_TEST_CODEX_KEEP_ALIVE_ON_INTERRUPT) {
+      setImmediate(() => process.exit(0));
+    }
   }
 });
 `
@@ -7026,14 +7577,14 @@ func waitForKind(t *testing.T, st *store, sessionID, kind string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		for _, event := range st.queryEvents("", sessionID, 0) {
-			if event.Kind == kind {
+		for _, event := range testQueryEvents(st, "", sessionID, 0) {
+			if string(event.Kind) == kind {
 				return
 			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for event kind %s; events=%#v", kind, st.queryEvents("", sessionID, 0))
+	t.Fatalf("timed out waiting for event kind %s; events=%#v", kind, testQueryEvents(st, "", sessionID, 0))
 }
 
 func waitForKindCount(t *testing.T, st *store, sessionID, kind string, want int) {
@@ -7041,8 +7592,8 @@ func waitForKindCount(t *testing.T, st *store, sessionID, kind string, want int)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		count := 0
-		for _, event := range st.queryEvents("", sessionID, 0) {
-			if event.Kind == kind {
+		for _, event := range testQueryEvents(st, "", sessionID, 0) {
+			if string(event.Kind) == kind {
 				count++
 			}
 		}
@@ -7106,7 +7657,7 @@ func waitForClaudeTerminalKind(t *testing.T, st *store, sessionID string, timeou
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		for _, event := range st.queryEvents("", sessionID, 0) {
+		for _, event := range testQueryEvents(st, "", sessionID, 0) {
 			if event.Kind == "turn.completed" || event.Kind == "turn.failed" || event.Kind == "turn.cancelled" {
 				return
 			}
@@ -7131,15 +7682,16 @@ func summarizeSessionEvents(events []AstralEvent) string {
 	var out strings.Builder
 	for _, event := range events {
 		value := mapValue(event.Normalized)
+		kind := string(event.Kind)
 		switch event.Kind {
 		case "message.delta", "message.assistant":
-			out.WriteString(event.Kind + ": " + stringValue(value["text"]) + "\n")
+			out.WriteString(kind + ": " + stringValue(value["text"]) + "\n")
 		case "tool.started":
-			out.WriteString(event.Kind + ": " + firstString(value["name"], value["tool_name"]) + " " + fmt.Sprint(value["input"]) + "\n")
+			out.WriteString(kind + ": " + firstString(value["name"], value["tool_name"]) + " " + fmt.Sprint(value["input"]) + "\n")
 		case "tool.completed":
-			out.WriteString(event.Kind + ": " + fmt.Sprint(value["content"]) + "\n")
+			out.WriteString(kind + ": " + fmt.Sprint(value["content"]) + "\n")
 		case "turn.failed", "control.error", "control.warning", "approval.requested":
-			out.WriteString(event.Kind + ": " + fmt.Sprint(value) + "\n")
+			out.WriteString(kind + ": " + fmt.Sprint(value) + "\n")
 		}
 	}
 	return out.String()
@@ -7210,7 +7762,7 @@ func normalizedWorkspaceConnection(normalized any) WorkspaceConnection {
 func eventKinds(events []AstralEvent) []string {
 	kinds := make([]string, 0, len(events))
 	for _, event := range events {
-		kinds = append(kinds, event.Kind)
+		kinds = append(kinds, string(event.Kind))
 	}
 	return kinds
 }
@@ -7218,7 +7770,7 @@ func eventKinds(events []AstralEvent) []string {
 func countKind(events []AstralEvent, kind string) int {
 	count := 0
 	for _, event := range events {
-		if event.Kind == kind {
+		if string(event.Kind) == kind {
 			count++
 		}
 	}

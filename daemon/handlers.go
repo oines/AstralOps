@@ -81,7 +81,7 @@ func (a *app) createWorkspace(req createWorkspaceRequest) (Workspace, error) {
 	if err != nil {
 		return Workspace{}, err
 	}
-	a.emit(AstralEvent{WorkspaceID: ws.ID, SessionID: "", Agent: ws.Agent, Kind: "workspace.created", Normalized: ws})
+	a.emit(AstralEvent{WorkspaceID: ws.ID, SessionID: "", Agent: ws.Agent, Kind: "workspace.created", Normalized: eventNormalized("workspace.created", ws)})
 	return ws, nil
 }
 
@@ -98,7 +98,7 @@ func (a *app) deleteWorkspace(workspaceID string) (map[string]any, error) {
 		a.ssh.disconnect(ws)
 	}
 	a.store.deleteWorkspace(workspaceID)
-	a.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.removed", Normalized: map[string]any{"workspace_id": ws.ID}})
+	a.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.removed", Normalized: eventNormalized("workspace.removed", map[string]any{"workspace_id": ws.ID})})
 	return map[string]any{"ok": true}, nil
 }
 
@@ -111,6 +111,33 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "native-sessions" && r.Method == http.MethodGet {
+		if _, ok := a.store.getWorkspace(parts[0]); !ok {
+			writeActionError(w, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found"))
+			return
+		}
+		writeJSON(w, http.StatusOK, nativeSessionListResponse{Sessions: a.store.listNativeSessionCandidates(parts[0])})
+		return
+	}
+	if len(parts) == 3 && parts[1] == "native-sessions" && parts[2] == "import" && r.Method == http.MethodPost {
+		if _, ok := a.store.getWorkspace(parts[0]); !ok {
+			writeActionError(w, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found"))
+			return
+		}
+		var req importNativeSessionRequest
+		if err := decodeJSON(r.Body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		session, err := a.store.importNativeSession(parts[0], req.SessionID)
+		if err != nil {
+			writeActionError(w, newActionError(http.StatusNotFound, "native_session_not_found", err.Error()))
+			return
+		}
+		a.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: eventNormalized("session.started", session)})
+		writeJSON(w, http.StatusOK, importNativeSessionResponse{Session: session})
 		return
 	}
 	if len(parts) == 2 && parts[1] == "files" && r.Method == http.MethodGet {
@@ -717,6 +744,18 @@ type createSessionRequest struct {
 	Agent       AgentKind `json:"agent,omitempty"`
 }
 
+type nativeSessionListResponse struct {
+	Sessions []Session `json:"sessions"`
+}
+
+type importNativeSessionRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+type importNativeSessionResponse struct {
+	Session Session `json:"session"`
+}
+
 func (a *app) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, a.store.listSessions(r.URL.Query().Get("workspace_id")))
@@ -848,7 +887,7 @@ func (a *app) handleEvents(w http.ResponseWriter, r *http.Request) {
 	afterSeq, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
 	beforeSeq, _ := strconv.ParseInt(r.URL.Query().Get("before_seq"), 10, 64)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	events := a.store.queryEventsWindow(r.URL.Query().Get("workspace_id"), r.URL.Query().Get("session_id"), afterSeq, beforeSeq, limit)
+	events := a.eventProjection().QueryEventsWindow(r.URL.Query().Get("workspace_id"), r.URL.Query().Get("session_id"), afterSeq, beforeSeq, limit)
 	writeJSON(w, http.StatusOK, events)
 }
 
@@ -882,7 +921,7 @@ func (a *app) handleEventsSSE(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("session_id")
 
 	writeSSE(w, flusher, "heartbeat", map[string]any{"ts": time.Now().UTC().Format(time.RFC3339Nano)})
-	for _, ev := range a.store.queryEvents(workspaceID, sessionID, afterSeq) {
+	for _, ev := range a.eventStreamReplayEvents(workspaceID, sessionID, afterSeq) {
 		writeSSE(w, flusher, "astral-event", ev)
 	}
 
@@ -913,6 +952,24 @@ func (a *app) handleEventsSSE(w http.ResponseWriter, r *http.Request) {
 			writeSSE(w, flusher, "astral-event", ev)
 		}
 	}
+}
+
+func (a *app) eventStreamReplayEvents(workspaceID, sessionID string, afterSeq int64) []AstralEvent {
+	if workspaceID != "" || sessionID != "" {
+		return a.eventProjection().QueryEvents(workspaceID, sessionID, afterSeq)
+	}
+	out := []AstralEvent{}
+	out = append(out, a.store.runtimeEventsSnapshot()...)
+	out = append(out, a.store.overlayEventsSnapshot("")...)
+	out = append(out, a.store.controlEventsSnapshot()...)
+	out = filterEvents(dedupeProjectedEvents(out), "", "", afterSeq, 0)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Seq == out[j].Seq {
+			return out[i].TS < out[j].TS
+		}
+		return out[i].Seq < out[j].Seq
+	})
+	return out
 }
 
 func writeSSE(w io.Writer, flusher http.Flusher, name string, payload any) {

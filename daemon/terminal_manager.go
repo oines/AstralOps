@@ -226,7 +226,7 @@ func (m *terminalManager) openLocal(_ context.Context, controllerDeviceID string
 	session.localPTY = ptmx
 	m.register(session)
 	session.scheduleRetention(m, m.retentionTimeout)
-	m.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: session.lifecycle("opened")})
+	m.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: eventNormalized("control.terminal.opened", session.lifecycle("opened"))})
 	go session.readLocalOutput(m)
 	return session.openResult(), nil
 }
@@ -259,7 +259,7 @@ func (m *terminalManager) openSSH(ctx context.Context, controllerDeviceID string
 	session.shell = stringValue(started["shell"])
 	m.register(session)
 	session.scheduleRetention(m, m.retentionTimeout)
-	m.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: session.lifecycle("opened")})
+	m.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: eventNormalized("control.terminal.opened", session.lifecycle("opened"))})
 	go session.readSSHOutput(m, events)
 	return session.openResult(), nil
 }
@@ -291,7 +291,8 @@ func (m *terminalManager) attach(controllerDeviceID string, conn controlConnecti
 		WorkspaceID: session.workspaceID,
 		Agent:       session.agent,
 		Kind:        "control.terminal.attached",
-		Normalized:  session.viewerLifecycle(controllerDeviceID, conn.connectionID(), "attached"),
+		Normalized: eventNormalized("control.terminal.attached",
+			session.viewerLifecycle(controllerDeviceID, conn.connectionID(), "attached")),
 	})
 	return result, nil
 }
@@ -312,7 +313,8 @@ func (m *terminalManager) detach(controllerDeviceID string, conn controlConnecti
 			WorkspaceID: session.workspaceID,
 			Agent:       session.agent,
 			Kind:        "control.terminal.detached",
-			Normalized:  session.viewerLifecycle(controllerDeviceID, conn.connectionID(), "detached"),
+			Normalized: eventNormalized("control.terminal.detached",
+				session.viewerLifecycle(controllerDeviceID, conn.connectionID(), "detached")),
 		})
 	}
 	return result, nil
@@ -490,7 +492,8 @@ func (m *terminalManager) detachConnection(connectionID, reason string) {
 			WorkspaceID: session.workspaceID,
 			Agent:       session.agent,
 			Kind:        "control.terminal.detached",
-			Normalized:  session.viewerLifecycle(result.ViewerDeviceID, connectionID, reason),
+			Normalized: eventNormalized("control.terminal.detached",
+				session.viewerLifecycle(result.ViewerDeviceID, connectionID, reason)),
 		})
 	}
 }
@@ -866,7 +869,7 @@ func (s *terminalSession) close(ctx context.Context, manager *terminalManager, r
 			_, _ = localCmd.Process.Wait()
 		}
 		closeViewersAfterFrame(closedFrame, viewers)
-		manager.emit(AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: s.lifecycle(reason)})
+		manager.emit(AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: eventNormalized("control.terminal.closed", s.lifecycle(reason))})
 	})
 }
 
@@ -896,7 +899,7 @@ func (s *terminalSession) markClosed(manager *terminalManager, reason string) {
 			_, _ = localCmd.Process.Wait()
 		}
 		closeViewersAfterFrame(closedFrame, viewers)
-		manager.emit(AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: s.lifecycle(reason)})
+		manager.emit(AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: eventNormalized("control.terminal.closed", s.lifecycle(reason))})
 	})
 }
 
@@ -1177,7 +1180,7 @@ func (v *terminalViewer) fail(code, message string) {
 				OK: false,
 				Error: &ControlError{
 					Status:  http.StatusServiceUnavailable,
-					Code:    code,
+					Code:    ControlErrorCode(code),
 					Message: message,
 				},
 			},

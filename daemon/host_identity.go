@@ -123,21 +123,21 @@ func trustGrantsPath(dataDir string) string {
 
 func defaultHostCapabilities() []string {
 	return []string{
-		CapabilityCoreRead,
-		CapabilityCoreControl,
-		CapabilityInteractionRespond,
-		CapabilitySessionEdit,
-		CapabilityAttachmentIngest,
-		CapabilityMediaRead,
-		CapabilityMediaDownload,
-		CapabilityMediaStream,
-		CapabilityWorkspaceFilesRead,
-		CapabilityWorkspaceFilesWrite,
-		CapabilityWorkspaceExec,
-		CapabilityTerminalOpen,
-		CapabilityTerminalInput,
-		CapabilityHostFileSystemBrowse,
-		CapabilityHostManage,
+		string(CapabilityCoreRead),
+		string(CapabilityCoreControl),
+		string(CapabilityInteractionRespond),
+		string(CapabilitySessionEdit),
+		string(CapabilityAttachmentIngest),
+		string(CapabilityMediaRead),
+		string(CapabilityMediaDownload),
+		string(CapabilityMediaStream),
+		string(CapabilityWorkspaceFilesRead),
+		string(CapabilityWorkspaceFilesWrite),
+		string(CapabilityWorkspaceExec),
+		string(CapabilityTerminalOpen),
+		string(CapabilityTerminalInput),
+		string(CapabilityHostFileSystemBrowse),
+		string(CapabilityHostManage),
 	}
 }
 

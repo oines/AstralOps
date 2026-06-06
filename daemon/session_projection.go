@@ -37,7 +37,7 @@ func (a *app) rebuildSessionProjections() {
 	if a.store == nil {
 		return
 	}
-	for _, ev := range a.store.allEvents() {
+	for _, ev := range a.eventProjection().QueryEvents("", "", 0) {
 		cache.apply(ev)
 	}
 }

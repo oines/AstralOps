@@ -1,8 +1,11 @@
 package main
 
+import "path/filepath"
+
 func (a *app) backfillHistoricalContextEvents() error {
 	latestContext := map[string]AstralEvent{}
-	for _, ev := range a.store.allEvents() {
+	events := a.historicalBackfillEvents()
+	for _, ev := range events {
 		if ev.Kind == "control.context" {
 			latestContext[ev.SessionID] = ev
 		}
@@ -10,7 +13,6 @@ func (a *app) backfillHistoricalContextEvents() error {
 			delete(latestContext, ev.SessionID)
 		}
 	}
-	events := a.store.allEvents()
 	handled := map[string]bool{}
 	claudeAggregateFallbacks := map[string]AstralEvent{}
 	claudeAggregateOrder := []string{}
@@ -74,7 +76,8 @@ func (a *app) backfillHistoricalContextEvents() error {
 
 func (a *app) backfillHistoricalApprovalEvents() error {
 	seen := map[string]bool{}
-	for _, ev := range a.store.allEvents() {
+	events := a.historicalBackfillEvents()
+	for _, ev := range events {
 		if ev.Kind != "approval.requested" {
 			continue
 		}
@@ -82,7 +85,7 @@ func (a *app) backfillHistoricalApprovalEvents() error {
 			seen[id] = true
 		}
 	}
-	for _, source := range a.store.allEvents() {
+	for _, source := range events {
 		if source.Agent != AgentClaude {
 			continue
 		}
@@ -117,6 +120,15 @@ func (a *app) backfillHistoricalApprovalEvents() error {
 		}
 	}
 	return nil
+}
+
+func (a *app) historicalBackfillEvents() []AstralEvent {
+	if a == nil || a.store == nil {
+		return nil
+	}
+	events := a.eventProjection().QueryEvents("", "", 0)
+	legacy, _ := (legacyMigrationReader{dir: filepath.Join(a.store.dataDir, "events")}).Read()
+	return append(events, legacy...)
 }
 
 func (a *app) contextEventFromHistoricalRaw(source AstralEvent) (AstralEvent, bool) {
@@ -194,7 +206,7 @@ func hydrateHistoricalCurrentContext(candidate AstralEvent, source AstralEvent) 
 		"cumulative_cache_creation_input_tokens",
 	})
 	refreshProjectedContextPercent(next)
-	candidate.Normalized = next
+	candidate.Normalized = eventNormalized(candidate.Kind, next)
 	return candidate
 }
 

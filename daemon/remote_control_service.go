@@ -18,6 +18,8 @@ type remoteControlService struct {
 	buildHostSnapshotFn                  func(hostSnapshotParams) hostSnapshotResult
 	buildWorkbenchStateFn                func() workbenchState
 	buildSessionViewFn                   func(string) (sessionView, bool)
+	queryEventsWindowFn                  func(workspaceID, sessionID string, afterSeq, beforeSeq int64, limit int) []AstralEvent
+	emitFn                               func(AstralEvent)
 	workspaceServiceFn                   func() *workspaceService
 	prepareControlEventSubscriptionFn    func(eventSubscriptionParams) (eventSubscriptionResult, error)
 	streamControlEventsFn                func(context.Context, eventSubscriptionResult, controlConnection, string)
@@ -62,6 +64,8 @@ func remoteControlServiceDepsFromApp(a *app) remoteControlService {
 		buildHostSnapshotFn:                  a.buildHostSnapshot,
 		buildWorkbenchStateFn:                a.buildWorkbenchState,
 		buildSessionViewFn:                   a.buildSessionView,
+		queryEventsWindowFn:                  a.eventProjection().QueryEventsWindow,
+		emitFn:                               a.emit,
 		workspaceServiceFn:                   a.workspaceService,
 		prepareControlEventSubscriptionFn:    a.prepareControlEventSubscription,
 		streamControlEventsFn:                a.streamControlEvents,
@@ -105,6 +109,19 @@ func (s *remoteControlService) buildSessionView(sessionID string) (sessionView, 
 		return sessionView{}, false
 	}
 	return s.buildSessionViewFn(sessionID)
+}
+
+func (s *remoteControlService) queryEventsWindow(workspaceID, sessionID string, afterSeq, beforeSeq int64, limit int) []AstralEvent {
+	if s.queryEventsWindowFn != nil {
+		return s.queryEventsWindowFn(workspaceID, sessionID, afterSeq, beforeSeq, limit)
+	}
+	return nil
+}
+
+func (s *remoteControlService) emit(event AstralEvent) {
+	if s.emitFn != nil {
+		s.emitFn(event)
+	}
 }
 
 func (s *remoteControlService) workspaceService() *workspaceService {
@@ -319,6 +336,6 @@ func (a *app) remoteHostTargetWithPreference(hostDeviceID string, preferRelay bo
 	return a.remoteControlService().remoteHostTargetWithPreference(hostDeviceID, preferRelay)
 }
 
-func (a *app) remoteControlResponse(hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
+func (a *app) remoteControlResponse(hostDeviceID string, capability ControlCapability, action ControlAction, params map[string]any) (ControlResponse, error) {
 	return a.remoteControlService().remoteControlResponse(hostDeviceID, capability, action, params)
 }

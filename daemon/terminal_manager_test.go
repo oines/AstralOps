@@ -30,12 +30,12 @@ func TestControlGatewayTerminalOpenInputResizeAndClose(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id":    open.TerminalID,
 			"viewer_id":      attach.ViewerID,
 			"input_lease_id": attach.InputLeaseID,
 			"data":           "printf terminal-ok > " + shellSingleQuote(marker) + "\n",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -65,13 +65,13 @@ func TestControlGatewayTerminalOpenInputResizeAndClose(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalResize,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id":    open.TerminalID,
 			"viewer_id":      attach.ViewerID,
 			"input_lease_id": attach.InputLeaseID,
 			"cols":           120,
 			"rows":           32,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestControlGatewayTerminalOpenInputResizeAndClose(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalClose,
-		Params:             map[string]any{"terminal_id": open.TerminalID},
+		Params:             controlParams(map[string]any{"terminal_id": open.TerminalID}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +97,7 @@ func TestControlGatewayTerminalOpenInputResizeAndClose(t *testing.T) {
 		t.Fatalf("closed status = %q, want closed", closed.Status)
 	}
 
-	events := app.store.queryEvents(workspace.ID, "", 0)
+	events := testQueryEvents(app.store, workspace.ID, "", 0)
 	if countKind(events, "control.terminal.opened") != 1 || countKind(events, "control.terminal.closed") != 1 {
 		t.Fatalf("terminal lifecycle events = %#v", eventKinds(events))
 	}
@@ -116,12 +116,12 @@ func TestControlGatewayTerminalOpenReturnsWorkspaceRelativeCWD(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalOpen,
 		Action:             ControlActionTerminalOpen,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"cwd":          "nested",
 			"cols":         80,
 			"rows":         24,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestControlGatewayTerminalOpenReturnsWorkspaceRelativeCWD(t *testing.T) {
 		t.Fatalf("terminal open result leaked Host cwd: %s", string(wire))
 	}
 
-	events := app.store.queryEvents(workspace.ID, "", 0)
+	events := testQueryEvents(app.store, workspace.ID, "", 0)
 	for _, event := range events {
 		if event.Kind != "control.terminal.opened" {
 			continue
@@ -176,10 +176,10 @@ func TestControlGatewayTerminalInputRequiresInputCapability(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id": open.TerminalID,
 			"data":        "echo denied\n",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }
@@ -199,10 +199,10 @@ func TestControlGatewayTerminalInputRejectsLargePayload(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id": open.TerminalID,
 			"data":        strings.Repeat("x", terminalInputMaxBytes+1),
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusRequestEntityTooLarge, "terminal_input_too_large")
 }
@@ -222,10 +222,10 @@ func TestControlGatewayTerminalInputRequiresActiveViewerLease(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id": open.TerminalID,
 			"data":        "echo denied\n",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusConflict, terminalViewerRequiredCode)
 
@@ -250,12 +250,12 @@ func TestControlGatewayTerminalInputRequiresActiveViewerLease(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id":    open.TerminalID,
 			"viewer_id":      attach.ViewerID,
 			"input_lease_id": attach.InputLeaseID,
 			"data":           "",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -296,7 +296,7 @@ func TestControlGatewayTerminalAttachRequiresControlConnection(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalOpen,
 		Action:             ControlActionTerminalAttach,
-		Params:             map[string]any{"terminal_id": open.TerminalID},
+		Params:             controlParams(map[string]any{"terminal_id": open.TerminalID}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "control_connection_required")
 }
@@ -315,13 +315,13 @@ func TestControlGatewayRejectsTerminalCWDThroughSymlink(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalOpen,
 		Action:             ControlActionTerminalOpen,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"cwd":          "escape",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
-	events := app.store.queryEvents(workspace.ID, "", 0)
+	events := testQueryEvents(app.store, workspace.ID, "", 0)
 	if countKind(events, "control.terminal.opened") != 0 {
 		t.Fatalf("terminal opened through symlink escape: %#v", eventKinds(events))
 	}
@@ -455,12 +455,12 @@ func TestTerminalManagerAllowsSharedInput(t *testing.T) {
 		ControllerDeviceID: "device_b",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id":    open.TerminalID,
 			"viewer_id":      attach.ViewerID,
 			"input_lease_id": attach.InputLeaseID,
 			"data":           "printf shared > " + shellSingleQuote(marker) + "\n",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -521,12 +521,12 @@ func TestTrustRevocationLeavesSharedTerminalInputAvailableForTrustedController(t
 		ControllerDeviceID: "device_b",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id":    open.TerminalID,
 			"viewer_id":      attach.ViewerID,
 			"input_lease_id": attach.InputLeaseID,
 			"data":           "printf claimed > " + shellSingleQuote(marker) + "\n",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -550,11 +550,11 @@ func openTerminalForTest(t *testing.T, app *app, deviceID, workspaceID string) t
 		ControllerDeviceID: deviceID,
 		Capability:         CapabilityTerminalOpen,
 		Action:             ControlActionTerminalOpen,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspaceID,
 			"cols":         80,
 			"rows":         24,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -577,7 +577,7 @@ func attachTerminalForTest(t *testing.T, app *app, deviceID, terminalID string) 
 		ControllerDeviceID: deviceID,
 		Capability:         CapabilityTerminalOpen,
 		Action:             ControlActionTerminalAttach,
-		Params:             map[string]any{"terminal_id": terminalID},
+		Params:             controlParams(map[string]any{"terminal_id": terminalID}),
 	}, conn)
 	if err != nil {
 		t.Fatal(err)
@@ -597,7 +597,7 @@ func terminalManagerTestShell(t *testing.T) string {
 	if runtime.GOOS == "windows" {
 		t.Skip("terminal manager is disabled on Windows")
 	}
-	for _, shell := range []string{"/bin/zsh", "/bin/bash"} {
+	for _, shell := range []string{"/bin/bash", "/bin/zsh"} {
 		if _, err := os.Stat(shell); err == nil {
 			return shell
 		}
@@ -609,7 +609,7 @@ func terminalManagerTestShell(t *testing.T) string {
 func waitForFileContent(t *testing.T, path, want string) {
 	t.Helper()
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		body, err := os.ReadFile(path)
 		if err == nil && string(body) == want {

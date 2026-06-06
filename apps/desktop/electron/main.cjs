@@ -617,7 +617,8 @@ function quitApp() {
 
 async function waitForDaemon() {
   const started = Date.now();
-  while (Date.now() - started < 15000) {
+  const timeoutMs = app.isPackaged || process.env.ASTRALOPS_DAEMON ? 15000 : 90000;
+  while (Date.now() - started < timeoutMs) {
     try {
       const raw = fs.readFileSync(runtimePath(), "utf8");
       const info = JSON.parse(raw);
@@ -630,7 +631,7 @@ async function waitForDaemon() {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
-  throw new Error("Timed out waiting for astralopsd");
+  throw new Error(`Timed out waiting for astralopsd after ${Math.round(timeoutMs / 1000)}s`);
 }
 
 function createWindow() {
@@ -845,6 +846,9 @@ ipcMain.handle("astral:set-diagnostics-logging-enabled", async (_event, enabled)
 
 ipcMain.handle("astral:get-daemon-info", async () => {
   logDesktopEvent("ipc.get_daemon_info");
+  if (!daemonInfo && !daemonProcess) {
+    startDaemon();
+  }
   if (daemonInfo) {
     try {
       const raw = fs.readFileSync(runtimePath(), "utf8");

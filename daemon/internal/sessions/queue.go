@@ -69,7 +69,7 @@ func (s *QueueService) EnqueueTurn(session protocol.Session, input string, optio
 	if text := turnDisplayInput(input, options); text != "" {
 		normalized["text"] = text
 	}
-	s.emit(protocol.AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "queue.queued", Normalized: normalized})
+	s.emit(protocol.AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "queue.queued", Normalized: protocol.EventNormalized("queue.queued", normalized)})
 	return turn
 }
 
@@ -94,7 +94,7 @@ func (s *QueueService) CancelQueuedTurn(sessionID, queueID string) {
 	}
 	s.queueMu.Unlock()
 	if cancelled {
-		s.emit(protocol.AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: session.Agent, Kind: "queue.cancelled", Normalized: map[string]any{"queue_id": queueID}})
+		s.emit(protocol.AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: session.Agent, Kind: "queue.cancelled", Normalized: protocol.EventNormalized("queue.cancelled", map[string]any{"queue_id": queueID})})
 	}
 }
 
@@ -116,7 +116,7 @@ func (s *QueueService) ClearSessionQueue(sessionID string, reason string) {
 		if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
 			normalized["text"] = text
 		}
-		s.emit(protocol.AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: session.Agent, Kind: "queue.cancelled", Normalized: normalized})
+		s.emit(protocol.AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: session.Agent, Kind: "queue.cancelled", Normalized: protocol.EventNormalized("queue.cancelled", normalized)})
 	}
 }
 
@@ -150,7 +150,7 @@ func (s *QueueService) SteerQueuedTurn(sessionID, queueID string) error {
 	if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
 		normalized["text"] = text
 	}
-	s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.steered", Normalized: normalized})
+	s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.steered", Normalized: protocol.EventNormalized("queue.steered", normalized)})
 	return nil
 }
 
@@ -186,11 +186,11 @@ func (s *QueueService) StartNextQueuedTurn(sessionID string) {
 		if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
 			normalized["text"] = text
 		}
-		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.failed", Normalized: normalized})
-		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{
+		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.failed", Normalized: protocol.EventNormalized("queue.failed", normalized)})
+		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: protocol.EventNormalized("control.error", map[string]any{
 			"message":  err.Error(),
 			"queue_id": turn.ID,
-		}})
+		})})
 		return
 	}
 	normalized := map[string]any{
@@ -202,7 +202,7 @@ func (s *QueueService) StartNextQueuedTurn(sessionID string) {
 	if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
 		normalized["text"] = text
 	}
-	s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.dequeued", Normalized: normalized})
+	s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.dequeued", Normalized: protocol.EventNormalized("queue.dequeued", normalized)})
 }
 
 func (s *QueueService) PopQueuedTurn(sessionID string) (sessiontypes.QueuedTurn, bool) {

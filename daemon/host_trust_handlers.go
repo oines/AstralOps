@@ -46,12 +46,13 @@ func (a *app) handleTrustDevices(w http.ResponseWriter, r *http.Request) {
 		}
 		a.emit(AstralEvent{
 			Kind: "control.trust.granted",
-			Normalized: map[string]any{
-				"host_device_id":       grant.HostDeviceID,
-				"controller_device_id": grant.ControllerDeviceID,
-				"scope":                grant.Scope,
-				"capabilities":         grant.Capabilities,
-			},
+			Normalized: eventNormalized("control.trust.granted",
+				map[string]any{
+					"host_device_id":       grant.HostDeviceID,
+					"controller_device_id": grant.ControllerDeviceID,
+					"scope":                grant.Scope,
+					"capabilities":         grant.Capabilities,
+				}),
 		})
 		writeJSON(w, http.StatusCreated, grant)
 	default:
@@ -87,12 +88,13 @@ func (a *app) revokeTrustedControlDevice(controllerDeviceID, exceptConnectionID 
 	releasedWriters := a.releaseTerminalWritersForDevice(grant.ControllerDeviceID)
 	a.emit(AstralEvent{
 		Kind: "control.trust.revoked",
-		Normalized: map[string]any{
-			"host_device_id":            grant.HostDeviceID,
-			"controller_device_id":      grant.ControllerDeviceID,
-			"revoked_at":                grant.RevokedAt,
-			"released_terminal_writers": releasedWriters,
-		},
+		Normalized: eventNormalized("control.trust.revoked",
+			map[string]any{
+				"host_device_id":            grant.HostDeviceID,
+				"controller_device_id":      grant.ControllerDeviceID,
+				"revoked_at":                grant.RevokedAt,
+				"released_terminal_writers": releasedWriters,
+			}),
 	})
 	return hostTrustRevokeResult{
 		ControllerDeviceID:      grant.ControllerDeviceID,

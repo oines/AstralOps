@@ -11,6 +11,7 @@ type sessionService struct {
 	runtimes    map[AgentKind]AgentRuntime
 	queueMu     *sync.Mutex
 	queues      *map[string][]queuedTurn
+	queryEvents func(workspaceID, sessionID string, afterSeq int64) []AstralEvent
 	emit        func(AstralEvent)
 	stopSession func(Session, string)
 }
@@ -21,13 +22,14 @@ func (a *app) sessions() *sessionService {
 		runtimes:    a.runtimes,
 		queueMu:     &a.queueMu,
 		queues:      &a.queues,
+		queryEvents: a.eventProjection().QueryEvents,
 		emit:        a.emit,
 		stopSession: a.stopSessionRuntime,
 	}
 }
 
 func (s *sessionService) controlService() *internalsessions.Service {
-	return internalsessions.NewService(sessionQueueStoreAdapter{store: s.store}, s.runtimes, s.queueMu, s.queues, s.emit, s.stopSession)
+	return internalsessions.NewService(sessionQueueStoreAdapter{store: s.store, queryEvents: s.queryEvents}, s.runtimes, s.queueMu, s.queues, s.emit, s.stopSession)
 }
 
 func (a *app) startSessionInput(sessionID, input string, options TurnOptions) (map[string]any, error) {

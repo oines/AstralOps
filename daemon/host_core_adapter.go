@@ -21,11 +21,13 @@ func (a *app) hostCoreManager() *hostcore.Core {
 	defer a.controlMu.Unlock()
 	if a.hostCore == nil {
 		a.hostCore = hostcore.New(hostcore.Adapters{
-			Identity:     hostCoreIdentityAdapterFromApp(a),
-			Membership:   hostCoreMembershipAdapterFromApp(a),
-			Trust:        hostCoreTrustAdapterFromApp(a),
-			Capabilities: hostcore.CapabilityResolverFunc(controlActionCapability),
-			Dispatcher:   hostCoreDispatchAdapter{control: a.remoteControlService(), store: a.store},
+			Identity:   hostCoreIdentityAdapterFromApp(a),
+			Membership: hostCoreMembershipAdapterFromApp(a),
+			Trust:      hostCoreTrustAdapterFromApp(a),
+			Capabilities: hostcore.CapabilityResolverFunc(func(action string) string {
+				return string(controlActionCapability(ControlAction(action)))
+			}),
+			Dispatcher: hostCoreDispatchAdapter{control: a.remoteControlService(), store: a.store},
 		})
 	}
 	return a.hostCore
@@ -174,7 +176,7 @@ func controlHelloCloseFrame(err error) controlPlainFrame {
 	}
 	var actionErr *actionError
 	if errors.As(err, &actionErr) {
-		code = actionErr.Code
+		code = string(actionErr.Code)
 		reason = actionErr.Message
 	}
 	if code == hostcore.ErrorCodeControllerUntrusted {

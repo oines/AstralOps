@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/oines/astralops/pkg/cloudmesh"
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 const (
@@ -26,26 +27,9 @@ const (
 	DirectionHostToController = "host-to-controller"
 )
 
-type ControlRequest struct {
-	RequestID          string         `json:"request_id,omitempty"`
-	ControllerDeviceID string         `json:"controller_device_id,omitempty"`
-	Capability         string         `json:"capability"`
-	Action             string         `json:"action"`
-	Params             map[string]any `json:"params,omitempty"`
-}
-
-type ControlResponse struct {
-	RequestID string        `json:"request_id,omitempty"`
-	OK        bool          `json:"ok"`
-	Result    any           `json:"result,omitempty"`
-	Error     *ControlError `json:"error,omitempty"`
-}
-
-type ControlError struct {
-	Status  int    `json:"status,omitempty"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
+type ControlRequest = protocol.ControlRequest
+type ControlResponse = protocol.ControlResponse
+type ControlError = protocol.ControlError
 
 type HelloFrame struct {
 	Type                   string                     `json:"type"`

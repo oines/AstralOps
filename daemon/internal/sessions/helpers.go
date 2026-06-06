@@ -9,6 +9,9 @@ import (
 )
 
 func mapValue(v any) map[string]any {
+	if payload, ok := v.(protocol.AstralEventNormalized); ok {
+		return protocol.NormalizedMap(payload)
+	}
 	m, _ := v.(map[string]any)
 	if m == nil {
 		return map[string]any{}
@@ -121,7 +124,7 @@ func hasPendingInteraction(events []protocol.AstralEvent) bool {
 			continue
 		}
 		normalized := mapValue(ev.Normalized)
-		if isAskPermissionEchoEvent(ev.Kind, normalized) {
+		if isAskPermissionEchoEvent(string(ev.Kind), normalized) {
 			continue
 		}
 		ids := interactionIDsFromNormalized(normalized)

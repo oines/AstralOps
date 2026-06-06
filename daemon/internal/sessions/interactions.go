@@ -20,9 +20,17 @@ func (s *Service) RespondInteraction(id string, req map[string]any) (map[string]
 	if !ok {
 		return nil, apperrors.New(http.StatusNotFound, "interaction_not_found", "interaction not found")
 	}
+	if session, sessionOK := s.store.GetSession(origin.SessionID); sessionOK {
+		if session.Source == protocol.SessionSourceDiscovered || session.Source == protocol.SessionSourceLegacyUnlinked {
+			return nil, apperrors.New(http.StatusConflict, "interaction_not_live", "interaction is from native history and is not pending in a live runtime")
+		}
+	}
 
 	req = InteractionResponseForClientAction(origin, req)
 	if err := s.processInteractionResponse(id, origin, req); err != nil {
+		if strings.Contains(err.Error(), "not pending in a runtime") {
+			return nil, apperrors.New(http.StatusConflict, "interaction_not_live", "interaction is not pending in a live runtime")
+		}
 		return nil, apperrors.New(http.StatusConflict, "interaction_failed", err.Error())
 	}
 	s.emit(interactionRespondedEvent(id, origin, req))
@@ -69,11 +77,12 @@ func interactionRespondedEvent(id string, origin protocol.AstralEvent, req map[s
 		SessionID:   origin.SessionID,
 		Agent:       origin.Agent,
 		Kind:        "approval.responded",
-		Normalized:  map[string]any{"approval_id": id, "response": req},
+		Normalized: protocol.EventNormalized("approval.responded",
+			map[string]any{"approval_id": id, "response": req}),
 	}
 	if origin.Kind == "ask.requested" {
 		responded.Kind = "ask.resolved"
-		responded.Normalized = map[string]any{"ask_id": id, "request_id": id, "response": req}
+		responded.Normalized = protocol.EventNormalized(responded.Kind, map[string]any{"ask_id": id, "request_id": id, "response": req})
 	}
 	return responded
 }
@@ -212,7 +221,7 @@ func (s *Service) interruptInteractionSession(origin protocol.AstralEvent) error
 	if err := runtime.Interrupt(origin.SessionID); err != nil {
 		if errors.Is(err, sessiontypes.ErrSessionIdle) {
 			s.store.UpdateSessionStatus(origin.SessionID, "idle")
-			s.emit(protocol.AstralEvent{WorkspaceID: origin.WorkspaceID, SessionID: origin.SessionID, Agent: origin.Agent, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle"}})
+			s.emit(protocol.AstralEvent{WorkspaceID: origin.WorkspaceID, SessionID: origin.SessionID, Agent: origin.Agent, Kind: "turn.cancelled", Normalized: protocol.EventNormalized("turn.cancelled", map[string]any{"status": "idle"})})
 			return nil
 		}
 		return err
@@ -408,7 +417,7 @@ func (s *Service) FindInteractionEvent(id string) (protocol.AstralEvent, bool) {
 		if ev.Kind != "approval.requested" && ev.Kind != "ask.requested" {
 			continue
 		}
-		normalized, _ := ev.Normalized.(map[string]any)
+		normalized := mapValue(ev.Normalized)
 		if stringValue(normalized["approval_id"]) == id || stringValue(normalized["ask_id"]) == id {
 			return ev, true
 		}

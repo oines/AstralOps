@@ -1,4 +1,4 @@
-import type { AstralEvent } from "@astralops/protocol";
+import { normalizedRecord, type AstralEvent } from "@astralops/protocol";
 
 export type TurnGroup = {
   id: string;
@@ -100,6 +100,15 @@ export function groupTranscriptEvents(events: AstralEvent[]): TurnGroup[] {
       continue;
     }
     if (isTranscriptUserEvent(event, legacySteeredUserSeqs)) {
+      if (current && !current.end && canAttachUserToOpenTurn(current)) {
+        current.user = event;
+        continueAfterResolution = false;
+        continue;
+      }
+      if (current && !current.end && shouldStartNewTurnForUser(current)) {
+        completeImplicitTurn(current);
+        current = null;
+      }
       if (current && !current.end) {
         current.timeline.push(event);
         continueAfterResolution = false;
@@ -129,6 +138,9 @@ export function groupTranscriptEvents(events: AstralEvent[]): TurnGroup[] {
       continue;
     }
     if (event.kind === "message.delta" || event.kind === "message.assistant" || event.kind === "message.media" || isTranscriptPlanEvent(event)) {
+      if (isDuplicateAssistantContentEvent(group, event)) {
+        continue;
+      }
       group.assistant.push(event);
       group.timeline.push(event);
       continue;
@@ -138,6 +150,40 @@ export function groupTranscriptEvents(events: AstralEvent[]): TurnGroup[] {
   }
 
   return groups.filter(hasVisibleTurnContent);
+}
+
+function canAttachUserToOpenTurn(group: TurnGroup): boolean {
+  return !group.user && group.assistant.length === 0 && group.details.length === 0 && group.timeline.length === 0;
+}
+
+function shouldStartNewTurnForUser(group: TurnGroup): boolean {
+  return Boolean(group.user || group.assistant.length > 0 || group.details.length > 0 || group.timeline.some((event) => !isSilentOperationEvent(event)));
+}
+
+function completeImplicitTurn(group: TurnGroup): void {
+  if (group.end || group.status !== "running") return;
+  group.status = "completed";
+}
+
+function isDuplicateAssistantContentEvent(group: TurnGroup, event: AstralEvent): boolean {
+  if (event.kind === "message.media") return false;
+  const key = assistantContentKey(event);
+  if (key === "") return false;
+  return group.assistant.some((candidate) => candidate.kind !== "message.media" && assistantContentKey(candidate) === key);
+}
+
+function assistantContentKey(event: AstralEvent): string {
+  if (isTranscriptPlanEvent(event)) {
+    return `plan:${normalizeTranscriptText(transcriptPlanText(event))}`;
+  }
+  if (event.kind !== "message.delta" && event.kind !== "message.assistant") {
+    return "";
+  }
+  return `message:${normalizeTranscriptText(textValue(normalizedRecord(event), "text"))}`;
+}
+
+function normalizeTranscriptText(text: string): string {
+  return text.trim().replace(/\s+/g, " ");
 }
 
 function hasVisibleTurnContent(group: TurnGroup): boolean {
@@ -197,7 +243,7 @@ export function filterReplacedTranscriptEvents(events: AstralEvent[]): AstralEve
   const hidden = new Set<number>();
   for (const event of events) {
     if (event.kind !== "turn.replaced") continue;
-    const value = event.normalized as Record<string, unknown>;
+    const value = normalizedRecord(event);
     const start = numberValue(value.start_seq);
     const end = numberValue(value.end_seq);
     if (start <= 0 || end < start) continue;
@@ -368,7 +414,7 @@ function suppressedReasoningEventSeqs(events: AstralEvent[]): Set<number> {
   const textItems = new Set<string>();
   for (const event of events) {
     if (event.kind !== "reasoning.delta") continue;
-    const value = event.normalized as Record<string, unknown>;
+    const value = normalizedRecord(event);
     if (textValue(value, "text")) {
       textItems.add(textValue(value, "item_id") || String(event.seq));
     }
@@ -376,7 +422,7 @@ function suppressedReasoningEventSeqs(events: AstralEvent[]): Set<number> {
   const suppressed = new Set<number>();
   for (const event of events) {
     if (event.kind !== "reasoning.started" && event.kind !== "reasoning.completed") continue;
-    const value = event.normalized as Record<string, unknown>;
+    const value = normalizedRecord(event);
     if (textItems.has(textValue(value, "item_id") || String(event.seq))) {
       suppressed.add(event.seq);
     }
@@ -412,7 +458,7 @@ function operationSummary(events: AstralEvent[], selectedFileDiffSeqs: Set<numbe
     if (event.kind === "control.steer") steers += 1;
     if (event.kind.startsWith("tool.") && !isCommandEvent(event)) {
       const name = toolName(event).toLowerCase();
-      const value = event.normalized as Record<string, unknown>;
+      const value = normalizedRecord(event);
       const category = textValue(value, "category").toLowerCase();
       if (searches.length === 0 && isSearchToolName(name, category)) searchTools.add(toolIdentity(event));
       if (readFiles.length === 0 && (category === "read" || name === "read" || name.includes("read") || name.includes("list"))) readTools.add(toolIdentity(event));
@@ -454,7 +500,7 @@ function activeOperationSummary(events: AstralEvent[], selectedFileDiffSeqs: Set
       return command ? `正在运行 ${command}` : "正在运行命令";
     }
     if (event.kind.startsWith("tool.")) {
-      const value = event.normalized as Record<string, unknown>;
+      const value = normalizedRecord(event);
       const input = value.input as Record<string, unknown> | undefined;
       const name = toolName(event).toLowerCase();
       const category = textValue(value, "category").toLowerCase();
@@ -492,7 +538,7 @@ function selectedFileDiffEventSeqs(events: AstralEvent[]): Set<number> {
 }
 
 function diffEventScore(event: AstralEvent, file: FileDiff): number {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   let score = 1;
   if (textValue(value, "status") === "completed") score += 1;
   if (event.kind === "tool.completed") score += 2;
@@ -536,7 +582,7 @@ function fileDiffQuality(file: FileDiff): number {
 }
 
 function fileDiffsFromEvent(event: AstralEvent): FileDiff[] {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const out: FileDiff[] = [];
   const changes = Array.isArray(value.changes) ? value.changes : [];
   for (const change of changes) {
@@ -558,7 +604,7 @@ function fileDiffsFromEvent(event: AstralEvent): FileDiff[] {
 function isFileDiffEvent(event: AstralEvent): boolean {
   if (event.kind === "tool.diff") return fileDiffsFromEvent(event).length > 0;
   if (event.kind !== "tool.completed") return false;
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   return textValue(value, "category") === "file" && fileDiffsFromEvent(event).length > 0;
 }
 
@@ -596,21 +642,38 @@ function fileDiffsFromStructuredToolResult(value: Record<string, unknown>): File
 
 export function fileReadFromEvent(event: AstralEvent): FileRead | null {
   if (event.kind !== "tool.completed") return null;
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   if (textValue(value, "category") !== "read") return null;
+  const input = mapValue(value.input);
   const result = mapValue(value.result);
   const structuredContent = mapValue(result.structuredContent);
   const file = mapValue(structuredContent.file);
-  const path = firstStringFromRecord(file, "filePath", "file_path", "path");
-  const content = textValue(file, "content");
+  const path =
+    firstStringFromRecord(file, "filePath", "file_path", "path") ||
+    firstStringFromRecord(input, "file_path", "filePath", "path") ||
+    firstStringFromRecord(value, "file_path", "filePath", "path");
+  const content = textValue(file, "content") || contentText(value.content) || contentText(result.content);
   if (!path || content === "") return null;
   return {
     content,
     name: baseName(path) || "文件",
     path,
     startLine: numberValue(file.startLine) || 1,
-    totalLines: numberValue(file.totalLines) || 0,
+    totalLines: numberValue(file.totalLines) || content.split("\n").length,
   };
+}
+
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") return textValue(item as Record<string, unknown>, "text");
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function buildFileReadItems(events: AstralEvent[]): FileReadItem[] {
@@ -635,7 +698,7 @@ function collectFileReadEvents(events: AstralEvent[]): AstralEvent[] {
 
 function fileReadItemFromEvent(event: AstralEvent): FileReadItem | null {
   if (event.kind !== "tool.started" && event.kind !== "tool.completed") return null;
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   if (textValue(value, "category") !== "read") return null;
   const input = mapValue(value.input);
   const completed = fileReadFromEvent(event);
@@ -680,7 +743,7 @@ function collectSearchEvents(events: AstralEvent[]): AstralEvent[] {
 function searchItemFromEvent(event: AstralEvent): SearchItem | null {
   if (event.kind !== "tool.started" && event.kind !== "tool.completed") return null;
   if (isCommandEvent(event)) return null;
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const input = mapValue(value.input);
   const name = toolName(event);
   const category = textValue(value, "category").toLowerCase();
@@ -770,7 +833,7 @@ function enrichToolLifecycleEvents(events: AstralEvent[]): AstralEvent[] {
   let changed = false;
   const enriched = events.map((event) => {
     if (event.kind === "tool.started") {
-      const value = event.normalized as Record<string, unknown>;
+      const value = normalizedRecord(event);
       const id = textValue(value, "id");
       if (id) {
         startedByID.set(id, {
@@ -783,7 +846,7 @@ function enrichToolLifecycleEvents(events: AstralEvent[]): AstralEvent[] {
       return event;
     }
     if (event.kind !== "tool.completed" && event.kind !== "tool.output_delta") return event;
-    const value = event.normalized as Record<string, unknown>;
+    const value = normalizedRecord(event);
     const id = textValue(value, "id") || textValue(value, "item_id");
     const started = id ? startedByID.get(id) : undefined;
     if (!started) return event;
@@ -804,7 +867,7 @@ function shallowEqualRecord(a: Record<string, unknown>, b: Record<string, unknow
 }
 
 function toolIdentity(event: AstralEvent): string {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   return textValue(value, "id") || textValue(value, "item_id") || `${event.kind}:${event.seq}`;
 }
 
@@ -825,7 +888,7 @@ function numberValue(value: unknown): number {
 }
 
 function isInternalContinuationEvent(event: AstralEvent): boolean {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   return value.internal === true;
 }
 
@@ -834,14 +897,14 @@ function isResolutionEvent(event: AstralEvent): boolean {
 }
 
 function isHiddenTranscriptEvent(event: AstralEvent): boolean {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   if (event.kind === "workspace.connection") return true;
   return value.hidden === true || value.visibility === "debug";
 }
 
 export function isCompactCommandEcho(event: AstralEvent): boolean {
   if (event.kind !== "message.user") return false;
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   return textValue(value, "text").trim() === "/compact";
 }
 
@@ -931,16 +994,17 @@ export function isCommandEvent(event: AstralEvent): boolean {
   if (event.kind === "tool.output_delta") return true;
   if (!event.kind.startsWith("tool.")) return false;
   const name = toolName(event).toLowerCase();
-  return Boolean(commandText(event)) || name === "bash" || name === "shell" || name === "command" || name.includes("commandexecution");
+  const category = textValue(normalizedRecord(event), "category").toLowerCase();
+  return Boolean(commandText(event)) || category === "command" || name === "bash" || name === "shell" || name === "command" || name.includes("commandexecution");
 }
 
 export function commandKey(event: AstralEvent, fallback: string): string {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   return textValue(value, "id") || textValue(value, "item_id") || textValue(value, "call_id") || fallback;
 }
 
 export function commandText(event: AstralEvent): string {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const input = value.input as Record<string, unknown> | undefined;
   return (
     textValue(value, "remote_command") ||
@@ -952,7 +1016,7 @@ export function commandText(event: AstralEvent): string {
 }
 
 export function commandOutput(event: AstralEvent): string {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const text = textValue(value, "text");
   if (text) return text;
   const output = textValue(value, "output");
@@ -1048,7 +1112,7 @@ export function planItems(value: Record<string, unknown>): PlanItem[] {
 }
 
 export function isTranscriptPlanEvent(event: AstralEvent): boolean {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   if (event.kind === "plan.delta" || event.kind === "plan.updated") {
     if (Array.isArray(value.plan)) return false;
     return transcriptPlanText(event).trim() !== "";
@@ -1057,7 +1121,7 @@ export function isTranscriptPlanEvent(event: AstralEvent): boolean {
 }
 
 export function transcriptPlanText(event: AstralEvent): string {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const text = textValue(value, "text");
   if (text) return text;
   const input = value.input as Record<string, unknown> | undefined;
@@ -1204,7 +1268,7 @@ const CLAUDE_HOOK_EVENT_NAMES = new Set([
 
 export function isHookEvent(event: AstralEvent): boolean {
   if (event.kind.startsWith("hook.")) return true;
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const hook = hookEventName(value);
   return CLAUDE_HOOK_EVENT_NAMES.has(hook);
 }
@@ -1214,7 +1278,7 @@ export function hookEventName(value: Record<string, unknown>): string {
 }
 
 export function isTodoToolEvent(event: AstralEvent): boolean {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   return toolName(event) === "TodoWrite" || textValue(value, "category") === "todo";
 }
 
@@ -1238,7 +1302,7 @@ export function queueLabel(kind: string): string {
 }
 
 export function toolName(event: AstralEvent): string {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   return textValue(value, "name") || textValue(value, "command");
 }
 
@@ -1261,20 +1325,20 @@ export function shouldRenderEvent(event: AstralEvent): boolean {
 }
 
 function isVisibleLegacyQueueSteer(event: AstralEvent): boolean {
-  return event.kind === "queue.steered" && textValue(event.normalized as Record<string, unknown>, "text").trim() !== "";
+  return event.kind === "queue.steered" && textValue(normalizedRecord(event), "text").trim() !== "";
 }
 
 function isEmptyCodexReasoningLifecycle(event: AstralEvent): boolean {
   if (event.kind !== "reasoning.started" && event.kind !== "reasoning.completed") return false;
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   return textValue(value, "source") === "codex" && textValue(value, "text") === "";
 }
 
 export function isInternalQueueEcho(event: AstralEvent): boolean {
   if (!event.kind.startsWith("queue.")) return false;
-  if (event.kind === "queue.steered" && textValue(event.normalized as Record<string, unknown>, "text").trim() !== "") return false;
+  if (event.kind === "queue.steered" && textValue(normalizedRecord(event), "text").trim() !== "") return false;
   if (event.kind === "queue.dequeued") return true;
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   if (value.internal === true) return true;
   const text = textValue(value, "text").trim();
   if (event.kind === "queue.queued" && text === "") return true;
@@ -1305,14 +1369,14 @@ export function compactStreamingEvents(events: AstralEvent[]): AstralEvent[] {
     }
     compacted.push({
       ...pending,
-      normalized: { ...(pending.normalized as Record<string, unknown>), text: pendingText },
+      normalized: { ...(normalizedRecord(pending)), text: pendingText },
     });
     pending = null;
     pendingText = "";
   }
 
   for (const event of events) {
-    const value = event.normalized as Record<string, unknown>;
+    const value = normalizedRecord(event);
     const text = textValue(value, "text");
 
     if (isCompactDelta(event.kind) && text) {
@@ -1363,7 +1427,7 @@ export function isCompactDelta(kind: string): boolean {
 }
 
 export function eventKey(event: AstralEvent): string {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const itemID = textValue(value, "item_id") || textValue(value, "id");
   return `${event.session_id}:${event.kind}:${itemID}`;
 }
@@ -1376,7 +1440,7 @@ function legacySteeredUserEventSeqs(events: AstralEvent[]): Set<number> {
   const seqs = new Set<number>();
   for (const event of events) {
     if (event.kind !== "queue.steered") continue;
-    const text = textValue(event.normalized as Record<string, unknown>, "text").trim();
+    const text = textValue(normalizedRecord(event), "text").trim();
     if (text === "" || hasNearbyUserMessage(events, event, text)) continue;
     seqs.add(event.seq);
   }
@@ -1388,7 +1452,7 @@ function hasNearbyUserMessage(events: AstralEvent[], event: AstralEvent, text: s
   return events.some((candidate) => {
     if (candidate.kind !== "message.user") return false;
     if (candidate.session_id !== event.session_id) return false;
-    if (textValue(candidate.normalized as Record<string, unknown>, "text").trim() !== text) return false;
+    if (textValue(normalizedRecord(candidate), "text").trim() !== text) return false;
     const candidateTime = Date.parse(candidate.ts);
     if (Number.isFinite(eventTime) && Number.isFinite(candidateTime)) {
       return Math.abs(candidateTime - eventTime) <= 30000;

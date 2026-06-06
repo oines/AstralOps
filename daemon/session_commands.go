@@ -147,6 +147,15 @@ func (a *app) handleRunSessionCommand(w http.ResponseWriter, sessionID, commandI
 	}
 	ss, _ := a.store.getSession(sessionID)
 	ws, _ := a.store.getWorkspace(ss.WorkspaceID)
+	if command.Kind != commandKindClient && command.ID != "status" {
+		linked, err := a.linkSessionForCommand(ss)
+		if err != nil {
+			writeActionError(w, err)
+			return
+		}
+		ss = linked
+		ws, _ = a.store.getWorkspace(ss.WorkspaceID)
+	}
 	switch command.Kind {
 	case commandKindPrompt:
 		input := firstString(mapValue(command.Payload)["input"], "/"+strings.TrimPrefix(command.ID, "claude:"))
@@ -185,6 +194,17 @@ func (a *app) handleRunSessionCommand(w http.ResponseWriter, sessionID, commandI
 	}
 }
 
+func (a *app) linkSessionForCommand(ss Session) (Session, error) {
+	switch ss.Source {
+	case SessionSourceLegacyUnlinked:
+		return Session{}, newActionError(http.StatusConflict, "native_history_missing", "native history is missing for this session")
+	case SessionSourceDiscovered:
+		return Session{}, newActionError(http.StatusConflict, "native_session_not_imported", "native session must be imported before control")
+	default:
+		return ss, nil
+	}
+}
+
 func (a *app) startSessionPromptCommand(w http.ResponseWriter, ss Session, ws Workspace, input string) {
 	runtime, ok := a.runtimes[ss.Agent]
 	if !ok {
@@ -201,28 +221,28 @@ func (a *app) startSessionPromptCommand(w http.ResponseWriter, ss Session, ws Wo
 		return
 	}
 	if strings.TrimSpace(input) == "/compact" {
-		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "memory.compacting", Normalized: map[string]any{
+		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "memory.compacting", Normalized: eventNormalized("memory.compacting", map[string]any{
 			"source":  "astralops",
 			"command": "compact",
 			"status":  "running",
-		}})
+		})})
 	}
 	writeJSON(w, http.StatusOK, SessionCommandResponse{OK: true})
 }
 
 func (a *app) emitSessionStatusSnapshot(ss Session) {
-	a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.status", Normalized: map[string]any{
+	a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.status", Normalized: eventNormalized("control.status", map[string]any{
 		"source":            "astralops",
 		"session_id":        ss.ID,
 		"native_session_id": ss.NativeSessionID,
 		"native_thread_id":  ss.NativeThreadID,
 		"status":            ss.Status,
 		"message":           "Status refreshed",
-	}})
+	})})
 	if context := a.sessionProjections().latestContext(ss.ID); len(context) > 0 {
 		context["source"] = "astralops"
 		context["session_id"] = ss.ID
-		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.context", Normalized: context})
+		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.context", Normalized: eventNormalized("control.context", context)})
 	}
 }
 

@@ -39,13 +39,18 @@ func (s *Service) StartSessionInput(sessionID, input string, options sessiontype
 	if !ok {
 		return nil, apperrors.New(http.StatusNotFound, "session_not_found", "session not found")
 	}
+	var err error
+	ss, err = s.ensureLinkedForControl(ss)
+	if err != nil {
+		return nil, err
+	}
 	ws, ok := s.store.GetWorkspace(ss.WorkspaceID)
 	if !ok {
 		return nil, apperrors.New(http.StatusNotFound, "workspace_not_found", "workspace not found")
 	}
 	runtime, ok := s.runtimes[ss.Agent]
 	if !ok {
-		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": "agent runtime is not implemented"}})
+		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: protocol.EventNormalized("control.error", map[string]any{"message": "agent runtime is not implemented"})})
 		return nil, apperrors.New(http.StatusNotImplemented, "runtime_not_implemented", "agent runtime is not implemented")
 	}
 	if ss.Status == "running" {
@@ -61,7 +66,7 @@ func (s *Service) StartSessionInput(sessionID, input string, options sessiontype
 			turn := s.queue.EnqueueTurn(ss, input, options)
 			return map[string]any{"ok": true, "mode": "queue", "queued": true, "queue_id": turn.ID}, nil
 		}
-		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": err.Error()}})
+		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: protocol.EventNormalized("control.error", map[string]any{"message": err.Error()})})
 		return nil, apperrors.New(http.StatusBadRequest, "runtime_error", err.Error())
 	}
 	return map[string]any{"ok": true, "mode": "start"}, nil
@@ -79,7 +84,7 @@ func (s *Service) CreateSession(workspaceID string, agent protocol.AgentKind) (p
 		return protocol.Session{}, apperrors.New(http.StatusBadRequest, "agent_invalid", "agent must be claude or codex")
 	}
 	session := s.store.CreateSession(ws, agent)
-	s.emit(protocol.AstralEvent{WorkspaceID: ws.ID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: session})
+	s.emit(protocol.AstralEvent{WorkspaceID: ws.ID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: protocol.EventNormalized("session.started", session)})
 	return session, nil
 }
 
@@ -96,11 +101,11 @@ func (s *Service) tryRunningInput(ss protocol.Session, ws protocol.Workspace, ru
 		} else if errors.Is(retryErr, sessiontypes.ErrSessionRunning) {
 			return nil, false, nil
 		} else {
-			s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": retryErr.Error()}})
+			s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: protocol.EventNormalized("control.error", map[string]any{"message": retryErr.Error()})})
 			return nil, true, apperrors.New(http.StatusBadRequest, "runtime_error", retryErr.Error())
 		}
 	} else {
-		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: map[string]any{"message": steerErr.Error()}})
+		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: protocol.EventNormalized("control.error", map[string]any{"message": steerErr.Error()})})
 		return nil, true, apperrors.New(http.StatusConflict, "steer_failed", steerErr.Error())
 	}
 }
@@ -110,6 +115,11 @@ func (s *Service) InterruptSession(sessionID string) (map[string]any, error) {
 	if !ok {
 		return nil, apperrors.New(http.StatusNotFound, "session_not_found", "session not found")
 	}
+	var err error
+	ss, err = s.ensureLinkedForControl(ss)
+	if err != nil {
+		return nil, err
+	}
 	runtime, ok := s.runtimes[ss.Agent]
 	if !ok {
 		return nil, apperrors.New(http.StatusNotImplemented, "runtime_not_implemented", "agent runtime is not implemented")
@@ -118,6 +128,17 @@ func (s *Service) InterruptSession(sessionID string) (map[string]any, error) {
 		return nil, apperrors.New(http.StatusConflict, "interrupt_failed", err.Error())
 	}
 	return map[string]any{"ok": true}, nil
+}
+
+func (s *Service) ensureLinkedForControl(ss protocol.Session) (protocol.Session, error) {
+	switch ss.Source {
+	case protocol.SessionSourceLegacyUnlinked:
+		return protocol.Session{}, apperrors.New(http.StatusConflict, "native_history_missing", "native history is missing for this session")
+	case protocol.SessionSourceDiscovered:
+		return protocol.Session{}, apperrors.New(http.StatusConflict, "native_session_not_imported", "native session must be imported before control")
+	default:
+		return ss, nil
+	}
 }
 
 func (s *Service) DeleteSessionByID(sessionID string) (protocol.SessionDeleteResult, error) {
@@ -131,7 +152,7 @@ func (s *Service) DeleteSessionByID(sessionID string) (protocol.SessionDeleteRes
 	}
 	s.stopSession(ss, "session deleted")
 	s.store.DeleteSession(ss.ID)
-	s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "session.deleted", Normalized: map[string]any{"session_id": ss.ID}})
+	s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "session.deleted", Normalized: protocol.EventNormalized("session.deleted", map[string]any{"session_id": ss.ID})})
 	return protocol.SessionDeleteResult{OK: true, SessionID: ss.ID}, nil
 }
 
@@ -141,8 +162,12 @@ func (s *Service) CancelControlQueuedTurn(params protocol.QueueControlParams) (m
 	if sessionID == "" || queueID == "" {
 		return nil, apperrors.New(http.StatusBadRequest, "queue_reference_invalid", "session_id and queue_id are required")
 	}
-	if _, ok := s.store.GetSession(sessionID); !ok {
+	session, ok := s.store.GetSession(sessionID)
+	if !ok {
 		return nil, apperrors.New(http.StatusNotFound, "session_not_found", "session not found")
+	}
+	if _, err := s.ensureLinkedForControl(session); err != nil {
+		return nil, err
 	}
 	if _, ok := s.queue.PeekQueuedTurn(sessionID, queueID); !ok {
 		return nil, apperrors.New(http.StatusNotFound, "queue_not_found", "queued input not found")
@@ -156,6 +181,13 @@ func (s *Service) SteerControlQueuedTurn(params protocol.QueueControlParams) (ma
 	queueID := strings.TrimSpace(params.QueueID)
 	if sessionID == "" || queueID == "" {
 		return nil, apperrors.New(http.StatusBadRequest, "queue_reference_invalid", "session_id and queue_id are required")
+	}
+	session, ok := s.store.GetSession(sessionID)
+	if !ok {
+		return nil, apperrors.New(http.StatusNotFound, "session_not_found", "session not found")
+	}
+	if _, err := s.ensureLinkedForControl(session); err != nil {
+		return nil, err
 	}
 	err := s.queue.SteerQueuedTurn(sessionID, queueID)
 	if err == nil {

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 const (
@@ -418,6 +420,18 @@ func (a *app) handleRemoteHostAction(w http.ResponseWriter, r *http.Request) {
 			"path":         r.URL.Query().Get("path"),
 			"mode":         "list",
 		})
+	case len(route) == 3 && route[0] == "workspaces" && route[2] == "native-sessions" && r.Method == http.MethodGet:
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreRead, ControlActionNativeSessions, map[string]any{"workspace_id": route[1]})
+	case len(route) == 4 && route[0] == "workspaces" && route[2] == "native-sessions" && route[3] == "import" && r.Method == http.MethodPost:
+		var req importNativeSessionRequest
+		if err := decodeJSON(r.Body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreControl, ControlActionNativeSessionImport, map[string]any{
+			"workspace_id": route[1],
+			"session_id":   req.SessionID,
+		})
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "connection" && r.Method == http.MethodGet:
 		a.writeRemoteControlResult(w, hostDeviceID, CapabilityCoreRead, ControlActionWorkspaceConnection, map[string]any{"workspace_id": route[1]})
 	case len(route) == 3 && route[0] == "workspaces" && route[2] == "connect" && r.Method == http.MethodPost:
@@ -636,17 +650,6 @@ func (a *app) remoteHostSnapshot(ctx context.Context, hostDeviceID string, param
 		return hostSnapshotResult{}, err
 	}
 	eventLimit := normalizedHostSnapshotEventLimit(params.EventLimit)
-	response, err := manager.Request(ctx, hostDeviceID, CapabilityCoreRead, ControlActionEvents, map[string]any{"limit": eventLimit})
-	if err != nil {
-		return hostSnapshotResult{}, fmt.Errorf("remote control request failed: %w", err)
-	}
-	if !response.OK {
-		return hostSnapshotResult{}, controlResponseActionError(response, ControlActionEvents)
-	}
-	events, err := remoteEventsFromResult(response.Result)
-	if err != nil {
-		return hostSnapshotResult{}, err
-	}
 	workspaces, sessions, sessionViews, connections := flattenRemoteWorkbenchState(workbench)
 	result := hostSnapshotResult{
 		Host:                 a.remoteHostSnapshotHostInfo(hostDeviceID),
@@ -654,7 +657,7 @@ func (a *app) remoteHostSnapshot(ctx context.Context, hostDeviceID string, param
 		Workspaces:           workspaces,
 		Sessions:             sessions,
 		WorkspaceConnections: connections,
-		Events:               events,
+		Events:               []AstralEvent{},
 		SessionViews:         sessionViews,
 		Workbench:            workbench,
 	}
@@ -966,7 +969,7 @@ func controlResponseMessage(response ControlResponse) string {
 		return response.Error.Message
 	}
 	if response.Error.Code != "" {
-		return response.Error.Code
+		return string(response.Error.Code)
 	}
 	return "remote control request failed"
 }
@@ -999,7 +1002,7 @@ func (a *remoteControlService) remoteTargetResolver() remoteTargetResolver {
 	}
 }
 
-func (a *app) writeRemoteControlResult(w http.ResponseWriter, hostDeviceID, capability, action string, params map[string]any) {
+func (a *app) writeRemoteControlResult(w http.ResponseWriter, hostDeviceID string, capability ControlCapability, action ControlAction, params map[string]any) {
 	response, err := a.remoteControlResponse(hostDeviceID, capability, action, params)
 	if err != nil {
 		writeRemoteHostError(w, err)
@@ -1026,10 +1029,16 @@ func (a *app) writeRemoteWorkspaceFilesResult(w http.ResponseWriter, hostDeviceI
 	})
 }
 
-func (a *remoteControlService) remoteControlResponse(hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
+func (a *remoteControlService) remoteControlResponse(hostDeviceID string, capability ControlCapability, action ControlAction, params map[string]any) (ControlResponse, error) {
 	manager := a.hostRemoteSessionManager()
 	if manager == nil {
 		return ControlResponse{}, errors.New("remote Host session manager is not initialized")
+	}
+	if protocol.RequiredCapability(action) == "" {
+		return ControlResponse{}, newActionError(http.StatusNotFound, "control_action_unknown", "control action not found")
+	}
+	if capability != protocol.RequiredCapability(action) {
+		return ControlResponse{}, newActionError(http.StatusForbidden, "capability_mismatch", "control capability does not match action")
 	}
 	response, err := manager.Request(context.Background(), hostDeviceID, capability, action, params)
 	if err != nil {
@@ -1091,7 +1100,7 @@ func (a *app) handleRemoteHostEventsSSE(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-func writeControlHTTPResult(w http.ResponseWriter, response ControlResponse, action string) {
+func writeControlHTTPResult(w http.ResponseWriter, response ControlResponse, action ControlAction) {
 	if response.OK {
 		status := http.StatusOK
 		if action == ControlActionSessionCreate || action == ControlActionSessionFork || action == ControlActionWorkspaceCreate {
@@ -1111,7 +1120,7 @@ func writeControlHTTPResult(w http.ResponseWriter, response ControlResponse, act
 			message = response.Error.Message
 		}
 		if response.Error.Code != "" {
-			code = response.Error.Code
+			code = string(response.Error.Code)
 		}
 	}
 	writeJSON(w, status, map[string]string{"error": message, "code": code})
@@ -1120,7 +1129,7 @@ func writeControlHTTPResult(w http.ResponseWriter, response ControlResponse, act
 func writeRemoteHostError(w http.ResponseWriter, err error) {
 	var actionErr *actionError
 	if errors.As(err, &actionErr) {
-		writeJSON(w, actionErr.Status, map[string]string{"error": actionErr.Message, "code": actionErr.Code})
+		writeJSON(w, actionErr.Status, map[string]string{"error": actionErr.Message, "code": string(actionErr.Code)})
 		return
 	}
 	writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error(), "code": "remote_host_unavailable"})

@@ -131,7 +131,7 @@ func (a *app) controllerCoreManager() *controllercore.Controller {
 	return a.controllerCore
 }
 
-func (a *app) controllerCoreRequest(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
+func (a *app) controllerCoreRequest(ctx context.Context, hostDeviceID string, capability ControlCapability, action ControlAction, params map[string]any) (ControlResponse, error) {
 	core := a.controllerCoreManager()
 	if core == nil {
 		return ControlResponse{}, errors.New("controller core is not initialized")
@@ -274,7 +274,7 @@ func (t daemonControllerTransport) ControlState(hostDeviceID string) controllerc
 	return manager.ControlState(hostDeviceID)
 }
 
-func (t daemonControllerTransport) Request(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (controllercore.ControlResponse, error) {
+func (t daemonControllerTransport) Request(ctx context.Context, hostDeviceID string, capability controllercore.ControlCapability, action controllercore.ControlAction, params map[string]any) (controllercore.ControlResponse, error) {
 	manager := t.deps.managedTransport()
 	if manager == nil {
 		return controllercore.ControlResponse{}, controllercore.NewActionError(http.StatusServiceUnavailable, "controller_unavailable", "controller transport is not initialized")
@@ -644,7 +644,7 @@ func toCoreError(err error) error {
 	if code == terminalViewerNotReadyCode {
 		code = controllercore.TerminalViewerNotReadyCode
 	}
-	return controllercore.NewActionError(actionErr.Status, code, actionErr.Message)
+	return controllercore.NewActionError(actionErr.Status, string(code), actionErr.Message)
 }
 
 func fromCoreControlResponse(response controllercore.ControlResponse) ControlResponse {
@@ -675,7 +675,7 @@ func fromCoreError(err error) error {
 	if code == controllercore.TerminalViewerNotReadyCode {
 		code = terminalViewerNotReadyCode
 	}
-	return newActionError(coreErr.Status, code, coreErr.Message)
+	return newActionError(coreErr.Status, string(code), coreErr.Message)
 }
 
 func toCoreMeshState(state meshStateResponse) controllercore.MeshState {

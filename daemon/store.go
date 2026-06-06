@@ -1,17 +1,16 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 type store struct {
@@ -26,6 +25,8 @@ type store struct {
 	workspaces       map[string]Workspace
 	sessions         map[string]Session
 	events           []AstralEvent
+	overlays         map[string]sessionOverlayState
+	controlState     astralControlState
 	nextSeq          int64
 }
 
@@ -60,11 +61,22 @@ func loadStore(dataDir string) (*store, error) {
 		knownHosts:       knownHosts,
 		workspaces:       map[string]Workspace{},
 		sessions:         map[string]Session{},
+		overlays:         map[string]sessionOverlayState{},
+		controlState:     astralControlState{Version: 1},
 	}
 	if err := os.MkdirAll(filepath.Join(dataDir, "workspaces"), 0o700); err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "sessions"), 0o700); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Join(dataDir, "events"), 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "overlays"), 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "migrations"), 0o700); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Join(dataDir, "projections"), 0o700); err != nil {
@@ -79,116 +91,101 @@ func loadStore(dataDir string) (*store, error) {
 		}
 	}
 
-	eventFiles, _ := filepath.Glob(filepath.Join(dataDir, "events", "*.jsonl"))
-	for _, p := range eventFiles {
-		if err := st.loadEventFile(p); err != nil {
-			return nil, err
+	sessionFiles, _ := filepath.Glob(filepath.Join(dataDir, "sessions", "*.json"))
+	for _, p := range sessionFiles {
+		var ss Session
+		if body, err := os.ReadFile(p); err == nil && json.Unmarshal(body, &ss) == nil && ss.ID != "" {
+			normalizeStoredSession(&ss)
+			st.sessions[ss.ID] = ss
 		}
 	}
-	st.hydrateSessionsFromEvents()
+
+	st.overlays = loadOverlayStates(dataDir)
+	st.controlState = loadControlState(dataDir)
+	if err := st.migrateLegacyNativeHistory(); err != nil {
+		return nil, err
+	}
+	if err := st.persistLoadedSessions(); err != nil {
+		return nil, err
+	}
 	return st, nil
 }
 
-func (s *store) loadEventFile(path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	reader := bufio.NewReader(f)
-	for {
-		line, err := reader.ReadBytes('\n')
-		if len(bytes.TrimSpace(line)) > 0 {
-			var ev AstralEvent
-			if decodeErr := json.Unmarshal(line, &ev); decodeErr == nil {
-				s.events = append(s.events, ev)
-				if ev.Seq > s.nextSeq {
-					s.nextSeq = ev.Seq
-				}
+func (s *store) applySessionEventLocked(ev AstralEvent) {
+	switch ev.Kind {
+	case "session.started":
+		var ss Session
+		body, _ := json.Marshal(ev.Normalized)
+		if json.Unmarshal(body, &ss) != nil || ss.ID == "" {
+			ss = Session{
+				ID:              ev.SessionID,
+				WorkspaceID:     ev.WorkspaceID,
+				Agent:           ev.Agent,
+				Status:          "idle",
+				NativeSessionID: stringValue(mapValue(ev.Normalized)["native_session_id"]),
+				NativeThreadID:  stringValue(mapValue(ev.Normalized)["native_thread_id"]),
+				CreatedAt:       ev.TS,
+				UpdatedAt:       ev.TS,
 			}
 		}
-		if errors.Is(err, io.EOF) {
-			break
+		if ss.Agent == "" {
+			ss.Agent = ev.Agent
 		}
-		if err != nil {
-			return err
+		if ss.WorkspaceID == "" {
+			ss.WorkspaceID = ev.WorkspaceID
 		}
-	}
-	return nil
-}
-
-func (s *store) hydrateSessionsFromEvents() {
-	for _, ev := range s.events {
-		switch ev.Kind {
-		case "session.started":
-			var ss Session
-			body, _ := json.Marshal(ev.Normalized)
-			if json.Unmarshal(body, &ss) != nil || ss.ID == "" {
-				ss = Session{
-					ID:              ev.SessionID,
-					WorkspaceID:     ev.WorkspaceID,
-					Agent:           ev.Agent,
-					Status:          "idle",
-					NativeSessionID: stringValue(mapValue(ev.Normalized)["native_session_id"]),
-					NativeThreadID:  stringValue(mapValue(ev.Normalized)["native_thread_id"]),
-					CreatedAt:       ev.TS,
-					UpdatedAt:       ev.TS,
-				}
-			}
-			if ss.Agent == "" {
-				ss.Agent = ev.Agent
-			}
+		normalizeStoredSession(&ss)
+		if ss.Status == "" {
 			ss.Status = "idle"
-			s.sessions[ss.ID] = ss
-		case "session.native":
-			ss, ok := s.sessions[ev.SessionID]
-			if !ok {
-				ss = Session{
-					ID:          ev.SessionID,
-					WorkspaceID: ev.WorkspaceID,
-					Agent:       ev.Agent,
-					Status:      "idle",
-					CreatedAt:   ev.TS,
-				}
-			}
-			value := mapValue(ev.Normalized)
-			if nativeSessionID := stringValue(value["native_session_id"]); nativeSessionID != "" {
-				ss.NativeSessionID = nativeSessionID
-			}
-			if nativeThreadID := stringValue(value["native_thread_id"]); nativeThreadID != "" {
-				ss.NativeThreadID = nativeThreadID
-			}
-			if ss.Agent == "" {
-				ss.Agent = ev.Agent
-			}
-			if ss.WorkspaceID == "" {
-				ss.WorkspaceID = ev.WorkspaceID
-			}
-			if ss.CreatedAt == "" {
-				ss.CreatedAt = ev.TS
-			}
-			ss.Status = "idle"
-			ss.UpdatedAt = ev.TS
-			s.sessions[ss.ID] = ss
-		case "session.deleted":
-			delete(s.sessions, ev.SessionID)
 		}
-		if ev.Kind != "session.deleted" {
-			s.touchSessionForEvent(ev)
+		s.sessions[ss.ID] = ss
+	case "session.native":
+		ss, ok := s.sessions[ev.SessionID]
+		if !ok {
+			ss = Session{
+				ID:          ev.SessionID,
+				WorkspaceID: ev.WorkspaceID,
+				Agent:       ev.Agent,
+				Status:      "idle",
+				CreatedAt:   ev.TS,
+			}
 		}
+		value := mapValue(ev.Normalized)
+		if nativeSessionID := stringValue(value["native_session_id"]); nativeSessionID != "" {
+			ss.NativeSessionID = nativeSessionID
+		}
+		if nativeThreadID := stringValue(value["native_thread_id"]); nativeThreadID != "" {
+			ss.NativeThreadID = nativeThreadID
+		}
+		if ss.Agent == "" {
+			ss.Agent = ev.Agent
+		}
+		if ss.WorkspaceID == "" {
+			ss.WorkspaceID = ev.WorkspaceID
+		}
+		if ss.CreatedAt == "" {
+			ss.CreatedAt = ev.TS
+		}
+		normalizeStoredSession(&ss)
+		ss.Status = "idle"
+		ss.UpdatedAt = ev.TS
+		s.sessions[ss.ID] = ss
+	case "session.deleted":
+		delete(s.sessions, ev.SessionID)
 	}
 }
 
-func (s *store) touchSessionForEvent(ev AstralEvent) {
+func (s *store) touchSessionForEventLocked(ev AstralEvent) (Session, bool) {
 	if ev.SessionID == "" || ev.TS == "" {
-		return
+		return Session{}, false
 	}
 	ss, ok := s.sessions[ev.SessionID]
 	if !ok {
-		return
+		return Session{}, false
 	}
 	ss.UpdatedAt = ev.TS
 	s.sessions[ev.SessionID] = ss
+	return ss, true
 }
 
 func (s *store) listWorkspaces() []Workspace {
@@ -204,18 +201,182 @@ func (s *store) listWorkspaces() []Workspace {
 
 func (s *store) listSessions(workspaceID string) []Session {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]Session, 0, len(s.sessions))
 	titles := s.sessionTitlesLocked()
+	managed := make([]Session, 0, len(s.sessions))
 	for _, ss := range s.sessions {
 		if workspaceID != "" && ss.WorkspaceID != workspaceID {
 			continue
 		}
-		ss.Title = titles[ss.ID]
+		if title := titles[ss.ID]; title != "" {
+			ss.Title = title
+		}
+		normalizeStoredSession(&ss)
+		managed = append(managed, ss)
+	}
+	s.mu.Unlock()
+
+	out := make([]Session, 0, len(managed))
+	managedByNative := map[string]int{}
+	for _, ss := range managed {
+		if key := sessionNativeKey(ss); key != "" {
+			if existing, ok := managedByNative[key]; ok {
+				out[existing] = mergeDuplicateNativeSession(out[existing], ss)
+				continue
+			}
+			managedByNative[key] = len(out)
+		}
 		out = append(out, ss)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
 	return out
+}
+
+func (s *store) listNativeSessionCandidates(workspaceID string) []Session {
+	s.mu.Lock()
+	workspaces := make([]Workspace, 0, len(s.workspaces))
+	for _, ws := range s.workspaces {
+		if workspaceID != "" && ws.ID != workspaceID {
+			continue
+		}
+		workspaces = append(workspaces, ws)
+	}
+	managedNative := map[string]bool{}
+	for _, ss := range s.sessions {
+		if workspaceID != "" && ss.WorkspaceID != workspaceID {
+			continue
+		}
+		normalizeStoredSession(&ss)
+		if key := sessionNativeKey(ss); key != "" {
+			managedNative[key] = true
+		}
+	}
+	s.mu.Unlock()
+
+	out := []Session{}
+	index := nativeSessionIndex{}
+	for _, ws := range workspaces {
+		for _, record := range index.List(ws) {
+			ss := record.Session
+			if key := sessionNativeKey(ss); key != "" && managedNative[key] {
+				continue
+			}
+			ss = sanitizeNativeSessionCandidate(ss)
+			out = append(out, ss)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
+	return out
+}
+
+func sanitizeNativeSessionCandidate(ss Session) Session {
+	if ss.NativeRef != nil {
+		ref := *ss.NativeRef
+		ref.LocalPath = ""
+		ref.RemotePath = ""
+		ref.WorkspaceCWD = ""
+		ss.NativeRef = &ref
+	}
+	return ss
+}
+
+func (s *store) importNativeSession(workspaceID, candidateID string) (Session, error) {
+	candidateID = strings.TrimSpace(candidateID)
+	if candidateID == "" {
+		return Session{}, errors.New("native session id required")
+	}
+	workspace, ok := s.getWorkspace(workspaceID)
+	if !ok {
+		return Session{}, errors.New("workspace not found")
+	}
+	for _, existing := range s.listSessions(workspaceID) {
+		if existing.ID == candidateID {
+			return existing, nil
+		}
+	}
+	for _, record := range (nativeSessionIndex{}).List(workspace) {
+		ss := record.Session
+		if ss.ID != candidateID {
+			continue
+		}
+		if key := sessionNativeKey(ss); key != "" {
+			for _, existing := range s.listSessions(workspaceID) {
+				if sessionNativeKey(existing) == key {
+					return existing, nil
+				}
+			}
+		}
+		ss.Source = SessionSourceLinked
+		ss.ManagedByAstralOps = true
+		ss.Status = firstString(ss.Status, string(SessionStatusIdle))
+		ss.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		normalizeStoredSession(&ss)
+		s.mu.Lock()
+		s.sessions[ss.ID] = ss
+		s.mu.Unlock()
+		if err := s.writeSessionFile(ss); err != nil {
+			return Session{}, err
+		}
+		return ss, nil
+	}
+	return Session{}, errors.New("native session not found")
+}
+
+func mergeDiscoveredNativeRef(managed Session, discovered Session) Session {
+	if managed.NativeRef == nil {
+		managed.NativeRef = discovered.NativeRef
+	} else if discovered.NativeRef != nil {
+		if managed.NativeRef.LocalPath == "" {
+			managed.NativeRef.LocalPath = discovered.NativeRef.LocalPath
+		}
+		if managed.NativeRef.WorkspaceCWD == "" {
+			managed.NativeRef.WorkspaceCWD = discovered.NativeRef.WorkspaceCWD
+		}
+		if managed.NativeRef.NativeSessionID == "" {
+			managed.NativeRef.NativeSessionID = discovered.NativeRef.NativeSessionID
+		}
+		if managed.NativeRef.NativeThreadID == "" {
+			managed.NativeRef.NativeThreadID = discovered.NativeRef.NativeThreadID
+		}
+	}
+	if discovered.Title != "" {
+		managed.Title = discovered.Title
+	}
+	if discovered.UpdatedAt > managed.UpdatedAt {
+		managed.UpdatedAt = discovered.UpdatedAt
+	}
+	if managed.Source == SessionSourceManaged {
+		managed.Source = SessionSourceLinked
+	}
+	return managed
+}
+
+func mergeDuplicateNativeSession(primary Session, duplicate Session) Session {
+	if duplicate.UpdatedAt > primary.UpdatedAt {
+		primary, duplicate = duplicate, primary
+	}
+	if primary.Title == "" {
+		primary.Title = duplicate.Title
+	}
+	if primary.CreatedAt == "" || (duplicate.CreatedAt != "" && duplicate.CreatedAt < primary.CreatedAt) {
+		primary.CreatedAt = duplicate.CreatedAt
+	}
+	if primary.NativeRef == nil {
+		primary.NativeRef = duplicate.NativeRef
+	} else if duplicate.NativeRef != nil {
+		if primary.NativeRef.LocalPath == "" {
+			primary.NativeRef.LocalPath = duplicate.NativeRef.LocalPath
+		}
+		if primary.NativeRef.WorkspaceCWD == "" {
+			primary.NativeRef.WorkspaceCWD = duplicate.NativeRef.WorkspaceCWD
+		}
+	}
+	if primary.NativeSessionID == "" {
+		primary.NativeSessionID = duplicate.NativeSessionID
+	}
+	if primary.NativeThreadID == "" {
+		primary.NativeThreadID = duplicate.NativeThreadID
+	}
+	return primary
 }
 
 func (s *store) sessionTitlesLocked() map[string]string {
@@ -256,25 +417,40 @@ func (s *store) sessionTitlesLocked() map[string]string {
 
 func (s *store) sessionTitle(sessionID string) string {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sessionTitlesLocked()[sessionID]
+	title := s.sessionTitlesLocked()[sessionID]
+	if title == "" {
+		if ss, ok := s.sessions[sessionID]; ok {
+			title = ss.Title
+		}
+	}
+	s.mu.Unlock()
+	return title
 }
 
-func (s *store) allEvents() []AstralEvent {
+func (s *store) runtimeEventsSnapshot() []AstralEvent {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]AstralEvent(nil), s.events...)
 }
 
-func (s *store) AllEvents() []AstralEvent {
-	return s.allEvents()
+func (s *store) runtimeEventsSnapshotForSession(sessionID string) []AstralEvent {
+	if sessionID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []AstralEvent{}
+	for _, ev := range s.events {
+		if ev.SessionID == sessionID {
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 func (s *store) latestSessionIDForWorkspace(workspaceID string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	var latest Session
-	for _, ss := range s.sessions {
+	for _, ss := range s.listSessions(workspaceID) {
 		if ss.WorkspaceID != workspaceID {
 			continue
 		}
@@ -288,6 +464,12 @@ func (s *store) latestSessionIDForWorkspace(workspaceID string) (string, bool) {
 	return latest.ID, true
 }
 
+func (s *store) currentSeq() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nextSeq
+}
+
 func normalizedNativeSessionTitle(value map[string]any) (string, int) {
 	candidates := []struct {
 		rank int
@@ -296,6 +478,7 @@ func normalizedNativeSessionTitle(value map[string]any) (string, int) {
 		{50, []string{"agent_name", "agentName", "custom_title", "customTitle"}},
 		{40, []string{"thread_name", "threadName", "name", "title"}},
 		{30, []string{"summary", "ai_title", "aiTitle"}},
+		{20, []string{"last_prompt", "lastPrompt"}},
 		{10, []string{"preview", "first_prompt", "firstPrompt"}},
 	}
 	for _, candidate := range candidates {
@@ -351,8 +534,8 @@ func (s *store) getWorkspace(id string) (Workspace, bool) {
 func (s *store) latestWorkspaceConnection(workspaceID string) (WorkspaceConnection, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for index := len(s.events) - 1; index >= 0; index-- {
-		ev := s.events[index]
+	for index := len(s.controlState.Events) - 1; index >= 0; index-- {
+		ev := s.controlState.Events[index]
 		if ev.WorkspaceID != workspaceID || ev.Kind != "workspace.connection" {
 			continue
 		}
@@ -437,17 +620,21 @@ func (s *store) createSession(workspace Workspace, agent AgentKind) Session {
 		agent = workspace.Agent
 	}
 	ss := Session{
-		ID:              "sess_" + randomID(12),
-		WorkspaceID:     workspace.ID,
-		Agent:           agent,
-		Status:          "idle",
-		NativeSessionID: randomUUID(),
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:                 "sess_" + randomID(12),
+		WorkspaceID:        workspace.ID,
+		Agent:              agent,
+		Status:             "idle",
+		Source:             SessionSourceManaged,
+		ManagedByAstralOps: true,
+		NativeSessionID:    randomUUID(),
+		CreatedAt:          now,
+		UpdatedAt:          now,
 	}
+	ss.NativeRef = nativeRefForManagedSession(workspace, ss)
 	s.mu.Lock()
 	s.sessions[ss.ID] = ss
 	s.mu.Unlock()
+	_ = s.writeSessionFile(ss)
 	return ss
 }
 
@@ -458,6 +645,8 @@ func (s *store) createForkSession(workspace Workspace, source Session, anchor fo
 		WorkspaceID:            workspace.ID,
 		Agent:                  source.Agent,
 		Status:                 "idle",
+		Source:                 SessionSourceManaged,
+		ManagedByAstralOps:     true,
 		NativeSessionID:        randomUUID(),
 		ForkedFromSessionID:    source.ID,
 		ForkedFromEventSeq:     anchor.EventSeq,
@@ -466,52 +655,84 @@ func (s *store) createForkSession(workspace Workspace, source Session, anchor fo
 		CreatedAt:              now,
 		UpdatedAt:              now,
 	}
+	ss.NativeRef = nativeRefForManagedSession(workspace, ss)
 	s.mu.Lock()
 	s.sessions[ss.ID] = ss
 	s.mu.Unlock()
+	_ = s.writeSessionFile(ss)
 	return ss
 }
 
 func (s *store) getSession(id string) (Session, bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	ss, ok := s.sessions[id]
-	return ss, ok
+	if ok {
+		normalizeStoredSession(&ss)
+		s.mu.Unlock()
+		return s.resolveSessionNativeRef(ss), true
+	}
+	s.mu.Unlock()
+	for _, candidate := range s.listSessions("") {
+		if candidate.ID == id {
+			return candidate, true
+		}
+	}
+	return Session{}, false
 }
 
 func (s *store) updateSessionStatus(id, status string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	ss, ok := s.sessions[id]
 	if !ok {
+		s.mu.Unlock()
 		return
 	}
 	ss.Status = status
 	ss.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	s.sessions[id] = ss
+	s.mu.Unlock()
+	_ = s.writeSessionFile(ss)
 }
 
 func (s *store) updateSessionNativeThreadID(id, nativeThreadID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	ss, ok := s.sessions[id]
 	if !ok {
+		s.mu.Unlock()
 		return
 	}
 	ss.NativeThreadID = nativeThreadID
+	if ss.NativeRef != nil {
+		ss.NativeRef.NativeThreadID = nativeThreadID
+	}
 	ss.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	s.sessions[id] = ss
+	s.mu.Unlock()
+	_ = s.writeSessionFile(ss)
 }
 
 func (s *store) hasEventKind(sessionID, kind string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, ev := range s.events {
-		if ev.SessionID == sessionID && ev.Kind == kind {
+		if ev.SessionID == sessionID && string(ev.Kind) == kind {
 			return true
 		}
 	}
 	return false
+}
+
+func (s *store) shouldResumeClaudeSession(session Session) bool {
+	if session.Agent != AgentClaude || session.NativeSessionID == "" {
+		return false
+	}
+	if session.Source == SessionSourceLinked {
+		return true
+	}
+	if session.NativeRef != nil && session.NativeRef.LocalPath != "" {
+		return true
+	}
+	return s.hasEventKind(session.ID, "session.native")
 }
 
 func (s *store) deleteSession(id string) {
@@ -528,8 +749,11 @@ func (s *store) deleteSession(id string) {
 	s.mu.Unlock()
 
 	_ = os.Remove(filepath.Join(s.dataDir, "events", id+".jsonl"))
+	s.removeOverlayState(id)
+	s.removeSessionControlState(id)
 	if sessionOK {
 		_ = session
+		_ = os.Remove(filepath.Join(s.dataDir, "sessions", id+".json"))
 	}
 }
 
@@ -554,82 +778,256 @@ func (s *store) deleteWorkspace(id string) {
 
 	_ = os.RemoveAll(filepath.Join(s.dataDir, "workspaces", id))
 	_ = os.RemoveAll(filepath.Join(s.dataDir, "projections", id))
+	s.removeWorkspaceControlState(id)
 	for _, sessionID := range sessionIDs {
 		_ = os.Remove(filepath.Join(s.dataDir, "events", sessionID+".jsonl"))
+		_ = os.Remove(filepath.Join(s.dataDir, "sessions", sessionID+".json"))
+		s.removeOverlayState(sessionID)
+	}
+}
+
+func normalizeStoredSession(ss *Session) {
+	if ss == nil {
+		return
+	}
+	if ss.Source == "" {
+		ss.Source = SessionSourceManaged
+	}
+	if ss.Source == SessionSourceManaged || ss.Source == SessionSourceLinked {
+		ss.ManagedByAstralOps = true
+	}
+	if ss.Status == "" {
+		ss.Status = string(SessionStatusIdle)
+	}
+	if ss.NativeRef == nil && (ss.NativeSessionID != "" || ss.NativeThreadID != "") {
+		ss.NativeRef = &NativeSessionRef{
+			Agent:           ss.Agent,
+			NativeSessionID: ss.NativeSessionID,
+			NativeThreadID:  ss.NativeThreadID,
+		}
+	}
+	if ss.NativeRef != nil {
+		if ss.NativeRef.Agent == "" {
+			ss.NativeRef.Agent = ss.Agent
+		}
+		if ss.NativeSessionID == "" {
+			ss.NativeSessionID = ss.NativeRef.NativeSessionID
+		}
+		if ss.NativeThreadID == "" {
+			ss.NativeThreadID = ss.NativeRef.NativeThreadID
+		}
+	}
+}
+
+func (s *store) resolveSessionNativeRef(ss Session) Session {
+	if ss.WorkspaceID == "" {
+		return ss
+	}
+	workspace, ok := s.getWorkspace(ss.WorkspaceID)
+	if !ok {
+		return ss
+	}
+	resolved := resolveNativeRefForSession(workspace, ss)
+	if resolved == nil {
+		return ss
+	}
+	nativeTitle := nativeSessionTitleFromRef(resolved)
+	if ss.NativeRef == nil || ss.NativeRef.LocalPath == "" || ss.NativeRef.WorkspaceCWD == "" {
+		ss.NativeRef = resolved
+		if ss.NativeSessionID == "" {
+			ss.NativeSessionID = resolved.NativeSessionID
+		}
+		if ss.NativeThreadID == "" {
+			ss.NativeThreadID = resolved.NativeThreadID
+		}
+		if nativeTitle != "" {
+			ss.Title = nativeTitle
+		}
+		if resolved.LocalPath != "" {
+			s.mu.Lock()
+			current, ok := s.sessions[ss.ID]
+			if ok {
+				current.NativeRef = resolved
+				if current.NativeSessionID == "" {
+					current.NativeSessionID = resolved.NativeSessionID
+				}
+				if current.NativeThreadID == "" {
+					current.NativeThreadID = resolved.NativeThreadID
+				}
+				if nativeTitle != "" {
+					current.Title = nativeTitle
+				}
+				s.sessions[ss.ID] = current
+				ss = current
+			}
+			s.mu.Unlock()
+			_ = s.writeSessionFile(ss)
+		}
+	} else if nativeTitle != "" && nativeTitle != ss.Title {
+		ss.Title = nativeTitle
+		s.mu.Lock()
+		current, ok := s.sessions[ss.ID]
+		if ok {
+			current.Title = nativeTitle
+			s.sessions[ss.ID] = current
+			ss = current
+		}
+		s.mu.Unlock()
+		if ok {
+			_ = s.writeSessionFile(ss)
+		}
+	}
+	return ss
+}
+
+func (s *store) persistLoadedSessions() error {
+	for _, ss := range s.sessions {
+		normalizeStoredSession(&ss)
+		if err := s.writeSessionFile(ss); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *store) writeSessionFile(ss Session) error {
+	normalizeStoredSession(&ss)
+	if ss.ID == "" {
+		return nil
+	}
+	dir := filepath.Join(s.dataDir, "sessions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	body, err := json.MarshalIndent(ss, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, ss.ID+".json"), body, 0o600)
+}
+
+func nativeRefForManagedSession(workspace Workspace, ss Session) *NativeSessionRef {
+	ref := &NativeSessionRef{
+		Agent:           ss.Agent,
+		NativeSessionID: ss.NativeSessionID,
+		NativeThreadID:  ss.NativeThreadID,
+	}
+	if workspace.Target == string(protocol.WorkspaceTargetLocal) {
+		ref.WorkspaceCWD = workspace.LocalCWD
+	} else if workspace.SSH != nil {
+		ref.WorkspaceCWD = workspace.LocalProjectionRoot
+		ref.RemotePath = workspace.SSH.RemoteCWD
+	}
+	return ref
+}
+
+func sessionNativeKey(ss Session) string {
+	normalizeStoredSession(&ss)
+	if ss.NativeRef == nil {
+		return ""
+	}
+	parts := []string{
+		ss.WorkspaceID,
+		string(ss.NativeRef.Agent),
+		ss.NativeRef.NativeSessionID,
+		ss.NativeRef.NativeThreadID,
+	}
+	if parts[0] == "" || parts[1] == "" || (parts[2] == "" && parts[3] == "") {
+		return ""
+	}
+	return strings.Join(parts, "\x00")
+}
+
+func shouldPersistEventToDomainLog(ev AstralEvent) bool {
+	kind := string(ev.Kind)
+	switch {
+	case strings.HasPrefix(kind, "message."):
+		return false
+	case strings.HasPrefix(kind, "tool."):
+		return false
+	case strings.HasPrefix(kind, "reasoning."):
+		return false
+	case strings.HasPrefix(kind, "plan."):
+		return false
+	case strings.HasPrefix(kind, "hook."):
+		return false
+	case strings.HasPrefix(kind, "memory."):
+		return false
+	case kind == "turn.started" || kind == "turn.completed" || kind == "turn.failed" || kind == "turn.cancelled":
+		return false
+	case kind == "control.status" || kind == "control.rate_limit" || kind == "control.warning" || kind == "control.model" || kind == "control.raw":
+		return false
+	default:
+		return true
 	}
 }
 
 func (s *store) appendEvent(ev AstralEvent) (AstralEvent, error) {
+	var touched Session
+	var touchedOK bool
 	s.mu.Lock()
 	s.nextSeq++
 	ev.Seq = s.nextSeq
 	ev.TS = time.Now().UTC().Format(time.RFC3339Nano)
 	s.events = append(s.events, ev)
-	s.touchSessionForEvent(ev)
+	s.applySessionEventLocked(ev)
+	touched, touchedOK = s.touchSessionForEventLocked(ev)
 	s.mu.Unlock()
-
-	eventDir := filepath.Join(s.dataDir, "events")
-	if err := os.MkdirAll(eventDir, 0o700); err != nil {
-		return ev, err
+	if touchedOK {
+		_ = s.writeSessionFile(touched)
 	}
-	path := filepath.Join(eventDir, ev.SessionID+".jsonl")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return ev, err
+	if isOverlayEventKind(string(ev.Kind)) {
+		if err := s.persistOverlayEvent(ev); err != nil {
+			return ev, err
+		}
 	}
-	defer f.Close()
-	body, _ := json.Marshal(ev)
-	_, err = f.Write(append(body, '\n'))
-	return ev, err
+	if isControlStateEventKind(string(ev.Kind)) {
+		if err := s.persistControlStateEvent(ev); err != nil {
+			return ev, err
+		}
+	}
+	if ev.Kind == "session.deleted" && ev.SessionID != "" {
+		_ = os.Remove(filepath.Join(s.dataDir, "sessions", ev.SessionID+".json"))
+		s.removeOverlayState(ev.SessionID)
+		s.removeSessionControlState(ev.SessionID)
+	}
+	return ev, nil
 }
 
 func (s *store) AppendEvent(ev AstralEvent) (AstralEvent, error) {
 	return s.appendEvent(ev)
 }
 
-func (s *store) queryEvents(workspaceID, sessionID string, afterSeq int64) []AstralEvent {
-	return s.queryEventsWindow(workspaceID, sessionID, afterSeq, 0, 0)
-}
-
-func (s *store) queryEventsWindow(workspaceID, sessionID string, afterSeq, beforeSeq int64, limit int) []AstralEvent {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func filterEvents(events []AstralEvent, workspaceID, sessionID string, afterSeq, beforeSeq int64) []AstralEvent {
 	out := []AstralEvent{}
-	matches := func(ev AstralEvent) bool {
+	for _, ev := range events {
 		if afterSeq > 0 && ev.Seq <= afterSeq {
-			return false
+			continue
 		}
 		if beforeSeq > 0 && ev.Seq >= beforeSeq {
-			return false
+			continue
 		}
 		if workspaceID != "" && ev.WorkspaceID != workspaceID {
-			return false
+			continue
 		}
 		if sessionID != "" && ev.SessionID != sessionID {
-			return false
+			continue
 		}
-		return true
-	}
-	if limit > 0 {
-		for index := len(s.events) - 1; index >= 0; index-- {
-			ev := s.events[index]
-			if !matches(ev) {
-				continue
-			}
-			out = append(out, ev)
-			if len(out) >= limit {
-				break
-			}
-		}
-		for left, right := 0, len(out)-1; left < right; left, right = left+1, right-1 {
-			out[left], out[right] = out[right], out[left]
-		}
-		return out
-	}
-	for _, ev := range s.events {
-		if matches(ev) {
-			out = append(out, ev)
-		}
+		out = append(out, ev)
 	}
 	return out
+}
+
+func (s *store) sessionsForEventProjection(workspaceID, sessionID string) []Session {
+	if sessionID != "" {
+		ss, ok := s.getSession(sessionID)
+		if !ok {
+			return nil
+		}
+		if workspaceID != "" && ss.WorkspaceID != workspaceID {
+			return nil
+		}
+		return []Session{ss}
+	}
+	return s.listSessions(workspaceID)
 }

@@ -29,6 +29,10 @@ func (s *Service) ForkSession(sessionID string, req protocol.ForkSessionRequest)
 	if !ok {
 		return protocol.ForkSessionResponse{}, apperrors.New(http.StatusNotFound, "session_not_found", "session not found")
 	}
+	source, err := s.ensureLinkedForControl(source)
+	if err != nil {
+		return protocol.ForkSessionResponse{}, err
+	}
 	workspace, ok := s.store.GetWorkspace(source.WorkspaceID)
 	if !ok {
 		return protocol.ForkSessionResponse{}, apperrors.New(http.StatusNotFound, "workspace_not_found", "workspace not found")
@@ -55,19 +59,16 @@ func (s *Service) ForkSession(sessionID string, req protocol.ForkSessionRequest)
 	}
 
 	fork := s.store.CreateForkSession(workspace, source, anchor)
-	s.emit(protocol.AstralEvent{WorkspaceID: workspace.ID, SessionID: fork.ID, Agent: fork.Agent, Kind: "session.started", Normalized: fork})
+	s.emit(protocol.AstralEvent{WorkspaceID: workspace.ID, SessionID: fork.ID, Agent: fork.Agent, Kind: "session.started", Normalized: protocol.EventNormalized("session.started", fork)})
 	if source.Agent == protocol.AgentCodex {
 		if err := forker.ForkSession(source, fork, workspace, anchor.RollbackTurns); err != nil {
 			s.store.DeleteSession(fork.ID)
-			s.emit(protocol.AstralEvent{WorkspaceID: fork.WorkspaceID, SessionID: fork.ID, Agent: fork.Agent, Kind: "session.deleted", Normalized: map[string]any{"session_id": fork.ID, "reason": "fork_failed", "message": err.Error()}})
+			s.emit(protocol.AstralEvent{WorkspaceID: fork.WorkspaceID, SessionID: fork.ID, Agent: fork.Agent, Kind: "session.deleted", Normalized: protocol.EventNormalized("session.deleted", map[string]any{"session_id": fork.ID, "reason": "fork_failed", "message": err.Error()})})
 			return protocol.ForkSessionResponse{}, apperrors.New(http.StatusBadRequest, "session_fork_failed", err.Error())
 		}
 		if updated, ok := s.store.GetSession(fork.ID); ok {
 			fork = updated
 		}
-	}
-	for _, ev := range safeForkTranscriptEvents(sourceEvents, anchor.TurnEndSeq, fork) {
-		s.emit(ev)
 	}
 	return protocol.ForkSessionResponse{Session: fork}, nil
 }
@@ -157,6 +158,10 @@ func forkTurnsFromEvents(events []protocol.AstralEvent) []forkTurn {
 
 	for _, ev := range events {
 		if ev.Kind == "message.user" {
+			if current != nil && current.end == nil && current.user == nil && len(current.assistant) == 0 {
+				current.user = eventPtr(ev)
+				continue
+			}
 			turns = append(turns, forkTurn{status: "running", user: eventPtr(ev)})
 			current = &turns[len(turns)-1]
 			continue
@@ -247,15 +252,16 @@ func safeForkTranscriptEvents(sourceEvents []protocol.AstralEvent, endSeq int64,
 			SessionID:   fork.ID,
 			Agent:       fork.Agent,
 			Kind:        ev.Kind,
-			Normalized:  normalized,
-			Raw:         cloneJSONValue(ev.Raw),
+			Normalized: protocol.EventNormalized(ev.Kind,
+				normalized),
+			Raw: cloneJSONValue(ev.Raw),
 		})
 	}
 	return out
 }
 
 func isSafeForkTranscriptEvent(ev protocol.AstralEvent) bool {
-	family := ev.Kind
+	family := string(ev.Kind)
 	if dot := strings.IndexByte(family, '.'); dot >= 0 {
 		family = family[:dot]
 	}

@@ -91,7 +91,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 
 	r.deps.store.updateSessionStatus(session.ID, "running")
 	if !options.Internal && !options.SuppressUserMessage {
-		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
+		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", displayInputNormalized(input, options))})
 	}
 
 	go client.startTurn(input, options)
@@ -112,11 +112,11 @@ func (r *codexLocalRuntime) RunCommand(session Session, workspace Workspace, com
 	}
 	r.deps.store.updateSessionStatus(session.ID, "running")
 	if commandID == "compact" {
-		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "memory.compacting", Normalized: map[string]any{
+		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "memory.compacting", Normalized: eventNormalized("memory.compacting", map[string]any{
 			"source":  "astralops",
 			"command": "compact",
 			"status":  "running",
-		}})
+		})})
 	}
 
 	go func() {
@@ -208,10 +208,10 @@ func (r *codexLocalRuntime) clientForSession(session Session, workspace Workspac
 			var skillErr error
 			remoteCodexHome, skillErr = r.deps.prepareCodexRemoteBundledSkills(ctx, workspace, info.Path)
 			if skillErr != nil {
-				r.deps.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.warning", Normalized: map[string]any{
+				r.deps.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.warning", Normalized: eventNormalized("control.warning", map[string]any{
 					"source":  "codex",
 					"message": "failed to prepare Codex bundled skills on SSH remote: " + skillErr.Error(),
-				}})
+				})})
 			}
 		}
 		cancel()
@@ -677,10 +677,10 @@ func (c *codexClient) ensureThread() error {
 			c.runtime.deps.store.updateSessionNativeThreadID(c.session.ID, threadID)
 			return nil
 		}
-		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "control.warning", Normalized: map[string]any{
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "control.warning", Normalized: eventNormalized("control.warning", map[string]any{
 			"source":  "codex",
 			"message": fmt.Sprintf("failed to resume codex thread %s: %s", nativeThreadID, err.Error()),
-		}})
+		})})
 	}
 	result, err := c.request("thread/start", c.threadParams(), codexRequestTimeout)
 	if err != nil {
@@ -723,8 +723,8 @@ func (c *codexClient) interrupt() error {
 	if err != nil {
 		return err
 	}
-	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.interrupt", Normalized: map[string]any{"status": "requested"}})
-	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle", "turn_id": turnID}})
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.interrupt", Normalized: eventNormalized("control.interrupt", map[string]any{"status": "requested"})})
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.cancelled", Normalized: eventNormalized("turn.cancelled", map[string]any{"status": "idle", "turn_id": turnID})})
 	c.markIdle("cancelled")
 	return nil
 }
@@ -746,7 +746,7 @@ func (c *codexClient) interruptForEdit() error {
 		}
 		return err
 	}
-	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.interrupt", Normalized: map[string]any{"status": "requested", "turn_id": turnID}})
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.interrupt", Normalized: eventNormalized("control.interrupt", map[string]any{"status": "requested", "turn_id": turnID})})
 	return nil
 }
 
@@ -780,7 +780,7 @@ func (c *codexClient) stop(reason string) {
 		if reason != "" {
 			normalized["reason"] = reason
 		}
-		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.cancelled", Normalized: normalized})
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.cancelled", Normalized: eventNormalized("turn.cancelled", normalized)})
 	}
 }
 
@@ -792,7 +792,7 @@ func (c *codexClient) steer(input string, options TurnOptions) error {
 		return ErrSessionIdle
 	}
 	if !options.Internal && !options.SuppressUserMessage {
-		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: eventNormalized("message.user", displayInputNormalized(input, options))})
 	}
 	_, err := c.request("turn/steer", map[string]any{
 		"threadId":       threadID,
@@ -802,7 +802,7 @@ func (c *codexClient) steer(input string, options TurnOptions) error {
 	if err != nil {
 		return err
 	}
-	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.steer", Normalized: map[string]any{"status": "sent", "turn_id": turnID}})
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.steer", Normalized: eventNormalized("control.steer", map[string]any{"status": "sent", "turn_id": turnID})})
 	return nil
 }
 
@@ -839,7 +839,7 @@ func (c *codexClient) scan(stdout io.Reader) {
 		c.handleLine([]byte(line))
 	}
 	if err := scanner.Err(); err != nil {
-		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.error", Normalized: map[string]any{"message": err.Error()}})
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.error", Normalized: eventNormalized("control.error", map[string]any{"message": err.Error()})})
 	}
 }
 
@@ -854,10 +854,10 @@ func (c *codexClient) scanStderr(stderr io.Reader) {
 		if shouldSuppressCodexStderr(text) {
 			continue
 		}
-		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.warning", Normalized: map[string]any{
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.warning", Normalized: eventNormalized("control.warning", map[string]any{
 			"source":  "codex",
 			"message": text,
-		}})
+		})})
 	}
 }
 
@@ -885,11 +885,11 @@ func shouldSuppressCodexStderr(text string) bool {
 func (c *codexClient) handleLine(line []byte) {
 	var raw map[string]any
 	if err := json.Unmarshal(line, &raw); err != nil {
-		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.raw", Normalized: map[string]any{
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "control.raw", Normalized: eventNormalized("control.raw", map[string]any{
 			"source": "codex",
 			"line":   string(line),
 			"error":  err.Error(),
-		}, Raw: string(line)})
+		}), Raw: string(line)})
 		return
 	}
 
@@ -959,7 +959,7 @@ func (c *codexClient) enrichInternalTurnEvent(ev *AstralEvent) {
 	}
 	normalized := mapValue(ev.Normalized)
 	normalized["internal"] = true
-	ev.Normalized = normalized
+	ev.Normalized = eventNormalized(ev.Kind, normalized)
 }
 
 func (c *codexClient) enrichRemoteCommandEvent(ev *AstralEvent) {
@@ -988,7 +988,7 @@ func (c *codexClient) enrichRemoteCommandEvent(ev *AstralEvent) {
 	normalized["effective_command"] = command.EffectiveCommand
 	normalized["remote_command"] = command.EffectiveCommand
 	normalized["command"] = command.EffectiveCommand
-	ev.Normalized = normalized
+	ev.Normalized = eventNormalized(ev.Kind, normalized)
 }
 
 func (c *codexClient) wait(cmd *exec.Cmd, closed chan struct{}) {
@@ -1013,10 +1013,10 @@ func (c *codexClient) wait(cmd *exec.Cmd, closed chan struct{}) {
 	close(closed)
 	if err != nil && !stopping && current {
 		c.runtime.deps.store.updateSessionStatus(c.session.ID, "failed")
-		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.failed", Normalized: map[string]any{
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.failed", Normalized: eventNormalized("turn.failed", map[string]any{
 			"status":  "failed",
 			"message": err.Error(),
-		}})
+		})})
 	}
 }
 
@@ -1024,10 +1024,10 @@ func (c *codexClient) finishFailed(message string) {
 	c.ensureRuntimeDeps()
 	c.markIdle("failed")
 	c.runtime.deps.store.updateSessionStatus(c.session.ID, "failed")
-	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.failed", Normalized: map[string]any{
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.failed", Normalized: eventNormalized("turn.failed", map[string]any{
 		"status":  "failed",
 		"message": message,
-	}})
+	})})
 }
 
 func (c *codexClient) markIdle(status string) {

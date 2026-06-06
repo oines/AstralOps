@@ -15,66 +15,11 @@ import (
 	"github.com/oines/astralops/pkg/controllercore"
 	"github.com/oines/astralops/pkg/controlwire"
 	"github.com/oines/astralops/pkg/deviceidentity"
+	"github.com/oines/astralops/pkg/protocol"
 	"github.com/oines/astralops/pkg/relaymesh"
 )
 
 const defaultCloudBaseURL = "https://cloud-astralops.oines.dev"
-
-var mobileControlActionCapabilities = map[string]string{
-	"core.read.host_snapshot":           "core.read",
-	"core.read.workbench":               "core.read",
-	"core.read.ping":                    "core.read",
-	"core.read.session_view":            "core.read",
-	"core.read.sessions":                "core.read",
-	"core.read.workspaces":              "core.read",
-	"core.read.workspace.connection":    "core.read",
-	"core.read.events":                  "core.read",
-	"core.subscribe.events":             "core.read",
-	"core.unsubscribe.events":           "core.read",
-	"core.control.session_input":        "core.control",
-	"core.control.interrupt":            "core.control",
-	"core.control.queue.cancel":         "core.control",
-	"core.control.queue.steer":          "core.control",
-	"core.control.workspace.create":     "core.control",
-	"core.control.workspace.connect":    "core.control",
-	"core.control.workspace.disconnect": "core.control",
-	"core.control.workspace.delete":     "core.control",
-	"core.control.session.create":       "core.control",
-	"core.control.session.fork":         "core.control",
-	"core.control.session.delete":       "core.control",
-	"interaction.respond":               "interaction.respond",
-	"session.edit":                      "session.edit",
-	"attachment.ingest":                 "attachment.ingest",
-	"attachment.ingest.start":           "attachment.ingest",
-	"attachment.ingest.chunk":           "attachment.ingest",
-	"attachment.ingest.finish":          "attachment.ingest",
-	"media.read":                        "media.read",
-	"media.download":                    "media.download",
-	"media.stream":                      "media.stream",
-	"media.stream.cancel":               "media.stream",
-	"workspace.files.read":              "workspace.files.read",
-	"workspace.files.write":             "workspace.files.write",
-	"workspace.files.apply_patch":       "workspace.files.write",
-	"workspace.files.delete":            "workspace.files.write",
-	"workspace.files.move":              "workspace.files.write",
-	"workspace.files.stream":            "workspace.files.read",
-	"workspace.files.stream.cancel":     "workspace.files.read",
-	"workspace.exec":                    "workspace.exec",
-	"terminal.open":                     "terminal.open",
-	"terminal.list":                     "terminal.open",
-	"terminal.attach":                   "terminal.open",
-	"terminal.detach":                   "terminal.open",
-	"terminal.heartbeat_ack":            "terminal.open",
-	"terminal.input":                    "terminal.input",
-	"terminal.resize":                   "terminal.input",
-	"terminal.close":                    "terminal.input",
-	"host.fs.browse":                    "host.fs.browse",
-	"host.trust.list":                   "host.manage",
-	"host.trust.revoke":                 "host.manage",
-	"host.pairing.list":                 "host.manage",
-	"host.pairing.approve":              "host.manage",
-	"host.pairing.deny":                 "host.manage",
-}
 
 func mobileCloudHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
@@ -361,13 +306,14 @@ func (c *Core) RespondInteraction(hostDeviceID, interactionID, responseJSON stri
 func (c *Core) ControlRequest(hostDeviceID, capability, action, paramsJSON string) (string, error) {
 	capability = strings.TrimSpace(capability)
 	action = strings.TrimSpace(action)
-	requiredCapability, ok := mobileControlActionCapabilities[action]
+	actionValue, ok := protocol.ParseControlAction(action)
 	if !ok {
 		err := controllercore.NewActionError(http.StatusNotFound, "control_action_unknown", "control action not found")
 		c.emitError(err)
 		return "", err
 	}
-	if capability != requiredCapability {
+	capabilityValue, ok := protocol.ParseControlCapability(capability)
+	if !ok || capabilityValue != protocol.RequiredCapability(actionValue) {
 		err := controllercore.NewActionError(http.StatusForbidden, "capability_mismatch", "control capability does not match action")
 		c.emitError(err)
 		return "", err
@@ -379,7 +325,7 @@ func (c *Core) ControlRequest(hostDeviceID, capability, action, paramsJSON strin
 			return "", err
 		}
 	}
-	response, err := c.controllerCore().Request(context.Background(), hostDeviceID, capability, action, params)
+	response, err := c.controllerCore().Request(context.Background(), hostDeviceID, capabilityValue, actionValue, params)
 	if err != nil {
 		c.emitError(err)
 		return "", err
@@ -406,7 +352,7 @@ func (c *Core) SubscribeEvents(hostDeviceID, optionsJSON string) (string, error)
 }
 
 func (c *Core) ListTerminals(hostDeviceID string) (string, error) {
-	return c.ControlRequest(hostDeviceID, "terminal.open", "terminal.list", "")
+	return c.ControlRequest(hostDeviceID, string(protocol.CapabilityTerminalOpen), string(protocol.ControlActionTerminalList), "")
 }
 
 func (c *Core) OpenTerminal(hostDeviceID, workspaceID string) (string, error) {
@@ -563,7 +509,7 @@ func (t mobileTransport) ControlState(hostDeviceID string) controllercore.Contro
 	return t.core.managedTransport().ControlState(hostDeviceID)
 }
 
-func (t mobileTransport) Request(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (controllercore.ControlResponse, error) {
+func (t mobileTransport) Request(ctx context.Context, hostDeviceID string, capability controllercore.ControlCapability, action controllercore.ControlAction, params map[string]any) (controllercore.ControlResponse, error) {
 	return t.core.managedTransport().Request(ctx, hostDeviceID, capability, action, params)
 }
 

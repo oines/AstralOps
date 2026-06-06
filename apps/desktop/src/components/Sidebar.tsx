@@ -1,4 +1,4 @@
-import { Bot, Check, ChevronDown, ChevronRight, Folder, Laptop, Link2, LoaderCircle, Plus, Settings, Smartphone, TerminalSquare, Trash2, Unlink2 } from "lucide-react";
+import { Bot, Check, ChevronDown, ChevronRight, Download, Folder, Laptop, Link2, LoaderCircle, Plus, Settings, Smartphone, TerminalSquare, Trash2, Unlink2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -26,6 +26,7 @@ type SidebarProps = {
   onDisconnectWorkspace: (workspaceId: string) => void;
   onDeleteSession: (sessionId: string) => void;
   onDeleteWorkspace: (workspaceId: string) => void;
+  onImportNativeSessions: (workspaceId: string) => void;
   onOpenSettings: () => void;
   onResize: (width: number) => void;
   onSelectHost: (hostId: string) => void;
@@ -66,6 +67,7 @@ export function Sidebar({
   onDisconnectWorkspace,
   onDeleteSession,
   onDeleteWorkspace,
+  onImportNativeSessions,
   onOpenSettings,
   onResize,
   onSelectHost,
@@ -271,6 +273,7 @@ export function Sidebar({
                 }
                 setConfirmDelete({ type: "workspace", id: workspace.id });
               }}
+              onImportNativeSessions={() => onImportNativeSessions(workspace.id)}
               onSelectSession={onSelectSession}
               onToggleCollapsed={() => toggleWorkspaceCollapsed(workspace.id)}
               onToggleMenu={() => setMenuWorkspaceId((current) => (current === workspace.id ? "" : workspace.id))}
@@ -319,6 +322,7 @@ type WorkspaceRowProps = {
   onConnect: () => void;
   onDelete: () => void;
   onDisconnect: () => void;
+  onImportNativeSessions: () => void;
   onClick: () => void;
   onToggleMenu: () => void;
 };
@@ -340,6 +344,7 @@ type WorkspaceBlockProps = {
   onDeleteSession: (sessionId: string) => void;
   onDeleteWorkspace: () => void;
   onDisconnectWorkspace: () => void;
+  onImportNativeSessions: () => void;
   onSelectSession: (sessionId: string) => void;
   onToggleCollapsed: () => void;
   onToggleMenu: () => void;
@@ -356,6 +361,7 @@ function WorkspaceBlock({
   onDeleteSession,
   onDeleteWorkspace,
   onDisconnectWorkspace,
+  onImportNativeSessions,
   onSelectSession,
   onToggleCollapsed,
   onToggleMenu,
@@ -381,6 +387,7 @@ function WorkspaceBlock({
         onConnect={onConnectWorkspace}
         onDelete={onDeleteWorkspace}
         onDisconnect={onDisconnectWorkspace}
+        onImportNativeSessions={onImportNativeSessions}
         onClick={onToggleCollapsed}
         onToggleMenu={onToggleMenu}
       />
@@ -422,6 +429,7 @@ function WorkspaceRow({
   onConnect,
   onDelete,
   onDisconnect,
+  onImportNativeSessions,
   onClick,
   onToggleMenu,
   sessionCount,
@@ -442,8 +450,8 @@ function WorkspaceRow({
         { agent: "codex", icon: TerminalSquare, label: "Codex" },
       ];
   const rowGridClass = target === "ssh"
-    ? "grid-cols-[14px_17px_minmax(0,1fr)_26px_26px_26px]"
-    : "grid-cols-[14px_17px_minmax(0,1fr)_26px_26px]";
+    ? "grid-cols-[14px_17px_minmax(0,1fr)_26px_26px_26px_26px]"
+    : "grid-cols-[14px_17px_minmax(0,1fr)_26px_26px_26px]";
   return (
     <div
       className={`group relative grid min-h-[32px] w-full cursor-default ${rowGridClass} items-center gap-1.5 rounded-lg py-0.5 pl-1.5 pr-1.5 text-[#6f7378] transition-[background-color,color,box-shadow] duration-150 ease-out hover:bg-black/[0.045]`}
@@ -493,7 +501,19 @@ function WorkspaceRow({
         </button>
       ) : null}
       <button
-          className={`grid size-6 shrink-0 place-items-center rounded-md transition-colors duration-150 ease-out ${
+        className={`grid size-6 shrink-0 place-items-center rounded-md text-[#9a9da1] transition-colors duration-150 ease-out hover:bg-black/[0.06] hover:text-[#202124] ${confirmDelete ? "pointer-events-none opacity-0" : ""}`}
+        type="button"
+        aria-label={t("desktop:sidebar.importNativeSession")}
+        title={t("desktop:sidebar.importNativeSession")}
+        onClick={(event) => {
+          event.stopPropagation();
+          onImportNativeSessions();
+        }}
+      >
+        <Download size={14} strokeWidth={1.9} />
+      </button>
+      <button
+        className={`grid size-6 shrink-0 place-items-center rounded-md transition-colors duration-150 ease-out ${
           canCreateSession ? "text-[#9a9da1] hover:bg-black/[0.06] hover:text-[#202124]" : "cursor-not-allowed text-[#c1bfb8]"
         }`}
         type="button"

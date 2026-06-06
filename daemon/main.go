@@ -67,6 +67,8 @@ type app struct {
 	cloudRelayConnected  bool
 	cloudAuthMu          sync.Mutex
 	cloudAuthStates      map[string]cloudAuthState
+	sessionViewCacheMu   sync.Mutex
+	sessionViewCache     map[string]cachedSessionView
 }
 
 func main() {
@@ -128,12 +130,6 @@ func main() {
 	a.network = newNetworkMonitor(networkMonitorDepsFromApp(a))
 	a.mesh = newMeshStateManager(meshStateDepsFromApp(a))
 	a.rebuildSessionProjections()
-	if err := a.backfillHistoricalContextEvents(); err != nil {
-		log.Fatal(err)
-	}
-	if err := a.backfillHistoricalApprovalEvents(); err != nil {
-		log.Fatal(err)
-	}
 	a.ssh = newSSHManager(a)
 	a.runtimes = newRuntimeRegistry(a)
 	a.ssh.restorePersistedConnections(context.Background())

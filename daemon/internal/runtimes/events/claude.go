@@ -3,6 +3,8 @@ package events
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 func NormalizeClaudeStreamJSON(session Session, line []byte) []AstralEvent {
@@ -616,9 +618,10 @@ func baseClaudeEvent(session Session, kind string, normalized any, raw any) Astr
 		WorkspaceID: session.WorkspaceID,
 		SessionID:   session.ID,
 		Agent:       session.Agent,
-		Kind:        kind,
-		Normalized:  normalized,
-		Raw:         raw,
+		Kind:        protocol.AstralEventKind(kind),
+		Normalized: protocol.EventNormalized(protocol.AstralEventKind(kind),
+			normalized),
+		Raw: raw,
 	}
 }
 

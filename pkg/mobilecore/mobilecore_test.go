@@ -15,6 +15,7 @@ import (
 	"github.com/oines/astralops/pkg/cloudmesh"
 	"github.com/oines/astralops/pkg/controllercore"
 	"github.com/oines/astralops/pkg/deviceidentity"
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 func TestMobileCoreFacadeDelegatesRemoteActionsToGoController(t *testing.T) {
@@ -69,10 +70,10 @@ func TestMobileCoreFacadeDelegatesRemoteActionsToGoController(t *testing.T) {
 	if transport.requestCount(controllercore.ActionInteractionRespond) != 1 {
 		t.Fatalf("interaction respond requests = %d, want 1", transport.requestCount(controllercore.ActionInteractionRespond))
 	}
-	if response := transport.requestForAction(controllercore.ActionInteractionRespond); response.Params["interaction_id"] != "approval_1" {
+	if response := transport.requestForAction(controllercore.ActionInteractionRespond); requestParam(response, "interaction_id") != "approval_1" {
 		t.Fatalf("interaction params = %#v, want approval_1", response.Params)
 	}
-	if response := transport.requestForAction("workspace.files.read"); response.Params["workspace_id"] != "workspace_1" {
+	if response := transport.requestForAction("workspace.files.read"); requestParam(response, "workspace_id") != "workspace_1" {
 		t.Fatalf("workspace files params = %#v, want workspace_1", response.Params)
 	}
 	if transport.requestCount("terminal.list") != 1 {
@@ -247,9 +248,13 @@ func (f *fakeMobileCoreTransport) ControlState(string) controllercore.ControlSta
 	return controllercore.ControlState{State: controllercore.StateLive, Transport: controllercore.TransportRelay}
 }
 
-func (f *fakeMobileCoreTransport) Request(_ context.Context, _ string, capability, action string, params map[string]any) (controllercore.ControlResponse, error) {
+func (f *fakeMobileCoreTransport) Request(_ context.Context, _ string, capability controllercore.ControlCapability, action controllercore.ControlAction, params map[string]any) (controllercore.ControlResponse, error) {
+	raw, err := protocol.MarshalControlParams(params)
+	if err != nil {
+		return controllercore.ControlResponse{}, err
+	}
 	f.mu.Lock()
-	f.requests = append(f.requests, controllercore.ControlRequest{Capability: capability, Action: action, Params: params})
+	f.requests = append(f.requests, controllercore.ControlRequest{Capability: capability, Action: action, Params: raw})
 	f.mu.Unlock()
 	return controllercore.ControlResponse{OK: true, Result: map[string]any{"ok": true}}, nil
 }
@@ -281,7 +286,7 @@ func (f *fakeMobileCoreTransport) nextTerminal() *fakeMobileCoreTerminal {
 	return f.terminal
 }
 
-func (f *fakeMobileCoreTransport) requestCount(action string) int {
+func (f *fakeMobileCoreTransport) requestCount(action controllercore.ControlAction) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	count := 0
@@ -293,7 +298,7 @@ func (f *fakeMobileCoreTransport) requestCount(action string) int {
 	return count
 }
 
-func (f *fakeMobileCoreTransport) requestForAction(action string) controllercore.ControlRequest {
+func (f *fakeMobileCoreTransport) requestForAction(action controllercore.ControlAction) controllercore.ControlRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, request := range f.requests {
@@ -302,6 +307,17 @@ func (f *fakeMobileCoreTransport) requestForAction(action string) controllercore
 		}
 	}
 	return controllercore.ControlRequest{}
+}
+
+func requestParam(request controllercore.ControlRequest, key string) any {
+	if len(request.Params) == 0 {
+		return nil
+	}
+	var params map[string]any
+	if err := json.Unmarshal(request.Params, &params); err != nil {
+		return nil
+	}
+	return params[key]
 }
 
 type fakeMobileCoreTerminal struct {

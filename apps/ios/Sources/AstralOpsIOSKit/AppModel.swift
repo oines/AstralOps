@@ -326,8 +326,8 @@ final class AppModel: ObservableObject {
         }
         return try await controlResult(
             HostFileSystemBrowseResult.self,
-            capability: "host.fs.browse",
-            action: "host.fs.browse",
+            capability: .capabilityHostFileSystemBrowse,
+            action: .hostFileSystemBrowse,
             params: .object(params)
         )
     }
@@ -346,8 +346,8 @@ final class AppModel: ObservableObject {
             }
             let workspace = try await controlResult(
                 Workspace.self,
-                capability: "core.control",
-                action: "core.control.workspace.create",
+                capability: .capabilityCoreControl,
+                action: .workspaceCreate,
                 params: jsonValue(request)
             )
             workspaceCreatorPresented = false
@@ -359,15 +359,15 @@ final class AppModel: ObservableObject {
     }
 
     func connectSelectedWorkspace() async {
-        await workspaceReferenceAction(capability: "core.control", action: "core.control.workspace.connect")
+        await workspaceReferenceAction(action: .workspaceConnect)
     }
 
     func disconnectSelectedWorkspace() async {
-        await workspaceReferenceAction(capability: "core.control", action: "core.control.workspace.disconnect")
+        await workspaceReferenceAction(action: .workspaceDisconnect)
     }
 
     func deleteSelectedWorkspace() async {
-        await workspaceReferenceAction(capability: "core.control", action: "core.control.workspace.delete")
+        await workspaceReferenceAction(action: .workspaceDelete)
     }
 
     func createSession(agent: String = "") async {
@@ -379,8 +379,8 @@ final class AppModel: ObservableObject {
             }
             let session = try await controlResult(
                 SessionRecord.self,
-                capability: "core.control",
-                action: "core.control.session.create",
+                capability: .capabilityCoreControl,
+                action: .sessionCreate,
                 params: .object(params)
             )
             await loadSnapshot(for: try requireHost().deviceID, silent: true)
@@ -395,8 +395,8 @@ final class AppModel: ObservableObject {
     func deleteSession(_ session: SessionRecord) async {
         do {
             _ = try await controlValue(
-                capability: "core.control",
-                action: "core.control.session.delete",
+                capability: .capabilityCoreControl,
+                action: .sessionDelete,
                 params: .object(["session_id": .string(session.id)])
             )
             await loadSnapshot(for: try requireHost().deviceID, silent: true)
@@ -409,8 +409,8 @@ final class AppModel: ObservableObject {
         do {
             guard !selectedSessionID.isEmpty else { throw AppModelError.missingSession }
             _ = try await controlValue(
-                capability: "core.control",
-                action: "core.control.interrupt",
+                capability: .capabilityCoreControl,
+                action: .interrupt,
                 params: .object(["session_id": .string(selectedSessionID)])
             )
             await loadSnapshot(for: try requireHost().deviceID, silent: true)
@@ -420,11 +420,11 @@ final class AppModel: ObservableObject {
     }
 
     func cancelQueuedInput(_ queued: QueuedInputView) async {
-        await queueAction(action: "core.control.queue.cancel", queued: queued)
+        await queueAction(action: .queueCancel, queued: queued)
     }
 
     func steerQueuedInput(_ queued: QueuedInputView) async {
-        await queueAction(action: "core.control.queue.steer", queued: queued)
+        await queueAction(action: .queueSteer, queued: queued)
     }
 
     func forkSession(eventSeq: Int) async {
@@ -432,8 +432,8 @@ final class AppModel: ObservableObject {
             guard !selectedSessionID.isEmpty else { throw AppModelError.missingSession }
             let session = try await controlResult(
                 SessionRecord.self,
-                capability: "core.control",
-                action: "core.control.session.fork",
+                capability: .capabilityCoreControl,
+                action: .sessionFork,
                 params: .object(["session_id": .string(selectedSessionID), "event_seq": .number(eventSeq)])
             )
             await loadSnapshot(for: try requireHost().deviceID, silent: true)
@@ -450,7 +450,7 @@ final class AppModel: ObservableObject {
             params["session_id"] = .string(selectedSessionID)
             params["event_seq"] = .number(eventSeq)
             params["input"] = .string(input)
-            _ = try await controlValue(capability: "session.edit", action: "session.edit", params: .object(params))
+            _ = try await controlValue(capability: .capabilitySessionEdit, action: .sessionEdit, params: .object(params))
             await loadSnapshot(for: try requireHost().deviceID, silent: true)
         } catch {
             presentError(error)
@@ -489,8 +489,8 @@ final class AppModel: ObservableObject {
             guard !selectedWorkspaceID.isEmpty else { throw AppModelError.missingWorkspace }
             let result = try await controlResult(
                 WorkspaceFilesReadResult.self,
-                capability: "workspace.files.read",
-                action: "workspace.files.read",
+                capability: .capabilityWorkspaceFilesRead,
+                action: .workspaceFilesRead,
                 params: .object([
                     "workspace_id": .string(selectedWorkspaceID),
                     "path": .string(path),
@@ -520,8 +520,8 @@ final class AppModel: ObservableObject {
             guard !selectedWorkspaceID.isEmpty else { throw AppModelError.missingWorkspace }
             guard !selectedFilePath.isEmpty else { return }
             _ = try await controlValue(
-                capability: "workspace.files.write",
-                action: "workspace.files.write",
+                capability: .capabilityWorkspaceFilesWrite,
+                action: .workspaceFilesWrite,
                 params: .object([
                     "workspace_id": .string(selectedWorkspaceID),
                     "path": .string(selectedFilePath),
@@ -540,8 +540,8 @@ final class AppModel: ObservableObject {
             guard !selectedWorkspaceID.isEmpty else { throw AppModelError.missingWorkspace }
             guard !selectedFilePath.isEmpty else { return }
             _ = try await controlValue(
-                capability: "workspace.files.write",
-                action: "workspace.files.apply_patch",
+                capability: .capabilityWorkspaceFilesWrite,
+                action: .workspaceFilesApplyPatch,
                 params: .object([
                     "workspace_id": .string(selectedWorkspaceID),
                     "path": .string(selectedFilePath),
@@ -564,8 +564,8 @@ final class AppModel: ObservableObject {
         do {
             guard !selectedWorkspaceID.isEmpty else { throw AppModelError.missingWorkspace }
             _ = try await controlValue(
-                capability: "workspace.files.write",
-                action: "workspace.files.delete",
+                capability: .capabilityWorkspaceFilesWrite,
+                action: .workspaceFilesDelete,
                 params: .object([
                     "workspace_id": .string(selectedWorkspaceID),
                     "path": .string(path),
@@ -582,8 +582,8 @@ final class AppModel: ObservableObject {
         do {
             guard !selectedWorkspaceID.isEmpty else { throw AppModelError.missingWorkspace }
             _ = try await controlValue(
-                capability: "workspace.files.write",
-                action: "workspace.files.move",
+                capability: .capabilityWorkspaceFilesWrite,
+                action: .workspaceFilesMove,
                 params: .object([
                     "workspace_id": .string(selectedWorkspaceID),
                     "path": .string(path),
@@ -604,8 +604,8 @@ final class AppModel: ObservableObject {
             guard !command.isEmpty else { return }
             execResult = try await controlResult(
                 WorkspaceExecResult.self,
-                capability: "workspace.exec",
-                action: "workspace.exec",
+                capability: .capabilityWorkspaceExec,
+                action: .workspaceExec,
                 params: .object([
                     "workspace_id": .string(selectedWorkspaceID),
                     "command": .string(command),
@@ -620,8 +620,8 @@ final class AppModel: ObservableObject {
 
     func loadHostManagement() async {
         do {
-            let trust = try await controlResult(HostTrustListResult.self, capability: "host.manage", action: "host.trust.list")
-            let pairing = try await controlResult(PairingRequestListResult.self, capability: "host.manage", action: "host.pairing.list")
+            let trust = try await controlResult(HostTrustListResult.self, capability: .capabilityHostManage, action: .hostTrustList)
+            let pairing = try await controlResult(PairingRequestListResult.self, capability: .capabilityHostManage, action: .hostPairingList)
             trustGrants = trust.grants
             pairingRequests = pairing.requests
         } catch {
@@ -632,8 +632,8 @@ final class AppModel: ObservableObject {
     func revokeTrust(_ grant: TrustGrant) async {
         do {
             _ = try await controlValue(
-                capability: "host.manage",
-                action: "host.trust.revoke",
+                capability: .capabilityHostManage,
+                action: .hostTrustRevoke,
                 params: .object(["controller_device_id": .string(grant.controllerDeviceID)])
             )
             await loadHostManagement()
@@ -645,8 +645,8 @@ final class AppModel: ObservableObject {
     func resolvePairingRequest(_ request: PairingRequest, approve: Bool) async {
         do {
             _ = try await controlValue(
-                capability: "host.manage",
-                action: approve ? "host.pairing.approve" : "host.pairing.deny",
+                capability: .capabilityHostManage,
+                action: approve ? .hostPairingApprove : .hostPairingDeny,
                 params: .object(["request_id": .string(request.requestID)])
             )
             await loadHostManagement()
@@ -790,8 +790,8 @@ final class AppModel: ObservableObject {
     func loadMedia(sessionID: String, eventSeq: Int, mediaID: String, download: Bool = false) async throws -> MediaReadResult {
         try await controlResult(
             MediaReadResult.self,
-            capability: download ? "media.download" : "media.read",
-            action: download ? "media.download" : "media.read",
+            capability: download ? .capabilityMediaDownload : .capabilityMediaRead,
+            action: download ? .mediaDownload : .mediaRead,
             params: .object([
                 "session_id": .string(sessionID),
                 "event_seq": .number(eventSeq),
@@ -819,8 +819,8 @@ final class AppModel: ObservableObject {
     private func ingestAttachment(data: Data, name: String, mimeType: String?, kind: String) async throws -> ControlAttachmentHandle {
         let start = try await controlResult(
             AttachmentIngestStartResult.self,
-            capability: "attachment.ingest",
-            action: "attachment.ingest.start",
+            capability: .capabilityAttachmentIngest,
+            action: .attachmentIngestStart,
             params: .object([
                 "session_id": .string(selectedSessionID),
                 "name": .string(name),
@@ -838,8 +838,8 @@ final class AppModel: ObservableObject {
             let chunk = data.subdata(in: offset..<end).base64EncodedString()
             _ = try await controlResult(
                 AttachmentIngestChunkResult.self,
-                capability: "attachment.ingest",
-                action: "attachment.ingest.chunk",
+                capability: .capabilityAttachmentIngest,
+                action: .attachmentIngestChunk,
                 params: .object([
                     "session_id": .string(selectedSessionID),
                     "upload_id": .string(start.uploadID),
@@ -853,8 +853,8 @@ final class AppModel: ObservableObject {
         }
         let finish = try await controlResult(
             AttachmentIngestFinishResult.self,
-            capability: "attachment.ingest",
-            action: "attachment.ingest.finish",
+            capability: .capabilityAttachmentIngest,
+            action: .attachmentIngestFinish,
             params: .object([
                 "session_id": .string(selectedSessionID),
                 "upload_id": .string(start.uploadID)
@@ -912,20 +912,24 @@ final class AppModel: ObservableObject {
         return .object(payload)
     }
 
-    private func workspaceReferenceAction(capability: String, action: String) async {
+    private func workspaceReferenceAction(action: GeneratedProtocol.ControlAction) async {
         do {
             guard !selectedWorkspaceID.isEmpty else { throw AppModelError.missingWorkspace }
-            _ = try await controlValue(capability: capability, action: action, params: .object(["workspace_id": .string(selectedWorkspaceID)]))
+            _ = try await controlValue(
+                capability: .capabilityCoreControl,
+                action: action,
+                params: .object(["workspace_id": .string(selectedWorkspaceID)])
+            )
             await loadSnapshot(for: try requireHost().deviceID, silent: true)
         } catch {
             presentError(error)
         }
     }
 
-    private func queueAction(action: String, queued: QueuedInputView) async {
+    private func queueAction(action: GeneratedProtocol.ControlAction, queued: QueuedInputView) async {
         do {
             _ = try await controlValue(
-                capability: "core.control",
+                capability: .capabilityCoreControl,
                 action: action,
                 params: .object([
                     "session_id": .string(queued.sessionID),
@@ -938,12 +942,21 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func controlValue(capability: String, action: String, params: JSONValue = .object([:])) async throws -> JSONValue {
+    private func controlValue(
+        capability: GeneratedProtocol.ControlCapability,
+        action: GeneratedProtocol.ControlAction,
+        params: JSONValue = .object([:])
+    ) async throws -> JSONValue {
         let host = try requireHost()
-        return try await bridge.controlRequest(hostDeviceID: host.deviceID, capability: capability, action: action, params: params)
+        return try await bridge.controlRequest(hostDeviceID: host.deviceID, capability: capability.rawValue, action: action.rawValue, params: params)
     }
 
-    private func controlResult<T: Decodable>(_ type: T.Type, capability: String, action: String, params: JSONValue = .object([:])) async throws -> T {
+    private func controlResult<T: Decodable>(
+        _ type: T.Type,
+        capability: GeneratedProtocol.ControlCapability,
+        action: GeneratedProtocol.ControlAction,
+        params: JSONValue = .object([:])
+    ) async throws -> T {
         let value = try await controlValue(capability: capability, action: action, params: params)
         return try decodeValue(type, from: value)
     }

@@ -1,14 +1,19 @@
 package main
 
 import (
+	"errors"
+
 	internalsessions "github.com/oines/astralops/daemon/internal/sessions"
 	"github.com/oines/astralops/daemon/internal/sessiontypes"
 )
 
 type queuedTurn = sessiontypes.QueuedTurn
 
+var errStoreUnavailable = errors.New("store unavailable")
+
 type sessionQueueStoreAdapter struct {
-	store *store
+	store       *store
+	queryEvents func(workspaceID, sessionID string, afterSeq int64) []AstralEvent
 }
 
 func (s sessionQueueStoreAdapter) GetSession(id string) (Session, bool) {
@@ -54,10 +59,10 @@ func (s sessionQueueStoreAdapter) UpdateSessionStatus(id, status string) {
 }
 
 func (s sessionQueueStoreAdapter) QueryEvents(workspaceID, sessionID string, afterSeq int64) []AstralEvent {
-	if s.store == nil {
-		return nil
+	if s.queryEvents != nil {
+		return s.queryEvents(workspaceID, sessionID, afterSeq)
 	}
-	return s.store.queryEvents(workspaceID, sessionID, afterSeq)
+	return nil
 }
 
 func (s sessionQueueStoreAdapter) SessionTitle(sessionID string) string {
@@ -68,7 +73,7 @@ func (s sessionQueueStoreAdapter) SessionTitle(sessionID string) string {
 }
 
 func (s *sessionService) queueService() *internalsessions.QueueService {
-	return internalsessions.NewQueueService(sessionQueueStoreAdapter{store: s.store}, s.runtimes, s.queueMu, s.queues, s.emit)
+	return internalsessions.NewQueueService(sessionQueueStoreAdapter{store: s.store, queryEvents: s.queryEvents}, s.runtimes, s.queueMu, s.queues, s.emit)
 }
 
 func (s *sessionService) enqueueTurn(session Session, input string, options TurnOptions) queuedTurn {

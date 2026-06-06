@@ -35,6 +35,12 @@ Codex sends filesystem, process, and PTY operations to AstralOps using the exec-
 
 This lets Codex keep its local app-server/session model while the actual workspace operations happen on a remote machine.
 
+## Session History Model
+
+Claude/Codex transcript history comes from the agents' native history files on the Desktop Host. AstralOps stores only workspace/session metadata, control state, and transcript overlays such as queued inputs or replaced turns.
+
+For SSH workspaces, the remote server still does not run Claude, Codex, or AstralOps history storage. Claude/Codex native history is read from the Host machine: Claude SSH sessions are linked to the Host-local projection root, and Codex SSH sessions are linked by their Host-local native thread id. The SSH `proxy-agent` only executes file, command, and PTY operations over SSH stdio.
+
 ## Multi-Device Remote Control
 
 AstralOps also includes an end-to-end encrypted remote-control mesh. A trusted Controller device can connect to a Desktop Host and use the Host's AstralOps workspaces and sessions remotely.
@@ -49,7 +55,7 @@ Each desktop app can act as both:
 - **Host**: runs the daemon, owns workspaces and sessions, executes all actions, and stores all data.
 - **Controller**: connects to another trusted Host and sends remote intents.
 
-The Host remains the execution authority. Workspace data, session/event JSONL, agent runtimes, SSH keys, PTY processes, pending interactions, files, and credentials stay on the Host machine.
+The Host remains the execution authority. Workspace state, AstralOps control state, native Claude/Codex history, agent runtimes, SSH keys, PTY processes, pending interactions, files, and credentials stay on the Host machine.
 
 Controller and Host communicate over an E2EE control channel. Cloud and Relay services are only used for account/device discovery, pairing signals, presence, and opaque encrypted-envelope routing. They cannot decrypt prompts, code, terminal output, file contents, approvals, or session events.
 
@@ -96,8 +102,8 @@ Planned: a mobile Controller app for monitoring sessions, sending prompts, respo
 │  │ Claude Code  │ │ Codex        │ │ SSH Proxy           │ │
 │  │ Runtime      │ │ Runtime      │ │ + proxy-agent deploy│ │
 │  ├──────────────┤ ├──────────────┤ ├─────────────────────┤ │
-│  │ Session      │ │ Event Hub    │ │ Control Gateway     │ │
-│  │ Store (JSONL)│ │ + Projection │ │ + E2EE Mesh         │ │
+│  │ State Store  │ │ Event Hub    │ │ Control Gateway     │ │
+│  │ + Native Log │ │ + Projection │ │ + E2EE Mesh         │ │
 │  └──────────────┘ └──────────────┘ └─────────────────────┘ │
 ├─────────────────────────────────────────────────────────────┤
 │  proxy-agent (Go)             │  Relay Server (Go, optional)│

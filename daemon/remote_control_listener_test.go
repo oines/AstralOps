@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +37,11 @@ func newRemoteControlHandlerTestApp(t *testing.T) (*app, Workspace) {
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 	app.ssh = newSSHManager(app)
+	t.Cleanup(func() {
+		if terminals := app.terminalManager(); terminals != nil {
+			terminals.closeWorkspace(context.Background(), workspace.ID, "test_cleanup")
+		}
+	})
 	return app, workspace
 }
 
@@ -97,7 +103,7 @@ func TestRemoteControlDevPairingAndClientWorkspaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTestCloudMembership(t, controllerStore, false, true)
-	grant, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead})
+	grant, err := controlClientPair(hostServer.URL, controllerStore, capabilityStrings(CapabilityCoreRead))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +134,7 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTestCloudMembership(t, controllerStore, false, true)
-	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead, CapabilityCoreControl, CapabilityWorkspaceFilesRead}); err != nil {
+	if _, err := controlClientPair(hostServer.URL, controllerStore, capabilityStrings(CapabilityCoreRead, CapabilityCoreControl, CapabilityWorkspaceFilesRead)); err != nil {
 		t.Fatal(err)
 	}
 	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
@@ -214,6 +220,80 @@ func TestRemoteHostProxyListsKnownHostAndReadsWorkspaces(t *testing.T) {
 	}
 }
 
+func TestRemoteHostProxyImportsNativeSessions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	hostApp, workspace := newRemoteControlHandlerTestApp(t)
+	nativeID := "remote-native-import"
+	claudeDir := filepath.Join(home, ".claude", "projects", encodeClaudeProjectPath(cleanLocalPath(workspace.LocalCWD)))
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nativePath := filepath.Join(claudeDir, nativeID+".jsonl")
+	body := `{"type":"user","message":{"role":"user","content":"remote cli session"},"timestamp":"2026-06-01T00:00:00Z","sessionId":"` + nativeID + `"}` + "\n"
+	if err := os.WriteFile(nativePath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
+	defer hostServer.Close()
+
+	controllerStore, err := loadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestCloudMembership(t, controllerStore, false, true)
+	if _, err := controlClientPair(hostServer.URL, controllerStore, capabilityStrings(CapabilityCoreRead, CapabilityCoreControl)); err != nil {
+		t.Fatal(err)
+	}
+	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/workspaces/"+workspace.ID+"/native-sessions", nil)
+	listResp := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("remote native sessions status = %d body = %s", listResp.Code, listResp.Body.String())
+	}
+	var list nativeSessionListResponse
+	if err := json.Unmarshal(listResp.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Sessions) != 1 {
+		t.Fatalf("native sessions = %#v, want one import candidate", list.Sessions)
+	}
+	candidate := list.Sessions[0]
+	if candidate.ID == "" || candidate.Source != SessionSourceDiscovered || candidate.ManagedByAstralOps {
+		t.Fatalf("candidate = %#v, want discovered unmanaged candidate", candidate)
+	}
+	if candidate.NativeRef != nil || candidate.NativeSessionID != "" || candidate.NativeThreadID != "" {
+		t.Fatalf("candidate leaked native identity: %#v", candidate)
+	}
+
+	importBody := []byte(`{"session_id":` + strconv.Quote(candidate.ID) + `}`)
+	importReq := httptest.NewRequest(http.MethodPost, "/v1/remote/hosts/"+hostApp.store.deviceIdentity.DeviceID+"/workspaces/"+workspace.ID+"/native-sessions/import", bytes.NewReader(importBody))
+	importResp := httptest.NewRecorder()
+	controllerApp.handleRemoteHostAction(importResp, importReq)
+	if importResp.Code != http.StatusOK {
+		t.Fatalf("remote native import status = %d body = %s", importResp.Code, importResp.Body.String())
+	}
+	var imported importNativeSessionResponse
+	if err := json.Unmarshal(importResp.Body.Bytes(), &imported); err != nil {
+		t.Fatal(err)
+	}
+	if imported.Session.ID != candidate.ID || imported.Session.Source != SessionSourceLinked || !imported.Session.ManagedByAstralOps {
+		t.Fatalf("imported session = %#v, want linked imported candidate", imported.Session)
+	}
+	if imported.Session.NativeRef != nil || imported.Session.NativeSessionID != "" || imported.Session.NativeThreadID != "" {
+		t.Fatalf("import response leaked native identity: %#v", imported.Session)
+	}
+	hostStored, ok := hostApp.store.getSession(candidate.ID)
+	if !ok {
+		t.Fatalf("host did not persist imported native session %s", candidate.ID)
+	}
+	if hostStored.NativeRef == nil || hostStored.NativeRef.LocalPath != nativePath || hostStored.NativeSessionID != nativeID {
+		t.Fatalf("host stored native ref = %#v, want Host-local native path/id", hostStored.NativeRef)
+	}
+}
+
 func TestRemoteHostSnapshotHydratesWorkbenchState(t *testing.T) {
 	hostApp, workspace := newRemoteControlHandlerTestApp(t)
 	hostApp.agents = map[AgentKind]agentInfo{
@@ -230,7 +310,8 @@ func TestRemoteHostSnapshotHydratesWorkbenchState(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       session.Agent,
 		Kind:        "message.user",
-		Normalized:  map[string]any{"text": "hello"},
+		Normalized: eventNormalized("message.user",
+			map[string]any{"text": "hello"}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +323,7 @@ func TestRemoteHostSnapshotHydratesWorkbenchState(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTestCloudMembership(t, controllerStore, false, true)
-	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead}); err != nil {
+	if _, err := controlClientPair(hostServer.URL, controllerStore, capabilityStrings(CapabilityCoreRead)); err != nil {
 		t.Fatal(err)
 	}
 	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
@@ -292,7 +373,7 @@ func TestRemoteHostTargetUsesCachedBaseURLBeforeDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTestCloudMembership(t, controllerStore, false, true)
-	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreRead}); err != nil {
+	if _, err := controlClientPair(hostServer.URL, controllerStore, capabilityStrings(CapabilityCoreRead)); err != nil {
 		t.Fatal(err)
 	}
 	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
@@ -323,7 +404,7 @@ func TestRemoteHostProxyCreatesWorkspaceAndBrowsesHostFilesystem(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTestCloudMembership(t, controllerStore, false, true)
-	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityCoreControl, CapabilityHostFileSystemBrowse}); err != nil {
+	if _, err := controlClientPair(hostServer.URL, controllerStore, capabilityStrings(CapabilityCoreControl, CapabilityHostFileSystemBrowse)); err != nil {
 		t.Fatal(err)
 	}
 	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
@@ -386,7 +467,7 @@ func TestRemoteHostProxyReadsSessionMedia(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTestCloudMembership(t, controllerStore, false, true)
-	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityMediaRead}); err != nil {
+	if _, err := controlClientPair(hostServer.URL, controllerStore, capabilityStrings(CapabilityMediaRead)); err != nil {
 		t.Fatal(err)
 	}
 	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
@@ -447,7 +528,7 @@ func TestRemoteHostProxyApprovesPairingRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTestCloudMembership(t, controllerStore, false, true)
-	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityHostManage}); err != nil {
+	if _, err := controlClientPair(hostServer.URL, controllerStore, capabilityStrings(CapabilityHostManage)); err != nil {
 		t.Fatal(err)
 	}
 	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
@@ -492,7 +573,7 @@ func TestRemoteHostProxyOpensWorkspacePTY(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTestCloudMembership(t, controllerStore, false, true)
-	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityTerminalOpen, CapabilityTerminalInput}); err != nil {
+	if _, err := controlClientPair(hostServer.URL, controllerStore, capabilityStrings(CapabilityTerminalOpen, CapabilityTerminalInput)); err != nil {
 		t.Fatal(err)
 	}
 	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}
@@ -578,7 +659,7 @@ func TestRemoteHostProxyReportsTerminalStreamDisconnectAsResyncing(t *testing.T)
 		t.Fatal(err)
 	}
 	setTestCloudMembership(t, controllerStore, false, true)
-	if _, err := controlClientPair(hostServer.URL, controllerStore, []string{CapabilityTerminalOpen, CapabilityTerminalInput}); err != nil {
+	if _, err := controlClientPair(hostServer.URL, controllerStore, capabilityStrings(CapabilityTerminalOpen, CapabilityTerminalInput)); err != nil {
 		t.Fatal(err)
 	}
 	controllerApp := &app{store: controllerStore, settings: newMeshActiveTestSettings(t, controllerStore.dataDir), hub: newEventHub(), upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}}

@@ -21,7 +21,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func newControlChannelTestApp(t *testing.T, capabilities ...string) (*app, Workspace, Session, ed25519.PublicKey, ed25519.PrivateKey) {
+func newControlChannelTestApp(t *testing.T, capabilities ...ControlCapability) (*app, Workspace, Session, ed25519.PublicKey, ed25519.PrivateKey) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -38,10 +38,14 @@ func newControlChannelTestApp(t *testing.T, capabilities ...string) (*app, Works
 	if err != nil {
 		t.Fatal(err)
 	}
+	values := make([]string, 0, len(capabilities))
+	for _, capability := range capabilities {
+		values = append(values, string(capability))
+	}
 	_, err = st.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  "dev_controller",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
-		Capabilities:        capabilities,
+		Capabilities:        values,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -286,7 +290,7 @@ func TestControlWebSocketEncryptedRequestResponse(t *testing.T) {
 			Action:     ControlActionWorkspaces,
 		},
 	})
-	if strings.Contains(string(body), ControlActionWorkspaces) || strings.Contains(string(body), CapabilityCoreRead) {
+	if strings.Contains(string(body), string(ControlActionWorkspaces)) || strings.Contains(string(body), string(CapabilityCoreRead)) {
 		t.Fatalf("sealed frame leaked request payload: %s", string(body))
 	}
 
@@ -372,11 +376,11 @@ func TestControlWebSocketMediaReadResponseIsEncrypted(t *testing.T) {
 			RequestID:  "media_read",
 			Capability: CapabilityMediaRead,
 			Action:     ControlActionMediaRead,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"event_seq":  media.eventSeq,
 				"media_id":   media.mediaID,
-			},
+			}),
 		},
 	})
 	if strings.Contains(string(body), media.path) || strings.Contains(string(body), "sealed-media-secret") {
@@ -425,14 +429,14 @@ func TestControlWebSocketMediaDownloadResponseIsEncrypted(t *testing.T) {
 			RequestID:  "media_download",
 			Capability: CapabilityMediaDownload,
 			Action:     ControlActionMediaDownload,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"event_seq":  media.eventSeq,
 				"media_id":   media.mediaID,
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionMediaDownload) || strings.Contains(string(sealedRequest), session.ID) || strings.Contains(string(sealedRequest), media.mediaID) || strings.Contains(string(sealedRequest), media.path) || strings.Contains(string(sealedRequest), encoded) || strings.Contains(string(sealedRequest), string(secret)) {
+	if strings.Contains(string(sealedRequest), string(ControlActionMediaDownload)) || strings.Contains(string(sealedRequest), session.ID) || strings.Contains(string(sealedRequest), media.mediaID) || strings.Contains(string(sealedRequest), media.path) || strings.Contains(string(sealedRequest), encoded) || strings.Contains(string(sealedRequest), string(secret)) {
 		t.Fatalf("sealed media download request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -480,12 +484,12 @@ func TestControlWebSocketMediaStreamChunksAreEncrypted(t *testing.T) {
 			RequestID:  "media_stream",
 			Capability: CapabilityMediaStream,
 			Action:     ControlActionMediaStream,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"event_seq":  media.eventSeq,
 				"media_id":   media.mediaID,
 				"chunk_size": 7,
-			},
+			}),
 		},
 	})
 
@@ -544,17 +548,18 @@ func TestControlWebSocketMediaStreamReportsTruncatedFile(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       session.Agent,
 		Kind:        "message.user",
-		Normalized: map[string]any{"text": "", "attachments": []map[string]any{{
-			"id":        mediaID,
-			"media_id":  mediaID,
-			"kind":      "image",
-			"path":      mediaPath,
-			"name":      "clip.png",
-			"mime_type": "image/png",
-			"size":      10,
-		}}},
+		Normalized: eventNormalized("message.user",
+			map[string]any{"text": "", "attachments": []map[string]any{{
+				"id":        mediaID,
+				"media_id":  mediaID,
+				"kind":      "image",
+				"path":      mediaPath,
+				"name":      "clip.png",
+				"mime_type": "image/png",
+				"size":      10,
+			}}}),
 	})
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if len(events) == 0 {
 		t.Fatal("media fixture event was not persisted")
 	}
@@ -569,12 +574,12 @@ func TestControlWebSocketMediaStreamReportsTruncatedFile(t *testing.T) {
 			RequestID:  "media_stream_truncated",
 			Capability: CapabilityMediaStream,
 			Action:     ControlActionMediaStream,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"event_seq":  eventSeq,
 				"media_id":   mediaID,
 				"chunk_size": 4,
-			},
+			}),
 		},
 	})
 	plain := readEncryptedControlFrame(t, client, cipher)
@@ -610,17 +615,18 @@ func TestControlWebSocketMediaStreamReportsGrownFile(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       session.Agent,
 		Kind:        "message.user",
-		Normalized: map[string]any{"text": "", "attachments": []map[string]any{{
-			"id":        mediaID,
-			"media_id":  mediaID,
-			"kind":      "image",
-			"path":      mediaPath,
-			"name":      "clip.png",
-			"mime_type": "image/png",
-			"size":      4,
-		}}},
+		Normalized: eventNormalized("message.user",
+			map[string]any{"text": "", "attachments": []map[string]any{{
+				"id":        mediaID,
+				"media_id":  mediaID,
+				"kind":      "image",
+				"path":      mediaPath,
+				"name":      "clip.png",
+				"mime_type": "image/png",
+				"size":      4,
+			}}}),
 	})
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if len(events) == 0 {
 		t.Fatal("media fixture event was not persisted")
 	}
@@ -635,12 +641,12 @@ func TestControlWebSocketMediaStreamReportsGrownFile(t *testing.T) {
 			RequestID:  "media_stream_grown",
 			Capability: CapabilityMediaStream,
 			Action:     ControlActionMediaStream,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"event_seq":  eventSeq,
 				"media_id":   mediaID,
 				"chunk_size": 4,
-			},
+			}),
 		},
 	})
 	plain := readEncryptedControlFrame(t, client, cipher)
@@ -677,10 +683,10 @@ func TestControlWebSocketMediaStreamCancelIsEncrypted(t *testing.T) {
 			RequestID:  "media_stream_cancel",
 			Capability: CapabilityMediaStream,
 			Action:     ControlActionMediaStreamCancel,
-			Params:     map[string]any{"stream_id": streamID},
+			Params:     controlParams(map[string]any{"stream_id": streamID}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionMediaStreamCancel) || strings.Contains(string(sealedRequest), streamID) {
+	if strings.Contains(string(sealedRequest), string(ControlActionMediaStreamCancel)) || strings.Contains(string(sealedRequest), streamID) {
 		t.Fatalf("sealed media stream cancel request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -715,12 +721,12 @@ func TestControlWebSocketMediaStreamResumesAcrossControlReconnect(t *testing.T) 
 			RequestID:  "media_stream_initial",
 			Capability: CapabilityMediaStream,
 			Action:     ControlActionMediaStream,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"event_seq":  media.eventSeq,
 				"media_id":   media.mediaID,
 				"chunk_size": 4,
-			},
+			}),
 		},
 	})
 
@@ -766,11 +772,11 @@ func TestControlWebSocketMediaStreamResumesAcrossControlReconnect(t *testing.T) 
 			RequestID:  "media_stream_reconnect",
 			Capability: CapabilityMediaStream,
 			Action:     ControlActionMediaStream,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"resume_token": resumeToken,
 				"offset":       nextOffset,
 				"chunk_size":   5,
-			},
+			}),
 		},
 	})
 
@@ -828,13 +834,13 @@ func TestControlWebSocketMediaStreamResumesFromOffset(t *testing.T) {
 			RequestID:  "media_stream_resume",
 			Capability: CapabilityMediaStream,
 			Action:     ControlActionMediaStream,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"event_seq":  media.eventSeq,
 				"media_id":   media.mediaID,
 				"offset":     4,
 				"chunk_size": 3,
-			},
+			}),
 		},
 	})
 
@@ -876,16 +882,16 @@ func TestControlWebSocketSessionForkOverEncryptedChannel(t *testing.T) {
 	app.store.sessions[session.ID] = session
 	app.store.mu.Unlock()
 
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "one"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-1", "status": "running"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "answer", "item_id": "item-1"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn-1", "status": "idle"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "two"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-2", "status": "running"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "later", "item_id": "item-2"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn-2", "status": "idle"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "one"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"turn_id": "turn-1", "status": "running"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: eventNormalized("message.assistant", map[string]any{"text": "answer", "item_id": "item-1"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"turn_id": "turn-1", "status": "idle"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "two"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"turn_id": "turn-2", "status": "running"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: eventNormalized("message.assistant", map[string]any{"text": "later", "item_id": "item-2"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"turn_id": "turn-2", "status": "idle"})})
 	targetSeq := int64(0)
-	for _, event := range app.store.queryEvents("", session.ID, 0) {
+	for _, event := range testQueryEvents(app.store, "", session.ID, 0) {
 		if event.Kind == "message.assistant" && stringValue(mapValue(event.Normalized)["text"]) == "answer" {
 			targetSeq = event.Seq
 			break
@@ -905,13 +911,13 @@ func TestControlWebSocketSessionForkOverEncryptedChannel(t *testing.T) {
 			RequestID:  "session_fork",
 			Capability: CapabilityCoreControl,
 			Action:     ControlActionSessionFork,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"event_seq":  targetSeq,
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionSessionFork) || strings.Contains(string(sealedRequest), session.ID) {
+	if strings.Contains(string(sealedRequest), string(ControlActionSessionFork)) || strings.Contains(string(sealedRequest), session.ID) {
 		t.Fatalf("sealed session fork request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -930,8 +936,8 @@ func TestControlWebSocketSessionForkOverEncryptedChannel(t *testing.T) {
 	if runtime.rollbackTurns != 1 {
 		t.Fatalf("rollbackTurns = %d, want 1", runtime.rollbackTurns)
 	}
-	if !containsEventKind(app.store.queryEvents("", forkID, 0), "session.started") {
-		t.Fatalf("fork events = %#v, want session.started", eventKinds(app.store.queryEvents("", forkID, 0)))
+	if !containsEventKind(testQueryEvents(app.store, "", forkID, 0), "session.started") {
+		t.Fatalf("fork events = %#v, want session.started", eventKinds(testQueryEvents(app.store, "", forkID, 0)))
 	}
 }
 
@@ -950,10 +956,10 @@ func TestControlWebSocketSessionDeleteOverEncryptedChannel(t *testing.T) {
 			RequestID:  "session_delete",
 			Capability: CapabilityCoreControl,
 			Action:     ControlActionSessionDelete,
-			Params:     map[string]any{"session_id": session.ID},
+			Params:     controlParams(map[string]any{"session_id": session.ID}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionSessionDelete) || strings.Contains(string(sealedRequest), session.ID) {
+	if strings.Contains(string(sealedRequest), string(ControlActionSessionDelete)) || strings.Contains(string(sealedRequest), session.ID) {
 		t.Fatalf("sealed session delete request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -974,8 +980,8 @@ func TestControlWebSocketSessionDeleteOverEncryptedChannel(t *testing.T) {
 	if len(runtime.interrupts) != 1 || runtime.interrupts[0] != session.ID {
 		t.Fatalf("runtime interrupts = %#v, want deleted session interrupted", runtime.interrupts)
 	}
-	if !containsEventKind(app.store.queryEvents("", session.ID, 0), "session.deleted") {
-		t.Fatalf("events = %#v, want session.deleted", eventKinds(app.store.queryEvents("", session.ID, 0)))
+	if !containsEventKind(testQueryEvents(app.store, "", session.ID, 0), "session.deleted") {
+		t.Fatalf("events = %#v, want session.deleted", eventKinds(testQueryEvents(app.store, "", session.ID, 0)))
 	}
 
 	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
@@ -984,7 +990,7 @@ func TestControlWebSocketSessionDeleteOverEncryptedChannel(t *testing.T) {
 			RequestID:  "session_view_after_delete",
 			Capability: CapabilityCoreRead,
 			Action:     ControlActionSessionView,
-			Params:     map[string]any{"session_id": session.ID},
+			Params:     controlParams(map[string]any{"session_id": session.ID}),
 		},
 	})
 	plain = readEncryptedControlFrame(t, client, cipher)
@@ -1007,17 +1013,17 @@ func TestControlWebSocketSessionInputIsEncrypted(t *testing.T) {
 			RequestID:  "session_input",
 			Capability: CapabilityCoreControl,
 			Action:     ControlActionSessionInput,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id":       session.ID,
 				"input":            prompt,
 				"model":            "gpt-test",
 				"reasoning_effort": "low",
 				"permission_mode":  "auto",
-			},
+			}),
 		},
 	})
 	wireRequest := string(sealedRequest)
-	for _, secret := range []string{ControlActionSessionInput, session.ID, prompt, "gpt-test", "permission_mode"} {
+	for _, secret := range []string{string(ControlActionSessionInput), session.ID, prompt, "gpt-test", "permission_mode"} {
 		if strings.Contains(wireRequest, secret) {
 			t.Fatalf("sealed session input request leaked %q: %s", secret, wireRequest)
 		}
@@ -1076,10 +1082,10 @@ func TestControlWebSocketHandlesRequestsConcurrently(t *testing.T) {
 			RequestID:  "blocked_session_input",
 			Capability: CapabilityCoreControl,
 			Action:     ControlActionSessionInput,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"input":      "block the first request",
-			},
+			}),
 		},
 	})
 
@@ -1095,7 +1101,7 @@ func TestControlWebSocketHandlesRequestsConcurrently(t *testing.T) {
 			RequestID:  "snapshot_while_blocked",
 			Capability: CapabilityCoreRead,
 			Action:     ControlActionHostSnapshot,
-			Params:     map[string]any{"event_limit": 1},
+			Params:     controlParams(map[string]any{"event_limit": 1}),
 		},
 	})
 
@@ -1118,11 +1124,11 @@ func TestControlWebSocketInterruptIsEncrypted(t *testing.T) {
 			RequestID:  "session_interrupt",
 			Capability: CapabilityCoreControl,
 			Action:     ControlActionInterrupt,
-			Params:     map[string]any{"session_id": session.ID},
+			Params:     controlParams(map[string]any{"session_id": session.ID}),
 		},
 	})
 	wireRequest := string(sealedRequest)
-	for _, secret := range []string{ControlActionInterrupt, session.ID} {
+	for _, secret := range []string{string(ControlActionInterrupt), session.ID} {
 		if strings.Contains(wireRequest, secret) {
 			t.Fatalf("sealed interrupt request leaked %q: %s", secret, wireRequest)
 		}
@@ -1153,11 +1159,12 @@ func TestControlWebSocketInteractionRespondIsEncrypted(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       AgentCodex,
 		Kind:        "approval.requested",
-		Normalized: map[string]any{
-			"approval_id": approvalID,
-			"kind":        "command",
-			"command":     secretCommand,
-		},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{
+				"approval_id": approvalID,
+				"kind":        "command",
+				"command":     secretCommand,
+			}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1172,14 +1179,14 @@ func TestControlWebSocketInteractionRespondIsEncrypted(t *testing.T) {
 			RequestID:  "interaction_respond",
 			Capability: CapabilityInteractionRespond,
 			Action:     ControlActionInteractionRespond,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"interaction_id": approvalID,
 				"response":       map[string]any{"decision": "accept", "note": decisionSecret},
-			},
+			}),
 		},
 	})
 	wireRequest := string(sealedRequest)
-	for _, secret := range []string{ControlActionInteractionRespond, approvalID, decisionSecret} {
+	for _, secret := range []string{string(ControlActionInteractionRespond), approvalID, decisionSecret} {
 		if strings.Contains(wireRequest, secret) {
 			t.Fatalf("sealed interaction response request leaked %q: %s", secret, wireRequest)
 		}
@@ -1199,8 +1206,8 @@ func TestControlWebSocketInteractionRespondIsEncrypted(t *testing.T) {
 	if stringValue(runtimeResponse["decision"]) != "accept" || stringValue(runtimeResponse["note"]) != decisionSecret {
 		t.Fatalf("runtime approval response = %#v", runtimeResponse)
 	}
-	if !containsEventKind(app.store.queryEvents(workspace.ID, session.ID, 0), "approval.responded") {
-		t.Fatalf("events = %#v, want approval.responded", eventKinds(app.store.queryEvents(workspace.ID, session.ID, 0)))
+	if !containsEventKind(testQueryEvents(app.store, workspace.ID, session.ID, 0), "approval.responded") {
+		t.Fatalf("events = %#v, want approval.responded", eventKinds(testQueryEvents(app.store, workspace.ID, session.ID, 0)))
 	}
 }
 
@@ -1208,10 +1215,10 @@ func TestControlWebSocketSessionEditIsEncrypted(t *testing.T) {
 	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilitySessionEdit)
 	runtime := &recordingEditRuntime{}
 	app.runtimes[AgentCodex] = runtime
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: map[string]any{"text": "old sealed prompt"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn_1"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.assistant", Normalized: map[string]any{"text": "old sealed answer"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn_1"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "old sealed prompt"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"turn_id": "turn_1"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "message.assistant", Normalized: eventNormalized("message.assistant", map[string]any{"text": "old sealed answer"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: AgentCodex, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"turn_id": "turn_1"})})
 	view, ok := app.buildSessionView(session.ID)
 	if !ok || view.EditableUserMessage == nil {
 		t.Fatal("missing editable user message")
@@ -1227,18 +1234,18 @@ func TestControlWebSocketSessionEditIsEncrypted(t *testing.T) {
 			RequestID:  "session_edit",
 			Capability: CapabilitySessionEdit,
 			Action:     ControlActionSessionEdit,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id":       session.ID,
 				"event_seq":        view.EditableUserMessage.EventSeq,
 				"input":            replacement,
 				"model":            "gpt-edit-test",
 				"reasoning_effort": "low",
 				"permission_mode":  "auto",
-			},
+			}),
 		},
 	})
 	wireRequest := string(sealedRequest)
-	for _, secret := range []string{ControlActionSessionEdit, session.ID, replacement, "gpt-edit-test", "permission_mode"} {
+	for _, secret := range []string{string(ControlActionSessionEdit), session.ID, replacement, "gpt-edit-test", "permission_mode"} {
 		if strings.Contains(wireRequest, secret) {
 			t.Fatalf("sealed session edit request leaked %q: %s", secret, wireRequest)
 		}
@@ -1254,8 +1261,8 @@ func TestControlWebSocketSessionEditIsEncrypted(t *testing.T) {
 	if runtime.editCalls != 1 || runtime.editedInput != replacement || runtime.editOptions.Model != "gpt-edit-test" || runtime.editOptions.ReasoningEffort != "low" || runtime.editOptions.PermissionMode != "auto" {
 		t.Fatalf("runtime edit = calls %d input %q options %#v", runtime.editCalls, runtime.editedInput, runtime.editOptions)
 	}
-	if !containsEventKind(app.store.queryEvents(workspace.ID, session.ID, 0), "turn.replaced") {
-		t.Fatalf("events = %#v, want turn.replaced", eventKinds(app.store.queryEvents(workspace.ID, session.ID, 0)))
+	if !containsEventKind(testQueryEvents(app.store, workspace.ID, session.ID, 0), "turn.replaced") {
+		t.Fatalf("events = %#v, want turn.replaced", eventKinds(testQueryEvents(app.store, workspace.ID, session.ID, 0)))
 	}
 }
 
@@ -1275,14 +1282,14 @@ func TestControlWebSocketQueueControlIsEncrypted(t *testing.T) {
 			RequestID:  "queue_cancel",
 			Capability: CapabilityCoreControl,
 			Action:     ControlActionQueueCancel,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"queue_id":   cancelTurn.ID,
-			},
+			}),
 		},
 	})
 	wireCancel := string(sealedCancel)
-	for _, secret := range []string{ControlActionQueueCancel, session.ID, cancelTurn.ID} {
+	for _, secret := range []string{string(ControlActionQueueCancel), session.ID, cancelTurn.ID} {
 		if strings.Contains(wireCancel, secret) {
 			t.Fatalf("sealed queue cancel request leaked %q: %s", secret, wireCancel)
 		}
@@ -1304,14 +1311,14 @@ func TestControlWebSocketQueueControlIsEncrypted(t *testing.T) {
 			RequestID:  "queue_steer",
 			Capability: CapabilityCoreControl,
 			Action:     ControlActionQueueSteer,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"queue_id":   steerTurn.ID,
-			},
+			}),
 		},
 	})
 	wireSteer := string(sealedSteer)
-	for _, secret := range []string{ControlActionQueueSteer, session.ID, steerTurn.ID} {
+	for _, secret := range []string{string(ControlActionQueueSteer), session.ID, steerTurn.ID} {
 		if strings.Contains(wireSteer, secret) {
 			t.Fatalf("sealed queue steer request leaked %q: %s", secret, wireSteer)
 		}
@@ -1329,7 +1336,7 @@ func TestControlWebSocketQueueControlIsEncrypted(t *testing.T) {
 	if len(runtime.steered) != 1 || runtime.steered[0] != "sealed queued steer prompt" {
 		t.Fatalf("steered = %#v, want queued steer prompt", runtime.steered)
 	}
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if !containsEventKind(events, "queue.cancelled") || !containsEventKind(events, "queue.steered") {
 		t.Fatalf("events = %#v, want queue.cancelled and queue.steered", eventKinds(events))
 	}
@@ -1338,7 +1345,7 @@ func TestControlWebSocketQueueControlIsEncrypted(t *testing.T) {
 func TestControlWebSocketEventSubscriptionStreamsEncryptedEvents(t *testing.T) {
 	app, workspace, session, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityCoreRead)
 	secret := "sealed-event-subscription-secret"
-	saved, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": secret}})
+	saved, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": secret})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1352,14 +1359,14 @@ func TestControlWebSocketEventSubscriptionStreamsEncryptedEvents(t *testing.T) {
 			RequestID:  "event_subscription",
 			Capability: CapabilityCoreRead,
 			Action:     ControlActionEventsSubscribe,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"session_id":   session.ID,
 				"replay_limit": 1,
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionEventsSubscribe) || strings.Contains(string(sealedRequest), session.ID) {
+	if strings.Contains(string(sealedRequest), string(ControlActionEventsSubscribe)) || strings.Contains(string(sealedRequest), session.ID) {
 		t.Fatalf("sealed event subscription request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -1385,7 +1392,7 @@ func TestControlWebSocketEventSubscriptionStreamsEncryptedEvents(t *testing.T) {
 	}
 
 	liveSecret := "sealed-event-subscription-live-secret"
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.status", Normalized: map[string]any{"status": "running", "message": liveSecret}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.status", Normalized: eventNormalized("control.status", map[string]any{"status": "running", "message": liveSecret})})
 	plain, sealedEvent = readEncryptedControlFrameWithBody(t, client, cipher)
 	if strings.Contains(string(sealedEvent), liveSecret) {
 		t.Fatalf("sealed live event frame leaked payload: %s", string(sealedEvent))
@@ -1403,7 +1410,7 @@ func TestControlWebSocketEventSubscriptionStreamsEncryptedEvents(t *testing.T) {
 			RequestID:  "event_unsubscribe",
 			Capability: CapabilityCoreRead,
 			Action:     ControlActionEventsUnsubscribe,
-			Params:     map[string]any{"stream_id": streamID},
+			Params:     controlParams(map[string]any{"stream_id": streamID}),
 		},
 	})
 	plain = readEncryptedControlFrame(t, client, cipher)
@@ -1427,15 +1434,15 @@ func TestControlWebSocketAttachmentIngestRequestResponseIsEncrypted(t *testing.T
 			RequestID:  "attachment_ingest",
 			Capability: CapabilityAttachmentIngest,
 			Action:     ControlActionAttachmentIngest,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id":     session.ID,
 				"name":           name,
 				"mime_type":      "text/plain",
 				"content_base64": encoded,
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionAttachmentIngest) || strings.Contains(string(sealedRequest), session.ID) || strings.Contains(string(sealedRequest), name) || strings.Contains(string(sealedRequest), encoded) || strings.Contains(string(sealedRequest), string(secret)) {
+	if strings.Contains(string(sealedRequest), string(ControlActionAttachmentIngest)) || strings.Contains(string(sealedRequest), session.ID) || strings.Contains(string(sealedRequest), name) || strings.Contains(string(sealedRequest), encoded) || strings.Contains(string(sealedRequest), string(secret)) {
 		t.Fatalf("sealed attachment ingest request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -1488,14 +1495,14 @@ func TestControlWebSocketChunkedAttachmentIngestIsEncrypted(t *testing.T) {
 			RequestID:  "attachment_start",
 			Capability: CapabilityAttachmentIngest,
 			Action:     ControlActionAttachmentIngestStart,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"name":       name,
 				"mime_type":  "text/plain",
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedStartRequest), ControlActionAttachmentIngestStart) || strings.Contains(string(sealedStartRequest), session.ID) || strings.Contains(string(sealedStartRequest), name) || strings.Contains(string(sealedStartRequest), "text/plain") {
+	if strings.Contains(string(sealedStartRequest), string(ControlActionAttachmentIngestStart)) || strings.Contains(string(sealedStartRequest), session.ID) || strings.Contains(string(sealedStartRequest), name) || strings.Contains(string(sealedStartRequest), "text/plain") {
 		t.Fatalf("sealed attachment start request leaked payload: %s", string(sealedStartRequest))
 	}
 	startPlain, sealedStartResponse := readEncryptedControlFrameWithBody(t, client, cipher)
@@ -1518,16 +1525,16 @@ func TestControlWebSocketChunkedAttachmentIngestIsEncrypted(t *testing.T) {
 			RequestID:  "attachment_chunk",
 			Capability: CapabilityAttachmentIngest,
 			Action:     ControlActionAttachmentIngestChunk,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id":  session.ID,
 				"upload_id":   uploadID,
 				"seq":         1,
 				"offset":      0,
 				"data_base64": encoded,
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionAttachmentIngestChunk) || strings.Contains(string(sealedRequest), session.ID) || strings.Contains(string(sealedRequest), uploadID) || strings.Contains(string(sealedRequest), string(chunk)) || strings.Contains(string(sealedRequest), encoded) {
+	if strings.Contains(string(sealedRequest), string(ControlActionAttachmentIngestChunk)) || strings.Contains(string(sealedRequest), session.ID) || strings.Contains(string(sealedRequest), uploadID) || strings.Contains(string(sealedRequest), string(chunk)) || strings.Contains(string(sealedRequest), encoded) {
 		t.Fatalf("sealed attachment chunk request leaked payload: %s", string(sealedRequest))
 	}
 	chunkPlain, sealedResponse := readEncryptedControlFrameWithBody(t, client, cipher)
@@ -1544,13 +1551,13 @@ func TestControlWebSocketChunkedAttachmentIngestIsEncrypted(t *testing.T) {
 			RequestID:  "attachment_finish",
 			Capability: CapabilityAttachmentIngest,
 			Action:     ControlActionAttachmentIngestFinish,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id": session.ID,
 				"upload_id":  uploadID,
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedFinishRequest), ControlActionAttachmentIngestFinish) || strings.Contains(string(sealedFinishRequest), session.ID) || strings.Contains(string(sealedFinishRequest), uploadID) {
+	if strings.Contains(string(sealedFinishRequest), string(ControlActionAttachmentIngestFinish)) || strings.Contains(string(sealedFinishRequest), session.ID) || strings.Contains(string(sealedFinishRequest), uploadID) {
 		t.Fatalf("sealed attachment finish request leaked payload: %s", string(sealedFinishRequest))
 	}
 	finishPlain, sealedFinishResponse := readEncryptedControlFrameWithBody(t, client, cipher)
@@ -1586,10 +1593,10 @@ func TestControlWebSocketWorkspaceFileReadResponseIsEncrypted(t *testing.T) {
 			RequestID:  "workspace_file_read",
 			Capability: CapabilityWorkspaceFilesRead,
 			Action:     ControlActionWorkspaceFilesRead,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"path":         "secret.txt",
-			},
+			}),
 		},
 	})
 
@@ -1627,14 +1634,14 @@ func TestControlWebSocketWorkspaceFileWriteRequestResponseIsEncrypted(t *testing
 			RequestID:  "workspace_file_write",
 			Capability: CapabilityWorkspaceFilesWrite,
 			Action:     ControlActionWorkspaceFilesWrite,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id":   workspace.ID,
 				"path":           "nested/out.txt",
 				"content_base64": encoded,
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionWorkspaceFilesWrite) || strings.Contains(string(sealedRequest), "nested/out.txt") || strings.Contains(string(sealedRequest), encoded) || strings.Contains(string(sealedRequest), workspace.ID) {
+	if strings.Contains(string(sealedRequest), string(ControlActionWorkspaceFilesWrite)) || strings.Contains(string(sealedRequest), "nested/out.txt") || strings.Contains(string(sealedRequest), encoded) || strings.Contains(string(sealedRequest), workspace.ID) {
 		t.Fatalf("sealed workspace file write request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -1683,7 +1690,7 @@ func TestControlWebSocketWorkspacePatchRequestResponseIsEncrypted(t *testing.T) 
 			RequestID:  "workspace_patch",
 			Capability: CapabilityWorkspaceFilesWrite,
 			Action:     ControlActionWorkspaceFilesApplyPatch,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"path":         "secret.txt",
 				"edits": []map[string]any{
@@ -1692,7 +1699,7 @@ func TestControlWebSocketWorkspacePatchRequestResponseIsEncrypted(t *testing.T) 
 						"new_string": "new-wire-secret",
 					},
 				},
-			},
+			}),
 		},
 	})
 	if strings.Contains(string(sealedRequest), "old-wire-secret") || strings.Contains(string(sealedRequest), "new-wire-secret") {
@@ -1737,15 +1744,15 @@ func TestControlWebSocketWorkspaceFileMoveDeleteRequestResponseIsEncrypted(t *te
 			RequestID:  "workspace_file_move",
 			Capability: CapabilityWorkspaceFilesWrite,
 			Action:     ControlActionWorkspaceFilesMove,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id":     workspace.ID,
 				"path":             "from-secret.txt",
 				"destination_path": "nested/to-secret.txt",
 				"create_parents":   true,
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedMoveRequest), ControlActionWorkspaceFilesMove) || strings.Contains(string(sealedMoveRequest), "from-secret.txt") || strings.Contains(string(sealedMoveRequest), "nested/to-secret.txt") || strings.Contains(string(sealedMoveRequest), workspace.ID) {
+	if strings.Contains(string(sealedMoveRequest), string(ControlActionWorkspaceFilesMove)) || strings.Contains(string(sealedMoveRequest), "from-secret.txt") || strings.Contains(string(sealedMoveRequest), "nested/to-secret.txt") || strings.Contains(string(sealedMoveRequest), workspace.ID) {
 		t.Fatalf("sealed workspace file move request leaked payload: %s", string(sealedMoveRequest))
 	}
 
@@ -1777,13 +1784,13 @@ func TestControlWebSocketWorkspaceFileMoveDeleteRequestResponseIsEncrypted(t *te
 			RequestID:  "workspace_file_delete",
 			Capability: CapabilityWorkspaceFilesWrite,
 			Action:     ControlActionWorkspaceFilesDelete,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"path":         "nested/to-secret.txt",
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedDeleteRequest), ControlActionWorkspaceFilesDelete) || strings.Contains(string(sealedDeleteRequest), "nested/to-secret.txt") || strings.Contains(string(sealedDeleteRequest), workspace.ID) {
+	if strings.Contains(string(sealedDeleteRequest), string(ControlActionWorkspaceFilesDelete)) || strings.Contains(string(sealedDeleteRequest), "nested/to-secret.txt") || strings.Contains(string(sealedDeleteRequest), workspace.ID) {
 		t.Fatalf("sealed workspace file delete request leaked payload: %s", string(sealedDeleteRequest))
 	}
 
@@ -1823,14 +1830,14 @@ func TestControlWebSocketWorkspaceExecRequestResponseIsEncrypted(t *testing.T) {
 			RequestID:  "workspace_exec",
 			Capability: CapabilityWorkspaceExec,
 			Action:     ControlActionWorkspaceExec,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"command":      command,
 				"timeout_ms":   5000,
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionWorkspaceExec) || strings.Contains(string(sealedRequest), command) || strings.Contains(string(sealedRequest), workspace.ID) {
+	if strings.Contains(string(sealedRequest), string(ControlActionWorkspaceExec)) || strings.Contains(string(sealedRequest), command) || strings.Contains(string(sealedRequest), workspace.ID) {
 		t.Fatalf("sealed workspace exec request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -1873,11 +1880,11 @@ func TestControlWebSocketDisconnectCancelsWorkspaceExec(t *testing.T) {
 			RequestID:  "workspace_exec_disconnect",
 			Capability: CapabilityWorkspaceExec,
 			Action:     ControlActionWorkspaceExec,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"command":      "printf started > exec-started.txt; sleep 1; printf ran > should-not-run.txt",
 				"timeout_ms":   5000,
-			},
+			}),
 		},
 	})
 	waitForPath(t, started)
@@ -1893,7 +1900,7 @@ func TestControlWebSocketWorkspaceExecRequireApprovalIsEncrypted(t *testing.T) {
 	if _, err := app.store.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  "dev_controller",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
-		Capabilities:        []string{CapabilityWorkspaceExec},
+		Capabilities:        []string{string(CapabilityWorkspaceExec)},
 		WorkspaceExecPolicy: WorkspaceExecPolicyRequireApproval,
 	}); err != nil {
 		t.Fatal(err)
@@ -1913,14 +1920,14 @@ func TestControlWebSocketWorkspaceExecRequireApprovalIsEncrypted(t *testing.T) {
 			RequestID:  "workspace_exec_approval",
 			Capability: CapabilityWorkspaceExec,
 			Action:     ControlActionWorkspaceExec,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"command":      command,
 				"timeout_ms":   5000,
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionWorkspaceExec) || strings.Contains(string(sealedRequest), command) || strings.Contains(string(sealedRequest), workspace.ID) {
+	if strings.Contains(string(sealedRequest), string(ControlActionWorkspaceExec)) || strings.Contains(string(sealedRequest), command) || strings.Contains(string(sealedRequest), workspace.ID) {
 		t.Fatalf("sealed workspace exec approval request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -1955,11 +1962,11 @@ func TestControlWebSocketWorkspaceFileStreamChunksAreEncrypted(t *testing.T) {
 			RequestID:  "workspace_file_stream",
 			Capability: CapabilityWorkspaceFilesRead,
 			Action:     ControlActionWorkspaceFilesStream,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"path":         "large.txt",
 				"chunk_size":   7,
-			},
+			}),
 		},
 	})
 
@@ -2023,11 +2030,11 @@ func TestControlWebSocketWorkspaceFileStreamReportsGrownFile(t *testing.T) {
 			RequestID:  "workspace_file_stream_grown",
 			Capability: CapabilityWorkspaceFilesRead,
 			Action:     ControlActionWorkspaceFilesStream,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"path":         "growing.txt",
 				"chunk_size":   64 * 1024,
-			},
+			}),
 		},
 	})
 	plain := readEncryptedControlFrame(t, client, cipher)
@@ -2083,10 +2090,10 @@ func TestControlWebSocketWorkspaceFileStreamCancelIsEncrypted(t *testing.T) {
 			RequestID:  "workspace_file_stream_cancel",
 			Capability: CapabilityWorkspaceFilesRead,
 			Action:     ControlActionWorkspaceFilesStreamCancel,
-			Params:     map[string]any{"stream_id": streamID},
+			Params:     controlParams(map[string]any{"stream_id": streamID}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionWorkspaceFilesStreamCancel) || strings.Contains(string(sealedRequest), streamID) {
+	if strings.Contains(string(sealedRequest), string(ControlActionWorkspaceFilesStreamCancel)) || strings.Contains(string(sealedRequest), streamID) {
 		t.Fatalf("sealed workspace file stream cancel request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -2123,12 +2130,12 @@ func TestControlWebSocketWorkspaceFileStreamResumesFromOffset(t *testing.T) {
 			RequestID:  "workspace_file_stream_resume",
 			Capability: CapabilityWorkspaceFilesRead,
 			Action:     ControlActionWorkspaceFilesStream,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"path":         "resume.txt",
 				"offset":       4,
 				"chunk_size":   3,
-			},
+			}),
 		},
 	})
 
@@ -2188,7 +2195,7 @@ func TestControlWebSocketRemoteWorkspaceFileStreamUsesProxyReadRange(t *testing.
 	_, err = st.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  "dev_controller",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
-		Capabilities:        []string{CapabilityWorkspaceFilesRead},
+		Capabilities:        []string{string(CapabilityWorkspaceFilesRead)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2214,12 +2221,12 @@ func TestControlWebSocketRemoteWorkspaceFileStreamUsesProxyReadRange(t *testing.
 			RequestID:  "remote_workspace_file_stream",
 			Capability: CapabilityWorkspaceFilesRead,
 			Action:     ControlActionWorkspaceFilesStream,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"path":         "big.txt",
 				"offset":       7,
 				"chunk_size":   4,
-			},
+			}),
 		},
 	})
 	plain := readEncryptedControlFrame(t, client, cipher)
@@ -2276,7 +2283,7 @@ func TestControlWebSocketRemoteWorkspaceFileStreamReportsTruncatedReadRange(t *t
 	_, err = st.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  "dev_controller",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
-		Capabilities:        []string{CapabilityWorkspaceFilesRead},
+		Capabilities:        []string{string(CapabilityWorkspaceFilesRead)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2302,11 +2309,11 @@ func TestControlWebSocketRemoteWorkspaceFileStreamReportsTruncatedReadRange(t *t
 			RequestID:  "remote_workspace_file_stream_truncated",
 			Capability: CapabilityWorkspaceFilesRead,
 			Action:     ControlActionWorkspaceFilesStream,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"path":         "shrinking.txt",
 				"chunk_size":   4,
-			},
+			}),
 		},
 	})
 	plain := readEncryptedControlFrame(t, client, cipher)
@@ -2406,7 +2413,7 @@ func TestControlWebSocketRemoteWorkspaceFileWriteUsesProxyOverEncryptedChannel(t
 	_, err = st.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  "dev_controller",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
-		Capabilities:        []string{CapabilityWorkspaceFilesWrite},
+		Capabilities:        []string{string(CapabilityWorkspaceFilesWrite)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2434,14 +2441,14 @@ func TestControlWebSocketRemoteWorkspaceFileWriteUsesProxyOverEncryptedChannel(t
 			RequestID:  "remote_workspace_file_write",
 			Capability: CapabilityWorkspaceFilesWrite,
 			Action:     ControlActionWorkspaceFilesWrite,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id":   workspace.ID,
 				"path":           "nested/out.txt",
 				"content_base64": encoded,
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionWorkspaceFilesWrite) || strings.Contains(string(sealedRequest), workspace.ID) || strings.Contains(string(sealedRequest), "nested/out.txt") || strings.Contains(string(sealedRequest), encoded) || strings.Contains(string(sealedRequest), secret) || strings.Contains(string(sealedRequest), "/remote/project") {
+	if strings.Contains(string(sealedRequest), string(ControlActionWorkspaceFilesWrite)) || strings.Contains(string(sealedRequest), workspace.ID) || strings.Contains(string(sealedRequest), "nested/out.txt") || strings.Contains(string(sealedRequest), encoded) || strings.Contains(string(sealedRequest), secret) || strings.Contains(string(sealedRequest), "/remote/project") {
 		t.Fatalf("sealed remote workspace write request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -2498,7 +2505,7 @@ func TestControlWebSocketRemoteWorkspacePatchUsesProxyOverEncryptedChannel(t *te
 	_, err = st.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  "dev_controller",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
-		Capabilities:        []string{CapabilityWorkspaceFilesWrite},
+		Capabilities:        []string{string(CapabilityWorkspaceFilesWrite)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2526,7 +2533,7 @@ func TestControlWebSocketRemoteWorkspacePatchUsesProxyOverEncryptedChannel(t *te
 			RequestID:  "remote_workspace_patch",
 			Capability: CapabilityWorkspaceFilesWrite,
 			Action:     ControlActionWorkspaceFilesApplyPatch,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"path":         "secret.txt",
 				"edits": []map[string]any{
@@ -2535,10 +2542,10 @@ func TestControlWebSocketRemoteWorkspacePatchUsesProxyOverEncryptedChannel(t *te
 						"new_string": newSecret,
 					},
 				},
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionWorkspaceFilesApplyPatch) || strings.Contains(string(sealedRequest), workspace.ID) || strings.Contains(string(sealedRequest), "secret.txt") || strings.Contains(string(sealedRequest), oldSecret) || strings.Contains(string(sealedRequest), newSecret) || strings.Contains(string(sealedRequest), "/remote/project") {
+	if strings.Contains(string(sealedRequest), string(ControlActionWorkspaceFilesApplyPatch)) || strings.Contains(string(sealedRequest), workspace.ID) || strings.Contains(string(sealedRequest), "secret.txt") || strings.Contains(string(sealedRequest), oldSecret) || strings.Contains(string(sealedRequest), newSecret) || strings.Contains(string(sealedRequest), "/remote/project") {
 		t.Fatalf("sealed remote workspace patch request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -2587,7 +2594,7 @@ func TestControlWebSocketRemoteWorkspaceExecUsesProxyOverEncryptedChannel(t *tes
 	_, err = st.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  "dev_controller",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublicKey),
-		Capabilities:        []string{CapabilityWorkspaceExec},
+		Capabilities:        []string{string(CapabilityWorkspaceExec)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2615,14 +2622,14 @@ func TestControlWebSocketRemoteWorkspaceExecUsesProxyOverEncryptedChannel(t *tes
 			RequestID:  "remote_workspace_exec",
 			Capability: CapabilityWorkspaceExec,
 			Action:     ControlActionWorkspaceExec,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"command":      command,
 				"timeout_ms":   5000,
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionWorkspaceExec) || strings.Contains(string(sealedRequest), workspace.ID) || strings.Contains(string(sealedRequest), command) || strings.Contains(string(sealedRequest), "/remote/project") {
+	if strings.Contains(string(sealedRequest), string(ControlActionWorkspaceExec)) || strings.Contains(string(sealedRequest), workspace.ID) || strings.Contains(string(sealedRequest), command) || strings.Contains(string(sealedRequest), "/remote/project") {
 		t.Fatalf("sealed remote workspace exec request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -2835,8 +2842,8 @@ func TestSelfRevokeCleansExceptedControlSessionStreamsBeforeClose(t *testing.T) 
 	if got := app.activeControlSessionCountForDevice("dev_controller"); got != 1 {
 		t.Fatalf("active sessions = %d, want self-revoke response connection still registered", got)
 	}
-	if countKind(app.store.queryEvents("", "", 0), "control.trust.revoked") != 1 {
-		t.Fatalf("events = %#v, want one trust revoke audit event", eventKinds(app.store.queryEvents("", "", 0)))
+	if countKind(testQueryEvents(app.store, "", "", 0), "control.trust.revoked") != 1 {
+		t.Fatalf("events = %#v, want one trust revoke audit event", eventKinds(testQueryEvents(app.store, "", "", 0)))
 	}
 }
 
@@ -2852,7 +2859,7 @@ func TestControlWebSocketHostTrustListIsEncrypted(t *testing.T) {
 		ControllerDeviceID:   "device_reader_secret_for_trust_list",
 		ControllerDeviceName: "Trust List Secret Reader",
 		ControllerPublicKey:  readerKey,
-		Capabilities:         []string{CapabilityCoreRead, CapabilityMediaStream},
+		Capabilities:         []string{string(CapabilityCoreRead), string(CapabilityMediaStream)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2869,7 +2876,7 @@ func TestControlWebSocketHostTrustListIsEncrypted(t *testing.T) {
 			Action:     ControlActionHostTrustList,
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionHostTrustList) || strings.Contains(string(sealedRequest), "host_trust_list") {
+	if strings.Contains(string(sealedRequest), string(ControlActionHostTrustList)) || strings.Contains(string(sealedRequest), "host_trust_list") {
 		t.Fatalf("sealed trust list request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -2901,7 +2908,7 @@ func TestControlWebSocketHostTrustListIsEncrypted(t *testing.T) {
 		t.Fatalf("reader trust grant = %#v", readerGrant)
 	}
 	capabilities := arrayValue(readerGrant["capabilities"])
-	if len(capabilities) != 2 || stringValue(capabilities[0]) != CapabilityCoreRead || stringValue(capabilities[1]) != CapabilityMediaStream {
+	if len(capabilities) != 2 || stringValue(capabilities[0]) != string(CapabilityCoreRead) || stringValue(capabilities[1]) != string(CapabilityMediaStream) {
 		t.Fatalf("reader trust capabilities = %#v", capabilities)
 	}
 }
@@ -2917,9 +2924,9 @@ func TestControlWebSocketHostTrustSelfRevokeRespondsThenCloses(t *testing.T) {
 			RequestID:  "host_trust_revoke_self",
 			Capability: CapabilityHostManage,
 			Action:     ControlActionHostTrustRevoke,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"controller_device_id": "dev_controller",
-			},
+			}),
 		},
 	})
 
@@ -2956,7 +2963,7 @@ func TestControlWebSocketHostTrustRevokeClosesTargetSessionOnly(t *testing.T) {
 	_, err = app.store.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  "device_reader",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(readerPublicKey),
-		Capabilities:        []string{CapabilityCoreRead},
+		Capabilities:        []string{string(CapabilityCoreRead)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2980,12 +2987,12 @@ func TestControlWebSocketHostTrustRevokeClosesTargetSessionOnly(t *testing.T) {
 			RequestID:  "host_trust_revoke_reader",
 			Capability: CapabilityHostManage,
 			Action:     ControlActionHostTrustRevoke,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"controller_device_id": "device_reader",
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRequest), ControlActionHostTrustRevoke) || strings.Contains(string(sealedRequest), "device_reader") {
+	if strings.Contains(string(sealedRequest), string(ControlActionHostTrustRevoke)) || strings.Contains(string(sealedRequest), "device_reader") {
 		t.Fatalf("sealed trust revoke request leaked payload: %s", string(sealedRequest))
 	}
 
@@ -3038,12 +3045,12 @@ func TestControlWebSocketTrustRevokeBroadcastsEncryptedAuditEventToTrustedSubscr
 	_, err = app.store.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  "device_reader_broadcast_secret",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(readerPublicKey),
-		Capabilities:        []string{CapabilityCoreRead},
+		Capabilities:        []string{string(CapabilityCoreRead)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := app.store.queryEvents("", "", 0)
+	events := testQueryEvents(app.store, "", "", 0)
 	afterSeq := int64(0)
 	if len(events) > 0 {
 		afterSeq = events[len(events)-1].Seq
@@ -3060,9 +3067,9 @@ func TestControlWebSocketTrustRevokeBroadcastsEncryptedAuditEventToTrustedSubscr
 			RequestID:  "trust_revoke_event_subscription",
 			Capability: CapabilityCoreRead,
 			Action:     ControlActionEventsSubscribe,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"after_seq": afterSeq,
-			},
+			}),
 		},
 	})
 	adminPlain := readEncryptedControlFrame(t, adminClient, adminCipher)
@@ -3075,7 +3082,7 @@ func TestControlWebSocketTrustRevokeBroadcastsEncryptedAuditEventToTrustedSubscr
 	}
 
 	readySecret := "trust-revoke-subscription-ready-secret"
-	app.emit(AstralEvent{Kind: "control.status", Normalized: map[string]any{"message": readySecret}})
+	app.emit(AstralEvent{Kind: "control.status", Normalized: eventNormalized("control.status", map[string]any{"message": readySecret})})
 	adminPlain, sealedEvent := readEncryptedControlFrameWithBody(t, adminClient, adminCipher)
 	if strings.Contains(string(sealedEvent), readySecret) {
 		t.Fatalf("sealed subscription ready event leaked payload: %s", string(sealedEvent))
@@ -3090,12 +3097,12 @@ func TestControlWebSocketTrustRevokeBroadcastsEncryptedAuditEventToTrustedSubscr
 			RequestID:  "host_trust_revoke_broadcast_reader",
 			Capability: CapabilityHostManage,
 			Action:     ControlActionHostTrustRevoke,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"controller_device_id": "device_reader_broadcast_secret",
-			},
+			}),
 		},
 	})
-	if strings.Contains(string(sealedRevoke), ControlActionHostTrustRevoke) || strings.Contains(string(sealedRevoke), "device_reader_broadcast_secret") {
+	if strings.Contains(string(sealedRevoke), string(ControlActionHostTrustRevoke)) || strings.Contains(string(sealedRevoke), "device_reader_broadcast_secret") {
 		t.Fatalf("sealed trust revoke request leaked payload: %s", string(sealedRevoke))
 	}
 
@@ -3150,11 +3157,11 @@ func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *test
 			RequestID:  "terminal_open",
 			Capability: CapabilityTerminalOpen,
 			Action:     ControlActionTerminalOpen,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"cols":         80,
 				"rows":         24,
-			},
+			}),
 		},
 	})
 	plain := readEncryptedControlFrame(t, client, cipher)
@@ -3172,7 +3179,7 @@ func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *test
 			RequestID:  "terminal_attach",
 			Capability: CapabilityTerminalOpen,
 			Action:     ControlActionTerminalAttach,
-			Params:     map[string]any{"terminal_id": terminalID},
+			Params:     controlParams(map[string]any{"terminal_id": terminalID}),
 		},
 	})
 	plain = readEncryptedControlFrame(t, client, cipher)
@@ -3223,7 +3230,7 @@ func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *test
 			RequestID:  "terminal_close",
 			Capability: CapabilityTerminalInput,
 			Action:     ControlActionTerminalClose,
-			Params:     map[string]any{"terminal_id": terminalID},
+			Params:     controlParams(map[string]any{"terminal_id": terminalID}),
 		},
 	})
 	sawCloseResponse := false
@@ -3245,7 +3252,7 @@ func TestControlWebSocketTerminalAttachStreamsOutputOverEncryptedChannel(t *test
 		t.Fatalf("saw close response=%v closed frame=%v, want both", sawCloseResponse, sawClosedFrame)
 	}
 
-	events := app.store.queryEvents(workspace.ID, "", 0)
+	events := testQueryEvents(app.store, workspace.ID, "", 0)
 	body, err := json.Marshal(events)
 	if err != nil {
 		t.Fatal(err)
@@ -3272,11 +3279,11 @@ func TestControlWebSocketTerminalResizeAndDetachAreEncrypted(t *testing.T) {
 			RequestID:  "terminal_open",
 			Capability: CapabilityTerminalOpen,
 			Action:     ControlActionTerminalOpen,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"cols":         80,
 				"rows":         24,
-			},
+			}),
 		},
 	})
 	plain := readEncryptedControlFrame(t, client, cipher)
@@ -3297,7 +3304,7 @@ func TestControlWebSocketTerminalResizeAndDetachAreEncrypted(t *testing.T) {
 			RequestID:  "terminal_attach",
 			Capability: CapabilityTerminalOpen,
 			Action:     ControlActionTerminalAttach,
-			Params:     map[string]any{"terminal_id": terminalID},
+			Params:     controlParams(map[string]any{"terminal_id": terminalID}),
 		},
 	})
 	plain = readEncryptedControlFrame(t, client, cipher)
@@ -3318,7 +3325,7 @@ func TestControlWebSocketTerminalResizeAndDetachAreEncrypted(t *testing.T) {
 			Rows:         32,
 		},
 	})
-	if strings.Contains(string(sealedResize), ControlActionTerminalResize) || strings.Contains(string(sealedResize), terminalID) {
+	if strings.Contains(string(sealedResize), string(ControlActionTerminalResize)) || strings.Contains(string(sealedResize), terminalID) {
 		t.Fatalf("sealed terminal resize frame leaked payload: %s", string(sealedResize))
 	}
 
@@ -3328,10 +3335,10 @@ func TestControlWebSocketTerminalResizeAndDetachAreEncrypted(t *testing.T) {
 			RequestID:  "terminal_detach",
 			Capability: CapabilityTerminalOpen,
 			Action:     ControlActionTerminalDetach,
-			Params:     map[string]any{"terminal_id": terminalID},
+			Params:     controlParams(map[string]any{"terminal_id": terminalID}),
 		},
 	})
-	if strings.Contains(string(sealedDetach), ControlActionTerminalDetach) || strings.Contains(string(sealedDetach), terminalID) {
+	if strings.Contains(string(sealedDetach), string(ControlActionTerminalDetach)) || strings.Contains(string(sealedDetach), terminalID) {
 		t.Fatalf("sealed terminal detach request leaked payload: %s", string(sealedDetach))
 	}
 	plain, sealedDetachResponse := readEncryptedControlFrameWithBody(t, client, cipher)
@@ -3362,11 +3369,11 @@ func TestControlWebSocketTerminalReconnectAttachWithinRetention(t *testing.T) {
 			RequestID:  "terminal_open",
 			Capability: CapabilityTerminalOpen,
 			Action:     ControlActionTerminalOpen,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"workspace_id": workspace.ID,
 				"cols":         80,
 				"rows":         24,
-			},
+			}),
 		},
 	})
 	plain := readEncryptedControlFrame(t, client, cipher)
@@ -3387,7 +3394,7 @@ func TestControlWebSocketTerminalReconnectAttachWithinRetention(t *testing.T) {
 			RequestID:  "terminal_attach",
 			Capability: CapabilityTerminalOpen,
 			Action:     ControlActionTerminalAttach,
-			Params:     map[string]any{"terminal_id": terminalID},
+			Params:     controlParams(map[string]any{"terminal_id": terminalID}),
 		},
 	})
 	plain = readEncryptedControlFrame(t, client, cipher)
@@ -3407,7 +3414,7 @@ func TestControlWebSocketTerminalReconnectAttachWithinRetention(t *testing.T) {
 			RequestID:  "terminal_reattach",
 			Capability: CapabilityTerminalOpen,
 			Action:     ControlActionTerminalAttach,
-			Params:     map[string]any{"terminal_id": terminalID},
+			Params:     controlParams(map[string]any{"terminal_id": terminalID}),
 		},
 	})
 	plain = readEncryptedControlFrame(t, reconnected, reconnectedCipher)
@@ -3455,10 +3462,10 @@ func TestTerminalRetentionTimeoutClosesUnattachedSession(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id": open.TerminalID,
 			"data":        "echo too-late\n",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusGone, "terminal_closed")
 }
@@ -3467,12 +3474,12 @@ func waitForEventKindCount(t *testing.T, app *app, workspaceID, kind string, wan
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if got := countKind(app.store.queryEvents(workspaceID, "", 0), kind); got >= want {
+		if got := countKind(testQueryEvents(app.store, workspaceID, "", 0), kind); got >= want {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("%s count did not reach %d; events = %#v", kind, want, eventKinds(app.store.queryEvents(workspaceID, "", 0)))
+	t.Fatalf("%s count did not reach %d; events = %#v", kind, want, eventKinds(testQueryEvents(app.store, workspaceID, "", 0)))
 }
 
 func waitForPath(t *testing.T, path string) {
@@ -3493,7 +3500,7 @@ func waitForTerminalClosedReason(t *testing.T, app *app, workspaceID, terminalID
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		for _, event := range app.store.queryEvents(workspaceID, "", 0) {
+		for _, event := range testQueryEvents(app.store, workspaceID, "", 0) {
 			if event.Kind != "control.terminal.closed" {
 				continue
 			}
@@ -3504,5 +3511,5 @@ func waitForTerminalClosedReason(t *testing.T, app *app, workspaceID, terminalID
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("terminal %s did not close with reason %s; events = %#v", terminalID, reason, app.store.queryEvents(workspaceID, "", 0))
+	t.Fatalf("terminal %s did not close with reason %s; events = %#v", terminalID, reason, testQueryEvents(app.store, workspaceID, "", 0))
 }
