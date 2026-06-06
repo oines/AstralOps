@@ -157,6 +157,14 @@ final class MobileCoreBridgeTests: XCTestCase {
         XCTAssertEqual(AppModel.errorDisplayMessage(for: error), "Cloud request failed. Check your network and try again.")
     }
 
+    func testBrowseAndWorkspaceEntriesTreatDirKindAsDirectory() throws {
+        let hostEntry = try JSONCoding.decode(HostFileSystemEntry.self, from: Data(#"{"name":"src","path":"/repo/src","kind":"dir"}"#.utf8))
+        let workspaceEntry = try JSONCoding.decode(WorkspaceFileEntry.self, from: Data(#"{"name":"src","path":"/repo/src","kind":"dir"}"#.utf8))
+
+        XCTAssertTrue(hostEntry.isDirectory)
+        XCTAssertTrue(workspaceEntry.isDirectory)
+    }
+
     func testKeychainRoundTripPreservesStoredIdentityJSON() throws {
         let store = KeychainStore(service: "dev.oines.astralops.ios.tests.\(UUID().uuidString)")
         let identityAccount = "stored_identity"

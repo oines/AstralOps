@@ -539,6 +539,14 @@ struct HostFileSystemEntry: Codable, Identifiable {
     var kind: String
     var size: Int?
     var modTime: String?
+    var isDirectory: Bool {
+        switch kind.lowercased() {
+        case "dir", "directory":
+            return true
+        default:
+            return false
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case name
@@ -556,6 +564,14 @@ struct WorkspaceFileEntry: Codable, Identifiable {
     var kind: String
     var size: Int?
     var modTime: String?
+    var isDirectory: Bool {
+        switch kind.lowercased() {
+        case "dir", "directory":
+            return true
+        default:
+            return false
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case name

@@ -95,7 +95,7 @@ struct FilesPage: View {
                             Task { await model.openWorkspaceEntry(entry) }
                         } label: {
                             HStack(spacing: 12) {
-                                Image(systemName: entry.kind == "directory" ? "folder" : "doc.text")
+                                Image(systemName: entry.isDirectory ? "folder" : "doc.text")
                                     .frame(width: 24)
                                     .foregroundStyle(.secondary)
                                 VStack(alignment: .leading, spacing: 2) {
@@ -111,7 +111,7 @@ struct FilesPage: View {
                             }
                         }
                         .accessibilityLabel(entry.name)
-                        .accessibilityHint(entry.kind == "directory" ? "Opens folder" : "Opens file")
+                        .accessibilityHint(entry.isDirectory ? "Opens folder" : "Opens file")
                     }
                 }
             } else {
