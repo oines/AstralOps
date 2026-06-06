@@ -261,6 +261,28 @@ func (c *Core) RefreshMesh() (string, error) {
 	return encode(state)
 }
 
+func (c *Core) NetworkChanged(configJSON string) (string, error) {
+	config := networkConfig{}
+	if strings.TrimSpace(configJSON) != "" {
+		if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+			c.emitError(err)
+			return "", err
+		}
+	}
+	lanUnavailable := config.LANAvailable != nil && !*config.LANAvailable
+	c.mu.Lock()
+	remote := c.remote
+	if lanUnavailable {
+		c.lanCandidates = map[string]controllercore.LanHostCandidate{}
+		c.terminals = map[string]controllercore.TerminalStream{}
+	}
+	c.mu.Unlock()
+	if remote != nil && lanUnavailable {
+		remote.InvalidateLAN("mobile_network_lan_unavailable")
+	}
+	return c.RefreshMesh()
+}
+
 func (c *Core) RequestPairing(hostDeviceID string) (string, error) {
 	controller := c.controllerCore()
 	signal, err := controller.RequestPairing(context.Background(), hostDeviceID)
@@ -510,6 +532,9 @@ func (c *Core) managedTransport() *controllercore.ManagedTransport {
 			},
 			StateChanged: func(hostDeviceID string, state controllercore.ControlState) {
 				c.emitHostState(hostDeviceID, state)
+			},
+			ForceRelayOnly: func() bool {
+				return c.forceRelayOnlyEnabled()
 			},
 		})
 	}
@@ -810,6 +835,10 @@ type startConfig struct {
 	StoredIdentity *deviceidentity.StoredIdentity `json:"stored_identity,omitempty"`
 	DeviceName     string                         `json:"device_name,omitempty"`
 	ForceRelayOnly bool                           `json:"force_relay_only,omitempty"`
+}
+
+type networkConfig struct {
+	LANAvailable *bool `json:"lan_available,omitempty"`
 }
 
 type cloudSession struct {

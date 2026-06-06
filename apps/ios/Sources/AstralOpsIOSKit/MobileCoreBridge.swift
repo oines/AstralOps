@@ -41,6 +41,7 @@ protocol MobileCoreRawClient: AnyObject {
     func cloudSession() async throws -> String
     func logout() async throws -> String
     func refreshMesh() async throws -> String
+    func networkChanged(_ configJSON: String) async throws -> String
     func requestPairing(hostDeviceID: String) async throws -> String
     func openHostSession(hostDeviceID: String) async throws -> String
     func snapshot(hostDeviceID: String, optionsJSON: String) async throws -> String
@@ -102,6 +103,12 @@ final class MobileCoreBridge: ObservableObject {
     func refreshMesh() async throws -> MeshState {
         try await call(MeshState.self) {
             try await raw.refreshMesh()
+        }
+    }
+
+    func networkChanged(lanAvailable: Bool) async throws -> MeshState {
+        try await call(MeshState.self) {
+            try await raw.networkChanged(jsonString(JSONValue.object(["lan_available": .bool(lanAvailable)])))
         }
     }
 
@@ -239,6 +246,7 @@ final class UnavailableMobileCoreRawClient: MobileCoreRawClient {
     func cloudSession() async throws -> String { throw MobileCoreBridgeError.unavailable }
     func logout() async throws -> String { throw MobileCoreBridgeError.unavailable }
     func refreshMesh() async throws -> String { throw MobileCoreBridgeError.unavailable }
+    func networkChanged(_ configJSON: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
     func requestPairing(hostDeviceID: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
     func openHostSession(hostDeviceID: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
     func snapshot(hostDeviceID: String, optionsJSON: String) async throws -> String { throw MobileCoreBridgeError.unavailable }
@@ -282,6 +290,7 @@ final class GoMobileCoreRawClient: NSObject, MobileCoreRawClient, MobilecoreCall
     func cloudSession() async throws -> String { try await invoke { core, error in core.cloudSession(error) } }
     func logout() async throws -> String { try await invoke { core, error in core.logout(error) } }
     func refreshMesh() async throws -> String { try await invoke { core, error in core.refreshMesh(error) } }
+    func networkChanged(_ configJSON: String) async throws -> String { try await invoke { core, error in core.networkChanged(configJSON, error: error) } }
     func requestPairing(hostDeviceID: String) async throws -> String { try await invoke { core, error in core.requestPairing(hostDeviceID, error: error) } }
     func openHostSession(hostDeviceID: String) async throws -> String { try await invoke { core, error in core.openHostSession(hostDeviceID, error: error) } }
     func snapshot(hostDeviceID: String, optionsJSON: String) async throws -> String { try await invoke { core, error in core.snapshot(hostDeviceID, optionsJSON: optionsJSON, error: error) } }

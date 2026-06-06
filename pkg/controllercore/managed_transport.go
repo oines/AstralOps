@@ -310,6 +310,30 @@ func (m *ManagedTransport) InvalidateAll(reason string) {
 	m.refreshMesh(true)
 }
 
+func (m *ManagedTransport) InvalidateLAN(reason string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	sessions := make([]*managedSession, 0, len(m.sessions))
+	for hostDeviceID, session := range m.sessions {
+		if session == nil || session.target.Transport != TransportLAN {
+			continue
+		}
+		delete(m.sessions, hostDeviceID)
+		sessions = append(sessions, session)
+	}
+	m.mu.Unlock()
+	if len(sessions) == 0 {
+		return
+	}
+	for _, session := range sessions {
+		session.closeWithError(fmt.Errorf("remote control session invalidated: %s", reason))
+		m.setControlState(session.hostDeviceID, StateReconnecting, session.target, fmt.Errorf("%s", reason))
+	}
+	m.refreshMesh(true)
+}
+
 func (m *ManagedTransport) requestOnce(ctx context.Context, hostDeviceID string, req ControlRequest) (ControlResponse, error) {
 	session, err := m.getSession(ctx, hostDeviceID)
 	if err != nil {

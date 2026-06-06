@@ -143,6 +143,17 @@ final class MobileCoreBridgeTests: XCTestCase {
         }
     }
 
+    func testNetworkChangedPassesLANAvailabilityToRawClient() async throws {
+        let raw = FakeRawClient()
+        let bridge = MobileCoreBridge(raw: raw)
+
+        let mesh = try await bridge.networkChanged(lanAvailable: false)
+
+        XCTAssertEqual(mesh.hosts.count, 0)
+        XCTAssertEqual(raw.calls.last?.name, "networkChanged")
+        XCTAssertTrue(raw.calls.last?.payload.contains("\"lan_available\":false") ?? false)
+    }
+
     func testTerminalHeartbeatAndDetachUseTypedWrappers() async throws {
         let raw = FakeRawClient()
         let bridge = MobileCoreBridge(raw: raw)
@@ -376,6 +387,11 @@ private final class FakeRawClient: MobileCoreRawClient {
     func refreshMesh() async throws -> String {
         calls.append(Call(name: "refreshMesh", payload: ""))
         return responses["refreshMesh"] ?? #"{"hosts":[]}"#
+    }
+
+    func networkChanged(_ configJSON: String) async throws -> String {
+        calls.append(Call(name: "networkChanged", payload: configJSON))
+        return responses["networkChanged"] ?? #"{"hosts":[]}"#
     }
 
     func requestPairing(hostDeviceID: String) async throws -> String {

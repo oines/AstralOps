@@ -123,6 +123,26 @@ func TestMobileCoreReplacingTerminalViewerDetachesPreviousStream(t *testing.T) {
 	}
 }
 
+func TestMobileCoreNetworkChangedDropsCachedTerminalViewerWhenLANUnavailable(t *testing.T) {
+	transport := &fakeMobileCoreTransport{terminal: newFakeMobileCoreTerminal("term_1")}
+	core := New()
+	core.controller = controllercore.New(transport)
+
+	if _, err := core.OpenTerminal("dev_host", "workspace_1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.TerminalInput("dev_host", "term_1", "before"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = core.NetworkChanged(`{"lan_available":false}`)
+	if _, err := core.TerminalInput("dev_host", "term_1", "after"); controllercore.ErrorCode(err) != controllercore.TerminalViewerNotReadyCode {
+		t.Fatalf("TerminalInput error = %v, want %s", err, controllercore.TerminalViewerNotReadyCode)
+	}
+	if transport.terminal.input != "before" {
+		t.Fatalf("terminal input = %q, want only pre-network-change input", transport.terminal.input)
+	}
+}
+
 func TestMobileCoreControlRequestRejectsUnsupportedAction(t *testing.T) {
 	core := New()
 	core.controller = controllercore.New(&fakeMobileCoreTransport{terminal: newFakeMobileCoreTerminal("term_1")})

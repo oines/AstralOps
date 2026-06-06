@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import SwiftUI
 import UIKit
 
@@ -79,6 +80,10 @@ final class AppModel: ObservableObject {
     private var terminalRecoveryInFlight = Set<String>()
     private var transcriptMediaDataURLs: [String: String] = [:]
     private var transcriptMediaLoads = Set<String>()
+    private let networkMonitor = NWPathMonitor()
+    private let networkMonitorQueue = DispatchQueue(label: "dev.oines.astralops.ios.network")
+    private var lastLANAvailable: Bool?
+    private var networkRecoveryTask: Task<Void, Never>?
 
     private let storedIdentityAccount = "stored_identity"
     private let cloudSessionAccount = "cloud_session"
@@ -108,10 +113,18 @@ final class AppModel: ObservableObject {
         terminalBridge.onReady = { [weak self] in
             self?.renderSelectedTerminalSurface()
         }
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor [weak self] in
+                self?.handleNetworkPath(path)
+            }
+        }
+        networkMonitor.start(queue: networkMonitorQueue)
     }
 
     deinit {
         eventTask?.cancel()
+        networkMonitor.cancel()
+        networkRecoveryTask?.cancel()
     }
 
     var selectedHost: RemoteHostRecord? {
@@ -315,6 +328,45 @@ final class AppModel: ObservableObject {
         forceRelayOnly = enabled
         UserDefaults.standard.set(enabled, forKey: "force_relay_only")
         Task { await start() }
+    }
+
+    private func handleNetworkPath(_ path: NWPath) {
+        let lanAvailable = path.status == .satisfied && (path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet))
+        guard let previous = lastLANAvailable else {
+            lastLANAvailable = lanAvailable
+            return
+        }
+        guard previous != lanAvailable else { return }
+        lastLANAvailable = lanAvailable
+        networkRecoveryTask?.cancel()
+        networkRecoveryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.recoverAfterNetworkPathChange(lanAvailable: lanAvailable)
+        }
+    }
+
+    private func recoverAfterNetworkPathChange(lanAvailable: Bool) async {
+        guard cloudSession != nil else { return }
+        let hostID = selectedHostID
+        let terminalID = selectedTerminalID
+        let shouldRestoreTerminal = page == .terminal && !terminalID.isEmpty
+        do {
+            let nextMesh = try await bridge.networkChanged(lanAvailable: lanAvailable)
+            applyMesh(nextMesh)
+            if !hostID.isEmpty {
+                await loadSnapshot(for: hostID, silent: true)
+            }
+            if shouldRestoreTerminal,
+               selectedHostID == hostID,
+               let tab = workbench.terminalTabs[terminalID] ?? terminalTabs.first(where: { $0.terminalID == terminalID }) {
+                await attachTerminal(tab)
+            }
+        } catch {
+            if lanAvailable {
+                presentError(error)
+            }
+        }
     }
 
     func selectHost(_ host: RemoteHostRecord) {
@@ -1343,8 +1395,32 @@ final class AppModel: ObservableObject {
             if let hostID = selectedHost?.deviceID {
                 await loadSnapshot(for: hostID, silent: true)
             }
-        case .hostState, .error:
+        case .hostState(let data):
+            if let update = try? JSONCoding.decode(HostControlStateUpdate.self, from: data) {
+                applyHostControlState(update)
+            }
+        case .error:
             break
+        }
+    }
+
+    private func applyHostControlState(_ update: HostControlStateUpdate) {
+        guard !update.hostDeviceID.isEmpty else { return }
+        func apply(to host: inout RemoteHostRecord) {
+            host.control = update.control
+            if let transport = update.control.transport, !transport.isEmpty {
+                host.connection = transport
+            }
+            if update.control.state == "live" {
+                host.status = "online"
+            }
+        }
+        if let index = hosts.firstIndex(where: { $0.deviceID == update.hostDeviceID }) {
+            apply(to: &hosts[index])
+        }
+        if var nextMesh = mesh, let index = nextMesh.hosts.firstIndex(where: { $0.deviceID == update.hostDeviceID }) {
+            apply(to: &nextMesh.hosts[index])
+            mesh = nextMesh
         }
     }
 
@@ -1659,6 +1735,16 @@ private struct TranscriptNativePayload: Codable {
     var mediaDataUrls: [String: String]
     var sourceSessionExists: Bool
     var empty: TranscriptEmptyState
+}
+
+private struct HostControlStateUpdate: Codable {
+    var hostDeviceID: String
+    var control: ControlState
+
+    enum CodingKeys: String, CodingKey {
+        case hostDeviceID = "host_device_id"
+        case control
+    }
 }
 
 private struct TranscriptMediaReference {
