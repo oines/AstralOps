@@ -3,6 +3,7 @@ import SwiftUI
 struct SideMenuView: View {
     @EnvironmentObject private var model: AppModel
     @State private var deleteTarget: SideMenuDeleteTarget?
+    @State private var connectionActionWorkspaceIDs = Set<String>()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -87,6 +88,7 @@ struct SideMenuView: View {
                                 .opacity(0.5)
                         } else {
                             ForEach(workspaces) { workspace in
+                                let connection = w.workspaceConnections?[workspace.id]
                                 DisclosureGroup {
                                     VStack(spacing: 2) {
                                         let sessions = w.sessions.values.filter { $0.workspaceID == workspace.id }.sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
@@ -122,20 +124,18 @@ struct SideMenuView: View {
                                     }
                                     .padding(.leading, 12)
                                 } label: {
-                                    HStack(spacing: 16) {
-                                        Image(systemName: "folder")
-                                            .font(.system(size: 20))
-                                            .frame(width: 24)
-                                        Text(workspace.name)
-                                            .font(model.selectedWorkspaceID == workspace.id ? .body.weight(.semibold) : .body)
-                                            .lineLimit(1)
-                                        Spacer()
-                                    }
-                                    .padding(.vertical, 10)
-                                    .padding(.horizontal, 16)
-                                    .background(model.selectedWorkspaceID == workspace.id ? Color.accentColor.opacity(0.15) : Color.clear)
-                                    .foregroundStyle(model.selectedWorkspaceID == workspace.id ? Color.accentColor : Color.primary)
-                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    WorkspaceDisclosureLabel(
+                                        workspace: workspace,
+                                        connection: connection,
+                                        isSelected: model.selectedWorkspaceID == workspace.id,
+                                        isActionInFlight: connectionActionWorkspaceIDs.contains(workspace.id),
+                                        onConnect: {
+                                            Task { await runWorkspaceConnectionAction(workspace, connect: true) }
+                                        },
+                                        onDisconnect: {
+                                            Task { await runWorkspaceConnectionAction(workspace, connect: false) }
+                                        }
+                                    )
                                 }
                                 .padding(.horizontal, 8)
                                 .tint(.secondary)
@@ -215,6 +215,112 @@ struct SideMenuView: View {
         case .session(let session):
             await model.deleteSession(session)
         }
+    }
+
+    @MainActor
+    private func runWorkspaceConnectionAction(_ workspace: Workspace, connect: Bool) async {
+        guard !connectionActionWorkspaceIDs.contains(workspace.id) else { return }
+        connectionActionWorkspaceIDs.insert(workspace.id)
+        defer { connectionActionWorkspaceIDs.remove(workspace.id) }
+        if connect {
+            await model.connectWorkspace(workspace)
+        } else {
+            await model.disconnectWorkspace(workspace)
+        }
+    }
+}
+
+private struct WorkspaceDisclosureLabel: View {
+    let workspace: Workspace
+    let connection: WorkspaceConnection?
+    let isSelected: Bool
+    let isActionInFlight: Bool
+    let onConnect: () -> Void
+    let onDisconnect: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: workspace.isSSHWorkspace ? "network" : "folder")
+                .font(.system(size: 20))
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(workspace.name)
+                    .font(isSelected ? .body.weight(.semibold) : .body)
+                    .lineLimit(1)
+                if let subtitle = connectionSubtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 8)
+            if workspace.isSSHWorkspace {
+                WorkspaceConnectionButton(
+                    status: connection?.status,
+                    isActionInFlight: isActionInFlight,
+                    onConnect: onConnect,
+                    onDisconnect: onDisconnect
+                )
+            }
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+        .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var connectionSubtitle: String? {
+        guard workspace.isSSHWorkspace else { return nil }
+        let status = workspaceConnectionLabel(connection?.status)
+        let detail = firstNonEmpty(connection?.message, connection?.displayCWD, connection?.endpoint, workspace.ssh?.endpoint)
+        if let detail {
+            return "\(status) · \(detail)"
+        }
+        return status
+    }
+}
+
+private struct WorkspaceConnectionButton: View {
+    let status: String?
+    let isActionInFlight: Bool
+    let onConnect: () -> Void
+    let onDisconnect: () -> Void
+
+    private var isActive: Bool {
+        switch status?.lowercased() {
+        case "connected", "connecting", "reconnecting", "degraded":
+            return true
+        default:
+            return false
+        }
+    }
+
+    var body: some View {
+        Button(action: isActive ? onDisconnect : onConnect) {
+            HStack(spacing: 5) {
+                if isActionInFlight {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: isActive ? "bolt.slash" : "bolt")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                Text(isActive ? "Disconnect" : "Connect")
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 9)
+            .frame(height: 28)
+            .background(isActive ? Color.red.opacity(0.12) : Color.accentColor.opacity(0.14))
+            .foregroundStyle(isActive ? Color.red : Color.accentColor)
+            .clipShape(Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(isActionInFlight)
+        .accessibilityLabel(isActive ? "Disconnect SSH workspace" : "Connect SSH workspace")
     }
 }
 
@@ -300,5 +406,40 @@ private enum SideMenuDeleteTarget {
         case .session(let session):
             return "Delete \(session.title ?? "Untitled")? This removes the session from the Host."
         }
+    }
+}
+
+private func workspaceConnectionLabel(_ status: String?) -> String {
+    switch status?.lowercased() {
+    case "connected":
+        return "Connected"
+    case "connecting":
+        return "Connecting"
+    case "reconnecting":
+        return "Reconnecting"
+    case "degraded":
+        return "Degraded"
+    case "failed":
+        return "Failed"
+    case "disconnected":
+        return "Disconnected"
+    default:
+        return "Disconnected"
+    }
+}
+
+private func firstNonEmpty(_ values: String?...) -> String? {
+    for value in values {
+        let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return trimmed
+        }
+    }
+    return nil
+}
+
+private extension Workspace {
+    var isSSHWorkspace: Bool {
+        (target ?? "").caseInsensitiveCompare("ssh") == .orderedSame || ssh != nil
     }
 }

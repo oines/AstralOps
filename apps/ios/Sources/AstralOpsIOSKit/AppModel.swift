@@ -440,18 +440,26 @@ final class AppModel: ObservableObject {
     }
 
     func connectSelectedWorkspace() async {
-        await workspaceReferenceAction(action: .workspaceConnect)
+        await workspaceReferenceAction(action: .workspaceConnect, workspaceID: selectedWorkspaceID)
     }
 
     func disconnectSelectedWorkspace() async {
-        await workspaceReferenceAction(action: .workspaceDisconnect)
+        await workspaceReferenceAction(action: .workspaceDisconnect, workspaceID: selectedWorkspaceID)
+    }
+
+    func connectWorkspace(_ workspace: Workspace) async {
+        await workspaceReferenceAction(action: .workspaceConnect, workspaceID: workspace.id)
+    }
+
+    func disconnectWorkspace(_ workspace: Workspace) async {
+        await workspaceReferenceAction(action: .workspaceDisconnect, workspaceID: workspace.id)
     }
 
     func deleteSelectedWorkspace() async {
         if let workspace = selectedWorkspace {
             await deleteWorkspace(workspace)
         } else {
-            await workspaceReferenceAction(action: .workspaceDelete)
+            await workspaceReferenceAction(action: .workspaceDelete, workspaceID: selectedWorkspaceID)
         }
     }
 
@@ -1029,13 +1037,13 @@ final class AppModel: ObservableObject {
         return .object(payload)
     }
 
-    private func workspaceReferenceAction(action: GeneratedProtocol.ControlAction) async {
+    private func workspaceReferenceAction(action: GeneratedProtocol.ControlAction, workspaceID: String) async {
         do {
-            guard !selectedWorkspaceID.isEmpty else { throw AppModelError.missingWorkspace }
+            guard !workspaceID.isEmpty else { throw AppModelError.missingWorkspace }
             _ = try await controlValue(
                 capability: .capabilityCoreControl,
                 action: action,
-                params: .object(["workspace_id": .string(selectedWorkspaceID)])
+                params: .object(["workspace_id": .string(workspaceID)])
             )
             await loadSnapshot(for: try requireHost().deviceID, silent: true)
         } catch {
