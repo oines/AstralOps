@@ -74,6 +74,54 @@ final class MobileCoreBridgeTests: XCTestCase {
         XCTAssertFalse(raw.calls.last?.payload.contains("\"path\"") ?? true)
     }
 
+    func testComposerSendsAttachmentOnlyInput() async throws {
+        let raw = FakeRawClient()
+        let model = AppModel(bridge: MobileCoreBridge(raw: raw))
+        configureSelectedHostAndSession(model)
+        model.composerText = ""
+        model.composerAttachments = [
+            ControlAttachmentHandle(id: "att_1", mediaID: nil, kind: "image", name: "clip.png", mimeType: "image/png", size: 4, detail: "high", hostOwned: true)
+        ]
+
+        await model.sendComposerText()
+
+        XCTAssertEqual(raw.calls.last?.name, "sendInput")
+        XCTAssertEqual(raw.calls.last?.sessionID, "sess_1")
+        XCTAssertTrue(raw.calls.last?.payload.contains("\"input\":\"\"") ?? false)
+        XCTAssertTrue(raw.calls.last?.payload.contains("\"attachments\"") ?? false)
+        XCTAssertFalse(raw.calls.last?.payload.contains("\"path\"") ?? true)
+        XCTAssertTrue(model.composerAttachments.isEmpty)
+    }
+
+    func testComposerAttachmentUploadUsesChunkedHostIngest() async throws {
+        let raw = FakeRawClient()
+        raw.responseQueues["controlRequest:attachment.ingest.start"] = [
+            #"{"ok":true,"result":{"session_id":"sess_1","upload_id":"up_1","attachment_id":"att_1","chunk_max_bytes":3,"max_bytes":10}}"#
+        ]
+        raw.responseQueues["controlRequest:attachment.ingest.chunk"] = [
+            #"{"ok":true,"result":{"session_id":"sess_1","upload_id":"up_1","seq":1,"offset":0,"received_bytes":3}}"#,
+            #"{"ok":true,"result":{"session_id":"sess_1","upload_id":"up_1","seq":2,"offset":3,"received_bytes":5}}"#
+        ]
+        raw.responseQueues["controlRequest:attachment.ingest.finish"] = [
+            #"{"ok":true,"result":{"session_id":"sess_1","upload_id":"up_1","attachment":{"id":"att_1","kind":"image","name":"clip.png","mime_type":"image/png","size":5,"detail":"high","host_owned":true}}}"#
+        ]
+        let model = AppModel(bridge: MobileCoreBridge(raw: raw))
+        configureSelectedHostAndSession(model)
+
+        await model.addComposerAttachment(data: Data([1, 2, 3, 4, 5]), name: "clip.png", mimeType: "image/png", kind: "image")
+
+        XCTAssertEqual(model.composerUploadCount, 0)
+        XCTAssertEqual(model.composerAttachments.first?.id, "att_1")
+        let controlCalls = raw.calls.filter { $0.name == "controlRequest" }
+        XCTAssertEqual(controlCalls.count, 4)
+        XCTAssertTrue(controlCalls[0].payload.contains(#""action":"attachment.ingest.start""#))
+        XCTAssertTrue(controlCalls[1].payload.contains(#""action":"attachment.ingest.chunk""#))
+        XCTAssertTrue(controlCalls[1].payload.contains(#""data_base64":"AQID""#))
+        XCTAssertTrue(controlCalls[2].payload.contains(#""data_base64":"BAU=""#))
+        XCTAssertTrue(controlCalls[3].payload.contains(#""action":"attachment.ingest.finish""#))
+        XCTAssertFalse(controlCalls.contains { $0.payload.contains("\"path\"") })
+    }
+
     func testControlRequestDecodesResultAndSurfacesRemoteErrors() async throws {
         let raw = FakeRawClient()
         raw.responses["controlRequest"] = #"{"ok":true,"result":{"workspace_id":"ws_1","path":"note.txt"}}"#
@@ -246,6 +294,27 @@ final class MobileCoreBridgeTests: XCTestCase {
             throw XCTSkip("Keychain is unavailable when simulator tests run without code signing entitlements.")
         }
     }
+
+    private func configureSelectedHostAndSession(_ model: AppModel) {
+        model.hosts = [
+            RemoteHostRecord(
+                deviceID: "dev_host",
+                deviceName: nil,
+                deviceKind: nil,
+                publicKeyFingerprint: nil,
+                knownIdentity: true,
+                status: "online",
+                connection: "lan",
+                authorizationState: nil,
+                pairingRequestID: nil,
+                pairingStatus: nil,
+                capabilities: nil,
+                control: nil
+            )
+        ]
+        model.selectedHostID = "dev_host"
+        model.selectedSessionID = "sess_1"
+    }
 }
 
 @MainActor
@@ -259,6 +328,7 @@ private final class FakeRawClient: MobileCoreRawClient {
 
     var onEvent: ((MobileCoreEvent) -> Void)?
     var responses: [String: String] = [:]
+    var responseQueues: [String: [String]] = [:]
     var errors: [String: Error] = [:]
     var calls: [Call] = []
 
@@ -314,6 +384,15 @@ private final class FakeRawClient: MobileCoreRawClient {
 
     func controlRequest(hostDeviceID: String, capability: String, action: String, paramsJSON: String) async throws -> String {
         calls.append(Call(name: "controlRequest", hostDeviceID: hostDeviceID, payload: #"{"capability":"\#(capability)","action":"\#(action)","params":\#(paramsJSON)}"#))
+        let actionKey = "controlRequest:\(action)"
+        if var queue = responseQueues[actionKey], !queue.isEmpty {
+            let next = queue.removeFirst()
+            responseQueues[actionKey] = queue
+            return next
+        }
+        if let response = responses[actionKey] {
+            return response
+        }
         return responses["controlRequest"] ?? #"{"ok":true,"result":{}}"#
     }
 

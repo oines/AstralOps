@@ -6,10 +6,26 @@ struct ComposerBar: View {
     @EnvironmentObject private var model: AppModel
     @FocusState private var focused: Bool
     @State private var fileImporterPresented = false
-    @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var photosPickerPresented = false
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if model.composerUploadCount > 0 {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(uploadStatusTitle)
+                        .lineLimit(1)
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .frame(minHeight: IOSMetrics.controlSize)
+                .background(Color(.tertiarySystemFill), in: Capsule())
+                .accessibilityLabel(uploadStatusTitle)
+            }
+
             if !model.composerAttachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -86,8 +102,10 @@ struct ComposerBar: View {
                     } label: {
                         Label("Files", systemImage: "doc.badge.plus")
                     }
-                    PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
-                        Label("Photos", systemImage: "photo")
+                    Button {
+                        photosPickerPresented = true
+                    } label: {
+                        Label("Photos", systemImage: "photo.on.rectangle")
                     }
                 } label: {
                     Image(systemName: "paperclip")
@@ -114,7 +132,7 @@ struct ComposerBar: View {
                         .font(.title)
                         .frame(width: IOSMetrics.controlSize, height: IOSMetrics.controlSize)
                 }
-                .disabled(model.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!model.canSendComposerInput)
                 .accessibilityLabel("Send")
             }
         }
@@ -122,37 +140,72 @@ struct ComposerBar: View {
         .fileImporter(isPresented: $fileImporterPresented, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             handleFileImport(result)
         }
-        .onChange(of: selectedPhotoItem) { _, item in
-            guard let item else { return }
-            Task {
-                if let data = try? await item.loadTransferable(type: Data.self) {
-                    await model.addComposerAttachment(data: data, name: "photo.jpg", mimeType: "image/jpeg", kind: "image")
-                }
-                selectedPhotoItem = nil
-            }
+        .photosPicker(isPresented: $photosPickerPresented, selection: $selectedPhotoItems, maxSelectionCount: 10, matching: .images)
+        .onChange(of: selectedPhotoItems) { _, items in
+            guard !items.isEmpty else { return }
+            let pickedItems = items
+            selectedPhotoItems = []
+            Task { await uploadPhotos(pickedItems) }
         }
+    }
+
+    private var uploadStatusTitle: String {
+        model.composerUploadCount == 1 ? "Uploading attachment" : "Uploading \(model.composerUploadCount) attachments"
     }
 
     private func handleFileImport(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
-            for url in urls {
-                Task {
-                    let access = url.startAccessingSecurityScopedResource()
-                    defer { if access { url.stopAccessingSecurityScopedResource() } }
-                    do {
-                        let data = try Data(contentsOf: url)
-                        let type = UTType(filenameExtension: url.pathExtension)
-                        let mimeType = type?.preferredMIMEType ?? "application/octet-stream"
-                        let kind = mimeType.hasPrefix("image/") ? "image" : "file"
-                        await model.addComposerAttachment(data: data, name: url.lastPathComponent, mimeType: mimeType, kind: kind)
-                    } catch {
-                        model.presentError(error)
-                    }
+            Task {
+                for url in urls {
+                    await uploadFile(url)
                 }
             }
         case .failure(let error):
             model.presentError(error)
         }
+    }
+
+    private func uploadPhotos(_ items: [PhotosPickerItem]) async {
+        let timestamp = Int(Date().timeIntervalSince1970)
+        for (index, item) in items.enumerated() {
+            model.beginComposerUpload()
+            defer { model.finishComposerUpload() }
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self) else {
+                    throw AppModelError.attachmentUnavailable
+                }
+                let metadata = photoAttachmentMetadata(for: item, timestamp: timestamp, index: index)
+                await model.addComposerAttachment(data: data, name: metadata.name, mimeType: metadata.mimeType, kind: "image", tracksUpload: false)
+            } catch {
+                model.presentError(error)
+            }
+        }
+    }
+
+    private func uploadFile(_ url: URL) async {
+        model.beginComposerUpload()
+        defer { model.finishComposerUpload() }
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .contentTypeKey])
+            guard values.isDirectory != true else { throw AppModelError.attachmentUnavailable }
+            let data = try Data(contentsOf: url)
+            let type = values.contentType ?? UTType(filenameExtension: url.pathExtension)
+            let mimeType = type?.preferredMIMEType ?? "application/octet-stream"
+            let kind = mimeType.hasPrefix("image/") ? "image" : "file"
+            await model.addComposerAttachment(data: data, name: url.lastPathComponent, mimeType: mimeType, kind: kind, tracksUpload: false)
+        } catch {
+            model.presentError(error)
+        }
+    }
+
+    private func photoAttachmentMetadata(for item: PhotosPickerItem, timestamp: Int, index: Int) -> (name: String, mimeType: String) {
+        let type = item.supportedContentTypes.first { $0.conforms(to: .image) }
+        let mimeType = type?.preferredMIMEType ?? "image/jpeg"
+        let fallbackExtension = mimeType == "image/png" ? "png" : "jpg"
+        let fileExtension = type?.preferredFilenameExtension ?? fallbackExtension
+        return ("photo-\(timestamp)-\(index + 1).\(fileExtension)", mimeType)
     }
 }

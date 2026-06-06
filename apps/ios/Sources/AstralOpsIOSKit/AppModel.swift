@@ -6,6 +6,7 @@ enum AppModelError: Error, LocalizedError {
     case missingHost
     case missingWorkspace
     case missingSession
+    case attachmentUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -15,6 +16,8 @@ enum AppModelError: Error, LocalizedError {
             return "Select a workspace first."
         case .missingSession:
             return "Select a session first."
+        case .attachmentUnavailable:
+            return "Attachment data is unavailable."
         }
     }
 }
@@ -53,6 +56,7 @@ final class AppModel: ObservableObject {
     @Published var selectedReasoningEffort = ""
     @Published var selectedPermissionMode = "default"
     @Published var composerAttachments: [ControlAttachmentHandle] = []
+    @Published var composerUploadCount = 0
     @Published var workspaceFiles: WorkspaceFilesReadResult?
     @Published var selectedFilePath = ""
     @Published var fileEditorText = ""
@@ -77,6 +81,14 @@ final class AppModel: ObservableObject {
     private let storedIdentityAccount = "stored_identity"
     private let cloudSessionAccount = "cloud_session"
     private static let storedSelectionKey = "controller_selection_v1"
+
+    var canSendComposerInput: Bool {
+        let hasText = !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return composerUploadCount == 0
+            && (hasText || !composerAttachments.isEmpty)
+            && selectedHost != nil
+            && !selectedSessionID.isEmpty
+    }
 
     init(bridge: MobileCoreBridge = MobileCoreBridge()) {
         self.bridge = bridge
@@ -370,7 +382,7 @@ final class AppModel: ObservableObject {
 
     func sendComposerText() async {
         let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let host = selectedHost, !selectedSessionID.isEmpty else { return }
+        guard composerUploadCount == 0, (!text.isEmpty || !composerAttachments.isEmpty), let host = selectedHost, !selectedSessionID.isEmpty else { return }
         let previousAttachments = composerAttachments
         let options = inputOptions()
         composerText = ""
@@ -384,11 +396,29 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func addComposerAttachment(data: Data, name: String, mimeType: String?, kind: String) async {
+    func beginComposerUpload() {
+        composerUploadCount += 1
+    }
+
+    func finishComposerUpload() {
+        composerUploadCount = max(0, composerUploadCount - 1)
+    }
+
+    func addComposerAttachment(data: Data, name: String, mimeType: String?, kind: String, tracksUpload: Bool = true) async {
         do {
             guard !selectedSessionID.isEmpty else { throw AppModelError.missingSession }
+            if tracksUpload {
+                beginComposerUpload()
+            }
+            defer {
+                if tracksUpload {
+                    finishComposerUpload()
+                }
+            }
             let handle = try await ingestAttachment(data: data, name: name, mimeType: mimeType, kind: kind)
-            composerAttachments.append(handle)
+            if !composerAttachments.contains(where: { $0.id == handle.id }) {
+                composerAttachments.append(handle)
+            }
         } catch {
             presentError(error)
         }
