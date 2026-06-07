@@ -13,6 +13,8 @@ struct WorkspaceCreateSheet: View {
     @State private var browseResult: HostFileSystemBrowseResult?
     @State private var isBrowsing = false
     @State private var browseErrorMessage = ""
+    @State private var browseGeneration = 0
+    @State private var remoteCWDChangeFromBrowse: String?
 
     var body: some View {
         NavigationStack {
@@ -39,6 +41,10 @@ struct WorkspaceCreateSheet: View {
                     .onChange(of: sshEndpoint) { _, _ in resetBrowsePreview(keepPath: true) }
                     .onChange(of: sshPort) { _, _ in resetBrowsePreview(keepPath: true) }
                     .onChange(of: sshRemoteCWD) { _, value in
+                        if remoteCWDChangeFromBrowse == value {
+                            remoteCWDChangeFromBrowse = nil
+                            return
+                        }
                         if browsePath != value {
                             browsePath = value
                             resetBrowsePreview(keepPath: true)
@@ -53,11 +59,11 @@ struct WorkspaceCreateSheet: View {
                             .autocorrectionDisabled()
                             .submitLabel(.go)
                             .onSubmit {
-                                Task { await browse() }
+                                Task { await browse(path: browsePath) }
                             }
                         HStack {
                             Button {
-                                Task { await browse() }
+                                Task { await browse(path: browsePath) }
                             } label: {
                                 Label("Preview", systemImage: "folder.badge.questionmark")
                             }
@@ -84,6 +90,7 @@ struct WorkspaceCreateSheet: View {
                         DirectoryPreview(
                             result: browseResult,
                             selectedPath: selectedFolderPath,
+                            isBrowsing: isBrowsing,
                             onOpen: { path in
                                 Task { await openDirectory(path) }
                             },
@@ -111,11 +118,14 @@ struct WorkspaceCreateSheet: View {
             }
             .task {
                 if browsePath.isEmpty {
-                    browsePath = target == "ssh" ? (sshRemoteCWD.isEmpty ? "/" : sshRemoteCWD) : localCWD
-                    await browse()
+                    let initialPath = target == "ssh" ? (sshRemoteCWD.isEmpty ? "/" : sshRemoteCWD) : localCWD
+                    browsePath = initialPath
+                    await browse(path: initialPath)
                 }
             }
             .onChange(of: target) { _, value in
+                browseGeneration += 1
+                isBrowsing = false
                 browseResult = nil
                 browseErrorMessage = ""
                 browsePath = value == "ssh" ? (sshRemoteCWD.isEmpty ? "/" : sshRemoteCWD) : localCWD
@@ -138,36 +148,49 @@ struct WorkspaceCreateSheet: View {
         if target == "ssh" {
             return sshEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || sshRemoteCWD.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
-        return localCWD.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && browsePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return localCWD.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private func browse() async {
+    private func browse(path explicitPath: String? = nil) async {
         guard canBrowse else { return }
+        browseGeneration += 1
+        let generation = browseGeneration
+        let requestTarget = target
+        let requestPath = explicitPath ?? browsePath
+        let requestSSH = requestTarget == "ssh" ? sshConfig() : nil
+        browsePath = requestPath
         isBrowsing = true
         browseErrorMessage = ""
-        defer { isBrowsing = false }
         do {
-            let ssh = target == "ssh" ? sshConfig() : nil
-            let result = try await model.browseHostFileSystem(target: target, path: browsePath, ssh: ssh)
+            let result = try await model.browseHostFileSystem(target: requestTarget, path: requestPath, ssh: requestSSH)
+            guard generation == browseGeneration else { return }
             browseResult = result
             browsePath = result.path
-            selectFolder(result.path)
+            if result.target == "ssh" {
+                selectFolder(result.path)
+            }
+            isBrowsing = false
         } catch {
+            guard generation == browseGeneration else { return }
             browseResult = nil
             browseErrorMessage = AppModel.errorDisplayMessage(for: error)
+            isBrowsing = false
         }
     }
 
     private func openDirectory(_ path: String) async {
-        browsePath = path
-        await browse()
+        await browse(path: path)
     }
 
     private func selectFolder(_ path: String) {
         if target == "ssh" {
+            remoteCWDChangeFromBrowse = path
             sshRemoteCWD = path
         } else {
             localCWD = path
+        }
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            name = pathBase(path, separator: browseResult?.separator ?? "/") ?? (target == "ssh" ? "SSH" : "Local")
         }
     }
 
@@ -184,7 +207,7 @@ struct WorkspaceCreateSheet: View {
         await model.createWorkspace(
             name: name,
             target: target,
-            localCWD: target == "ssh" ? "" : (localCWD.isEmpty ? browsePath : localCWD),
+            localCWD: target == "ssh" ? "" : localCWD,
             ssh: ssh
         )
     }
@@ -201,6 +224,7 @@ struct WorkspaceCreateSheet: View {
 private struct DirectoryPreview: View {
     let result: HostFileSystemBrowseResult
     let selectedPath: String
+    let isBrowsing: Bool
     let onOpen: (String) -> Void
     let onSelect: (String) -> Void
 
@@ -223,7 +247,7 @@ private struct DirectoryPreview: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.bordered)
-            .disabled(result.path == selectedPath)
+            .disabled(isBrowsing || result.path == selectedPath)
 
             if !result.roots.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -235,6 +259,7 @@ private struct DirectoryPreview: View {
                                 Label(root.label, systemImage: root.kind == "home" ? "house" : "externaldrive")
                             }
                             .buttonStyle(.bordered)
+                            .disabled(isBrowsing)
                         }
                     }
                 }
@@ -247,6 +272,8 @@ private struct DirectoryPreview: View {
                     Label("Parent", systemImage: "chevron.up")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .buttonStyle(.borderless)
+                .disabled(isBrowsing)
             }
 
             if result.entries.isEmpty {
@@ -257,7 +284,7 @@ private struct DirectoryPreview: View {
                     .padding(.vertical, 8)
             } else {
                 ForEach(result.entries) { entry in
-                    DirectoryPreviewEntry(entry: entry, onOpen: onOpen)
+                    DirectoryPreviewEntry(entry: entry, isBrowsing: isBrowsing, onOpen: onOpen)
                 }
             }
         }
@@ -277,6 +304,7 @@ private struct DirectoryPreview: View {
 
 private struct DirectoryPreviewEntry: View {
     let entry: HostFileSystemEntry
+    let isBrowsing: Bool
     let onOpen: (String) -> Void
 
     var body: some View {
@@ -286,6 +314,8 @@ private struct DirectoryPreviewEntry: View {
             } label: {
                 row(icon: "folder", tint: .accentColor)
             }
+            .buttonStyle(.plain)
+            .disabled(isBrowsing)
         } else {
             row(icon: "doc.text", tint: .secondary)
                 .foregroundStyle(.secondary)
@@ -324,4 +354,18 @@ private struct DirectoryPreviewEntry: View {
         }
         return entry.path
     }
+}
+
+private func pathBase(_ path: String, separator: String) -> String? {
+    let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let normalizedSeparator = separator.isEmpty ? "/" : separator
+    let withoutTrailing: String
+    if trimmed.hasSuffix(normalizedSeparator), trimmed.count > normalizedSeparator.count {
+        withoutTrailing = String(trimmed.dropLast(normalizedSeparator.count))
+    } else {
+        withoutTrailing = trimmed
+    }
+    let parts = withoutTrailing.split(separator: Character(normalizedSeparator), omittingEmptySubsequences: true)
+    return parts.last.map(String.init) ?? withoutTrailing
 }

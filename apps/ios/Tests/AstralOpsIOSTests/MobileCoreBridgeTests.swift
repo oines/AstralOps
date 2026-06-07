@@ -167,10 +167,9 @@ final class MobileCoreBridgeTests: XCTestCase {
         XCTAssertEqual(raw.calls.last?.payload, "term_1")
     }
 
-    func testTerminalViewerLifecycleErrorRecoversWithoutGlobalAlert() async throws {
+    func testTerminalViewerLifecycleErrorStaysInsideTerminalTransport() async throws {
         let raw = FakeRawClient()
         raw.errors["terminalInput"] = MobileCoreBridgeError.controlError(ControlErrorEnvelope(status: 409, code: "terminal_viewer_not_live", message: "terminal viewer is not live"))
-        raw.responses["attachTerminal"] = #"{"terminal_id":"term_1","viewer_id":"viewer_1","input_lease_id":"lease_1","output_seq":5}"#
         let model = AppModel(bridge: MobileCoreBridge(raw: raw))
         model.hosts = [
             RemoteHostRecord(
@@ -209,8 +208,8 @@ final class MobileCoreBridgeTests: XCTestCase {
         try await Task.sleep(nanoseconds: 200_000_000)
 
         XCTAssertEqual(model.errorMessage, "")
-        XCTAssertTrue(raw.calls.contains { $0.name == "attachTerminal" && $0.payload == "term_1:0" })
-        XCTAssertEqual(raw.calls.filter { $0.name == "terminalInput" }.count, 2)
+        XCTAssertFalse(raw.calls.contains { $0.name == "attachTerminal" })
+        XCTAssertEqual(raw.calls.filter { $0.name == "terminalInput" }.count, 1)
     }
 
     func testAttachTerminalDefaultsToFullReplay() async throws {

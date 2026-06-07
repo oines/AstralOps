@@ -82,6 +82,7 @@ struct LocalHTMLWebView: UIViewRepresentable {
     let resourceName: String
     let bridge: WebViewBridge
     var onTranscriptAction: ((JSONValue) -> Void)?
+    var onTerminalOpen: ((String, String, String, Int) -> Void)?
     var onTerminalInput: ((String) -> Void)?
     var onTerminalResize: ((String, Int, Int) -> Void)?
     var onTerminalHeartbeatAck: ((String, Int, Int) -> Void)?
@@ -91,6 +92,7 @@ struct LocalHTMLWebView: UIViewRepresentable {
         Coordinator(
             bridge: bridge,
             onTranscriptAction: onTranscriptAction,
+            onTerminalOpen: onTerminalOpen,
             onTerminalInput: onTerminalInput,
             onTerminalResize: onTerminalResize,
             onTerminalHeartbeatAck: onTerminalHeartbeatAck,
@@ -104,6 +106,7 @@ struct LocalHTMLWebView: UIViewRepresentable {
         configuration.setURLSchemeHandler(context.coordinator.mediaSchemeHandler, forURLScheme: "astralmedia")
         configuration.userContentController.add(context.coordinator, name: "astralReady")
         configuration.userContentController.add(context.coordinator, name: "astralTranscriptAction")
+        configuration.userContentController.add(context.coordinator, name: "astralTerminalOpen")
         configuration.userContentController.add(context.coordinator, name: "astralTerminalInput")
         configuration.userContentController.add(context.coordinator, name: "astralTerminalResize")
         configuration.userContentController.add(context.coordinator, name: "astralTerminalHeartbeatAck")
@@ -129,6 +132,7 @@ struct LocalHTMLWebView: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.onTranscriptAction = onTranscriptAction
+        context.coordinator.onTerminalOpen = onTerminalOpen
         context.coordinator.onTerminalInput = onTerminalInput
         context.coordinator.onTerminalResize = onTerminalResize
         context.coordinator.onTerminalHeartbeatAck = onTerminalHeartbeatAck
@@ -206,6 +210,7 @@ struct LocalHTMLWebView: UIViewRepresentable {
         let mediaSchemeHandler: MediaSchemeHandler
         var loadedResourceName: String?
         var onTranscriptAction: ((JSONValue) -> Void)?
+        var onTerminalOpen: ((String, String, String, Int) -> Void)?
         var onTerminalInput: ((String) -> Void)?
         var onTerminalResize: ((String, Int, Int) -> Void)?
         var onTerminalHeartbeatAck: ((String, Int, Int) -> Void)?
@@ -213,6 +218,7 @@ struct LocalHTMLWebView: UIViewRepresentable {
         init(
             bridge: WebViewBridge,
             onTranscriptAction: ((JSONValue) -> Void)?,
+            onTerminalOpen: ((String, String, String, Int) -> Void)?,
             onTerminalInput: ((String) -> Void)?,
             onTerminalResize: ((String, Int, Int) -> Void)?,
             onTerminalHeartbeatAck: ((String, Int, Int) -> Void)?,
@@ -220,6 +226,7 @@ struct LocalHTMLWebView: UIViewRepresentable {
         ) {
             self.bridge = bridge
             self.onTranscriptAction = onTranscriptAction
+            self.onTerminalOpen = onTerminalOpen
             self.onTerminalInput = onTerminalInput
             self.onTerminalResize = onTerminalResize
             self.onTerminalHeartbeatAck = onTerminalHeartbeatAck
@@ -231,6 +238,14 @@ struct LocalHTMLWebView: UIViewRepresentable {
                 Task { @MainActor in bridge.markReady() }
             } else if message.name == "astralTranscriptAction", let payload = Self.jsonValue(from: message.body) {
                 onTranscriptAction?(payload)
+            } else if message.name == "astralTerminalOpen", let payload = Self.dictionary(from: message.body) {
+                let requestID = Self.string(payload["request_id"] ?? payload["requestId"])
+                let workspaceID = Self.string(payload["workspace_id"] ?? payload["workspaceId"])
+                let terminalID = Self.string(payload["terminal_id"] ?? payload["terminalId"])
+                let afterSeq = Self.int(payload["after_seq"] ?? payload["afterSeq"])
+                if !requestID.isEmpty, !workspaceID.isEmpty {
+                    onTerminalOpen?(requestID, workspaceID, terminalID, afterSeq)
+                }
             } else if message.name == "astralTerminalInput", let data = message.body as? String {
                 onTerminalInput?(data)
             } else if message.name == "astralTerminalResize", let payload = Self.dictionary(from: message.body) {

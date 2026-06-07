@@ -1,3 +1,4 @@
+import type { HostControllerClient } from "@astralops/controller-client";
 import type {
   AstralEvent,
   AppSettings,
@@ -214,6 +215,45 @@ export function createLocalCoreClient(info: DaemonInfo): CoreClient {
 
 export function createRemoteCoreClient(info: DaemonInfo, hostDeviceId: string): CoreClient {
   return new RemoteCoreClient(new RemoteDaemonControlChannel(info, hostDeviceId));
+}
+
+export function createDesktopHostControllerClient(client: CoreClient, hostDeviceId: string): HostControllerClient {
+  return {
+    hostDeviceId,
+    terminal: client.terminal,
+    state: () => Promise.reject(new Error("Host state is provided by the selected desktop controller subscription.")),
+    subscribeState: () => ({ close: () => undefined }),
+    snapshot: (input) => client.hostSnapshot(input),
+    workbench: () => client.workbench(),
+    subscribeWorkbench: (handlers) => client.subscribeWorkbench({
+      onPatch: handlers.onData,
+      onOpen: handlers.onOpen,
+      onError: handlers.onError,
+    }),
+    events: (input) => client.events(input),
+    subscribeEvents: (afterSeq, handlers) => client.subscribeEvents(afterSeq, {
+      onEvent: handlers.onData,
+      onOpen: handlers.onOpen,
+      onError: handlers.onError,
+    }),
+    createWorkspace: (input) => client.createWorkspace(input),
+    connectWorkspace: (workspaceId) => client.connectWorkspace(workspaceId),
+    disconnectWorkspace: (workspaceId) => client.disconnectWorkspace(workspaceId),
+    listWorkspaceFiles: (workspaceId, path) => client.listWorkspaceFiles(workspaceId, path),
+    runWorkspaceCommand: (workspaceId, command) => client.runWorkspaceCommand(workspaceId, command),
+    deleteWorkspace: (workspaceId) => client.deleteWorkspace(workspaceId),
+    createSession: (workspaceId, agent) => client.createSession(workspaceId, agent),
+    sessionView: (sessionId) => client.sessionView(sessionId),
+    deleteSession: (sessionId) => client.deleteSession(sessionId),
+    forkSession: (sessionId, eventSeq) => client.forkSession(sessionId, eventSeq),
+    sendInput: (sessionId, input, options) => client.sendInput(sessionId, input, options),
+    editLastUserMessage: (sessionId, input, options) => client.editLastUserMessage(sessionId, input, options),
+    interrupt: (sessionId) => client.interrupt(sessionId),
+    cancelQueuedInput: (sessionId, queueId) => client.cancelQueuedInput(sessionId, queueId),
+    steerQueuedInput: (sessionId, queueId) => client.steerQueuedInput(sessionId, queueId),
+    respondApproval: (approvalId, response) => client.respondApproval(approvalId, response),
+    mediaUrl: (sessionId, eventSeq, mediaId, download) => client.mediaUrl(sessionId, eventSeq, mediaId, download),
+  };
 }
 
 export async function listRemoteHosts(info: DaemonInfo, discover = true): Promise<RemoteHostRecord[]> {

@@ -8,10 +8,12 @@
   "types": "src/index.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs"
   },
   "dependencies": {
-    "@astralops/protocol": "file:../../protocol"
+    "@astralops/protocol": "file:../../protocol",
+    "@astralops/workbench-state": "file:../workbench-state"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

@@ -13,12 +13,15 @@ import type {
   ControlCapability,
   CreateWorkspaceRequest,
   DeviceIdentity,
+  EditLastUserMessageRequest,
+  FileListResponse,
   HostSnapshotRequest,
   HostSnapshotResponse,
   MeshState,
   RemoteHostRecord,
   RemoteHostSessionState,
   Session,
+  SessionForkResponse,
   SessionInputAttachment,
   SessionView,
   TerminalAckResult,
@@ -26,7 +29,44 @@ import type {
   WorkbenchPatch,
   WorkbenchState,
   Workspace,
+  WorkspaceCommandResponse,
+  WorkspaceConnection,
 } from "@astralops/protocol";
+
+export {
+  ControllerRuntime,
+  buildSessionInputOptions,
+  buildWorkbenchFromSnapshot,
+  createControllerRuntime,
+  selectedSessionIsInteractive,
+} from "./runtime";
+export type {
+  ControllerRuntimeAdapter,
+  ControllerRuntimeAttachmentInput,
+  ControllerRuntimeConnectionState,
+  ControllerRuntimeEventQuery,
+  ControllerRuntimeListener,
+  ControllerRuntimeOptions,
+  ControllerRuntimeRunOptions,
+  ControllerRuntimeSelection,
+  ControllerRuntimeSnapshot,
+} from "./runtime";
+export {
+  TerminalViewerController,
+  isTerminalViewerLifecycleError,
+} from "./terminalViewer";
+export type {
+  TerminalViewerConnection,
+  TerminalViewerControllerOptions,
+  TerminalViewerCoreClient,
+  TerminalViewerHealth,
+  TerminalViewerHeartbeatPayload,
+  TerminalViewerOpenOptions,
+  TerminalViewerReadyPayload,
+  TerminalViewerStatusPayload,
+  TerminalViewerStreamHandlers,
+  TerminalViewerTerminalClient,
+} from "./terminalViewer";
 
 export type Closeable = {
   close: () => void;
@@ -45,6 +85,7 @@ export type TerminalReadyPayload = {
   shell?: string;
   cwd?: string;
   output_seq?: number;
+  can_input?: boolean;
 };
 
 export type TerminalStatusPayload = {
@@ -59,21 +100,32 @@ export type TerminalStreamHandlers = {
   onOpen?: () => void;
   onReady?: (payload: TerminalReadyPayload) => void;
   onStatus?: (payload: TerminalStatusPayload) => void;
+  onHeartbeat?: (payload: { terminal_id?: string; viewer_id?: string; input_lease_id?: string; heartbeat_seq?: number; output_seq?: number; can_input?: boolean }) => void;
   onOutput?: (data: string, outputSeq?: number) => void;
   onExit?: (payload: Record<string, unknown>) => void;
-  onError?: (message: string) => void;
-  onClose?: () => void;
+  onError?: (message: string, code?: string) => void;
+  onConnectionError?: (message: string) => void;
+  onClose?: (payload?: { code?: number; reason?: string; wasClean?: boolean }) => void;
 };
 
 export type TerminalConnection = {
   input: (data: string) => void;
   resize: (cols: number, rows: number) => void;
+  ackRendered: (outputSeq: number) => void;
   close: () => void;
 };
 
 export type TerminalOpenOptions = {
   terminalId?: string;
   afterSeq?: number;
+};
+
+export type HostEventQuery = {
+  after_seq?: number;
+  before_seq?: number;
+  limit?: number;
+  workspace_id?: string;
+  session_id?: string;
 };
 
 export interface TerminalControllerClient {
@@ -90,12 +142,25 @@ export interface HostControllerClient {
   snapshot(input?: HostSnapshotRequest): Promise<HostSnapshotResponse>;
   workbench(): Promise<WorkbenchState>;
   subscribeWorkbench(handlers: StreamHandlers<WorkbenchPatch>): Closeable;
-  events(afterSeq?: number): Promise<AstralEvent[]>;
+  events(input?: number | HostEventQuery): Promise<AstralEvent[]>;
   subscribeEvents(afterSeq: number, handlers: StreamHandlers<AstralEvent>): Closeable;
   createWorkspace(input: CreateWorkspaceRequest): Promise<Workspace>;
+  connectWorkspace(workspaceId: string): Promise<WorkspaceConnection>;
+  disconnectWorkspace(workspaceId: string): Promise<WorkspaceConnection>;
+  listWorkspaceFiles(workspaceId: string, path?: string): Promise<FileListResponse>;
+  runWorkspaceCommand(workspaceId: string, command: string): Promise<WorkspaceCommandResponse>;
+  deleteWorkspace(workspaceId: string): Promise<{ ok: boolean }>;
   createSession(workspaceId: string, agent?: Workspace["agent"]): Promise<Session>;
   sessionView(sessionId: string): Promise<SessionView>;
+  deleteSession(sessionId: string): Promise<{ ok: boolean }>;
+  forkSession(sessionId: string, eventSeq: number): Promise<SessionForkResponse>;
   sendInput(sessionId: string, input: string, options?: { model?: string; reasoning_effort?: string; permission_mode?: string; attachments?: SessionInputAttachment[] }): Promise<{ ok: boolean }>;
+  editLastUserMessage(sessionId: string, input: string, options: Omit<EditLastUserMessageRequest, "input">): Promise<{ ok: boolean }>;
+  interrupt(sessionId: string): Promise<{ ok: boolean }>;
+  cancelQueuedInput(sessionId: string, queueId: string): Promise<{ ok: boolean }>;
+  steerQueuedInput(sessionId: string, queueId: string): Promise<{ ok: boolean }>;
+  respondApproval(approvalId: string, response: Record<string, unknown>): Promise<{ ok: boolean }>;
+  mediaUrl?(sessionId: string, eventSeq: number, mediaId: string, download?: boolean): string;
 }
 
 export interface ControllerClient {
@@ -317,9 +382,22 @@ export function createUnavailableControllerClient(): ControllerClient {
     events: async () => fail(),
     subscribeEvents: () => fail(),
     createWorkspace: async () => fail(),
+    connectWorkspace: async () => fail(),
+    disconnectWorkspace: async () => fail(),
+    listWorkspaceFiles: async () => fail(),
+    runWorkspaceCommand: async () => fail(),
+    deleteWorkspace: async () => fail(),
     createSession: async () => fail(),
     sessionView: async () => fail(),
+    deleteSession: async () => fail(),
+    forkSession: async () => fail(),
     sendInput: async () => fail(),
+    editLastUserMessage: async () => fail(),
+    interrupt: async () => fail(),
+    cancelQueuedInput: async () => fail(),
+    steerQueuedInput: async () => fail(),
+    respondApproval: async () => fail(),
+    mediaUrl: () => fail(),
   });
   return {
     meshState: async () => fail(),

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ControllerRuntime, type ControllerRuntimeSnapshot } from "@astralops/controller-client";
 import { useTranslation } from "react-i18next";
 import { normalizedRecord } from "./types";
 import type { TFunction } from "i18next";
 import { AlertTriangle, KeyRound, LoaderCircle, PanelLeft, PanelRight, RefreshCw, X } from "lucide-react";
-import { createLocalCoreClient, createRemoteCoreClient, isCoreRequestError, readMeshState, requestRemoteHostPairing, subscribeMeshState, subscribeRemoteHostSessionState, type CoreClient, type EventSubscription } from "./api";
+import { createDesktopHostControllerClient, createLocalCoreClient, createRemoteCoreClient, readMeshState, requestRemoteHostPairing, subscribeMeshState, subscribeRemoteHostSessionState, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
 import { SettingsView } from "./components/SettingsView";
@@ -167,6 +168,7 @@ export function App(): React.JSX.Element {
   const hostStateGenerationRef = useRef(0);
   const sessionsRef = useRef<Session[]>([]);
   const remoteHostCacheRef = useRef<Record<string, RemoteHostRecord>>({});
+  const controllerRuntimeRef = useRef<ControllerRuntime | null>(null);
 
   const commitRemoteHosts = useCallback((hosts: RemoteHostRecord[]) => {
     if (hosts.length > 0) {
@@ -286,6 +288,25 @@ export function App(): React.JSX.Element {
     mergeEvents,
     setError,
   });
+  const commitControllerRuntimeSnapshot = useCallback((snapshot: ControllerRuntimeSnapshot) => {
+    setConnection(snapshot.connection === "idle" ? "booting" : snapshot.connection);
+    setHostAgents(snapshot.workbench.agents ?? {});
+    setWorkspaces(snapshot.workspaces);
+    setWorkspaceConnections(snapshot.workbench.workspace_connections ?? {});
+    setTerminalTabs(snapshot.workbench.terminal_tabs ?? {});
+    setSessions(sortSessionsByUpdated(snapshot.sessions.map((session) => {
+      const view = snapshot.workbench.session_views[session.id];
+      return view ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session;
+    })));
+    setSessionViews(snapshot.workbench.session_views ?? {});
+    setActiveWorkspaceId(snapshot.selectedWorkspaceId);
+    setActiveSession(snapshot.selectedSession);
+    setEventIndex(mergeEventIndex(EMPTY_EVENT_INDEX, snapshot.events));
+    if (snapshot.selectedSessionId) {
+      setSessionWindows((current) => updateWindowAfterLatest(current, snapshot.selectedSessionId, snapshot.selectedSessionEvents, EVENT_WINDOW_SIZE));
+    }
+    if (snapshot.error) setError(snapshot.error);
+  }, [setSessionWindows]);
   const sessionRunning = activeSessionView?.status === "running";
   const queuedInputs = useMemo<QueuedComposerInput[]>(
     () => (activeSessionView?.queued_inputs ?? []).map((item) => ({ id: item.id, sessionId: item.session_id, text: item.text })),
@@ -772,84 +793,64 @@ export function App(): React.JSX.Element {
 
   const handleCreateWorkspace = useCallback(
     async (request: CreateWorkspaceRequest) => {
-      if (!api) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime) return;
       setError("");
-      const workspace = await api.createWorkspace(request);
-      setWorkspaces((current) => [workspace, ...current.filter((item) => item.id !== workspace.id)]);
-      setActiveWorkspaceId(workspace.id);
-      setActiveSession(null);
+      await runtime.createWorkspace(request);
       setWorkspaceOpen(false);
-      if (workspace.target === "ssh") {
-        const state = await api.connectWorkspace(workspace.id);
-        setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
-      }
     },
-    [api],
+    [],
   );
 
   const handleConnectWorkspace = useCallback(
     async (workspaceId: string) => {
-      if (!api) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime) return;
       setError("");
       try {
-        const state = await api.connectWorkspace(workspaceId);
-        setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
+        await runtime.connectWorkspace(workspaceId);
       } catch (connectError) {
         setError(connectError instanceof Error ? connectError.message : String(connectError));
       }
     },
-    [api],
+    [],
   );
 
   const handleDisconnectWorkspace = useCallback(
     async (workspaceId: string) => {
-      if (!api) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime) return;
       setError("");
       try {
-        const state = await api.disconnectWorkspace(workspaceId);
-        setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
+        await runtime.disconnectWorkspace(workspaceId);
       } catch (disconnectError) {
         setError(disconnectError instanceof Error ? disconnectError.message : String(disconnectError));
       }
     },
-    [api],
+    [],
   );
 
   const handleSelectWorkspace = useCallback(
     (workspaceId: string) => {
-      setActiveWorkspaceId(workspaceId);
+      void controllerRuntimeRef.current?.selectWorkspace(workspaceId);
       setError("");
-      setActiveSession((current) => {
-        if (current?.workspace_id === workspaceId) return current;
-        return sessions.find((session) => session.workspace_id === workspaceId) ?? null;
-      });
     },
-    [sessions],
+    [],
   );
 
   const handleCreateSession = useCallback(
     async (workspaceId: string, agent: AgentKind) => {
-      if (!api) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime) return;
       setError("");
       try {
-        const workspace = workspaces.find((item) => item.id === workspaceId);
-        if (workspace?.target === "ssh" && workspaceConnections[workspaceId]?.status !== "connected") {
-          setError(t("desktop:errors.sshWorkspaceDisconnected"));
-          return;
-        }
-        const session = await api.createSession(workspaceId, agent);
-        const view = await api.sessionView(session.id).catch(() => null);
-        const displaySession = view ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session;
-        if (view) storeSessionView(view);
-        setSessions((current) => [displaySession, ...current.filter((item) => item.id !== session.id)]);
-        setActiveWorkspaceId(workspaceId);
-        setActiveSession(displaySession);
+        await runtime.createSession(workspaceId, agent);
         setLastSessionAgent(agent);
       } catch (sessionError) {
         setError(sessionError instanceof Error ? sessionError.message : String(sessionError));
       }
     },
-    [api, storeSessionView, t, workspaces, workspaceConnections],
+    [],
   );
 
   const openNativeImport = useCallback(
@@ -902,107 +903,71 @@ export function App(): React.JSX.Element {
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
-      const session = sessions.find((item) => item.id === sessionId);
-      if (!session) return;
       setError("");
-      setActiveWorkspaceId(session.workspace_id);
-      setActiveSession(session);
+      void controllerRuntimeRef.current?.selectSession(sessionId);
     },
-    [sessions],
+    [],
   );
 
   const handleOpenSourceSession = useCallback(
     (sessionId: string, eventSeq?: number) => {
-      const session = sessions.find((item) => item.id === sessionId);
-      if (!session) return;
       setError("");
-      setActiveWorkspaceId(session.workspace_id);
-      setActiveSession(session);
+      void controllerRuntimeRef.current?.selectSession(sessionId, eventSeq);
       if (eventSeq) {
         setScrollTarget({ sessionId, eventSeq });
       }
     },
-    [sessions],
+    [],
   );
 
   const handleForkFromEvent = useCallback(
     async (event: AstralEvent) => {
-      if (!api || !activeSession) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime || !activeSession) return;
       setError("");
       setForkingSeq(event.seq);
       try {
-        const response = await api.forkSession(activeSession.id, event.seq);
-        const forked = response.session;
-        const [view, sessionEvents] = await Promise.all([
-          api.sessionView(forked.id).catch(() => null),
-          api.events({ session_id: forked.id, limit: EVENT_WINDOW_SIZE }),
-        ]);
-        const displaySession = view ? { ...forked, ...view.session, title: view.title || view.session.title, status: view.status } : forked;
-        if (view) storeSessionView(view);
-        setSessions((current) => sortSessionsByUpdated([displaySession, ...current.filter((item) => item.id !== forked.id)]));
-        setActiveWorkspaceId(displaySession.workspace_id);
-        setActiveSession(displaySession);
-        mergeEvents(sessionEvents);
-        setSessionWindows((current) => updateWindowAfterLatest(current, forked.id, sessionEvents, EVENT_WINDOW_SIZE));
+        await runtime.forkSession(event.seq, activeSession.id);
       } catch (forkError) {
         setError(forkError instanceof Error ? forkError.message : String(forkError));
       } finally {
         setForkingSeq(null);
       }
     },
-    [activeSession, api, mergeEvents, setSessionWindows, storeSessionView],
+    [activeSession],
   );
 
   const deleteWorkspace = useCallback(
     async (workspaceId: string) => {
-      if (!api) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime) return;
       setError("");
       try {
-        await api.deleteWorkspace(workspaceId);
-        setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
-        setWorkspaceConnections((current) => {
-          const next = { ...current };
-          delete next[workspaceId];
-          return next;
-        });
-        setSessions((current) => current.filter((session) => session.workspace_id !== workspaceId));
-        setSessionViews((current) => Object.fromEntries(Object.entries(current).filter(([, view]) => view.session.workspace_id !== workspaceId)));
-        setEventIndex((current) => removeWorkspaceEvents(current, workspaceId));
-        if (activeWorkspaceId === workspaceId) {
-          setActiveWorkspaceId("");
-          setActiveSession(null);
-        }
+        await runtime.deleteWorkspace(workspaceId);
       } catch (deleteError) {
         setError(deleteError instanceof Error ? deleteError.message : String(deleteError));
       }
     },
-    [activeWorkspaceId, api],
+    [],
   );
 
   const deleteSession = useCallback(async (sessionId?: string) => {
-    if (!api) return;
+    const runtime = controllerRuntimeRef.current;
+    if (!runtime) return;
     const targetSession = sessionId ? sessions.find((session) => session.id === sessionId) : activeSession;
     if (!targetSession) return;
     setError("");
     try {
-      await api.deleteSession(targetSession.id);
-      setSessions((current) => current.filter((session) => session.id !== targetSession.id));
-      setSessionViews((current) => {
-        const next = { ...current };
-        delete next[targetSession.id];
-        return next;
-      });
-      setEventIndex((current) => removeSessionEvents(current, targetSession.id));
+      await runtime.deleteSession(targetSession.id);
       setSessionWindows((current) => {
         const next = { ...current };
         delete next[targetSession.id];
         return next;
       });
-      setActiveSession((current) => (current?.id === targetSession.id ? sessions.find((session) => session.workspace_id === targetSession.workspace_id && session.id !== targetSession.id) ?? null : current));
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : String(deleteError));
     }
-  }, [activeSession, api, sessions]);
+  }, [activeSession, sessions, setSessionWindows]);
 
   const handleChooseFiles = useCallback(async () => {
     if (!activeSession) return [];
@@ -1023,102 +988,94 @@ export function App(): React.JSX.Element {
 
   const handleSend = useCallback(
     async (input: string, attachments: SessionInputAttachment[] = []) => {
-      if (!api || !activeWorkspace || !activeSession || !workspaceInteractive) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime || !activeWorkspace || !activeSession || !workspaceInteractive) return;
       setError("");
       try {
-        await api.sendInput(activeSession.id, input, {
+        await runtime.sendMessage(input, {
           model: selectedModel,
           reasoning_effort: selectedReasoningEffort,
           permission_mode: runMode === "plan" ? "plan" : claudeSSHRemote ? "bypassPermissions" : permissionMode,
           attachments,
         });
-        scheduleSessionViewRefresh(api, activeSession.id);
       } catch (sendError) {
         setError(sendError instanceof Error ? sendError.message : String(sendError));
         throw sendError;
       }
     },
-    [activeSession, activeWorkspace, api, claudeSSHRemote, permissionMode, runMode, scheduleSessionViewRefresh, selectedModel, selectedReasoningEffort, workspaceInteractive],
+    [activeSession, activeWorkspace, claudeSSHRemote, permissionMode, runMode, selectedModel, selectedReasoningEffort, workspaceInteractive],
   );
 
   const handleEditUserMessage = useCallback(
     async (eventSeq: number, input: string) => {
-      if (!api || !activeWorkspace || !activeSession || !workspaceInteractive) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime || !activeWorkspace || !activeSession || !workspaceInteractive) return;
       setError("");
       try {
-        await api.editLastUserMessage(activeSession.id, input, {
-          event_seq: eventSeq,
+        await runtime.editLastUserMessage(eventSeq, input, {
           model: selectedModel,
           reasoning_effort: selectedReasoningEffort,
           permission_mode: runMode === "plan" ? "plan" : claudeSSHRemote ? "bypassPermissions" : permissionMode,
-        });
-        const view = await api.sessionView(activeSession.id).catch(() => null);
-        if (view) storeSessionView(view);
+        }, activeSession.id);
       } catch (editError) {
         setError(editError instanceof Error ? editError.message : String(editError));
         throw editError;
       }
     },
-    [activeSession, activeWorkspace, api, claudeSSHRemote, permissionMode, runMode, selectedModel, selectedReasoningEffort, storeSessionView, workspaceInteractive],
+    [activeSession, activeWorkspace, claudeSSHRemote, permissionMode, runMode, selectedModel, selectedReasoningEffort, workspaceInteractive],
   );
 
   const handleInterrupt = useCallback(async () => {
-    if (!api || !activeSession || !workspaceInteractive) return;
+    const runtime = controllerRuntimeRef.current;
+    if (!runtime || !activeSession || !workspaceInteractive) return;
     setError("");
     try {
-      await api.interrupt(activeSession.id);
-      const view = await api.sessionView(activeSession.id).catch(() => null);
-      if (view) storeSessionView(view);
+      await runtime.interrupt(activeSession.id);
     } catch (interruptError) {
       setError(interruptError instanceof Error ? interruptError.message : String(interruptError));
     }
-  }, [activeSession, api, storeSessionView, workspaceInteractive]);
+  }, [activeSession, workspaceInteractive]);
 
   const handleCancelQueue = useCallback(
     async (sessionId: string, queueId: string) => {
-      if (!api || !workspaceInteractive) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime || !workspaceInteractive) return;
       setError("");
       try {
-        await api.cancelQueuedInput(sessionId, queueId);
-        const view = await api.sessionView(sessionId).catch(() => null);
-        if (view) storeSessionView(view);
+        await runtime.cancelQueuedInput(sessionId, queueId);
       } catch (cancelError) {
         setError(cancelError instanceof Error ? cancelError.message : String(cancelError));
       }
     },
-    [api, storeSessionView, workspaceInteractive],
+    [workspaceInteractive],
   );
 
   const handleSteerQueue = useCallback(
     async (sessionId: string, queueId: string) => {
-      if (!api || !workspaceInteractive) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime || !workspaceInteractive) return;
       setError("");
       try {
-        await api.steerQueuedInput(sessionId, queueId);
-        const view = await api.sessionView(sessionId).catch(() => null);
-        if (view) storeSessionView(view);
+        await runtime.steerQueuedInput(sessionId, queueId);
       } catch (steerError) {
         setError(steerError instanceof Error ? steerError.message : String(steerError));
       }
     },
-    [api, storeSessionView, workspaceInteractive],
+    [workspaceInteractive],
   );
 
   const handleEventResponse = useCallback(
     async (requestId: string, response: Record<string, unknown>) => {
-      if (!api || !workspaceInteractive) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime || !workspaceInteractive) return;
       setError("");
       try {
-        await api.respondApproval(requestId, response);
-        if (activeSessionId) {
-          const view = await api.sessionView(activeSessionId).catch(() => null);
-          if (view) storeSessionView(view);
-        }
+        await runtime.respondApproval(requestId, response, activeSessionId);
       } catch (responseError) {
         setError(responseError instanceof Error ? responseError.message : String(responseError));
       }
     },
-    [activeSessionId, api, storeSessionView, workspaceInteractive],
+    [activeSessionId, workspaceInteractive],
   );
 
   useEffect(() => {
@@ -1129,11 +1086,9 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     if (!pendingOpenSessionId) return;
-    const session = sessions.find((item) => item.id === pendingOpenSessionId);
-    if (!session) return;
+    if (!sessions.some((item) => item.id === pendingOpenSessionId)) return;
     setError("");
-    setActiveWorkspaceId(session.workspace_id);
-    setActiveSession(session);
+    void controllerRuntimeRef.current?.selectSession(pendingOpenSessionId);
     setPendingOpenSessionId("");
   }, [pendingOpenSessionId, sessions]);
 
@@ -1229,14 +1184,10 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     if (!daemonInfo || !localApi || !activeHostId) return;
-    let subscription: EventSubscription | null = null;
-    let workbenchSubscription: EventSubscription | null = null;
     let hostSessionSubscription: EventSubscription | null = null;
     let cancelled = false;
-    let resyncOnOpen = false;
     sessionViewRefreshGenerationRef.current += 1;
     hostStateGenerationRef.current += 1;
-    const refreshGeneration = sessionViewRefreshGenerationRef.current;
     const hostGeneration = hostStateGenerationRef.current;
     for (const timer of Object.values(sessionViewRefreshTimersRef.current)) window.clearTimeout(timer);
     sessionViewRefreshTimersRef.current = {};
@@ -1244,6 +1195,7 @@ export function App(): React.JSX.Element {
     sessionViewRefreshPendingRef.current.clear();
     const client = activeHostIsLocal ? localApi : createRemoteCoreClient(daemonInfo, activeHostId);
     const isCurrentHost = (): boolean => !cancelled && hostStateGenerationRef.current === hostGeneration;
+    controllerRuntimeRef.current?.stop();
     setApi(activeHostNeedsPairing ? null : client);
     setConnection(activeHostNeedsPairing ? "connected" : "booting");
     setError("");
@@ -1259,86 +1211,41 @@ export function App(): React.JSX.Element {
       });
     }
 
-    async function loadSelectedHost(): Promise<void> {
-      if (activeHostNeedsPairing) {
-        return;
-      }
-      try {
-        const initialState = await loadHostState(client, {
-          includeWorkspaceConnections: true,
-          isCurrent: isCurrentHost,
-          restoreOnLaunch: appSettingsRef.current.general.restore_on_launch,
-          updateLocalHostInfo: activeHostIsLocal,
-        });
-        if (!isCurrentHost()) return;
-        const afterSeq = initialState.liveAfterSeq;
-        workbenchSubscription = client.subscribeWorkbench({
-          onPatch: (patch) => {
-            if (!isCurrentHost()) return;
-            applyWorkbenchPatch(patch);
-            setConnection("connected");
-          },
-          onOpen: () => {
-            if (!isCurrentHost()) return;
-            setConnection("connected");
-          },
-          onError: () => {
-            if (!isCurrentHost()) return;
-            resyncOnOpen = true;
-            if (activeHostIsLocal) setConnection("reconnecting");
-          },
-        });
-        subscription = client.subscribeEvents(afterSeq, {
-          onEvent: (event) => {
-            if (!isCurrentHost()) return;
-            setConnection("connected");
-            applyHostEventState(event, client, refreshGeneration);
-            if (activeHostIsLocal && event.kind.startsWith("control.pairing.")) {
-              void refreshRemoteHosts();
-            }
-            if (activeHostIsLocal) maybeNotifyLiveEvent(event);
-            queueLiveEvent(event);
-          },
-          onOpen: () => {
-            if (!isCurrentHost()) return;
-            setConnection("connected");
-            if (!resyncOnOpen) return;
-            resyncOnOpen = false;
-            void loadHostState(client, {
-              includeWorkspaceConnections: true,
-              isCurrent: isCurrentHost,
-              restoreOnLaunch: false,
-              updateLocalHostInfo: activeHostIsLocal,
-              preserveSelection: true,
-            }).catch(() => undefined);
-          },
-          onError: (event) => {
-            if (!isCurrentHost()) return;
-            if (event instanceof SyntaxError) setError("bad SSE event payload");
-            resyncOnOpen = true;
-            if (activeHostIsLocal) setConnection("reconnecting");
-          },
-        });
-        setConnection("connected");
-      } catch (hostError) {
-        if (isCurrentHost()) {
-          if (!activeHostIsLocal && isCoreRequestError(hostError, "control_authorization_required")) {
-            setHostAuthorizationOverrides((current) => ({ ...current, [activeHostId]: "revoked" }));
-            setHostPairingStatus((current) => ({ ...current, [activeHostId]: t("desktop:pairing.revokedDescription") }));
-            setError("");
-          } else {
-            setError(hostError instanceof Error ? hostError.message : String(hostError));
-          }
-          setConnection("failed");
-        }
-      }
+    if (activeHostNeedsPairing) {
+      return () => {
+        cancelled = true;
+        hostSessionSubscription?.close();
+      };
     }
 
-    void loadSelectedHost();
+    const runtime = new ControllerRuntime(
+      {
+        host: createDesktopHostControllerClient(client, activeHostId),
+        hostId: activeHostId,
+        onLiveEvent: (event) => {
+          if (!isCurrentHost()) return;
+          if (activeHostIsLocal && event.kind.startsWith("control.pairing.")) {
+            void refreshRemoteHosts();
+          }
+          if (activeHostIsLocal) maybeNotifyLiveEvent(event);
+        },
+        logger: console,
+      },
+      {
+        eventWindowSize: EVENT_WINDOW_SIZE,
+        restoreOnLaunch: appSettingsRef.current.general.restore_on_launch,
+      },
+    );
+    controllerRuntimeRef.current = runtime;
+    const runtimeSubscription = runtime.subscribe((snapshot) => {
+      if (isCurrentHost()) commitControllerRuntimeSnapshot(snapshot);
+    });
+    void runtime.start();
     return () => {
       cancelled = true;
-      subscription?.close();
-      workbenchSubscription?.close();
+      runtimeSubscription.close();
+      runtime.stop();
+      if (controllerRuntimeRef.current === runtime) controllerRuntimeRef.current = null;
       hostSessionSubscription?.close();
       if (sseFrameRef.current !== null) {
         window.cancelAnimationFrame(sseFrameRef.current);
@@ -1350,7 +1257,7 @@ export function App(): React.JSX.Element {
       sessionViewRefreshPendingRef.current.clear();
       sseQueueRef.current = [];
     };
-  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, activeHostAuthorizationOverride, applyHostEventState, applyWorkbenchPatch, clearDisplayedWorkbenchState, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, refreshRemoteHosts, storeSessionView]);
+  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, activeHostAuthorizationOverride, clearDisplayedWorkbenchState, commitControllerRuntimeSnapshot, daemonInfo, localApi, maybeNotifyLiveEvent, refreshRemoteHosts]);
 
   const sessionTitles = useMemo(
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),

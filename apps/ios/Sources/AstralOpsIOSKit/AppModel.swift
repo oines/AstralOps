@@ -77,7 +77,6 @@ final class AppModel: ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var storedSelection: StoredControllerSelection
     private var sessionEventLoads = Set<String>()
-    private var terminalRecoveryInFlight = Set<String>()
     private var transcriptMediaDataURLs: [String: String] = [:]
     private var transcriptMediaLoads = Set<String>()
     private let networkMonitor = NWPathMonitor()
@@ -349,18 +348,11 @@ final class AppModel: ObservableObject {
     private func recoverAfterNetworkPathChange(lanAvailable: Bool) async {
         guard cloudSession != nil else { return }
         let hostID = selectedHostID
-        let terminalID = selectedTerminalID
-        let shouldRestoreTerminal = page == .terminal && !terminalID.isEmpty
         do {
             let nextMesh = try await bridge.networkChanged(lanAvailable: lanAvailable)
             applyMesh(nextMesh)
             if !hostID.isEmpty {
                 await loadSnapshot(for: hostID, silent: true)
-            }
-            if shouldRestoreTerminal,
-               selectedHostID == hostID,
-               let tab = workbench.terminalTabs[terminalID] ?? terminalTabs.first(where: { $0.terminalID == terminalID }) {
-                await attachTerminal(tab)
             }
         } catch {
             if lanAvailable {
@@ -378,18 +370,14 @@ final class AppModel: ObservableObject {
     }
 
     func selectWorkspace(_ workspace: Workspace) {
-        selectedWorkspaceID = workspace.id
-        selectedSessionID = restoredSessionID(for: workspace.id) ?? sessions.first?.id ?? ""
-        selectedTerminalID = terminalTabs.first?.terminalID ?? ""
+        applyRuntimeSelection(ControllerRuntimeProjection.selectWorkspace(workspace.id, in: workbench, current: currentRuntimeSelection()))
         reconcileRunModelSelection()
         saveCurrentSelection()
         renderTranscript()
     }
 
     func selectSession(_ session: SessionRecord) {
-        selectedWorkspaceID = session.workspaceID
-        selectedSessionID = session.id
-        selectedTerminalID = terminalTabs.first?.terminalID ?? ""
+        applyRuntimeSelection(ControllerRuntimeProjection.selectSession(session.id, in: workbench, current: currentRuntimeSelection()))
         pendingInteraction = workbench.sessionViews[session.id]?.pendingInteraction
         reconcileRunModelSelection()
         saveCurrentSelection()
@@ -415,8 +403,7 @@ final class AppModel: ObservableObject {
         if let host {
             setActiveHost(host)
         }
-        selectedWorkspaceID = tab.workspaceID
-        selectedTerminalID = tab.terminalID
+        applyRuntimeSelection(ControllerRuntimeProjection.selectTerminal(tab.terminalID, in: workbench, current: currentRuntimeSelection()))
         page = .terminal
         saveCurrentSelection()
         await attachTerminal(tab)
@@ -882,6 +869,33 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func openTerminalFromWebView(requestID: String, workspaceID: String, terminalID: String, afterSeq: Int) {
+        guard let host = selectedHost else {
+            postTerminalTransportError(AppModelError.missingHost, requestID: requestID, terminalID: terminalID)
+            return
+        }
+        Task {
+            do {
+                let info: JSONValue
+                if terminalID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    info = try await bridge.openTerminal(hostDeviceID: host.deviceID, workspaceID: workspaceID)
+                    if let nextTerminalID = info.objectValue?["terminal_id"]?.stringValue {
+                        selectedWorkspaceID = workspaceID
+                        selectedTerminalID = nextTerminalID
+                    }
+                    await refreshTerminals()
+                } else {
+                    info = try await bridge.attachTerminal(hostDeviceID: host.deviceID, terminalID: terminalID, afterSeq: afterSeq)
+                    selectedWorkspaceID = workspaceID
+                    selectedTerminalID = terminalID
+                }
+                postTerminalOpened(requestID: requestID, streamInfo: info)
+            } catch {
+                postTerminalTransportError(error, requestID: requestID, terminalID: terminalID)
+            }
+        }
+    }
+
     func activateTerminalPage() async {
         guard selectedHost != nil else { return }
         await refreshTerminals()
@@ -902,14 +916,9 @@ final class AppModel: ObservableObject {
     }
 
     func attachTerminal(_ tab: TerminalTab) async {
-        do {
-            selectedWorkspaceID = tab.workspaceID
-            selectedTerminalID = tab.terminalID
-            let info = try await bridge.attachTerminal(hostDeviceID: try requireHost().deviceID, terminalID: tab.terminalID)
-            renderTerminal(tab: tab, streamInfo: info)
-        } catch {
-            presentError(error)
-        }
+        selectedWorkspaceID = tab.workspaceID
+        selectedTerminalID = tab.terminalID
+        renderTerminal(tab: tab)
     }
 
     func detachSelectedTerminal() async {
@@ -939,11 +948,7 @@ final class AppModel: ObservableObject {
             do {
                 try await bridge.terminalInput(hostDeviceID: host.deviceID, terminalID: terminalID, data: data)
             } catch {
-                if Self.isTerminalViewerLifecycleError(error) {
-                    await recoverTerminalViewer(terminalID: terminalID, retryInput: data)
-                } else {
-                    presentError(error)
-                }
+                postTerminalTransportError(error, terminalID: terminalID)
             }
         }
     }
@@ -954,11 +959,7 @@ final class AppModel: ObservableObject {
             do {
                 try await bridge.terminalResize(hostDeviceID: host.deviceID, terminalID: terminalID, cols: cols, rows: rows)
             } catch {
-                if Self.isTerminalViewerLifecycleError(error) {
-                    await recoverTerminalViewer(terminalID: terminalID)
-                } else {
-                    presentError(error)
-                }
+                postTerminalTransportError(error, terminalID: terminalID)
             }
         }
     }
@@ -969,11 +970,7 @@ final class AppModel: ObservableObject {
             do {
                 try await bridge.terminalHeartbeatAck(hostDeviceID: host.deviceID, terminalID: terminalID, heartbeatSeq: heartbeatSeq, renderedSeq: renderedSeq)
             } catch {
-                if Self.isTerminalViewerLifecycleError(error) {
-                    await recoverTerminalViewer(terminalID: terminalID)
-                } else {
-                    presentError(error)
-                }
+                postTerminalTransportError(error, terminalID: terminalID)
             }
         }
     }
@@ -1208,20 +1205,15 @@ final class AppModel: ObservableObject {
         let stream = streamInfo?.objectValue ?? [:]
         let terminalID = stream["terminal_id"]?.stringValue ?? tab.terminalID
         let outputSeq = stream["output_seq"]?.intValue ?? tab.outputSeq ?? 0
-        let hasInputLease = !(stream["viewer_id"]?.stringValue ?? "").isEmpty && !(stream["input_lease_id"]?.stringValue ?? "").isEmpty
-        let isLive = hasInputLease || tab.canInput == true
-        let state = isLive ? "live" : (tab.status ?? "")
-        let message = isLive ? "" : (tab.status ?? "Input paused")
         terminalBridge.postNative(
-            type: "terminal.render",
+            type: "terminal.select",
             payload: .object([
+                "workspaceId": .string(tab.workspaceID),
                 "terminalId": .string(terminalID),
-                "output": .string(""),
                 "output_seq": .number(outputSeq),
-                "replayFromStart": .bool(hasInputLease),
-                "canInput": .bool(isLive),
-                "state": .string(state),
-                "message": .string(message)
+                "canInput": .bool(tab.canInput == true),
+                "state": .string(tab.status ?? ""),
+                "message": .string(tab.status ?? "Input paused")
             ])
         )
     }
@@ -1248,15 +1240,42 @@ final class AppModel: ObservableObject {
             return
         }
         terminalBridge.postNative(
-            type: "terminal.render",
+            type: "terminal.select",
             payload: .object([
+                "workspaceId": .string(selectedWorkspaceID),
                 "terminalId": .string(""),
-                "output": .string(""),
                 "canInput": .bool(false),
                 "state": .string("idle"),
                 "message": .string("No terminal")
             ])
         )
+    }
+
+    private func postTerminalOpened(requestID: String, streamInfo: JSONValue) {
+        var payload = streamInfo.objectValue ?? [:]
+        payload["request_id"] = .string(requestID)
+        payload["can_input"] = .bool(true)
+        terminalBridge.postNative(type: "terminal.opened", payload: .object(payload))
+    }
+
+    private func postTerminalTransportError(_ error: Error, requestID: String? = nil, terminalID: String? = nil) {
+        var payload: [String: JSONValue] = [
+            "message": .string(Self.errorDisplayMessage(for: error))
+        ]
+        if let requestID, !requestID.isEmpty {
+            payload["request_id"] = .string(requestID)
+        }
+        if let terminalID, !terminalID.isEmpty {
+            payload["terminal_id"] = .string(terminalID)
+        }
+        if case MobileCoreBridgeError.controlError(let envelope) = error {
+            payload["code"] = .string(envelope.code)
+            payload["message"] = .string(envelope.message)
+            if let status = envelope.status {
+                payload["status"] = .number(status)
+            }
+        }
+        terminalBridge.postNative(type: "terminal.error", payload: .object(payload))
     }
 
     private func sourceSessionExists(for session: SessionRecord?) -> Bool {
@@ -1286,46 +1305,8 @@ final class AppModel: ObservableObject {
         return message.isEmpty ? "Something went wrong." : message
     }
 
-    static func isTerminalViewerLifecycleError(_ error: Error) -> Bool {
-        if case MobileCoreBridgeError.controlError(let envelope) = error {
-            if envelope.code == "terminal_viewer_not_live" {
-                return true
-            }
-            let message = envelope.message.lowercased()
-            return message == "terminal viewer is not live"
-                || message == "terminal viewer is not attached"
-                || message == "terminal input requires an attached healthy viewer"
-        }
-        let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return message == "terminal viewer is not live"
-            || message == "terminal viewer is not attached"
-            || message == "terminal input requires an attached healthy viewer"
-    }
-
     func terminalShortcut(_ value: String) {
         sendTerminalInput(value)
-    }
-
-    private func recoverTerminalViewer(terminalID: String, retryInput: String? = nil) async {
-        guard terminalID == selectedTerminalID else { return }
-        guard !terminalRecoveryInFlight.contains(terminalID) else { return }
-        guard let tab = workbench.terminalTabs[terminalID] ?? terminalTabs.first(where: { $0.terminalID == terminalID }) else { return }
-        terminalRecoveryInFlight.insert(terminalID)
-        defer { terminalRecoveryInFlight.remove(terminalID) }
-        do {
-            selectedWorkspaceID = tab.workspaceID
-            selectedTerminalID = tab.terminalID
-            let hostID = try requireHost().deviceID
-            let info = try await bridge.attachTerminal(hostDeviceID: hostID, terminalID: terminalID)
-            renderTerminal(tab: tab, streamInfo: info)
-            if let retryInput, !retryInput.isEmpty {
-                try await bridge.terminalInput(hostDeviceID: hostID, terminalID: terminalID, data: retryInput)
-            }
-        } catch {
-            if !Self.isTerminalViewerLifecycleError(error) {
-                presentError(error)
-            }
-        }
     }
 
     private func loadSnapshot(for hostID: String, silent: Bool = false) async {
@@ -1467,17 +1448,31 @@ final class AppModel: ObservableObject {
     }
 
     private func reconcileSelection() {
-        if selectedWorkspaceID.isEmpty || !workbench.workspaces.keys.contains(selectedWorkspaceID) {
-            selectedWorkspaceID = restoredWorkspaceID() ?? workspaces.first?.id ?? ""
-        }
-        if selectedSessionID.isEmpty || !sessionBelongsToSelectedWorkspace(selectedSessionID) {
-            selectedSessionID = restoredSessionID(for: selectedWorkspaceID) ?? sessions.first?.id ?? ""
-        }
-        if selectedTerminalID.isEmpty || !workbench.terminalTabs.keys.contains(selectedTerminalID) {
-            selectedTerminalID = terminalTabs.first?.terminalID ?? ""
-        }
+        applyRuntimeSelection(ControllerRuntimeProjection.reconcile(currentRuntimeSelection(), in: workbench))
         reconcileRunModelSelection()
         saveCurrentSelection()
+    }
+
+    private func currentRuntimeSelection() -> ControllerWorkbenchSelection {
+        var selection = ControllerWorkbenchSelection(
+            workspaceID: selectedWorkspaceID,
+            sessionID: selectedSessionID,
+            terminalID: selectedTerminalID,
+            sessionsByWorkspace: storedSelection.hosts[selectedHostID]?.sessionsByWorkspace ?? [:]
+        )
+        if let restoredWorkspaceID = restoredWorkspaceID(), selection.workspaceID.isEmpty {
+            selection.workspaceID = restoredWorkspaceID
+        }
+        if let restoredSessionID = restoredSessionID(for: selection.workspaceID), selection.sessionID.isEmpty {
+            selection.sessionID = restoredSessionID
+        }
+        return selection
+    }
+
+    private func applyRuntimeSelection(_ selection: ControllerWorkbenchSelection) {
+        selectedWorkspaceID = selection.workspaceID
+        selectedSessionID = selection.sessionID
+        selectedTerminalID = selection.terminalID
     }
 
     private func reconcileRunModelSelection() {
@@ -1545,10 +1540,7 @@ final class AppModel: ObservableObject {
 
     private func rememberSessionID(_ sessionID: String) {
         guard !sessionID.isEmpty else { return }
-        if let session = workbench.sessions[sessionID] {
-            selectedWorkspaceID = session.workspaceID
-        }
-        selectedSessionID = sessionID
+        applyRuntimeSelection(ControllerRuntimeProjection.selectSession(sessionID, in: workbench, current: currentRuntimeSelection()))
         reconcileRunModelSelection()
         saveCurrentSelection()
     }
@@ -1563,19 +1555,12 @@ final class AppModel: ObservableObject {
     }
 
     private func mergeEvents(_ events: [AstralEvent], fallbackSessionID: String? = nil) {
-        for event in events {
-            var nextEvent = event
-            if nextEvent.sessionID == nil {
-                nextEvent.sessionID = fallbackSessionID
-            }
-            guard let sessionID = nextEvent.sessionID else { continue }
-            var current = eventsBySession[sessionID] ?? []
-            if !current.contains(where: { $0.seq == nextEvent.seq }) {
-                current.append(nextEvent)
-                current.sort { $0.seq < $1.seq }
-            }
-            eventsBySession[sessionID] = current
-        }
+        eventsBySession = ControllerRuntimeProjection.mergeEvents(
+            eventsBySession,
+            events: events,
+            fallbackSessionID: fallbackSessionID ?? selectedSessionID,
+            limit: 1000
+        )
     }
 
     private func renderTranscript() {

@@ -1,4 +1,5 @@
 import type {
+  AgentInfo,
   Session,
   SessionView,
   TerminalTab,
@@ -65,6 +66,20 @@ export function applyWorkbenchPatch(state: WorkbenchState, patch: WorkbenchPatch
         } else if (isWorkspace(op.value)) {
           next.workspaces[op.value.id] = { ...next.workspaces[op.value.id], ...op.value };
           selection.workspaceId ??= op.value.id;
+        }
+        break;
+      case "agents":
+        if (op.op === "remove") {
+          if (next.agents) {
+            const agents: Record<string, AgentInfo> = { ...next.agents };
+            delete agents[op.id];
+            next.agents = Object.keys(agents).length > 0 ? agents as WorkbenchState["agents"] : undefined;
+          }
+        } else if (isAgentInfo(op.value)) {
+          next.agents = ({
+            ...(next.agents ?? {}),
+            [op.id]: op.value,
+          }) as WorkbenchState["agents"];
         }
         break;
       case "sessions":
@@ -143,6 +158,7 @@ function cloneWorkbenchState(state: WorkbenchState): WorkbenchState {
   return {
     version: state.version,
     updated_at: state.updated_at,
+    agents: state.agents ? { ...state.agents } : undefined,
     workspaces: { ...state.workspaces },
     sessions: { ...state.sessions },
     session_views: { ...state.session_views },
@@ -158,6 +174,10 @@ function sortByUpdated<T extends { updated_at?: string; created_at?: string }>(v
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isAgentInfo(value: unknown): value is AgentInfo {
+  return isRecord(value) && typeof value.available === "boolean";
 }
 
 function isWorkspace(value: unknown): value is Workspace {

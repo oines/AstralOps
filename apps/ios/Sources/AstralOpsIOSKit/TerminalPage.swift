@@ -17,6 +17,9 @@ struct TerminalPage: View {
                     LocalHTMLWebView(
                         resourceName: colorScheme == .dark ? "terminal-dark" : "terminal-light",
                         bridge: model.terminalBridge,
+                        onTerminalOpen: { requestID, workspaceID, terminalID, afterSeq in
+                            model.openTerminalFromWebView(requestID: requestID, workspaceID: workspaceID, terminalID: terminalID, afterSeq: afterSeq)
+                        },
                         onTerminalInput: { model.sendTerminalInput($0) },
                         onTerminalResize: { terminalID, cols, rows in
                             model.terminalResize(terminalID: terminalID, cols: cols, rows: rows)

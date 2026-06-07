@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		06AD6C33EF472314B98D6F2D /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D2BC5F5BE165B72376163B4 /* JSONValue.swift */; };
 		09032FD5EE25CFCECB6B149B /* SessionCreateSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7425F5B3B4FA496A28456B4 /* SessionCreateSheet.swift */; };
+		17E87A497B0D3553A6A8CF1E /* ControllerRuntimeProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E59A81239D81B39020FE5D1 /* ControllerRuntimeProjection.swift */; };
 		29D5701BD96EF4242F1CB1D0 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = C24036068EB3A30D0146FDA3 /* Models.swift */; };
 		3574D7C9C71CF2D6004A0BF2 /* MobileCoreBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 541295D8925E948E31970D30 /* MobileCoreBridge.swift */; };
 		3894AE4ADBFEE383A6E1EAAD /* MediaPreviewSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86C5D395C9E03F69EDFAFF47 /* MediaPreviewSheet.swift */; };
@@ -71,6 +72,7 @@
 		541295D8925E948E31970D30 /* MobileCoreBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileCoreBridge.swift; sourceTree = "<group>"; };
 		6D5A89BBB214B68CF171F14B /* AstralOpsIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AstralOpsIOSApp.swift; sourceTree = "<group>"; };
 		6DD85DBFE041B88292D2ED61 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		6E59A81239D81B39020FE5D1 /* ControllerRuntimeProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControllerRuntimeProjection.swift; sourceTree = "<group>"; };
 		74152150C88204E6CE036DF8 /* CloudOAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudOAuth.swift; sourceTree = "<group>"; };
 		7E3329D8C78D4CF134783F61 /* PendingInteractionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingInteractionSheet.swift; sourceTree = "<group>"; };
 		7FEDDB694D2755FFD4C07581 /* AstralOpsIOSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AstralOpsIOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -119,6 +121,7 @@
 				1687770FC19005F370FEC0A1 /* AppModel.swift */,
 				74152150C88204E6CE036DF8 /* CloudOAuth.swift */,
 				9B2E0D2D71A9960F91A5FA01 /* ComposerView.swift */,
+				6E59A81239D81B39020FE5D1 /* ControllerRuntimeProjection.swift */,
 				A9CA305FE2D81B21F9EEB891 /* FilesPage.swift */,
 				CE0B18D3DA5BE56777004230 /* GeneratedProtocol.swift */,
 				0D2BC5F5BE165B72376163B4 /* JSONValue.swift */,
@@ -318,6 +321,7 @@
 				6800358561CFD47CA11867ED /* AstralOpsIOSApp.swift in Sources */,
 				4EA45A9A43ED741DDD7CF79E /* CloudOAuth.swift in Sources */,
 				A86CC7A4D39A423B718EA456 /* ComposerView.swift in Sources */,
+				17E87A497B0D3553A6A8CF1E /* ControllerRuntimeProjection.swift in Sources */,
 				DD60690CA65A79AF431614EE /* FilesPage.swift in Sources */,
 				4C9628498A9B1C074F4EF505 /* GeneratedProtocol.swift in Sources */,
 				06AD6C33EF472314B98D6F2D /* JSONValue.swift in Sources */,
