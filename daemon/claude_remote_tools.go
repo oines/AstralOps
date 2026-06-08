@@ -108,7 +108,7 @@ func (a *app) claudeRemoteToolOutput(ctx context.Context, ws Workspace, tool str
 func (a *app) claudeRemoteToolRead(ctx context.Context, ws Workspace, args map[string]any) (map[string]any, error) {
 	remote := claudeRemoteToolPath(ws, firstString(args["file_path"], args["path"]))
 	var out map[string]any
-	if err := a.ssh.call(ctx, ws, "read", map[string]any{"path": remote}, &out); err != nil {
+	if err := a.sshService().Call(ctx, ws, "read", map[string]any{"path": remote}, &out); err != nil {
 		return nil, err
 	}
 	body, err := remoteReadBytes(out)
@@ -151,7 +151,7 @@ func (a *app) claudeRemoteToolWrite(ctx context.Context, ws Workspace, args map[
 	if err != nil {
 		return nil, err
 	}
-	if err := a.ssh.call(ctx, ws, "write", remoteWriteParams(remote, []byte(content)), nil); err != nil {
+	if err := a.sshService().Call(ctx, ws, "write", remoteWriteParams(remote, []byte(content)), nil); err != nil {
 		return nil, err
 	}
 	if !existed {
@@ -199,7 +199,7 @@ func (a *app) claudeRemoteToolEdit(ctx context.Context, ws Workspace, args map[s
 		}
 		next = original[:index] + newString + original[index+len(oldString):]
 	}
-	if err := a.ssh.call(ctx, ws, "write", remoteWriteParams(remote, []byte(next)), nil); err != nil {
+	if err := a.sshService().Call(ctx, ws, "write", remoteWriteParams(remote, []byte(next)), nil); err != nil {
 		return nil, err
 	}
 	return map[string]any{
@@ -246,7 +246,7 @@ func (a *app) claudeRemoteToolMultiEdit(ctx context.Context, ws Workspace, args 
 	if len(applied) == 0 {
 		return nil, errors.New("edits must contain at least one edit")
 	}
-	if err := a.ssh.call(ctx, ws, "write", remoteWriteParams(remote, []byte(next)), nil); err != nil {
+	if err := a.sshService().Call(ctx, ws, "write", remoteWriteParams(remote, []byte(next)), nil); err != nil {
 		return nil, err
 	}
 	return map[string]any{
@@ -262,7 +262,7 @@ func (a *app) claudeRemoteToolGlob(ctx context.Context, ws Workspace, args map[s
 	cwd := claudeRemoteToolPath(ws, firstString(args["path"], args["cwd"]))
 	start := time.Now()
 	var out map[string]any
-	if err := a.ssh.call(ctx, ws, "glob", map[string]any{"cwd": cwd, "pattern": firstString(args["pattern"], "*")}, &out); err != nil {
+	if err := a.sshService().Call(ctx, ws, "glob", map[string]any{"cwd": cwd, "pattern": firstString(args["pattern"], "*")}, &out); err != nil {
 		return nil, err
 	}
 	matches := []string{}
@@ -288,7 +288,7 @@ func (a *app) claudeRemoteToolGrep(ctx context.Context, ws Workspace, args map[s
 		limit = maxClaudeRemoteGrepMatches
 	}
 	var out map[string]any
-	if err := a.ssh.call(ctx, ws, "grep", map[string]any{
+	if err := a.sshService().Call(ctx, ws, "grep", map[string]any{
 		"cwd":     cwd,
 		"pattern": stringValue(args["pattern"]),
 		"glob":    stringValue(args["glob"]),
@@ -361,7 +361,7 @@ func (a *app) claudeRemoteToolBash(ctx context.Context, ws Workspace, args map[s
 
 func (a *app) remoteReadStringIfExists(ctx context.Context, ws Workspace, remote string) (string, bool, error) {
 	var out map[string]any
-	err := a.ssh.call(ctx, ws, "read", map[string]any{"path": remote}, &out)
+	err := a.sshService().Call(ctx, ws, "read", map[string]any{"path": remote}, &out)
 	if err != nil {
 		return "", false, nil
 	}

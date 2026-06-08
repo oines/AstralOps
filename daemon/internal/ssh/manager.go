@@ -1,4 +1,4 @@
-package main
+package ssh
 
 import (
 	"bufio"
@@ -19,107 +19,103 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 const (
-	connectionDisconnected = "disconnected"
-	connectionConnecting   = "connecting"
-	connectionConnected    = "connected"
-	connectionReconnecting = "reconnecting"
-	connectionDegraded     = "degraded"
-	connectionFailed       = "failed"
-	sshProxyMaxAttempts    = 5
-	sshBrowseSessionTTL    = 5 * time.Minute
+	ConnectionDisconnected = "disconnected"
+	ConnectionConnecting   = "connecting"
+	ConnectionConnected    = "connected"
+	ConnectionReconnecting = "reconnecting"
+	ConnectionDegraded     = "degraded"
+	ConnectionFailed       = "failed"
+	ProxyMaxAttempts       = 5
+	BrowseSessionTTL       = 5 * time.Minute
 )
 
-type sshManager struct {
-	deps   sshDeps
+type Manager struct {
+	deps   Deps
 	mu     sync.Mutex
 	by     map[string]*sshTarget
 	browse map[string]*sshBrowseSession
 }
 
-type sshDeps struct {
-	currentSettings       func() AppSettings
-	listWorkspaces        func() []Workspace
-	latestConnection      func(string) (WorkspaceConnection, bool)
-	stopWorkspaceSessions func(string, string)
-	emit                  func(AstralEvent)
-	dataDir               string
+type Deps struct {
+	SSHAutoReconnect      func() bool
+	ListWorkspaces        func() []protocol.Workspace
+	LatestConnection      func(string) (protocol.WorkspaceConnection, bool)
+	StopWorkspaceSessions func(string, string)
+	Emit                  func(protocol.AstralEvent)
+	DataDir               string
 }
 
 type sshTarget struct {
-	workspace Workspace
-	proxy     *proxyClient
-	state     WorkspaceConnection
+	workspace protocol.Workspace
+	proxy     *ProxyClient
+	state     protocol.WorkspaceConnection
 }
 
 type sshBrowseSession struct {
-	workspace Workspace
-	proxy     *proxyClient
+	workspace protocol.Workspace
+	proxy     *ProxyClient
 	expiresAt time.Time
 }
 
-func newSSHManager(a *app) *sshManager {
-	return &sshManager{deps: sshDepsFromApp(a), by: map[string]*sshTarget{}, browse: map[string]*sshBrowseSession{}}
+func NewManager(deps Deps) *Manager {
+	return &Manager{deps: deps, by: map[string]*sshTarget{}, browse: map[string]*sshBrowseSession{}}
 }
 
-func sshDepsFromApp(a *app) sshDeps {
-	deps := sshDeps{}
-	if a != nil {
-		deps.currentSettings = a.currentSettings
-		deps.stopWorkspaceSessions = a.stopWorkspaceSessions
-		deps.emit = a.emit
-		if a.store != nil {
-			deps.listWorkspaces = a.store.listWorkspaces
-			deps.latestConnection = a.store.latestWorkspaceConnection
-			deps.dataDir = a.store.dataDir
-		}
-	}
-	return deps
-}
-
-func (m *sshManager) restorePersistedConnections(ctx context.Context) {
-	if m == nil || m.deps.currentSettings == nil || m.deps.listWorkspaces == nil || m.deps.latestConnection == nil {
+func (m *Manager) UpdateDeps(deps Deps) {
+	if m == nil {
 		return
 	}
-	autoReconnect := m.deps.currentSettings().Workspace.SSHAutoReconnect
-	for _, ws := range m.deps.listWorkspaces() {
+	m.mu.Lock()
+	m.deps = deps
+	m.mu.Unlock()
+}
+
+func (m *Manager) RestorePersistedConnections(ctx context.Context) {
+	if m == nil || m.deps.SSHAutoReconnect == nil || m.deps.ListWorkspaces == nil || m.deps.LatestConnection == nil {
+		return
+	}
+	autoReconnect := m.deps.SSHAutoReconnect()
+	for _, ws := range m.deps.ListWorkspaces() {
 		if ws.Target != "ssh" {
 			continue
 		}
 		if !autoReconnect {
-			m.seedState(ws, initialSSHConnection(ws, connectionDisconnected))
+			m.SeedState(ws, InitialConnection(ws, ConnectionDisconnected))
 			continue
 		}
-		last, ok := m.deps.latestConnection(ws.ID)
+		last, ok := m.deps.LatestConnection(ws.ID)
 		if !ok {
 			continue
 		}
 		state := mergeSSHConnectionDefaults(ws, last)
 		if shouldRestoreSSHConnection(state.Status) {
-			state.Status = connectionReconnecting
+			state.Status = ConnectionReconnecting
 			state.Message = "restoring previous ssh connection"
 			state.RetryAttempt = 0
-			state.RetryMax = sshProxyMaxAttempts
+			state.RetryMax = ProxyMaxAttempts
 			m.setState(ws, state)
-			go func(workspace Workspace) {
+			go func(workspace protocol.Workspace) {
 				connectCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 				defer cancel()
-				_, _ = m.connect(connectCtx, workspace)
+				_, _ = m.Connect(connectCtx, workspace)
 			}(ws)
 			continue
 		}
-		m.seedState(ws, state)
+		m.SeedState(ws, state)
 	}
 }
 
-func (m *sshManager) getConnection(ws Workspace) WorkspaceConnection {
+func (m *Manager) Connection(ws protocol.Workspace) protocol.WorkspaceConnection {
 	if ws.Target != "ssh" {
-		return WorkspaceConnection{
+		return protocol.WorkspaceConnection{
 			WorkspaceID: ws.ID,
 			Target:      ws.Target,
-			Status:      connectionConnected,
+			Status:      ConnectionConnected,
 			RemoteCWD:   ws.LocalCWD,
 			UpdatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 		}
@@ -129,10 +125,29 @@ func (m *sshManager) getConnection(ws Workspace) WorkspaceConnection {
 	if target := m.by[ws.ID]; target != nil {
 		return target.state
 	}
-	return initialSSHConnection(ws, connectionDisconnected)
+	return InitialConnection(ws, ConnectionDisconnected)
 }
 
-func (m *sshManager) remoteWorkspaceRuntimeDir(ws Workspace) string {
+func (m *Manager) SeedConnectedProxyForTest(ws protocol.Workspace, proxy *ProxyClient, state protocol.WorkspaceConnection) {
+	if state.WorkspaceID == "" {
+		state = InitialConnection(ws, ConnectionConnected)
+	}
+	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	m.mu.Lock()
+	m.by[ws.ID] = &sshTarget{workspace: ws, proxy: proxy, state: state}
+	m.mu.Unlock()
+}
+
+func (m *Manager) ProxyForTest(workspaceID string) *ProxyClient {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if target := m.by[workspaceID]; target != nil {
+		return target.proxy
+	}
+	return nil
+}
+
+func (m *Manager) RemoteWorkspaceRuntimeDir(ws protocol.Workspace) string {
 	if ws.Target != "ssh" {
 		return ""
 	}
@@ -151,24 +166,24 @@ func (m *sshManager) remoteWorkspaceRuntimeDir(ws Workspace) string {
 	return ""
 }
 
-func (m *sshManager) connect(ctx context.Context, ws Workspace) (WorkspaceConnection, error) {
+func (m *Manager) Connect(ctx context.Context, ws protocol.Workspace) (protocol.WorkspaceConnection, error) {
 	return m.connectInternal(ctx, ws, true)
 }
 
-func (m *sshManager) connectInternal(ctx context.Context, ws Workspace, emitProgress bool) (WorkspaceConnection, error) {
+func (m *Manager) connectInternal(ctx context.Context, ws protocol.Workspace, emitProgress bool) (protocol.WorkspaceConnection, error) {
 	if ws.Target != "ssh" {
-		return m.getConnection(ws), nil
+		return m.Connection(ws), nil
 	}
 	if ws.SSH == nil {
-		return WorkspaceConnection{}, errors.New("ssh workspace is missing ssh config")
+		return protocol.WorkspaceConnection{}, errors.New("ssh workspace is missing ssh config")
 	}
 	if emitProgress {
-		m.setState(ws, initialSSHConnection(ws, connectionConnecting))
+		m.setState(ws, InitialConnection(ws, ConnectionConnecting))
 	}
 
 	probe, err := m.probe(ctx, ws)
 	if err != nil {
-		state := initialSSHConnection(ws, connectionFailed)
+		state := InitialConnection(ws, ConnectionFailed)
 		state.Message = err.Error()
 		if emitProgress {
 			m.setState(ws, state)
@@ -176,7 +191,7 @@ func (m *sshManager) connectInternal(ctx context.Context, ws Workspace, emitProg
 		return state, err
 	}
 	var helper helperUpload
-	var proxy *proxyClient
+	var proxy *ProxyClient
 	var hello map[string]any
 	localHelper, err := m.localHelperBinary(ctx, probe)
 	if err != nil {
@@ -186,7 +201,7 @@ func (m *sshManager) connectInternal(ctx context.Context, ws Workspace, emitProg
 		}
 		return state, err
 	}
-	localSum, err := fileSHA256(localHelper)
+	localSum, err := FileSHA256(localHelper)
 	if err != nil {
 		state := connectionFailedState(ws, probe, err)
 		if emitProgress {
@@ -225,7 +240,7 @@ func (m *sshManager) connectInternal(ctx context.Context, ws Workspace, emitProg
 		}
 		return state, err
 	}
-	state := initialSSHConnection(ws, connectionConnected)
+	state := InitialConnection(ws, ConnectionConnected)
 	state.RemoteOS = probe.OS
 	state.RemoteArch = probe.Arch
 	state.RemoteShell = firstString(probe.Shell, stringValue(hello["shell"]))
@@ -250,8 +265,8 @@ func (m *sshManager) connectInternal(ctx context.Context, ws Workspace, emitProg
 	return state, nil
 }
 
-func connectionFailedState(ws Workspace, probe sshProbe, err error) WorkspaceConnection {
-	state := initialSSHConnection(ws, connectionFailed)
+func connectionFailedState(ws protocol.Workspace, probe sshProbe, err error) protocol.WorkspaceConnection {
+	state := InitialConnection(ws, ConnectionFailed)
 	state.RemoteOS = probe.OS
 	state.RemoteArch = probe.Arch
 	state.RemoteShell = probe.Shell
@@ -264,7 +279,7 @@ func connectionFailedState(ws Workspace, probe sshProbe, err error) WorkspaceCon
 	return state
 }
 
-func validateProxyHello(hello map[string]any) error {
+func ValidateProxyHello(hello map[string]any) error {
 	capabilities := mapValue(hello["capabilities"])
 	methods := map[string]bool{}
 	switch values := capabilities["methods"].(type) {
@@ -298,7 +313,7 @@ func validateProxyHello(hello map[string]any) error {
 	return nil
 }
 
-func (m *sshManager) disconnect(ws Workspace) WorkspaceConnection {
+func (m *Manager) Disconnect(ws protocol.Workspace) protocol.WorkspaceConnection {
 	m.mu.Lock()
 	target := m.by[ws.ID]
 	delete(m.by, ws.ID)
@@ -306,22 +321,22 @@ func (m *sshManager) disconnect(ws Workspace) WorkspaceConnection {
 	if target != nil && target.proxy != nil {
 		_ = target.proxy.close()
 	}
-	state := initialSSHConnection(ws, connectionDisconnected)
+	state := InitialConnection(ws, ConnectionDisconnected)
 	m.setState(ws, state)
 	return state
 }
 
-func (m *sshManager) proxyFor(ctx context.Context, ws Workspace) (*proxyClient, WorkspaceConnection, error) {
+func (m *Manager) ProxyFor(ctx context.Context, ws protocol.Workspace) (*ProxyClient, protocol.WorkspaceConnection, error) {
 	return m.proxyForWithProgress(ctx, ws, true)
 }
 
-func (m *sshManager) proxyForWithProgress(ctx context.Context, ws Workspace, emitConnectProgress bool) (*proxyClient, WorkspaceConnection, error) {
+func (m *Manager) proxyForWithProgress(ctx context.Context, ws protocol.Workspace, emitConnectProgress bool) (*ProxyClient, protocol.WorkspaceConnection, error) {
 	if ws.Target != "ssh" {
-		return nil, m.getConnection(ws), errors.New("workspace is not ssh")
+		return nil, m.Connection(ws), errors.New("workspace is not ssh")
 	}
 	m.mu.Lock()
 	target := m.by[ws.ID]
-	if target != nil && target.proxy != nil && target.proxy.isAlive() && target.state.Status == connectionConnected {
+	if target != nil && target.proxy != nil && target.proxy.isAlive() && target.state.Status == ConnectionConnected {
 		proxy := target.proxy
 		state := target.state
 		m.mu.Unlock()
@@ -341,9 +356,9 @@ func (m *sshManager) proxyForWithProgress(ctx context.Context, ws Workspace, emi
 	return target.proxy, state, nil
 }
 
-func (m *sshManager) call(ctx context.Context, ws Workspace, method string, params any, out any) error {
+func (m *Manager) Call(ctx context.Context, ws protocol.Workspace, method string, params any, out any) error {
 	var lastErr error
-	for attempt := 1; attempt <= sshProxyMaxAttempts; attempt++ {
+	for attempt := 1; attempt <= ProxyMaxAttempts; attempt++ {
 		proxy, _, err := m.proxyForWithProgress(ctx, ws, attempt == 1)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -364,23 +379,23 @@ func (m *sshManager) call(ctx context.Context, ws Workspace, method string, para
 			}
 			m.dropProxy(ws, proxy)
 		}
-		m.setReconnecting(ws, attempt, sshProxyMaxAttempts, lastErr)
-		if attempt < sshProxyMaxAttempts {
+		m.setReconnecting(ws, attempt, ProxyMaxAttempts, lastErr)
+		if attempt < ProxyMaxAttempts {
 			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
 		}
 	}
 	if lastErr == nil {
 		lastErr = errors.New("ssh operation failed")
 	}
-	message := fmt.Sprintf("ssh operation failed after %d attempts: %s", sshProxyMaxAttempts, lastErr.Error())
+	message := fmt.Sprintf("ssh operation failed after %d attempts: %s", ProxyMaxAttempts, lastErr.Error())
 	m.markDegraded(ws, message)
-	if m.deps.stopWorkspaceSessions != nil {
-		m.deps.stopWorkspaceSessions(ws.ID, message)
+	if m.deps.StopWorkspaceSessions != nil {
+		m.deps.StopWorkspaceSessions(ws.ID, message)
 	}
 	return errors.New(message)
 }
 
-func (m *sshManager) callEphemeral(ctx context.Context, ws Workspace, method string, params any, out any) error {
+func (m *Manager) callEphemeral(ctx context.Context, ws protocol.Workspace, method string, params any, out any) error {
 	proxy, err := m.openEphemeralProxy(ctx, ws)
 	if err != nil {
 		return err
@@ -389,7 +404,7 @@ func (m *sshManager) callEphemeral(ctx context.Context, ws Workspace, method str
 	return proxy.call(ctx, method, params, out)
 }
 
-func (m *sshManager) callBrowse(ctx context.Context, ws Workspace, method string, params any, out any) error {
+func (m *Manager) CallBrowse(ctx context.Context, ws protocol.Workspace, method string, params any, out any) error {
 	key := sshBrowseSessionKey(ws)
 	if key == "" {
 		return m.callEphemeral(ctx, ws, method, params, out)
@@ -422,7 +437,15 @@ func (m *sshManager) callBrowse(ctx context.Context, ws Workspace, method string
 	return nil
 }
 
-func (m *sshManager) openEphemeralProxy(ctx context.Context, ws Workspace) (*proxyClient, error) {
+func (m *Manager) StartPTY(ctx context.Context, ws protocol.Workspace, id string, params map[string]any) (<-chan Event, func(), map[string]any, error) {
+	_, events, unsubscribe, started, err := m.StartPTYWithProxy(ctx, ws, id, params)
+	if err != nil {
+		return nil, unsubscribe, started, err
+	}
+	return adaptProxyEvents(events), unsubscribe, started, nil
+}
+
+func (m *Manager) openEphemeralProxy(ctx context.Context, ws protocol.Workspace) (*ProxyClient, error) {
 	if ws.Target != "ssh" {
 		return nil, errors.New("workspace is not ssh")
 	}
@@ -437,7 +460,7 @@ func (m *sshManager) openEphemeralProxy(ctx context.Context, ws Workspace) (*pro
 	if err != nil {
 		return nil, err
 	}
-	localSum, err := fileSHA256(localHelper)
+	localSum, err := FileSHA256(localHelper)
 	if err != nil {
 		return nil, err
 	}
@@ -459,11 +482,11 @@ func (m *sshManager) openEphemeralProxy(ctx context.Context, ws Workspace) (*pro
 	return nil, remoteHelperAttemptsError(attempts)
 }
 
-func (m *sshManager) startPTY(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
+func (m *Manager) StartPTYWithProxy(ctx context.Context, ws protocol.Workspace, id string, params map[string]any) (*ProxyClient, <-chan proxyEvent, func(), map[string]any, error) {
 	return m.startEventProcess(ctx, ws, id, "pty_start", params)
 }
 
-func sshBrowseSessionKey(ws Workspace) string {
+func sshBrowseSessionKey(ws protocol.Workspace) string {
 	if ws.Target != "ssh" || ws.SSH == nil {
 		return ""
 	}
@@ -474,7 +497,11 @@ func sshBrowseSessionKey(ws Workspace) string {
 	return strings.Join([]string{endpoint, strconv.Itoa(sshPort(ws))}, "\x00")
 }
 
-func (m *sshManager) cachedBrowseProxy(key string) *proxyClient {
+func BrowseSessionKey(ws protocol.Workspace) string {
+	return sshBrowseSessionKey(ws)
+}
+
+func (m *Manager) cachedBrowseProxy(key string) *ProxyClient {
 	now := time.Now()
 	m.mu.Lock()
 	session := m.browse[key]
@@ -488,14 +515,14 @@ func (m *sshManager) cachedBrowseProxy(key string) *proxyClient {
 		}
 		return nil
 	}
-	session.expiresAt = now.Add(sshBrowseSessionTTL)
+	session.expiresAt = now.Add(BrowseSessionTTL)
 	proxy := session.proxy
 	m.mu.Unlock()
 	return proxy
 }
 
-func (m *sshManager) storeBrowseProxy(key string, ws Workspace, proxy *proxyClient) {
-	existing := (*proxyClient)(nil)
+func (m *Manager) storeBrowseProxy(key string, ws protocol.Workspace, proxy *ProxyClient) {
+	existing := (*ProxyClient)(nil)
 	m.mu.Lock()
 	if current := m.browse[key]; current != nil && current.proxy != proxy {
 		existing = current.proxy
@@ -503,7 +530,7 @@ func (m *sshManager) storeBrowseProxy(key string, ws Workspace, proxy *proxyClie
 	m.browse[key] = &sshBrowseSession{
 		workspace: ws,
 		proxy:     proxy,
-		expiresAt: time.Now().Add(sshBrowseSessionTTL),
+		expiresAt: time.Now().Add(BrowseSessionTTL),
 	}
 	m.mu.Unlock()
 	if existing != nil {
@@ -512,15 +539,15 @@ func (m *sshManager) storeBrowseProxy(key string, ws Workspace, proxy *proxyClie
 	m.scheduleBrowseSessionCleanup(key)
 }
 
-func (m *sshManager) extendBrowseSession(key string) {
+func (m *Manager) extendBrowseSession(key string) {
 	m.mu.Lock()
 	if session := m.browse[key]; session != nil {
-		session.expiresAt = time.Now().Add(sshBrowseSessionTTL)
+		session.expiresAt = time.Now().Add(BrowseSessionTTL)
 	}
 	m.mu.Unlock()
 }
 
-func (m *sshManager) closeBrowseSession(key string, proxy *proxyClient) {
+func (m *Manager) closeBrowseSession(key string, proxy *ProxyClient) {
 	m.mu.Lock()
 	session := m.browse[key]
 	if session != nil && (proxy == nil || session.proxy == proxy) {
@@ -534,8 +561,8 @@ func (m *sshManager) closeBrowseSession(key string, proxy *proxyClient) {
 	}
 }
 
-func (m *sshManager) scheduleBrowseSessionCleanup(key string) {
-	time.AfterFunc(sshBrowseSessionTTL, func() {
+func (m *Manager) scheduleBrowseSessionCleanup(key string) {
+	time.AfterFunc(BrowseSessionTTL, func() {
 		m.mu.Lock()
 		session := m.browse[key]
 		if session == nil {
@@ -556,7 +583,7 @@ func (m *sshManager) scheduleBrowseSessionCleanup(key string) {
 	})
 }
 
-func (m *sshManager) closeExpiredBrowseSession(key string) {
+func (m *Manager) closeExpiredBrowseSession(key string) {
 	m.mu.Lock()
 	session := m.browse[key]
 	if session == nil || time.Now().Before(session.expiresAt) {
@@ -570,13 +597,32 @@ func (m *sshManager) closeExpiredBrowseSession(key string) {
 	}
 }
 
-func (m *sshManager) startExec(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
+func (m *Manager) StartExecWithProxy(ctx context.Context, ws protocol.Workspace, id string, params map[string]any) (*ProxyClient, <-chan proxyEvent, func(), map[string]any, error) {
 	return m.startEventProcess(ctx, ws, id, "exec_start", params)
 }
 
-func (m *sshManager) startEventProcess(ctx context.Context, ws Workspace, id, method string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
+func (m *Manager) StartExec(ctx context.Context, ws protocol.Workspace, id string, params map[string]any) (<-chan Event, func(), map[string]any, error) {
+	_, events, unsubscribe, started, err := m.StartExecWithProxy(ctx, ws, id, params)
+	if err != nil {
+		return nil, unsubscribe, started, err
+	}
+	return adaptProxyEvents(events), unsubscribe, started, nil
+}
+
+func adaptProxyEvents(events <-chan proxyEvent) <-chan Event {
+	out := make(chan Event)
+	go func() {
+		defer close(out)
+		for event := range events {
+			out <- Event{ID: event.ID, Event: event.Event, Result: event.Result}
+		}
+	}()
+	return out
+}
+
+func (m *Manager) startEventProcess(ctx context.Context, ws protocol.Workspace, id, method string, params map[string]any) (*ProxyClient, <-chan proxyEvent, func(), map[string]any, error) {
 	var lastErr error
-	for attempt := 1; attempt <= sshProxyMaxAttempts; attempt++ {
+	for attempt := 1; attempt <= ProxyMaxAttempts; attempt++ {
 		proxy, _, err := m.proxyForWithProgress(ctx, ws, attempt == 1)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -606,23 +652,23 @@ func (m *sshManager) startEventProcess(ctx context.Context, ws Workspace, id, me
 			}
 			m.dropProxy(ws, proxy)
 		}
-		m.setReconnecting(ws, attempt, sshProxyMaxAttempts, lastErr)
-		if attempt < sshProxyMaxAttempts {
+		m.setReconnecting(ws, attempt, ProxyMaxAttempts, lastErr)
+		if attempt < ProxyMaxAttempts {
 			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
 		}
 	}
 	if lastErr == nil {
 		lastErr = errors.New("ssh operation failed")
 	}
-	message := fmt.Sprintf("ssh operation failed after %d attempts: %s", sshProxyMaxAttempts, lastErr.Error())
+	message := fmt.Sprintf("ssh operation failed after %d attempts: %s", ProxyMaxAttempts, lastErr.Error())
 	m.markDegraded(ws, message)
-	if m.deps.stopWorkspaceSessions != nil {
-		m.deps.stopWorkspaceSessions(ws.ID, message)
+	if m.deps.StopWorkspaceSessions != nil {
+		m.deps.StopWorkspaceSessions(ws.ID, message)
 	}
 	return nil, nil, nil, nil, errors.New(message)
 }
 
-func killStartedEventProcess(proxy *proxyClient, startMethod string, id string) {
+func killStartedEventProcess(proxy *ProxyClient, startMethod string, id string) {
 	killMethod := ""
 	switch startMethod {
 	case "exec_start":
@@ -638,12 +684,12 @@ func killStartedEventProcess(proxy *proxyClient, startMethod string, id string) 
 	_ = proxy.call(ctx, killMethod, map[string]any{"id": id}, nil)
 }
 
-func (m *sshManager) dropProxy(ws Workspace, proxy *proxyClient) {
+func (m *Manager) dropProxy(ws protocol.Workspace, proxy *ProxyClient) {
 	m.mu.Lock()
 	target := m.by[ws.ID]
 	if target != nil && target.proxy == proxy {
 		target.proxy = nil
-		target.state.Status = connectionDegraded
+		target.state.Status = ConnectionDegraded
 		target.state.HelperStatus = "exited"
 		target.state.Message = proxy.exitMessage()
 		target.state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -652,18 +698,18 @@ func (m *sshManager) dropProxy(ws Workspace, proxy *proxyClient) {
 	_ = proxy.close()
 }
 
-func (m *sshManager) markDegraded(ws Workspace, message string) {
+func (m *Manager) markDegraded(ws protocol.Workspace, message string) {
 	m.mu.Lock()
 	target := m.by[ws.ID]
 	if target == nil {
-		target = &sshTarget{workspace: ws, state: initialSSHConnection(ws, connectionDegraded)}
+		target = &sshTarget{workspace: ws, state: InitialConnection(ws, ConnectionDegraded)}
 		m.by[ws.ID] = target
 	}
 	state := target.state
 	if state.WorkspaceID == "" {
-		state = initialSSHConnection(ws, connectionDegraded)
+		state = InitialConnection(ws, ConnectionDegraded)
 	}
-	state.Status = connectionDegraded
+	state.Status = ConnectionDegraded
 	state.HelperStatus = "exited"
 	state.Message = message
 	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -672,9 +718,9 @@ func (m *sshManager) markDegraded(ws Workspace, message string) {
 	m.emitConnection(ws, state)
 }
 
-func (m *sshManager) setReconnecting(ws Workspace, attempt int, max int, err error) {
+func (m *Manager) setReconnecting(ws protocol.Workspace, attempt int, max int, err error) {
 	state := m.connectionStateForUpdate(ws)
-	state.Status = connectionReconnecting
+	state.Status = ConnectionReconnecting
 	state.HelperStatus = "reconnecting"
 	state.RetryAttempt = attempt
 	state.RetryMax = max
@@ -684,16 +730,16 @@ func (m *sshManager) setReconnecting(ws Workspace, attempt int, max int, err err
 	m.setState(ws, state)
 }
 
-func (m *sshManager) connectionStateForUpdate(ws Workspace) WorkspaceConnection {
+func (m *Manager) connectionStateForUpdate(ws protocol.Workspace) protocol.WorkspaceConnection {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if target := m.by[ws.ID]; target != nil && target.state.WorkspaceID != "" {
 		return target.state
 	}
-	return initialSSHConnection(ws, connectionDisconnected)
+	return InitialConnection(ws, ConnectionDisconnected)
 }
 
-func (m *sshManager) setState(ws Workspace, state WorkspaceConnection) {
+func (m *Manager) setState(ws protocol.Workspace, state protocol.WorkspaceConnection) {
 	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	m.mu.Lock()
 	target := m.by[ws.ID]
@@ -706,7 +752,7 @@ func (m *sshManager) setState(ws Workspace, state WorkspaceConnection) {
 	m.emitConnection(ws, state)
 }
 
-func (m *sshManager) seedState(ws Workspace, state WorkspaceConnection) {
+func (m *Manager) SeedState(ws protocol.Workspace, state protocol.WorkspaceConnection) {
 	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	m.mu.Lock()
 	target := m.by[ws.ID]
@@ -718,14 +764,14 @@ func (m *sshManager) seedState(ws Workspace, state WorkspaceConnection) {
 	m.mu.Unlock()
 }
 
-func (m *sshManager) emitConnection(ws Workspace, state WorkspaceConnection) {
-	if m == nil || m.deps.emit == nil {
+func (m *Manager) emitConnection(ws protocol.Workspace, state protocol.WorkspaceConnection) {
+	if m == nil || m.deps.Emit == nil {
 		return
 	}
-	m.deps.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.connection", Normalized: eventNormalized("workspace.connection", state)})
+	m.deps.Emit(protocol.AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.connection", Normalized: protocol.EventNormalized("workspace.connection", state)})
 }
 
-func (m *sshManager) watchProxy(ws Workspace, proxy *proxyClient) {
+func (m *Manager) watchProxy(ws protocol.Workspace, proxy *ProxyClient) {
 	<-proxy.done
 	m.mu.Lock()
 	target := m.by[ws.ID]
@@ -734,7 +780,7 @@ func (m *sshManager) watchProxy(ws Workspace, proxy *proxyClient) {
 		return
 	}
 	state := target.state
-	state.Status = connectionDegraded
+	state.Status = ConnectionDegraded
 	state.HelperStatus = "exited"
 	state.Message = proxy.exitMessage()
 	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -758,7 +804,9 @@ type sshProbe struct {
 	RGVersion     string
 }
 
-func (m *sshManager) probe(ctx context.Context, ws Workspace) (sshProbe, error) {
+type Probe = sshProbe
+
+func (m *Manager) probe(ctx context.Context, ws protocol.Workspace) (sshProbe, error) {
 	remoteCWD := strings.TrimSpace(ws.SSH.RemoteCWD)
 	script := remoteProbeScript(remoteCWD)
 	out, stderr, err := runSSHOutput(ctx, ws, "probe", script, map[string]any{"remote_cwd": remoteCWD})
@@ -832,12 +880,14 @@ type remoteHelperCandidate struct {
 	RemoteDir string
 }
 
+type RemoteHelperCandidate = remoteHelperCandidate
+
 type remoteHelperAttempt struct {
 	Candidate remoteHelperCandidate
 	Err       error
 }
 
-func (m *sshManager) tryRemoteHelperCandidate(ctx context.Context, ws Workspace, probe sshProbe, candidate remoteHelperCandidate, localHelper, localSum string, emitProgress bool) (helperUpload, *proxyClient, map[string]any, error) {
+func (m *Manager) tryRemoteHelperCandidate(ctx context.Context, ws protocol.Workspace, probe sshProbe, candidate remoteHelperCandidate, localHelper, localSum string, emitProgress bool) (helperUpload, *ProxyClient, map[string]any, error) {
 	helper, proxy, hello, err := m.tryRemoteHelperCandidateOnce(ctx, ws, candidate, localHelper, localSum, false)
 	if err == nil {
 		return helper, proxy, hello, nil
@@ -847,7 +897,7 @@ func (m *sshManager) tryRemoteHelperCandidate(ctx context.Context, ws Workspace,
 		return helper, proxy, hello, err
 	}
 	if emitProgress {
-		state := initialSSHConnection(ws, connectionReconnecting)
+		state := InitialConnection(ws, ConnectionReconnecting)
 		state.RemoteOS = probe.OS
 		state.RemoteArch = probe.Arch
 		state.RemoteShell = probe.Shell
@@ -871,7 +921,7 @@ func (m *sshManager) tryRemoteHelperCandidate(ctx context.Context, ws Workspace,
 	return helper, proxy, hello, err
 }
 
-func (m *sshManager) tryRemoteHelperCandidateOnce(ctx context.Context, ws Workspace, candidate remoteHelperCandidate, localHelper, localSum string, forceUpload bool) (helper helperUpload, proxy *proxyClient, hello map[string]any, err error) {
+func (m *Manager) tryRemoteHelperCandidateOnce(ctx context.Context, ws protocol.Workspace, candidate remoteHelperCandidate, localHelper, localSum string, forceUpload bool) (helper helperUpload, proxy *ProxyClient, hello map[string]any, err error) {
 	candidateStartedAt := logDiagnosticSpanStart("ssh.helper.candidate", sshHelperCandidateLogFields(ws, candidate, forceUpload, helper))
 	defer func() {
 		fields := sshHelperCandidateLogFields(ws, candidate, forceUpload, helper)
@@ -896,7 +946,7 @@ func (m *sshManager) tryRemoteHelperCandidateOnce(ctx context.Context, ws Worksp
 		err = remoteHelperNoFallbackError{err: err}
 		return
 	}
-	if validateErr := validateProxyHello(hello); validateErr != nil {
+	if validateErr := ValidateProxyHello(hello); validateErr != nil {
 		_ = proxy.close()
 		err = remoteHelperValidationError{err: validateErr}
 		return
@@ -934,7 +984,7 @@ func (e remoteHelperNoFallbackError) Unwrap() error {
 	return e.err
 }
 
-func (m *sshManager) ensureHelperAt(ctx context.Context, ws Workspace, candidate remoteHelperCandidate, local, localSum string, forceUpload bool) (helperUpload, error) {
+func (m *Manager) ensureHelperAt(ctx context.Context, ws protocol.Workspace, candidate remoteHelperCandidate, local, localSum string, forceUpload bool) (helperUpload, error) {
 	remoteDir := candidate.RemoteDir
 	remotePath := remoteDir + "/astral-proxy-agent"
 	helper := helperUpload{LocalPath: local, RemoteDir: remoteDir, RemotePath: remotePath}
@@ -980,7 +1030,7 @@ func (m *sshManager) ensureHelperAt(ctx context.Context, ws Workspace, candidate
 	return helper, nil
 }
 
-func remoteHelperCandidates(ws Workspace, probe sshProbe) []remoteHelperCandidate {
+func remoteHelperCandidates(ws protocol.Workspace, probe sshProbe) []remoteHelperCandidate {
 	type candidateInput struct {
 		label string
 		base  string
@@ -1022,6 +1072,10 @@ func remoteHelperCandidates(ws Workspace, probe sshProbe) []remoteHelperCandidat
 	return out
 }
 
+func RemoteHelperCandidates(ws protocol.Workspace, probe Probe) []RemoteHelperCandidate {
+	return remoteHelperCandidates(ws, probe)
+}
+
 func remoteHelperAttemptsError(attempts []remoteHelperAttempt) error {
 	if len(attempts) == 0 {
 		return errors.New("remote helper failed")
@@ -1042,7 +1096,7 @@ func remoteHelperAttemptsError(attempts []remoteHelperAttempt) error {
 	return errors.New(b.String())
 }
 
-func (m *sshManager) remoteHelperSHA256(ctx context.Context, ws Workspace, remotePath string) string {
+func (m *Manager) remoteHelperSHA256(ctx context.Context, ws protocol.Workspace, remotePath string) string {
 	script := "if command -v sha256sum >/dev/null 2>&1; then sha256sum " + shellQuote(remotePath) + " 2>/dev/null | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 " + shellQuote(remotePath) + " 2>/dev/null | awk '{print $1}'; fi"
 	out, _, err := runSSHOutput(ctx, ws, "helper.hash", script, map[string]any{"remote_path": remotePath})
 	if err != nil {
@@ -1051,7 +1105,7 @@ func (m *sshManager) remoteHelperSHA256(ctx context.Context, ws Workspace, remot
 	return strings.TrimSpace(string(out))
 }
 
-func uploadRemoteFile(ctx context.Context, ws Workspace, localPath, remotePath string) error {
+func uploadRemoteFile(ctx context.Context, ws protocol.Workspace, localPath, remotePath string) error {
 	file, err := os.Open(localPath)
 	if err != nil {
 		return err
@@ -1072,7 +1126,7 @@ func uploadRemoteFile(ctx context.Context, ws Workspace, localPath, remotePath s
 	return nil
 }
 
-func fileSHA256(path string) (string, error) {
+func FileSHA256(path string) (string, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
@@ -1081,14 +1135,14 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func (m *sshManager) localHelperBinary(ctx context.Context, probe sshProbe) (string, error) {
+func (m *Manager) localHelperBinary(ctx context.Context, probe sshProbe) (string, error) {
 	if configured := strings.TrimSpace(os.Getenv("ASTRALOPS_PROXY_AGENT")); configured != "" {
 		return configured, nil
 	}
 	if bundled := findBundledProxyAgent(probe); bundled != "" {
 		return bundled, nil
 	}
-	out := filepath.Join(m.deps.dataDir, "helpers", probe.OS+"-"+probe.Arch, "astral-proxy-agent")
+	out := filepath.Join(m.deps.DataDir, "helpers", probe.OS+"-"+probe.Arch, "astral-proxy-agent")
 	root := repoRootGuess()
 	if _, err := os.Stat(filepath.Join(root, "proxy-agent", "main.go")); err == nil {
 		if st, statErr := os.Stat(out); statErr == nil && helperBinaryUsable(st) && helperBinaryFresh(root, st.ModTime()) {
@@ -1102,7 +1156,7 @@ func (m *sshManager) localHelperBinary(ctx context.Context, probe sshProbe) (str
 	return m.buildLocalHelperBinary(ctx, probe, out, root)
 }
 
-func (m *sshManager) buildLocalHelperBinary(ctx context.Context, probe sshProbe, out string, root string) (string, error) {
+func (m *Manager) buildLocalHelperBinary(ctx context.Context, probe sshProbe, out string, root string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {
 		return "", err
 	}
@@ -1145,6 +1199,10 @@ func helperBinaryFresh(root string, builtAt time.Time) bool {
 	return !latest.IsZero() && !latest.After(builtAt)
 }
 
+func HelperBinaryFresh(root string, builtAt time.Time) bool {
+	return helperBinaryFresh(root, builtAt)
+}
+
 func findBundledProxyAgent(probe sshProbe) string {
 	candidates := []string{}
 	if exe, err := os.Executable(); err == nil {
@@ -1178,7 +1236,7 @@ func helperBinaryUsable(st os.FileInfo) bool {
 	return st.Mode()&0o111 != 0
 }
 
-func initialSSHConnection(ws Workspace, status string) WorkspaceConnection {
+func InitialConnection(ws protocol.Workspace, status string) protocol.WorkspaceConnection {
 	port := 22
 	endpoint := ""
 	remoteCWD := ""
@@ -1188,7 +1246,7 @@ func initialSSHConnection(ws Workspace, status string) WorkspaceConnection {
 		remoteCWD = ws.SSH.RemoteCWD
 	}
 	user, host := userHostFromEndpoint(endpoint)
-	return WorkspaceConnection{
+	return protocol.WorkspaceConnection{
 		WorkspaceID: ws.ID,
 		Target:      ws.Target,
 		Status:      status,
@@ -1202,8 +1260,8 @@ func initialSSHConnection(ws Workspace, status string) WorkspaceConnection {
 	}
 }
 
-func mergeSSHConnectionDefaults(ws Workspace, state WorkspaceConnection) WorkspaceConnection {
-	base := initialSSHConnection(ws, state.Status)
+func mergeSSHConnectionDefaults(ws protocol.Workspace, state protocol.WorkspaceConnection) protocol.WorkspaceConnection {
+	base := InitialConnection(ws, state.Status)
 	if state.WorkspaceID == "" {
 		state.WorkspaceID = base.WorkspaceID
 	}
@@ -1236,14 +1294,14 @@ func mergeSSHConnectionDefaults(ws Workspace, state WorkspaceConnection) Workspa
 
 func shouldRestoreSSHConnection(status string) bool {
 	switch status {
-	case connectionConnected, connectionConnecting, connectionReconnecting, connectionDegraded:
+	case ConnectionConnected, ConnectionConnecting, ConnectionReconnecting, ConnectionDegraded:
 		return true
 	default:
 		return false
 	}
 }
 
-func runSSHOutput(ctx context.Context, ws Workspace, operation string, remoteCommand string, details map[string]any) ([]byte, string, error) {
+func runSSHOutput(ctx context.Context, ws protocol.Workspace, operation string, remoteCommand string, details map[string]any) ([]byte, string, error) {
 	cmd := exec.CommandContext(ctx, "ssh", sshOneShotCommandArgs(ws, remoteCommand)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -1268,7 +1326,7 @@ func runSSHOutput(ctx context.Context, ws Workspace, operation string, remoteCom
 	return out, userSSHStderr(stderr.String()), nil
 }
 
-func runSSHCombinedOutput(ctx context.Context, ws Workspace, operation string, remoteCommand string, details map[string]any) ([]byte, error) {
+func runSSHCombinedOutput(ctx context.Context, ws protocol.Workspace, operation string, remoteCommand string, details map[string]any) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "ssh", sshOneShotCommandArgs(ws, remoteCommand)...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -1298,7 +1356,7 @@ func runSSHCombinedOutput(ctx context.Context, ws Workspace, operation string, r
 	return stdout.Bytes(), nil
 }
 
-func runSSHWithInput(ctx context.Context, ws Workspace, operation string, remoteCommand string, input io.Reader, details map[string]any) (string, error) {
+func runSSHWithInput(ctx context.Context, ws protocol.Workspace, operation string, remoteCommand string, input io.Reader, details map[string]any) (string, error) {
 	cmd := exec.CommandContext(ctx, "ssh", sshOneShotCommandArgs(ws, remoteCommand)...)
 	cmd.Stdin = input
 	var stderr bytes.Buffer
@@ -1345,7 +1403,7 @@ func runLocalCombinedOutput(cmd *exec.Cmd, operation string, details map[string]
 	return out, nil
 }
 
-func sshCommandLogFields(ws Workspace, operation string, details map[string]any) map[string]any {
+func sshCommandLogFields(ws protocol.Workspace, operation string, details map[string]any) map[string]any {
 	fields := map[string]any{
 		"workspace_id": ws.ID,
 		"operation":    operation,
@@ -1362,7 +1420,7 @@ func sshCommandLogFields(ws Workspace, operation string, details map[string]any)
 	return fields
 }
 
-func sshOneShotCommandArgs(ws Workspace, remoteCommand string) []string {
+func sshOneShotCommandArgs(ws protocol.Workspace, remoteCommand string) []string {
 	args := append([]string{}, sshArgs(ws)...)
 	if daemonDiagnosticLoggingEnabled() {
 		args = append(args, "-v")
@@ -1396,7 +1454,7 @@ func combinedCommandOutput(stdout string, stderr string) []byte {
 	}
 }
 
-func sshHelperCandidateLogFields(ws Workspace, candidate remoteHelperCandidate, forceUpload bool, helper helperUpload) map[string]any {
+func sshHelperCandidateLogFields(ws protocol.Workspace, candidate remoteHelperCandidate, forceUpload bool, helper helperUpload) map[string]any {
 	fields := map[string]any{
 		"workspace_id":  ws.ID,
 		"endpoint":      "",
@@ -1417,7 +1475,7 @@ func sshHelperCandidateLogFields(ws Workspace, candidate remoteHelperCandidate, 
 	return fields
 }
 
-func startProxyClient(ws Workspace, helper helperUpload) (*proxyClient, error) {
+func startProxyClient(ws protocol.Workspace, helper helperUpload) (*ProxyClient, error) {
 	command := "exec " + shellQuote(helper.RemotePath) + " --cwd " + shellQuote(ws.SSH.RemoteCWD)
 	cmd := exec.Command("ssh", append(sshArgs(ws), ws.SSH.Endpoint, command)...)
 	fields := sshCommandLogFields(ws, "proxy.start", map[string]any{
@@ -1481,8 +1539,8 @@ func startProxyClient(ws Workspace, helper helperUpload) (*proxyClient, error) {
 	return client, nil
 }
 
-type proxyClient struct {
-	workspace Workspace
+type ProxyClient struct {
+	workspace protocol.Workspace
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
 	stdout    io.Reader
@@ -1511,8 +1569,8 @@ type proxyEvent struct {
 	Result map[string]any `json:"result,omitempty"`
 }
 
-func newProxyClient(ws Workspace, cmd *exec.Cmd, stdin io.WriteCloser, stdout io.Reader, stderr io.Reader) *proxyClient {
-	return &proxyClient{
+func newProxyClient(ws protocol.Workspace, cmd *exec.Cmd, stdin io.WriteCloser, stdout io.Reader, stderr io.Reader) *ProxyClient {
+	return &ProxyClient{
 		workspace: ws,
 		cmd:       cmd,
 		stdin:     stdin,
@@ -1525,19 +1583,40 @@ func newProxyClient(ws Workspace, cmd *exec.Cmd, stdin io.WriteCloser, stdout io
 	}
 }
 
-func (p *proxyClient) start() {
+func NewProxyClientForTest(ws protocol.Workspace, cmd *exec.Cmd, stdin io.WriteCloser, stdout io.Reader, stderr io.Reader) *ProxyClient {
+	return newProxyClient(ws, cmd, stdin, stdout, stderr)
+}
+
+func (p *ProxyClient) StartForTest() {
+	p.start()
+}
+
+func (p *ProxyClient) CloseForTest() error {
+	return p.close()
+}
+
+func (p *ProxyClient) DoneForTest() <-chan struct{} {
+	if p == nil {
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+	return p.done
+}
+
+func (p *ProxyClient) start() {
 	go p.scanStdout()
 	go p.scanStderr()
 	go p.wait()
 }
 
-func (p *proxyClient) isAlive() bool {
+func (p *ProxyClient) isAlive() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.alive
 }
 
-func (p *proxyClient) close() error {
+func (p *ProxyClient) close() error {
 	p.mu.Lock()
 	alive := p.alive
 	p.mu.Unlock()
@@ -1551,13 +1630,13 @@ func (p *proxyClient) close() error {
 	return nil
 }
 
-func (p *proxyClient) exitMessage() string {
+func (p *ProxyClient) exitMessage() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.errText
 }
 
-func (p *proxyClient) scanStdout() {
+func (p *ProxyClient) scanStdout() {
 	scanner := bufio.NewScanner(p.stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	for scanner.Scan() {
@@ -1577,7 +1656,7 @@ func (p *proxyClient) scanStdout() {
 	}
 }
 
-func (p *proxyClient) scanStderr() {
+func (p *ProxyClient) scanStderr() {
 	scanner := bufio.NewScanner(p.stderr)
 	scanner.Buffer(make([]byte, 0, 16*1024), 8*1024*1024)
 	for scanner.Scan() {
@@ -1588,7 +1667,7 @@ func (p *proxyClient) scanStderr() {
 	}
 }
 
-func (p *proxyClient) wait() {
+func (p *ProxyClient) wait() {
 	err := p.cmd.Wait()
 	if err != nil {
 		p.setErr(err.Error())
@@ -1620,7 +1699,7 @@ func (p *proxyClient) wait() {
 	close(p.done)
 }
 
-func (p *proxyClient) setErr(text string) {
+func (p *ProxyClient) setErr(text string) {
 	p.mu.Lock()
 	if p.errText == "" {
 		p.errText = text
@@ -1630,7 +1709,7 @@ func (p *proxyClient) setErr(text string) {
 	p.mu.Unlock()
 }
 
-func (p *proxyClient) deliverResponse(res proxyResponse) {
+func (p *ProxyClient) deliverResponse(res proxyResponse) {
 	p.mu.Lock()
 	ch := p.pending[res.ID]
 	delete(p.pending, res.ID)
@@ -1640,7 +1719,7 @@ func (p *proxyClient) deliverResponse(res proxyResponse) {
 	}
 }
 
-func (p *proxyClient) deliverEvent(res proxyResponse) {
+func (p *ProxyClient) deliverEvent(res proxyResponse) {
 	event := proxyEvent{ID: res.ID, Event: res.Event}
 	if len(res.Result) > 0 {
 		_ = json.Unmarshal(res.Result, &event.Result)
@@ -1656,7 +1735,7 @@ func (p *proxyClient) deliverEvent(res proxyResponse) {
 	}
 }
 
-func (p *proxyClient) subscribe(id string) (<-chan proxyEvent, func()) {
+func (p *ProxyClient) subscribe(id string) (<-chan proxyEvent, func()) {
 	ch := make(chan proxyEvent, 128)
 	p.mu.Lock()
 	p.events[id] = append(p.events[id], ch)
@@ -1681,7 +1760,7 @@ func (p *proxyClient) subscribe(id string) (<-chan proxyEvent, func()) {
 	return ch, cancel
 }
 
-func (p *proxyClient) call(ctx context.Context, method string, params any, out any) error {
+func (p *ProxyClient) call(ctx context.Context, method string, params any, out any) error {
 	startedAt := logSSHProxyCallStart(p.workspace, method, params)
 	id := strconv.FormatInt(time.Now().UnixNano(), 36) + "_" + strconv.FormatInt(p.next(), 36)
 	req := map[string]any{"id": id, "method": method, "params": params}
@@ -1757,32 +1836,44 @@ func isProxyTransportError(err error) bool {
 	return errors.As(err, &transport)
 }
 
-func (p *proxyClient) next() int64 {
+func IsProxyTransportError(err error) bool {
+	return isProxyTransportError(err)
+}
+
+func (p *ProxyClient) next() int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.nextID++
 	return p.nextID
 }
 
-func (p *proxyClient) hello(ctx context.Context) (map[string]any, error) {
+func (p *ProxyClient) hello(ctx context.Context) (map[string]any, error) {
 	var out map[string]any
 	err := p.call(ctx, "hello", map[string]any{}, &out)
 	return out, err
 }
 
-func sshPort(ws Workspace) int {
+func sshPort(ws protocol.Workspace) int {
 	if ws.SSH != nil && ws.SSH.Port > 0 {
 		return ws.SSH.Port
 	}
 	return 22
 }
 
-func sshArgs(ws Workspace) []string {
+func Port(ws protocol.Workspace) int {
+	return sshPort(ws)
+}
+
+func sshArgs(ws protocol.Workspace) []string {
 	args := []string{}
 	if port := sshPort(ws); port != 22 {
 		args = append(args, "-p", strconv.Itoa(port))
 	}
 	return append(args, "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3")
+}
+
+func Args(ws protocol.Workspace) []string {
+	return sshArgs(ws)
 }
 
 func remoteProbeScript(remoteCWD string) string {
@@ -1791,6 +1882,10 @@ func remoteProbeScript(remoteCWD string) string {
 		remoteIdentityProbeScript(),
 		"if command -v rg >/dev/null 2>&1; then command -v rg; rg --version 2>/dev/null | { IFS= read -r line; printf '%s\\n' \"$line\"; }; else printf '%s\\n' '' ''; fi",
 	}, " && ")
+}
+
+func RemoteProbeScript(remoteCWD string) string {
+	return remoteProbeScript(remoteCWD)
 }
 
 func remoteIdentityProbeScript() string {
@@ -1807,6 +1902,10 @@ func remoteIdentityProbeScript() string {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func ShellQuote(value string) string {
+	return shellQuote(value)
 }
 
 func stderrSuffix(text string) string {
@@ -1898,6 +1997,10 @@ func repoRootGuessFrom(wd string, hasGoMod func(string) bool, parentDir func(str
 	return wd
 }
 
+func RepoRootGuessFrom(wd string, hasGoMod func(string) bool, parentDir func(string) string) string {
+	return repoRootGuessFrom(wd, hasGoMod, parentDir)
+}
+
 func localTCPHostPort(addr string) string {
 	if strings.HasPrefix(addr, "127.0.0.1:") {
 		return addr
@@ -1907,4 +2010,8 @@ func localTCPHostPort(addr string) string {
 		return "127.0.0.1:" + port
 	}
 	return addr
+}
+
+func LocalTCPHostPort(addr string) string {
+	return localTCPHostPort(addr)
 }

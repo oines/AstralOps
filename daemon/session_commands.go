@@ -1,11 +1,9 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 )
 
 const (
@@ -125,73 +123,12 @@ func (a *app) handleListSessionCommands(w http.ResponseWriter, sessionID string)
 }
 
 func (a *app) handleRunSessionCommand(w http.ResponseWriter, sessionID, commandID string, req SessionCommandRequest) {
-	commands, ok := a.listSessionCommands(sessionID)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+	result, err := a.runSessionCommandResult(sessionID, commandID, req)
+	if err != nil {
+		writeActionError(w, err)
 		return
 	}
-	var command SessionCommand
-	for _, item := range commands {
-		if item.ID == commandID {
-			command = item
-			break
-		}
-	}
-	if command.ID == "" {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "command not found"})
-		return
-	}
-	if !command.Enabled {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": firstString(command.DisabledReason, "command is disabled")})
-		return
-	}
-	ss, _ := a.store.getSession(sessionID)
-	ws, _ := a.store.getWorkspace(ss.WorkspaceID)
-	if command.Kind != commandKindClient && command.ID != "status" {
-		linked, err := a.linkSessionForCommand(ss)
-		if err != nil {
-			writeActionError(w, err)
-			return
-		}
-		ss = linked
-		ws, _ = a.store.getWorkspace(ss.WorkspaceID)
-	}
-	switch command.Kind {
-	case commandKindPrompt:
-		input := firstString(mapValue(command.Payload)["input"], "/"+strings.TrimPrefix(command.ID, "claude:"))
-		a.startSessionPromptCommand(w, ss, ws, input)
-	case commandKindAction:
-		if command.ID == "status" {
-			a.emitSessionStatusSnapshot(ss)
-			writeJSON(w, http.StatusOK, SessionCommandResponse{OK: true})
-			return
-		}
-		runtime, ok := a.runtimes[ss.Agent]
-		if !ok {
-			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "agent runtime is not implemented"})
-			return
-		}
-		runner, ok := runtime.(CommandRunner)
-		if !ok {
-			if ss.Agent == AgentClaude && command.ID == "compact" {
-				a.startSessionPromptCommand(w, ss, ws, "/compact")
-				return
-			}
-			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "command is not implemented for this agent"})
-			return
-		}
-		if err := runner.RunCommand(ss, ws, command.ID, req.Args); err != nil {
-			status := http.StatusBadRequest
-			if errors.Is(err, ErrSessionRunning) {
-				status = http.StatusConflict
-			}
-			writeJSON(w, status, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, SessionCommandResponse{OK: true})
-	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "client command cannot be executed by daemon"})
-	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *app) linkSessionForCommand(ss Session) (Session, error) {
@@ -206,28 +143,12 @@ func (a *app) linkSessionForCommand(ss Session) (Session, error) {
 }
 
 func (a *app) startSessionPromptCommand(w http.ResponseWriter, ss Session, ws Workspace, input string) {
-	runtime, ok := a.runtimes[ss.Agent]
-	if !ok {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "agent runtime is not implemented"})
+	result, err := a.startSessionPromptCommandResult(ss, ws, input)
+	if err != nil {
+		writeActionError(w, err)
 		return
 	}
-	if err := runtime.StartTurn(ss, ws, input, TurnOptions{}); err != nil {
-		if errors.Is(err, ErrSessionRunning) {
-			turn := a.enqueueTurn(ss, input, TurnOptions{})
-			writeJSON(w, http.StatusOK, SessionCommandResponse{OK: true, Queued: true, QueueID: turn.ID})
-			return
-		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	if strings.TrimSpace(input) == "/compact" {
-		a.emit(AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "memory.compacting", Normalized: eventNormalized("memory.compacting", map[string]any{
-			"source":  "astralops",
-			"command": "compact",
-			"status":  "running",
-		})})
-	}
-	writeJSON(w, http.StatusOK, SessionCommandResponse{OK: true})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *app) emitSessionStatusSnapshot(ss Session) {

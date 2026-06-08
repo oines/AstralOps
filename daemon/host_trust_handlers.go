@@ -3,23 +3,15 @@ package main
 import (
 	"net/http"
 	"strings"
+
+	"github.com/oines/astralops/pkg/protocol"
 )
 
-type hostTrustListResult struct {
-	Grants []TrustGrant `json:"grants"`
-}
+type hostTrustListResult = protocol.HostTrustListResult
 
-type hostTrustRevokeParams struct {
-	ControllerDeviceID string `json:"controller_device_id"`
-}
+type hostTrustRevokeParams = protocol.HostTrustRevokeParams
 
-type hostTrustRevokeResult struct {
-	ControllerDeviceID      string     `json:"controller_device_id"`
-	Grant                   TrustGrant `json:"grant"`
-	ClosedControlSessions   int        `json:"closed_control_sessions"`
-	ReleasedTerminalWriters int        `json:"released_terminal_writers"`
-	RevokedAt               string     `json:"revoked_at,omitempty"`
-}
+type hostTrustRevokeResult = protocol.HostTrustRevokeResult
 
 func (a *app) handleHost(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

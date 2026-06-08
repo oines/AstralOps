@@ -1,4 +1,4 @@
-package main
+package terminal
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/oines/astralops/daemon/internal/apperrors"
+	internalssh "github.com/oines/astralops/daemon/internal/ssh"
 	"github.com/oines/astralops/pkg/protocol"
 )
 
@@ -42,40 +44,53 @@ const (
 	terminalOutputHistoryMaxBytes   = 256 * 1024
 )
 
-type terminalManager struct {
-	deps             terminalDeps
+const (
+	DefaultCols            = defaultTerminalCols
+	DefaultRows            = defaultTerminalRows
+	InputMaxBytes          = terminalInputMaxBytes
+	ViewerAckTTL           = terminalViewerAckTTL
+	OutputFrameMaxBytes    = terminalOutputFrameMaxBytes
+	OutputDisconnectedCode = terminalOutputDisconnectedCode
+	OutputDisconnectedText = terminalOutputDisconnectedText
+	ViewerRequiredCode     = terminalViewerRequiredCode
+	ViewerNotReadyCode     = terminalViewerNotReadyCode
+	ViewerMismatchCode     = terminalViewerMismatchCode
+)
+
+const (
+	FrameInput        = terminalFrameInput
+	FrameResize       = terminalFrameResize
+	FrameHeartbeatAck = terminalFrameHeartbeatAck
+	FrameOutput       = terminalFrameOutput
+	FrameHeartbeat    = terminalFrameHeartbeat
+	FrameClosed       = terminalFrameClosed
+	FrameError        = terminalFrameError
+)
+
+type Manager struct {
+	deps             Deps
 	mu               sync.Mutex
 	sessions         map[string]*terminalSession
 	retentionTimeout time.Duration
 }
 
-type terminalDeps struct {
-	workspaces terminalWorkspaceReader
-	events     terminalEventPublisher
-	ssh        terminalSSH
+type Deps struct {
+	Workspaces WorkspaceReader
+	Events     EventPublisher
+	SSH        SSH
 }
 
-type terminalWorkspaceReader interface {
-	getWorkspace(string) (Workspace, bool)
+type WorkspaceReader interface {
+	GetWorkspace(string) (protocol.Workspace, bool)
 }
 
-type terminalEventPublisher interface {
-	emit(AstralEvent)
+type EventPublisher interface {
+	Emit(protocol.AstralEvent)
 }
 
-type terminalSSH interface {
-	startPTY(context.Context, Workspace, string, map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error)
-	call(context.Context, Workspace, string, any, any) error
-}
-
-type terminalEventEmitter struct {
-	emitFn func(AstralEvent)
-}
-
-func (e terminalEventEmitter) emit(ev AstralEvent) {
-	if e.emitFn != nil {
-		e.emitFn(ev)
-	}
+type SSH interface {
+	StartPTY(context.Context, protocol.Workspace, string, map[string]any) (<-chan internalssh.Event, func(), map[string]any, error)
+	Call(context.Context, protocol.Workspace, string, any, any) error
 }
 
 type terminalSession struct {
@@ -83,14 +98,14 @@ type terminalSession struct {
 	closeOnce          sync.Once
 	id                 string
 	workspaceID        string
-	agent              AgentKind
+	agent              protocol.AgentKind
 	target             string
 	cwd                string
 	shell              string
 	writerDeviceID     string
 	status             string
 	outputSeq          int64
-	outputHistory      []terminalStreamFrame
+	outputHistory      []StreamFrame
 	outputHistoryBytes int
 	createdAt          time.Time
 	updatedAt          time.Time
@@ -101,7 +116,7 @@ type terminalSession struct {
 	localCmd *exec.Cmd
 	localPTY *os.File
 
-	sshWorkspace    *Workspace
+	sshWorkspace    *protocol.Workspace
 	sshUnsubscribe  func()
 	sshTerminalID   string
 	sshTerminalOpen bool
@@ -118,25 +133,6 @@ type terminalOpenResult = protocol.TerminalOpenResult
 type terminalAckResult = protocol.TerminalAckResult
 type terminalTab = protocol.TerminalTab
 type terminalAttachResult = protocol.TerminalAttachResult
-
-type terminalStreamFrame struct {
-	frameType    string `json:"-"`
-	TerminalID   string `json:"terminal_id"`
-	WorkspaceID  string `json:"workspace_id"`
-	Target       string `json:"target"`
-	Status       string `json:"status"`
-	OutputSeq    int64  `json:"output_seq"`
-	ViewerID     string `json:"viewer_id,omitempty"`
-	InputLeaseID string `json:"input_lease_id,omitempty"`
-	HeartbeatSeq int64  `json:"heartbeat_seq,omitempty"`
-	RenderedSeq  int64  `json:"rendered_seq,omitempty"`
-	Data         string `json:"data,omitempty"`
-	Cols         uint16 `json:"cols,omitempty"`
-	Rows         uint16 `json:"rows,omitempty"`
-	Reason       string `json:"reason,omitempty"`
-	Code         string `json:"code,omitempty"`
-	CanInput     bool   `json:"can_input,omitempty"`
-}
 
 type terminalViewer struct {
 	closeOnce          sync.Once
@@ -155,44 +151,47 @@ type terminalViewer struct {
 	heartbeatSeq       int64
 	lastAckSeq         int64
 	lastAckAt          time.Time
-	conn               controlConnection
-	frames             chan terminalStreamFrame
+	conn               ControlConnection
+	frames             chan StreamFrame
 	closed             bool
 }
 
-type terminalControlTerminator interface {
-	terminateControlConnection(code, reason string)
+func NewManager(deps Deps) *Manager {
+	return &Manager{deps: deps, sessions: map[string]*terminalSession{}, retentionTimeout: defaultTerminalRetentionTimeout}
 }
 
-func (a *app) terminalManager() *terminalManager {
-	a.terminalMu.Lock()
-	defer a.terminalMu.Unlock()
-	if a.terminals == nil {
-		a.terminals = newTerminalManager(terminalDeps{workspaces: a.store, events: terminalEventEmitter{emitFn: a.emit}, ssh: a.ssh})
+func (m *Manager) UpdateDependencies(deps Deps) {
+	if m == nil {
+		return
 	}
-	a.terminals.deps.workspaces = a.store
-	a.terminals.deps.events = terminalEventEmitter{emitFn: a.emit}
-	a.terminals.deps.ssh = a.ssh
-	return a.terminals
+	m.deps = deps
 }
 
-func newTerminalManager(deps terminalDeps) *terminalManager {
-	return &terminalManager{deps: deps, sessions: map[string]*terminalSession{}, retentionTimeout: defaultTerminalRetentionTimeout}
-}
-
-func (m *terminalManager) emit(ev AstralEvent) {
-	if m != nil && m.deps.events != nil {
-		m.deps.events.emit(ev)
+func (m *Manager) SetRetentionTimeoutForTest(timeout time.Duration) {
+	if m != nil {
+		m.retentionTimeout = timeout
 	}
 }
 
-func (m *terminalManager) open(ctx context.Context, controllerDeviceID string, params terminalOpenParams) (terminalOpenResult, error) {
-	if !terminalAvailableOnHost() {
-		return terminalOpenResult{}, newActionError(http.StatusBadRequest, windowsTerminalDisabledReason, "terminal is not available on this Host")
+func (m *Manager) RegisterSessionForTest(workspaceID string, agent protocol.AgentKind, target, cwd, shell string) string {
+	session := newTerminalSession(workspaceID, agent, target, cwd, shell)
+	m.register(session)
+	return session.id
+}
+
+func (m *Manager) Emit(ev protocol.AstralEvent) {
+	if m != nil && m.deps.Events != nil {
+		m.deps.Events.Emit(ev)
 	}
-	ws, ok := m.deps.workspaces.getWorkspace(params.WorkspaceID)
+}
+
+func (m *Manager) Open(ctx context.Context, controllerDeviceID string, params terminalOpenParams) (terminalOpenResult, error) {
+	if !AvailableOnHost() {
+		return terminalOpenResult{}, apperrors.New(http.StatusBadRequest, WindowsTerminalDisabledReason, "terminal is not available on this Host")
+	}
+	ws, ok := m.deps.Workspaces.GetWorkspace(params.WorkspaceID)
 	if !ok {
-		return terminalOpenResult{}, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found")
+		return terminalOpenResult{}, apperrors.New(http.StatusNotFound, "workspace_not_found", "workspace not found")
 	}
 	cols, rows := terminalSize(params.Cols, params.Rows)
 	switch ws.Target {
@@ -201,11 +200,11 @@ func (m *terminalManager) open(ctx context.Context, controllerDeviceID string, p
 	case "ssh":
 		return m.openSSH(ctx, controllerDeviceID, ws, params.CWD, cols, rows)
 	default:
-		return terminalOpenResult{}, newActionError(http.StatusBadRequest, "workspace_target_unsupported", "workspace target does not support terminal")
+		return terminalOpenResult{}, apperrors.New(http.StatusBadRequest, "workspace_target_unsupported", "workspace target does not support terminal")
 	}
 }
 
-func (m *terminalManager) openLocal(_ context.Context, controllerDeviceID string, ws Workspace, requestedCWD string, cols, rows uint16) (terminalOpenResult, error) {
+func (m *Manager) openLocal(_ context.Context, controllerDeviceID string, ws protocol.Workspace, requestedCWD string, cols, rows uint16) (terminalOpenResult, error) {
 	cwd, displayCWD, err := localTerminalCWD(ws, requestedCWD)
 	if err != nil {
 		return terminalOpenResult{}, err
@@ -226,17 +225,17 @@ func (m *terminalManager) openLocal(_ context.Context, controllerDeviceID string
 	session.localPTY = ptmx
 	m.register(session)
 	session.scheduleRetention(m, m.retentionTimeout)
-	m.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: eventNormalized("control.terminal.opened", session.lifecycle("opened"))})
+	m.Emit(protocol.AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: protocol.EventNormalized("control.terminal.opened", session.lifecycle("opened"))})
 	go session.readLocalOutput(m)
 	return session.openResult(), nil
 }
 
-func (m *terminalManager) openSSH(ctx context.Context, controllerDeviceID string, ws Workspace, requestedCWD string, cols, rows uint16) (terminalOpenResult, error) {
-	if m.deps.ssh == nil {
-		return terminalOpenResult{}, newActionError(http.StatusServiceUnavailable, "ssh_unavailable", "SSH manager is not available")
+func (m *Manager) openSSH(ctx context.Context, controllerDeviceID string, ws protocol.Workspace, requestedCWD string, cols, rows uint16) (terminalOpenResult, error) {
+	if m.deps.SSH == nil {
+		return terminalOpenResult{}, apperrors.New(http.StatusServiceUnavailable, "ssh_unavailable", "SSH manager is not available")
 	}
 	if ws.SSH == nil {
-		return terminalOpenResult{}, newActionError(http.StatusBadRequest, "workspace_ssh_missing", "workspace SSH config is missing")
+		return terminalOpenResult{}, apperrors.New(http.StatusBadRequest, "workspace_ssh_missing", "workspace SSH config is missing")
 	}
 	cwd := ws.SSH.RemoteCWD
 	displayCWD := ""
@@ -244,13 +243,13 @@ func (m *terminalManager) openSSH(ctx context.Context, controllerDeviceID string
 		var err error
 		cwd, displayCWD, err = resolveRemoteWorkspacePath(ws.SSH.RemoteCWD, requestedCWD)
 		if err != nil {
-			return terminalOpenResult{}, newActionError(http.StatusBadRequest, "path_invalid", err.Error())
+			return terminalOpenResult{}, apperrors.New(http.StatusBadRequest, "path_invalid", err.Error())
 		}
 	}
 	session := newTerminalSession(ws.ID, ws.Agent, ws.Target, displayCWD, "")
 	session.sshWorkspace = &ws
 	session.sshTerminalID = session.id
-	_, events, unsubscribe, started, err := m.deps.ssh.startPTY(ctx, ws, session.id, map[string]any{"cwd": cwd, "cols": cols, "rows": rows})
+	events, unsubscribe, started, err := m.deps.SSH.StartPTY(ctx, ws, session.id, map[string]any{"cwd": cwd, "cols": cols, "rows": rows})
 	if err != nil {
 		return terminalOpenResult{}, err
 	}
@@ -259,18 +258,18 @@ func (m *terminalManager) openSSH(ctx context.Context, controllerDeviceID string
 	session.shell = stringValue(started["shell"])
 	m.register(session)
 	session.scheduleRetention(m, m.retentionTimeout)
-	m.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: eventNormalized("control.terminal.opened", session.lifecycle("opened"))})
+	m.Emit(protocol.AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "control.terminal.opened", Normalized: protocol.EventNormalized("control.terminal.opened", session.lifecycle("opened"))})
 	go session.readSSHOutput(m, events)
 	return session.openResult(), nil
 }
 
-func (m *terminalManager) attach(controllerDeviceID string, conn controlConnection, params terminalAttachParams) (terminalAttachResult, error) {
-	if conn == nil || conn.connectionID() == "" {
-		return terminalAttachResult{}, newActionError(http.StatusBadRequest, "control_connection_required", "terminal.attach requires an encrypted control connection")
+func (m *Manager) Attach(controllerDeviceID string, conn ControlConnection, params terminalAttachParams) (terminalAttachResult, error) {
+	if conn == nil || conn.ConnectionID() == "" {
+		return terminalAttachResult{}, apperrors.New(http.StatusBadRequest, "control_connection_required", "terminal.attach requires an encrypted control connection")
 	}
 	session, ok := m.session(params.TerminalID)
 	if !ok {
-		return terminalAttachResult{}, newActionError(http.StatusNotFound, "terminal_not_found", "terminal not found")
+		return terminalAttachResult{}, apperrors.New(http.StatusNotFound, "terminal_not_found", "terminal not found")
 	}
 	viewer := newTerminalViewer(conn)
 	result, replaced, history, err := session.attachViewer(viewer, params.AfterSeq)
@@ -287,42 +286,42 @@ func (m *terminalManager) attach(controllerDeviceID string, conn controlConnecti
 			break
 		}
 	}
-	m.emit(AstralEvent{
+	m.Emit(protocol.AstralEvent{
 		WorkspaceID: session.workspaceID,
 		Agent:       session.agent,
 		Kind:        "control.terminal.attached",
-		Normalized: eventNormalized("control.terminal.attached",
-			session.viewerLifecycle(controllerDeviceID, conn.connectionID(), "attached")),
+		Normalized: protocol.EventNormalized("control.terminal.attached",
+			session.viewerLifecycle(controllerDeviceID, conn.ConnectionID(), "attached")),
 	})
 	return result, nil
 }
 
-func (m *terminalManager) detach(controllerDeviceID string, conn controlConnection, params terminalDetachParams) (terminalAttachResult, error) {
-	if conn == nil || conn.connectionID() == "" {
-		return terminalAttachResult{}, newActionError(http.StatusBadRequest, "control_connection_required", "terminal.detach requires an encrypted control connection")
+func (m *Manager) Detach(controllerDeviceID string, conn ControlConnection, params terminalDetachParams) (terminalAttachResult, error) {
+	if conn == nil || conn.ConnectionID() == "" {
+		return terminalAttachResult{}, apperrors.New(http.StatusBadRequest, "control_connection_required", "terminal.detach requires an encrypted control connection")
 	}
 	session, ok := m.session(params.TerminalID)
 	if !ok {
-		return terminalAttachResult{}, newActionError(http.StatusNotFound, "terminal_not_found", "terminal not found")
+		return terminalAttachResult{}, apperrors.New(http.StatusNotFound, "terminal_not_found", "terminal not found")
 	}
-	result, removed := session.detachViewer(conn.connectionID())
+	result, removed := session.detachViewer(conn.ConnectionID())
 	if removed != nil {
 		removed.close()
 		session.scheduleRetention(m, m.retentionTimeout)
-		m.emit(AstralEvent{
+		m.Emit(protocol.AstralEvent{
 			WorkspaceID: session.workspaceID,
 			Agent:       session.agent,
 			Kind:        "control.terminal.detached",
-			Normalized: eventNormalized("control.terminal.detached",
-				session.viewerLifecycle(controllerDeviceID, conn.connectionID(), "detached")),
+			Normalized: protocol.EventNormalized("control.terminal.detached",
+				session.viewerLifecycle(controllerDeviceID, conn.ConnectionID(), "detached")),
 		})
 	}
 	return result, nil
 }
 
-func (m *terminalManager) input(ctx context.Context, controllerDeviceID string, params terminalInputParams) (terminalAckResult, error) {
+func (m *Manager) Input(ctx context.Context, controllerDeviceID string, params terminalInputParams) (terminalAckResult, error) {
 	if len(params.Data) > terminalInputMaxBytes {
-		return terminalAckResult{}, newActionError(http.StatusRequestEntityTooLarge, "terminal_input_too_large", "terminal input is too large")
+		return terminalAckResult{}, apperrors.New(http.StatusRequestEntityTooLarge, "terminal_input_too_large", "terminal input is too large")
 	}
 	session, err := m.openSession(params.TerminalID)
 	if err != nil {
@@ -335,10 +334,10 @@ func (m *terminalManager) input(ctx context.Context, controllerDeviceID string, 
 		return session.ack(), nil
 	}
 	if session.sshTerminalOpen {
-		if session.sshWorkspace == nil || m.deps.ssh == nil {
-			return terminalAckResult{}, newActionError(http.StatusServiceUnavailable, "ssh_unavailable", "SSH manager is not available")
+		if session.sshWorkspace == nil || m.deps.SSH == nil {
+			return terminalAckResult{}, apperrors.New(http.StatusServiceUnavailable, "ssh_unavailable", "SSH manager is not available")
 		}
-		if err := m.deps.ssh.call(ctx, *session.sshWorkspace, "pty_write", map[string]any{"id": session.sshTerminalID, "data": params.Data}, nil); err != nil {
+		if err := m.deps.SSH.Call(ctx, *session.sshWorkspace, "pty_write", map[string]any{"id": session.sshTerminalID, "data": params.Data}, nil); err != nil {
 			return terminalAckResult{}, err
 		}
 		return session.ack(), nil
@@ -347,7 +346,7 @@ func (m *terminalManager) input(ctx context.Context, controllerDeviceID string, 
 	ptmx := session.localPTY
 	session.mu.Unlock()
 	if ptmx == nil {
-		return terminalAckResult{}, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
+		return terminalAckResult{}, apperrors.New(http.StatusGone, "terminal_closed", "terminal is closed")
 	}
 	if _, err := ptmx.Write([]byte(params.Data)); err != nil {
 		return terminalAckResult{}, err
@@ -355,22 +354,22 @@ func (m *terminalManager) input(ctx context.Context, controllerDeviceID string, 
 	return session.ack(), nil
 }
 
-func (m *terminalManager) resize(ctx context.Context, controllerDeviceID string, params terminalResizeParams) (terminalAckResult, error) {
+func (m *Manager) Resize(ctx context.Context, controllerDeviceID string, params terminalResizeParams) (terminalAckResult, error) {
 	session, err := m.openSession(params.TerminalID)
 	if err != nil {
 		return terminalAckResult{}, err
 	}
 	if params.Cols == 0 || params.Rows == 0 {
-		return terminalAckResult{}, newActionError(http.StatusBadRequest, "terminal_size_invalid", "terminal cols and rows are required")
+		return terminalAckResult{}, apperrors.New(http.StatusBadRequest, "terminal_size_invalid", "terminal cols and rows are required")
 	}
 	if err := session.validateViewerLease(controllerDeviceID, params.ViewerID, params.InputLeaseID); err != nil {
 		return terminalAckResult{}, err
 	}
 	if session.sshTerminalOpen {
-		if session.sshWorkspace == nil || m.deps.ssh == nil {
-			return terminalAckResult{}, newActionError(http.StatusServiceUnavailable, "ssh_unavailable", "SSH manager is not available")
+		if session.sshWorkspace == nil || m.deps.SSH == nil {
+			return terminalAckResult{}, apperrors.New(http.StatusServiceUnavailable, "ssh_unavailable", "SSH manager is not available")
 		}
-		if err := m.deps.ssh.call(ctx, *session.sshWorkspace, "pty_resize", map[string]any{"id": session.sshTerminalID, "cols": params.Cols, "rows": params.Rows}, nil); err != nil {
+		if err := m.deps.SSH.Call(ctx, *session.sshWorkspace, "pty_resize", map[string]any{"id": session.sshTerminalID, "cols": params.Cols, "rows": params.Rows}, nil); err != nil {
 			return terminalAckResult{}, err
 		}
 		return session.ack(), nil
@@ -379,7 +378,7 @@ func (m *terminalManager) resize(ctx context.Context, controllerDeviceID string,
 	ptmx := session.localPTY
 	session.mu.Unlock()
 	if ptmx == nil {
-		return terminalAckResult{}, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
+		return terminalAckResult{}, apperrors.New(http.StatusGone, "terminal_closed", "terminal is closed")
 	}
 	if err := pty.Setsize(ptmx, &pty.Winsize{Rows: params.Rows, Cols: params.Cols}); err != nil {
 		return terminalAckResult{}, err
@@ -387,7 +386,7 @@ func (m *terminalManager) resize(ctx context.Context, controllerDeviceID string,
 	return session.ack(), nil
 }
 
-func (m *terminalManager) heartbeatAck(controllerDeviceID string, params terminalHeartbeatAckParams) (terminalAckResult, error) {
+func (m *Manager) HeartbeatAck(controllerDeviceID string, params terminalHeartbeatAckParams) (terminalAckResult, error) {
 	session, err := m.openSession(params.TerminalID)
 	if err != nil {
 		return terminalAckResult{}, err
@@ -395,7 +394,7 @@ func (m *terminalManager) heartbeatAck(controllerDeviceID string, params termina
 	return session.heartbeatAck(controllerDeviceID, params)
 }
 
-func (m *terminalManager) close(ctx context.Context, controllerDeviceID string, params terminalCloseParams) (terminalAckResult, error) {
+func (m *Manager) Close(ctx context.Context, controllerDeviceID string, params terminalCloseParams) (terminalAckResult, error) {
 	session, err := m.openSession(params.TerminalID)
 	if err != nil {
 		return terminalAckResult{}, err
@@ -404,7 +403,7 @@ func (m *terminalManager) close(ctx context.Context, controllerDeviceID string, 
 	return session.ack(), nil
 }
 
-func (m *terminalManager) closeWorkspace(ctx context.Context, workspaceID, reason string) {
+func (m *Manager) CloseWorkspace(ctx context.Context, workspaceID, reason string) {
 	if m == nil {
 		return
 	}
@@ -428,13 +427,13 @@ func (m *terminalManager) closeWorkspace(ctx context.Context, workspaceID, reaso
 	}
 }
 
-func (m *terminalManager) register(session *terminalSession) {
+func (m *Manager) register(session *terminalSession) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessions[session.id] = session
 }
 
-func (m *terminalManager) listTabs() []terminalTab {
+func (m *Manager) ListTabs() []terminalTab {
 	if m == nil {
 		return nil
 	}
@@ -454,7 +453,7 @@ func (m *terminalManager) listTabs() []terminalTab {
 	return tabs
 }
 
-func (m *terminalManager) openTerminalResult(terminalID string) (terminalOpenResult, bool) {
+func (m *Manager) OpenTerminalResult(terminalID string) (terminalOpenResult, bool) {
 	if m == nil || strings.TrimSpace(terminalID) == "" {
 		return terminalOpenResult{}, false
 	}
@@ -473,7 +472,7 @@ func (m *terminalManager) openTerminalResult(terminalID string) (terminalOpenRes
 	return session.openResult(), true
 }
 
-func (m *terminalManager) detachConnection(connectionID, reason string) {
+func (m *Manager) DetachConnection(connectionID, reason string) {
 	m.mu.Lock()
 	sessions := make([]*terminalSession, 0, len(m.sessions))
 	for _, session := range m.sessions {
@@ -488,52 +487,37 @@ func (m *terminalManager) detachConnection(connectionID, reason string) {
 		}
 		removed.close()
 		session.scheduleRetention(m, m.retentionTimeout)
-		m.emit(AstralEvent{
+		m.Emit(protocol.AstralEvent{
 			WorkspaceID: session.workspaceID,
 			Agent:       session.agent,
 			Kind:        "control.terminal.detached",
-			Normalized: eventNormalized("control.terminal.detached",
+			Normalized: protocol.EventNormalized("control.terminal.detached",
 				session.viewerLifecycle(result.ViewerDeviceID, connectionID, reason)),
 		})
 	}
 }
 
-func (a *app) detachTerminalViewersForControlSession(connectionID, reason string) {
-	a.terminalMu.Lock()
-	manager := a.terminals
-	a.terminalMu.Unlock()
-	if manager == nil {
-		return
-	}
-	manager.detachConnection(connectionID, reason)
-}
-
-func (m *terminalManager) session(id string) (*terminalSession, bool) {
+func (m *Manager) session(id string) (*terminalSession, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	session, ok := m.sessions[id]
 	return session, ok
 }
 
-func (m *terminalManager) openSession(terminalID string) (*terminalSession, error) {
+func (m *Manager) openSession(terminalID string) (*terminalSession, error) {
 	session, ok := m.session(terminalID)
 	if !ok {
-		return nil, newActionError(http.StatusNotFound, "terminal_not_found", "terminal not found")
+		return nil, apperrors.New(http.StatusNotFound, "terminal_not_found", "terminal not found")
 	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	if session.status != terminalStatusOpen {
-		return nil, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
+		return nil, apperrors.New(http.StatusGone, "terminal_closed", "terminal is closed")
 	}
 	return session, nil
 }
 
-func (a *app) releaseTerminalWritersForDevice(controllerDeviceID string) int {
-	// Compatibility metric for older control responses; shared-input terminals no longer track per-controller writers.
-	return 0
-}
-
-func newTerminalSession(workspaceID string, agent AgentKind, target, cwd, shell string) *terminalSession {
+func newTerminalSession(workspaceID string, agent protocol.AgentKind, target, cwd, shell string) *terminalSession {
 	now := time.Now().UTC()
 	return &terminalSession{
 		id:          "term_" + randomID(16),
@@ -549,7 +533,7 @@ func newTerminalSession(workspaceID string, agent AgentKind, target, cwd, shell 
 	}
 }
 
-func (s *terminalSession) readLocalOutput(manager *terminalManager) {
+func (s *terminalSession) readLocalOutput(manager *Manager) {
 	buf := make([]byte, 4096)
 	for {
 		s.mu.Lock()
@@ -569,7 +553,7 @@ func (s *terminalSession) readLocalOutput(manager *terminalManager) {
 	}
 }
 
-func (s *terminalSession) readSSHOutput(manager *terminalManager, events <-chan proxyEvent) {
+func (s *terminalSession) readSSHOutput(manager *Manager, events <-chan internalssh.Event) {
 	for event := range events {
 		switch event.Event {
 		case "output":
@@ -589,7 +573,7 @@ func (s *terminalSession) appendOutput(data string) {
 	chunks := terminalOutputChunks(data)
 	s.mu.Lock()
 	s.updatedAt = time.Now().UTC()
-	frames := make([]terminalStreamFrame, 0, len(chunks))
+	frames := make([]StreamFrame, 0, len(chunks))
 	for _, chunk := range chunks {
 		s.outputSeq++
 		frame := s.streamFrameLocked(terminalFrameOutput, chunk, "")
@@ -603,11 +587,11 @@ func (s *terminalSession) appendOutput(data string) {
 	}
 }
 
-func (s *terminalSession) attachViewer(viewer *terminalViewer, afterSeq int64) (terminalAttachResult, *terminalViewer, []terminalStreamFrame, error) {
+func (s *terminalSession) attachViewer(viewer *terminalViewer, afterSeq int64) (terminalAttachResult, *terminalViewer, []StreamFrame, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.status != terminalStatusOpen {
-		return terminalAttachResult{}, nil, nil, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
+		return terminalAttachResult{}, nil, nil, apperrors.New(http.StatusGone, "terminal_closed", "terminal is closed")
 	}
 	s.cancelRetentionLocked()
 	viewer.bindTerminalLocked(s, afterSeq)
@@ -628,7 +612,7 @@ func (s *terminalSession) detachViewer(connectionID string) (terminalAttachResul
 	return s.attachResultLocked(connectionID, viewerDeviceID), viewer
 }
 
-func (s *terminalSession) sendToViewers(frame terminalStreamFrame, viewers []*terminalViewer) {
+func (s *terminalSession) sendToViewers(frame StreamFrame, viewers []*terminalViewer) {
 	for _, viewer := range viewers {
 		if viewer.enqueue(frame) {
 			continue
@@ -643,25 +627,25 @@ func (s *terminalSession) validateViewerLease(controllerDeviceID, viewerID, inpu
 	viewerID = strings.TrimSpace(viewerID)
 	inputLeaseID = strings.TrimSpace(inputLeaseID)
 	if viewerID == "" || inputLeaseID == "" {
-		return newActionError(http.StatusConflict, terminalViewerRequiredCode, "terminal input requires an attached healthy viewer")
+		return apperrors.New(http.StatusConflict, terminalViewerRequiredCode, "terminal input requires an attached healthy viewer")
 	}
 	s.mu.Lock()
 	if s.status != terminalStatusOpen {
 		s.mu.Unlock()
-		return newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
+		return apperrors.New(http.StatusGone, "terminal_closed", "terminal is closed")
 	}
 	viewer := s.viewerByIDLocked(viewerID)
 	s.mu.Unlock()
 	if viewer == nil {
-		return newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not attached")
+		return apperrors.New(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not attached")
 	}
 	viewer.mu.Lock()
 	defer viewer.mu.Unlock()
 	if viewer.closed {
-		return newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not attached")
+		return apperrors.New(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not attached")
 	}
 	if viewer.controllerDeviceID != controllerDeviceID || viewer.inputLeaseID != inputLeaseID {
-		return newActionError(http.StatusForbidden, terminalViewerMismatchCode, "terminal viewer lease does not match controller")
+		return apperrors.New(http.StatusForbidden, terminalViewerMismatchCode, "terminal viewer lease does not match controller")
 	}
 	return nil
 }
@@ -670,26 +654,26 @@ func (s *terminalSession) heartbeatAck(controllerDeviceID string, params termina
 	viewerID := strings.TrimSpace(params.ViewerID)
 	inputLeaseID := strings.TrimSpace(params.InputLeaseID)
 	if viewerID == "" || inputLeaseID == "" {
-		return terminalAckResult{}, newActionError(http.StatusBadRequest, terminalViewerRequiredCode, "terminal heartbeat ack requires viewer lease")
+		return terminalAckResult{}, apperrors.New(http.StatusBadRequest, terminalViewerRequiredCode, "terminal heartbeat ack requires viewer lease")
 	}
 	s.mu.Lock()
 	if s.status != terminalStatusOpen {
 		s.mu.Unlock()
-		return terminalAckResult{}, newActionError(http.StatusGone, "terminal_closed", "terminal is closed")
+		return terminalAckResult{}, apperrors.New(http.StatusGone, "terminal_closed", "terminal is closed")
 	}
 	viewer := s.viewerByIDLocked(viewerID)
 	ack := s.ackLocked()
 	s.mu.Unlock()
 	if viewer == nil {
-		return terminalAckResult{}, newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not attached")
+		return terminalAckResult{}, apperrors.New(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not attached")
 	}
 	viewer.mu.Lock()
 	defer viewer.mu.Unlock()
 	if viewer.closed {
-		return terminalAckResult{}, newActionError(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not attached")
+		return terminalAckResult{}, apperrors.New(http.StatusConflict, terminalViewerNotReadyCode, "terminal viewer is not attached")
 	}
 	if viewer.controllerDeviceID != controllerDeviceID || viewer.inputLeaseID != inputLeaseID {
-		return terminalAckResult{}, newActionError(http.StatusForbidden, terminalViewerMismatchCode, "terminal viewer lease does not match controller")
+		return terminalAckResult{}, apperrors.New(http.StatusForbidden, terminalViewerMismatchCode, "terminal viewer lease does not match controller")
 	}
 	if params.HeartbeatSeq > 0 && params.HeartbeatSeq >= viewer.lastAckSeq {
 		viewer.lastAckSeq = params.HeartbeatSeq
@@ -711,8 +695,8 @@ func (s *terminalSession) viewerByIDLocked(viewerID string) *terminalViewer {
 	return nil
 }
 
-func (s *terminalSession) rememberOutputLocked(frame terminalStreamFrame) {
-	if frame.frameType != terminalFrameOutput || frame.Data == "" {
+func (s *terminalSession) rememberOutputLocked(frame StreamFrame) {
+	if frame.FrameType != terminalFrameOutput || frame.Data == "" {
 		return
 	}
 	s.outputHistory = append(s.outputHistory, frame)
@@ -730,11 +714,11 @@ func (s *terminalSession) rememberOutputLocked(frame terminalStreamFrame) {
 	}
 }
 
-func (s *terminalSession) outputHistoryAfterLocked(afterSeq int64) []terminalStreamFrame {
+func (s *terminalSession) outputHistoryAfterLocked(afterSeq int64) []StreamFrame {
 	if len(s.outputHistory) == 0 {
 		return nil
 	}
-	frames := make([]terminalStreamFrame, 0, len(s.outputHistory))
+	frames := make([]StreamFrame, 0, len(s.outputHistory))
 	for _, frame := range s.outputHistory {
 		if frame.OutputSeq > afterSeq {
 			frames = append(frames, frame)
@@ -757,9 +741,9 @@ func (s *terminalSession) takeViewersLocked() []*terminalViewer {
 	return viewers
 }
 
-func (s *terminalSession) streamFrameLocked(frameType, data, reason string) terminalStreamFrame {
-	return terminalStreamFrame{
-		frameType:   frameType,
+func (s *terminalSession) streamFrameLocked(frameType, data, reason string) StreamFrame {
+	return StreamFrame{
+		FrameType:   frameType,
 		TerminalID:  s.id,
 		WorkspaceID: s.workspaceID,
 		Target:      s.target,
@@ -796,7 +780,7 @@ func (s *terminalSession) attachResultLocked(connectionID, viewerDeviceID string
 	}
 }
 
-func (s *terminalSession) scheduleRetention(manager *terminalManager, timeout time.Duration) {
+func (s *terminalSession) scheduleRetention(manager *Manager, timeout time.Duration) {
 	if timeout <= 0 {
 		return
 	}
@@ -820,7 +804,7 @@ func (s *terminalSession) cancelRetentionLocked() {
 	s.retentionUntil = time.Time{}
 }
 
-func (s *terminalSession) closeIfRetentionExpired(manager *terminalManager) {
+func (s *terminalSession) closeIfRetentionExpired(manager *Manager) {
 	now := time.Now().UTC()
 	s.mu.Lock()
 	expired := s.status == terminalStatusOpen && len(s.viewers) == 0 && !s.retentionUntil.IsZero() && !now.Before(s.retentionUntil)
@@ -834,7 +818,7 @@ func (s *terminalSession) closeIfRetentionExpired(manager *terminalManager) {
 	}
 }
 
-func (s *terminalSession) close(ctx context.Context, manager *terminalManager, reason string) {
+func (s *terminalSession) close(ctx context.Context, manager *Manager, reason string) {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		localCmd := s.localCmd
@@ -853,8 +837,8 @@ func (s *terminalSession) close(ctx context.Context, manager *terminalManager, r
 		viewers := s.takeViewersLocked()
 		s.mu.Unlock()
 
-		if sshOpen && sshWorkspace != nil && manager != nil && manager.deps.ssh != nil {
-			_ = manager.deps.ssh.call(ctx, *sshWorkspace, "pty_kill", map[string]any{"id": sshTerminalID}, nil)
+		if sshOpen && sshWorkspace != nil && manager != nil && manager.deps.SSH != nil {
+			_ = manager.deps.SSH.Call(ctx, *sshWorkspace, "pty_kill", map[string]any{"id": sshTerminalID}, nil)
 		}
 		if sshUnsubscribe != nil {
 			sshUnsubscribe()
@@ -869,11 +853,11 @@ func (s *terminalSession) close(ctx context.Context, manager *terminalManager, r
 			_, _ = localCmd.Process.Wait()
 		}
 		closeViewersAfterFrame(closedFrame, viewers)
-		manager.emit(AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: eventNormalized("control.terminal.closed", s.lifecycle(reason))})
+		manager.Emit(protocol.AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: protocol.EventNormalized("control.terminal.closed", s.lifecycle(reason))})
 	})
 }
 
-func (s *terminalSession) markClosed(manager *terminalManager, reason string) {
+func (s *terminalSession) markClosed(manager *Manager, reason string) {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		localCmd := s.localCmd
@@ -899,7 +883,7 @@ func (s *terminalSession) markClosed(manager *terminalManager, reason string) {
 			_, _ = localCmd.Process.Wait()
 		}
 		closeViewersAfterFrame(closedFrame, viewers)
-		manager.emit(AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: eventNormalized("control.terminal.closed", s.lifecycle(reason))})
+		manager.Emit(protocol.AstralEvent{WorkspaceID: s.workspaceID, Agent: s.agent, Kind: "control.terminal.closed", Normalized: protocol.EventNormalized("control.terminal.closed", s.lifecycle(reason))})
 	})
 }
 
@@ -987,25 +971,25 @@ func (s *terminalSession) viewerLifecycle(viewerDeviceID, connectionID, reason s
 	return value
 }
 
-func newTerminalViewer(conn controlConnection) *terminalViewer {
+func newTerminalViewer(conn ControlConnection) *terminalViewer {
 	now := time.Now().UTC()
 	return &terminalViewer{
-		connectionID:       conn.connectionID(),
-		controllerDeviceID: conn.controllerID(),
+		connectionID:       conn.ConnectionID(),
+		controllerDeviceID: conn.ControllerID(),
 		viewerID:           "viewer_" + randomID(12),
 		inputLeaseID:       "lease_" + randomID(16),
 		lastAckAt:          now,
 		conn:               conn,
-		frames:             make(chan terminalStreamFrame, terminalViewerBuffer),
+		frames:             make(chan StreamFrame, terminalViewerBuffer),
 	}
 }
 
 func (v *terminalViewer) run() {
 	ticker := time.NewTicker(terminalHeartbeatInterval)
 	defer ticker.Stop()
-	var pending *terminalStreamFrame
+	var pending *StreamFrame
 	for {
-		var frame terminalStreamFrame
+		var frame StreamFrame
 		if pending != nil {
 			frame = *pending
 			pending = nil
@@ -1021,7 +1005,7 @@ func (v *terminalViewer) run() {
 				continue
 			}
 		}
-		if frame.frameType != terminalFrameOutput {
+		if frame.FrameType != terminalFrameOutput {
 			v.writeFrame(frame)
 			continue
 		}
@@ -1049,8 +1033,8 @@ func (v *terminalViewer) bindTerminalLocked(session *terminalSession, afterSeq i
 	}
 }
 
-func (v *terminalViewer) writeFrame(frame terminalStreamFrame) {
-	v.conn.writePlain(controlPlainFrame{Type: frame.frameType, Terminal: &frame})
+func (v *terminalViewer) writeFrame(frame StreamFrame) {
+	v.conn.WriteTerminalFrame(frame.FrameType, frame)
 }
 
 func (v *terminalViewer) writeHeartbeat() {
@@ -1061,15 +1045,15 @@ func (v *terminalViewer) writeHeartbeat() {
 	v.writeFrame(frame)
 }
 
-func (v *terminalViewer) heartbeatFrame() (terminalStreamFrame, bool) {
+func (v *terminalViewer) heartbeatFrame() (StreamFrame, bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed || v.terminalID == "" {
-		return terminalStreamFrame{}, false
+		return StreamFrame{}, false
 	}
 	v.heartbeatSeq++
-	return terminalStreamFrame{
-		frameType:    terminalFrameHeartbeat,
+	return StreamFrame{
+		FrameType:    terminalFrameHeartbeat,
 		TerminalID:   v.terminalID,
 		WorkspaceID:  v.workspaceID,
 		Target:       v.target,
@@ -1082,7 +1066,7 @@ func (v *terminalViewer) heartbeatFrame() (terminalStreamFrame, bool) {
 	}, true
 }
 
-func (v *terminalViewer) coalesceOutput(first terminalStreamFrame) (terminalStreamFrame, terminalStreamFrame, bool) {
+func (v *terminalViewer) coalesceOutput(first StreamFrame) (StreamFrame, StreamFrame, bool) {
 	batch := first
 	timer := time.NewTimer(terminalOutputCoalesceWindow)
 	defer timer.Stop()
@@ -1090,9 +1074,9 @@ func (v *terminalViewer) coalesceOutput(first terminalStreamFrame) (terminalStre
 		select {
 		case next, ok := <-v.frames:
 			if !ok {
-				return batch, terminalStreamFrame{}, false
+				return batch, StreamFrame{}, false
 			}
-			if next.frameType != terminalFrameOutput || next.TerminalID != batch.TerminalID || len(batch.Data)+len(next.Data) > terminalOutputFrameMaxBytes {
+			if next.FrameType != terminalFrameOutput || next.TerminalID != batch.TerminalID || len(batch.Data)+len(next.Data) > terminalOutputFrameMaxBytes {
 				return batch, next, true
 			}
 			batch.Data += next.Data
@@ -1107,13 +1091,13 @@ func (v *terminalViewer) coalesceOutput(first terminalStreamFrame) (terminalStre
 			}
 			timer.Reset(terminalOutputCoalesceWindow)
 		case <-timer.C:
-			return batch, terminalStreamFrame{}, false
+			return batch, StreamFrame{}, false
 		}
 	}
-	return batch, terminalStreamFrame{}, false
+	return batch, StreamFrame{}, false
 }
 
-func (v *terminalViewer) enqueue(frame terminalStreamFrame) bool {
+func (v *terminalViewer) enqueue(frame StreamFrame) bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {
@@ -1127,7 +1111,7 @@ func (v *terminalViewer) enqueue(frame terminalStreamFrame) bool {
 		if frame.OutputSeq > v.outputSeq {
 			v.outputSeq = frame.OutputSeq
 		}
-		if frame.frameType == terminalFrameOutput && frame.OutputSeq > v.deliveredSeq {
+		if frame.FrameType == terminalFrameOutput && frame.OutputSeq > v.deliveredSeq {
 			v.deliveredSeq = frame.OutputSeq
 		}
 		frame.CanInput = v.canInputLocked(time.Now())
@@ -1139,7 +1123,7 @@ func (v *terminalViewer) enqueue(frame terminalStreamFrame) bool {
 	}
 	ctx := context.Background()
 	if v.conn != nil {
-		ctx = v.conn.requestContext()
+		ctx = v.conn.RequestContext()
 	}
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
@@ -1174,25 +1158,13 @@ func (v *terminalViewer) fail(code, message string) {
 		return
 	}
 	if v.conn != nil {
-		v.conn.writePlain(controlPlainFrame{
-			Type: "response",
-			Response: &ControlResponse{
-				OK: false,
-				Error: &ControlError{
-					Status:  http.StatusServiceUnavailable,
-					Code:    ControlErrorCode(code),
-					Message: message,
-				},
-			},
-		})
-		if terminator, ok := v.conn.(terminalControlTerminator); ok {
-			terminator.terminateControlConnection(code, message)
-		}
+		v.conn.WriteTerminalError(code, message)
+		v.conn.TerminateTerminalConnection(code, message)
 	}
 	v.close()
 }
 
-func closeViewersAfterFrame(frame terminalStreamFrame, viewers []*terminalViewer) {
+func closeViewersAfterFrame(frame StreamFrame, viewers []*terminalViewer) {
 	for _, viewer := range viewers {
 		_ = viewer.enqueue(frame)
 		viewer.close()
@@ -1224,23 +1196,23 @@ func terminalOutputChunks(data string) []string {
 	return chunks
 }
 
-func localTerminalCWD(ws Workspace, requested string) (string, string, error) {
+func localTerminalCWD(ws protocol.Workspace, requested string) (string, string, error) {
 	root := filepath.Clean(ws.LocalCWD)
 	if root == "" || root == "." {
-		return "", "", newActionError(http.StatusBadRequest, "workspace_cwd_empty", "workspace local cwd is empty")
+		return "", "", apperrors.New(http.StatusBadRequest, "workspace_cwd_empty", "workspace local cwd is empty")
 	}
 	if requested == "" {
 		if err := ensureLocalControlWorkspaceExistingPath(root, root); err != nil {
-			return "", "", err
+			return "", "", apperrors.New(http.StatusBadRequest, "workspace_path_invalid", err.Error())
 		}
 		return root, "", nil
 	}
 	target, rel, err := resolveWorkspacePath(root, requested)
 	if err != nil {
-		return "", "", newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
+		return "", "", apperrors.New(http.StatusBadRequest, "workspace_path_invalid", err.Error())
 	}
 	if err := ensureLocalControlWorkspaceExistingPath(root, target); err != nil {
-		return "", "", err
+		return "", "", apperrors.New(http.StatusBadRequest, "workspace_path_invalid", err.Error())
 	}
 	return target, rel, nil
 }

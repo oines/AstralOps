@@ -43,7 +43,7 @@ type mediaService struct {
 }
 
 func (a *app) mediaService() *mediaService {
-	return &mediaService{service: internalmedia.New(mediaStoreAdapter{store: a.store, queryEvents: a.eventProjection().QueryEvents})}
+	return &mediaService{service: internalmedia.New(mediaStoreAdapter{store: a.store, queryEvents: a.sessionProjections().QueryEvents})}
 }
 
 type mediaStoreAdapter struct {

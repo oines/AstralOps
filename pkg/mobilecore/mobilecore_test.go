@@ -155,6 +155,32 @@ func TestMobileCoreControlRequestRejectsUnsupportedAction(t *testing.T) {
 	}
 }
 
+func TestMobileCoreErrorCallbackPreservesTypedErrorEnvelope(t *testing.T) {
+	core := New()
+	callback := &recordingMobileCoreCallback{}
+	core.SetCallback(callback)
+
+	_, err := core.CloudSession()
+	if controllercore.ErrorCode(err) != "cloud_session_missing" {
+		t.Fatalf("CloudSession error = %v, want cloud_session_missing", err)
+	}
+	if controllercore.ErrorStatus(err) != http.StatusUnauthorized {
+		t.Fatalf("CloudSession status = %d, want %d", controllercore.ErrorStatus(err), http.StatusUnauthorized)
+	}
+	if len(callback.errors) != 1 {
+		t.Fatalf("callback errors = %d, want 1", len(callback.errors))
+	}
+	var payload struct {
+		Error protocol.ControlError `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(callback.errors[0]), &payload); err != nil {
+		t.Fatalf("callback payload is invalid JSON: %v", err)
+	}
+	if payload.Error.Status != http.StatusUnauthorized || payload.Error.Code != "cloud_session_missing" || payload.Error.Message == "" {
+		t.Fatalf("callback error = %#v, want typed status/code/message", payload.Error)
+	}
+}
+
 func TestMobileCoreOpenHostSessionPrewarmsControlConnection(t *testing.T) {
 	transport := &fakeMobileCoreTransport{}
 	core := New()
@@ -231,6 +257,18 @@ func TestStartReturnsPersistentStoredIdentity(t *testing.T) {
 	if restarted.Identity.DeviceID != result.Identity.DeviceID || restarted.StoredIdentity.PrivateKey != result.StoredIdentity.PrivateKey {
 		t.Fatalf("restarted = %#v, want same persistent identity", restarted)
 	}
+}
+
+type recordingMobileCoreCallback struct {
+	errors []string
+}
+
+func (r *recordingMobileCoreCallback) OnHostState(payload string)      {}
+func (r *recordingMobileCoreCallback) OnWorkbenchPatch(payload string) {}
+func (r *recordingMobileCoreCallback) OnEvents(payload string)         {}
+func (r *recordingMobileCoreCallback) OnTerminalFrame(payload string)  {}
+func (r *recordingMobileCoreCallback) OnError(payload string) {
+	r.errors = append(r.errors, payload)
 }
 
 func TestSetCloudSessionRefreshesMeshThroughGoCore(t *testing.T) {

@@ -75,6 +75,39 @@ var controlPrivatePathKeys = map[string]bool{
 	"filePath":   true,
 }
 
+var controlPrivateProjectionKeys = map[string]bool{
+	"path":                      true,
+	"saved_path":                true,
+	"savedPath":                 true,
+	"local_path":                true,
+	"localPath":                 true,
+	"file_path":                 true,
+	"filePath":                  true,
+	"cwd":                       true,
+	"local_cwd":                 true,
+	"localCwd":                  true,
+	"local_projection_root":     true,
+	"localProjectionRoot":       true,
+	"helper_path":               true,
+	"helperPath":                true,
+	"native_id":                 true,
+	"nativeId":                  true,
+	"native_session_id":         true,
+	"nativeSessionId":           true,
+	"native_thread_id":          true,
+	"nativeThreadId":            true,
+	"native_ref":                true,
+	"nativeRef":                 true,
+	"forked_from_native_anchor": true,
+	"forkedFromNativeAnchor":    true,
+	"raw":                       true,
+	"raw_payload":               true,
+	"rawPayload":                true,
+	"ssh":                       true,
+	"ssh_config":                true,
+	"sshConfig":                 true,
+}
+
 var controlEventProjectionKeys = map[string]map[string]bool{
 	"approval.requested": {
 		"source": true, "approval_id": true, "request_id": true, "kind": true, "turn_id": true, "item_id": true,
@@ -353,10 +386,32 @@ func projectControlEventFields(kind string, value map[string]any) map[string]any
 	out := map[string]any{}
 	for key := range allowed {
 		if v, ok := value[key]; ok {
-			out[key] = v
+			out[key] = sanitizeControlRemoteValue(cloneJSONValue(v))
 		}
 	}
 	return out
+}
+
+func sanitizeControlRemoteValue(value any) any {
+	switch current := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(current))
+		for key, item := range current {
+			if controlPrivateProjectionKeys[key] {
+				continue
+			}
+			out[key] = sanitizeControlRemoteValue(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(current))
+		for index, item := range current {
+			out[index] = sanitizeControlRemoteValue(item)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 func sanitizeControlEventMediaReferences(value any) any {

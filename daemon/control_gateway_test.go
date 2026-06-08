@@ -27,7 +27,7 @@ func newControlGatewayTestApp(t *testing.T, agent AgentKind, runtime AgentRuntim
 	}
 	session := st.createSession(workspace, agent)
 	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{agent: runtime}}
-	app.ssh = newSSHManager(app)
+	app.setSSHManagerForTest(newSSHManager(app))
 	return app, workspace, session
 }
 
@@ -482,7 +482,7 @@ func TestControlGatewayReadsWorkspaceConnectionFromHostState(t *testing.T) {
 	}
 	state := initialSSHConnection(workspace, connectionConnected)
 	state.RemoteOS = "linux"
-	app.ssh.seedState(workspace, state)
+	app.sshManagerForTest().SeedState(workspace, state)
 	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
 
 	response, err := app.executeControlRequest(ControlRequest{
@@ -506,8 +506,7 @@ func TestControlGatewayReadsWorkspaceConnectionFromHostState(t *testing.T) {
 
 func TestControlGatewayDeletesWorkspaceOnHost(t *testing.T) {
 	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
-	terminal := newTerminalSession(workspace.ID, AgentCodex, "local", ".", "zsh")
-	app.terminalManager().register(terminal)
+	app.terminalManager().RegisterSessionForTest(workspace.ID, AgentCodex, "local", ".", "zsh")
 	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
 
 	response, err := app.executeControlRequest(ControlRequest{
@@ -530,7 +529,7 @@ func TestControlGatewayDeletesWorkspaceOnHost(t *testing.T) {
 	if _, ok := app.store.getSession(session.ID); ok {
 		t.Fatalf("session %s still exists after workspace delete", session.ID)
 	}
-	if tabs := app.terminalManager().listTabs(); len(tabs) != 0 {
+	if tabs := app.terminalManager().ListTabs(); len(tabs) != 0 {
 		t.Fatalf("terminal tabs = %#v, want workspace terminals closed", tabs)
 	}
 	events := testQueryEvents(app.store, workspace.ID, "", 0)

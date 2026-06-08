@@ -273,8 +273,8 @@ func TestRestorePersistedConnectionsHonorsSetting(t *testing.T) {
 
 	app := &app{store: st, settings: settings, hub: newEventHub()}
 	manager := newSSHManager(app)
-	manager.restorePersistedConnections(context.Background())
-	if got := manager.getConnection(ws).Status; got != connectionDisconnected {
+	manager.RestorePersistedConnections(context.Background())
+	if got := manager.Connection(ws).Status; got != connectionDisconnected {
 		t.Fatalf("restored status = %q, want disconnected", got)
 	}
 }

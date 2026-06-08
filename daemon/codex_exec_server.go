@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	internalssh "github.com/oines/astralops/daemon/internal/ssh"
 )
 
 type execServerRequest struct {
@@ -25,7 +26,6 @@ type execServerRequest struct {
 type execServerConn struct {
 	deps            execServerDeps
 	ws              Workspace
-	proxy           *proxyClient
 	socket          *websocket.Conn
 	sessionID       string
 	remoteShell     string
@@ -39,8 +39,9 @@ type execServerConn struct {
 
 type execServerDeps struct {
 	call          func(context.Context, Workspace, string, any, any) error
-	startExec     func(context.Context, Workspace, string, map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error)
-	startPTY      func(context.Context, Workspace, string, map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error)
+	proxyFor      func(context.Context, Workspace) (WorkspaceConnection, error)
+	startExec     func(context.Context, Workspace, string, map[string]any) (<-chan internalssh.Event, func(), map[string]any, error)
+	startPTY      func(context.Context, Workspace, string, map[string]any) (<-chan internalssh.Event, func(), map[string]any, error)
 	recordCommand func(string, string, []string, []string)
 }
 
@@ -50,15 +51,11 @@ func execServerDepsFromApp(a *app) execServerDeps {
 		return deps
 	}
 	deps.recordCommand = a.recordCodexExecCommand
-	if a.ssh != nil {
-		deps.call = a.ssh.call
-		deps.startExec = func(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
-			return a.ssh.startExec(ctx, ws, id, params)
-		}
-		deps.startPTY = func(ctx context.Context, ws Workspace, id string, params map[string]any) (*proxyClient, <-chan proxyEvent, func(), map[string]any, error) {
-			proxy, events, unsubscribe, started, err := a.ssh.startPTY(ctx, ws, id, params)
-			return proxy, events, unsubscribe, started, err
-		}
+	if ssh := a.sshService(); ssh != nil {
+		deps.call = ssh.Call
+		deps.proxyFor = ssh.ProxyFor
+		deps.startExec = ssh.StartExec
+		deps.startPTY = ssh.StartPTY
 	}
 	return deps
 }
@@ -115,7 +112,12 @@ func (a *app) handleCodexExecServerWS(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
-	proxy, state, err := a.ssh.proxyFor(ctx, ws)
+	deps := execServerDepsFromApp(a)
+	if deps.proxyFor == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ssh manager unavailable"})
+		return
+	}
+	state, err := deps.proxyFor(ctx, ws)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -125,9 +127,8 @@ func (a *app) handleCodexExecServerWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn := &execServerConn{
-		deps:            execServerDepsFromApp(a),
+		deps:            deps,
 		ws:              ws,
-		proxy:           proxy,
 		socket:          socket,
 		sessionID:       "exec_" + randomID(12),
 		remoteShell:     strings.TrimSpace(state.RemoteShell),
@@ -222,8 +223,7 @@ func execServerNotFound(err error) error {
 	if err == nil {
 		return nil
 	}
-	var transport proxyTransportError
-	if errors.As(err, &transport) {
+	if internalssh.IsProxyTransportError(err) {
 		return err
 	}
 	return &execServerJSONRPCError{Code: -32004, Message: err.Error()}
@@ -487,12 +487,11 @@ func (c *execServerConn) startRemoteExecProcess(p struct {
 	if c.deps.startExec == nil {
 		return nil, errors.New("remote exec server ssh exec is not initialized")
 	}
-	proxy, events, unsubscribe, started, err := c.deps.startExec(context.Background(), c.ws, p.ProcessID, map[string]any{"cwd": p.CWD, "command": command, "argv": p.Argv, "env": p.Env, "arg0": p.Arg0, "timeout_ms": int((24 * time.Hour).Milliseconds())})
+	events, unsubscribe, started, err := c.deps.startExec(context.Background(), c.ws, p.ProcessID, map[string]any{"cwd": p.CWD, "command": command, "argv": p.Argv, "env": p.Env, "arg0": p.Arg0, "timeout_ms": int((24 * time.Hour).Milliseconds())})
 	if err != nil {
 		proc.finish(1, err.Error())
 		return nil, err
 	}
-	c.proxy = proxy
 	go func() {
 		defer unsubscribe()
 		for event := range events {
@@ -524,12 +523,11 @@ func (c *execServerConn) startTTYProcess(p struct {
 	if c.deps.startPTY == nil {
 		return nil, errors.New("remote exec server ssh pty is not initialized")
 	}
-	proxy, events, unsubscribe, _, err := c.deps.startPTY(context.Background(), c.ws, p.ProcessID, map[string]any{"cwd": p.CWD, "argv": p.Argv, "env": p.Env, "arg0": p.Arg0})
+	events, unsubscribe, _, err := c.deps.startPTY(context.Background(), c.ws, p.ProcessID, map[string]any{"cwd": p.CWD, "argv": p.Argv, "env": p.Env, "arg0": p.Arg0})
 	if err != nil {
 		proc.finish(1, err.Error())
 		return nil, err
 	}
-	c.proxy = proxy
 	go func() {
 		defer unsubscribe()
 		for event := range events {

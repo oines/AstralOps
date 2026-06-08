@@ -423,7 +423,6 @@ func TestImportedNativeSessionCanStartInput(t *testing.T) {
 		store:    st,
 		hub:      newEventHub(),
 		runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime},
-		queues:   map[string][]queuedTurn{},
 	}
 	if _, err := app.startSessionInput(imported.ID, "continue", TurnOptions{}); err != nil {
 		t.Fatal(err)
@@ -465,7 +464,6 @@ func TestLegacyUnlinkedSessionCanBeDeleted(t *testing.T) {
 		store:    st,
 		hub:      newEventHub(),
 		runtimes: map[AgentKind]AgentRuntime{},
-		queues:   map[string][]queuedTurn{},
 	}
 	if _, err := app.startSessionInput(session.ID, "continue", TurnOptions{}); err == nil {
 		t.Fatal("startSessionInput succeeded, want legacy native history error")

@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	internalsessions "github.com/oines/astralops/daemon/internal/sessions"
+	internalsessions "github.com/oines/astralops/daemon/internal/core/sessions"
 )
 
 func (a *app) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
@@ -18,7 +18,7 @@ func (a *app) handleApprovalAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	result, err := a.sessions().respondInteraction(id, req)
+	result, err := a.respondInteraction(id, req)
 	if err != nil {
 		writeActionError(w, err)
 		return

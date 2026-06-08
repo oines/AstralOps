@@ -511,12 +511,7 @@ func TestControlGatewayDeletesAndMovesRemoteWorkspacePaths(t *testing.T) {
 	proxy, cleanup := newMutableClaudeRemoteProxy(t, workspace, remoteStore)
 	defer cleanup()
 	app := &app{store: st, hub: newEventHub()}
-	app.ssh = &sshManager{
-		deps: sshDepsFromApp(app),
-		by: map[string]*sshTarget{
-			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
-		},
-	}
+	app.seedConnectedSSHProxyForTest(workspace, proxy)
 	trustControlDevice(t, app, "device_mobile", CapabilityWorkspaceFilesWrite)
 
 	deleteResponse, err := app.executeControlRequest(ControlRequest{

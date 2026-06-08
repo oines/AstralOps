@@ -208,7 +208,7 @@ func terminalErrorFrame(frame controlPlainFrame, err error) controlPlainFrame {
 			message = response.Error.Message
 		}
 	}
-	payload := &terminalStreamFrame{frameType: terminalFrameError, Code: code, Reason: message}
+	payload := &terminalStreamFrame{FrameType: terminalFrameError, Code: code, Reason: message}
 	if frame.Terminal != nil {
 		payload.TerminalID = frame.Terminal.TerminalID
 		payload.WorkspaceID = frame.Terminal.WorkspaceID

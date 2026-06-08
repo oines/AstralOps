@@ -2205,12 +2205,7 @@ func TestControlWebSocketRemoteWorkspaceFileStreamUsesProxyReadRange(t *testing.
 		hub:      newEventHub(),
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
-	app.ssh = &sshManager{
-		deps: sshDepsFromApp(app),
-		by: map[string]*sshTarget{
-			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
-		},
-	}
+	app.seedConnectedSSHProxyForTest(workspace, proxy)
 	server := startControlChannelTestServer(t, app)
 	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
 	defer client.Close()
@@ -2293,12 +2288,7 @@ func TestControlWebSocketRemoteWorkspaceFileStreamReportsTruncatedReadRange(t *t
 		hub:      newEventHub(),
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
-	app.ssh = &sshManager{
-		deps: sshDepsFromApp(app),
-		by: map[string]*sshTarget{
-			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
-		},
-	}
+	app.seedConnectedSSHProxyForTest(workspace, proxy)
 	server := startControlChannelTestServer(t, app)
 	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
 	defer client.Close()
@@ -2379,10 +2369,10 @@ for line in sys.stdin:
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	proxy.start()
+	proxy.StartForTest()
 	cleanup := func() {
-		proxy.close()
-		<-proxy.done
+		proxy.CloseForTest()
+		<-proxy.DoneForTest()
 	}
 	return proxy, cleanup
 }
@@ -2423,12 +2413,7 @@ func TestControlWebSocketRemoteWorkspaceFileWriteUsesProxyOverEncryptedChannel(t
 		hub:      newEventHub(),
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
-	app.ssh = &sshManager{
-		deps: sshDepsFromApp(app),
-		by: map[string]*sshTarget{
-			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
-		},
-	}
+	app.seedConnectedSSHProxyForTest(workspace, proxy)
 	server := startControlChannelTestServer(t, app)
 	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
 	defer client.Close()
@@ -2515,12 +2500,7 @@ func TestControlWebSocketRemoteWorkspacePatchUsesProxyOverEncryptedChannel(t *te
 		hub:      newEventHub(),
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
-	app.ssh = &sshManager{
-		deps: sshDepsFromApp(app),
-		by: map[string]*sshTarget{
-			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
-		},
-	}
+	app.seedConnectedSSHProxyForTest(workspace, proxy)
 	server := startControlChannelTestServer(t, app)
 	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
 	defer client.Close()
@@ -2604,12 +2584,7 @@ func TestControlWebSocketRemoteWorkspaceExecUsesProxyOverEncryptedChannel(t *tes
 		hub:      newEventHub(),
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
-	app.ssh = &sshManager{
-		deps: sshDepsFromApp(app),
-		by: map[string]*sshTarget{
-			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
-		},
-	}
+	app.seedConnectedSSHProxyForTest(workspace, proxy)
 	server := startControlChannelTestServer(t, app)
 	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
 	defer client.Close()
@@ -3295,7 +3270,7 @@ func TestControlWebSocketTerminalResizeAndDetachAreEncrypted(t *testing.T) {
 		t.Fatalf("open result = %#v, want terminal id", plain.Response.Result)
 	}
 	defer func() {
-		_, _ = app.terminalManager().close(context.Background(), "dev_controller", terminalCloseParams{TerminalID: terminalID})
+		_, _ = app.terminalManager().Close(context.Background(), "dev_controller", terminalCloseParams{TerminalID: terminalID})
 	}()
 
 	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
@@ -3359,7 +3334,7 @@ func TestControlWebSocketTerminalReconnectAttachWithinRetention(t *testing.T) {
 	t.Setenv("SHELL", terminalManagerTestShell(t))
 
 	app, workspace, _, controllerPublicKey, controllerPrivateKey := newControlChannelTestApp(t, CapabilityTerminalOpen, CapabilityTerminalInput)
-	app.terminalManager().retentionTimeout = 500 * time.Millisecond
+	app.terminalManager().SetRetentionTimeoutForTest(500 * time.Millisecond)
 	server := startControlChannelTestServer(t, app)
 	client, cipher, _ := dialControlChannel(t, server.URL, app, controllerPublicKey, controllerPrivateKey)
 
@@ -3385,7 +3360,7 @@ func TestControlWebSocketTerminalReconnectAttachWithinRetention(t *testing.T) {
 		t.Fatalf("open result = %#v, want terminal id", plain.Response.Result)
 	}
 	t.Cleanup(func() {
-		_, _ = app.terminalManager().close(context.Background(), "dev_controller", terminalCloseParams{TerminalID: terminalID})
+		_, _ = app.terminalManager().Close(context.Background(), "dev_controller", terminalCloseParams{TerminalID: terminalID})
 	})
 
 	writeEncryptedControlFrame(t, client, cipher, controlPlainFrame{
@@ -3452,7 +3427,7 @@ func TestTerminalRetentionTimeoutClosesUnattachedSession(t *testing.T) {
 
 	app, workspace, _ := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	manager := app.terminalManager()
-	manager.retentionTimeout = 50 * time.Millisecond
+	manager.SetRetentionTimeoutForTest(50 * time.Millisecond)
 	trustControlDevice(t, app, "device_mobile", CapabilityTerminalOpen, CapabilityTerminalInput)
 
 	open := openTerminalForTest(t, app, "device_mobile", workspace.ID)

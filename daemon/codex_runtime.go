@@ -89,7 +89,7 @@ func (r *codexLocalRuntime) StartTurn(session Session, workspace Workspace, inpu
 		return ErrSessionRunning
 	}
 
-	r.deps.store.updateSessionStatus(session.ID, "running")
+	r.deps.updateSessionStatus(session.ID, "running")
 	if !options.Internal && !options.SuppressUserMessage {
 		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", displayInputNormalized(input, options))})
 	}
@@ -110,7 +110,7 @@ func (r *codexLocalRuntime) RunCommand(session Session, workspace Workspace, com
 	if !client.trySetRunning() {
 		return ErrSessionRunning
 	}
-	r.deps.store.updateSessionStatus(session.ID, "running")
+	r.deps.updateSessionStatus(session.ID, "running")
 	if commandID == "compact" {
 		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "memory.compacting", Normalized: eventNormalized("memory.compacting", map[string]any{
 			"source":  "astralops",
@@ -200,7 +200,7 @@ func (r *codexLocalRuntime) clientForSession(session Session, workspace Workspac
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		var hello map[string]any
-		err := r.deps.ssh.call(ctx, workspace, "hello", map[string]any{}, &hello)
+		err := r.deps.ssh.Call(ctx, workspace, "hello", map[string]any{}, &hello)
 		if err == nil {
 			codexHome, err = r.deps.prepareCodexRemoteHome(ctx, workspace)
 		}
@@ -560,9 +560,17 @@ func (c *codexClient) ensureStarted() error {
 	c.stdin = stdin
 	c.mu.Unlock()
 
-	go c.scan(stdout)
-	go c.scanStderr(stderr)
-	go c.wait(cmd, processClosed)
+	stdoutDone := make(chan struct{})
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stdoutDone)
+		c.scan(stdout)
+	}()
+	go func() {
+		defer close(stderrDone)
+		c.scanStderr(stderr)
+	}()
+	go c.wait(cmd, processClosed, stdoutDone, stderrDone)
 
 	if _, err := c.request("initialize", map[string]any{
 		"clientInfo": map[string]any{"name": "AstralOps", "version": version},
@@ -771,7 +779,7 @@ func (c *codexClient) stop(reason string) {
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
 	}
-	c.runtime.deps.store.updateSessionStatus(c.session.ID, "idle")
+	c.runtime.deps.updateSessionStatus(c.session.ID, "idle")
 	if wasRunning {
 		normalized := map[string]any{"status": "idle"}
 		if turnID != "" {
@@ -991,8 +999,10 @@ func (c *codexClient) enrichRemoteCommandEvent(ev *AstralEvent) {
 	ev.Normalized = eventNormalized(ev.Kind, normalized)
 }
 
-func (c *codexClient) wait(cmd *exec.Cmd, closed chan struct{}) {
+func (c *codexClient) wait(cmd *exec.Cmd, closed chan struct{}, stdoutDone, stderrDone <-chan struct{}) {
 	c.ensureRuntimeDeps()
+	<-stdoutDone
+	<-stderrDone
 	err := cmd.Wait()
 	c.mu.Lock()
 	current := c.cmd == cmd && c.closed == closed
@@ -1012,7 +1022,7 @@ func (c *codexClient) wait(cmd *exec.Cmd, closed chan struct{}) {
 	c.mu.Unlock()
 	close(closed)
 	if err != nil && !stopping && current {
-		c.runtime.deps.store.updateSessionStatus(c.session.ID, "failed")
+		c.runtime.deps.updateSessionStatus(c.session.ID, "failed")
 		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.failed", Normalized: eventNormalized("turn.failed", map[string]any{
 			"status":  "failed",
 			"message": err.Error(),
@@ -1023,7 +1033,7 @@ func (c *codexClient) wait(cmd *exec.Cmd, closed chan struct{}) {
 func (c *codexClient) finishFailed(message string) {
 	c.ensureRuntimeDeps()
 	c.markIdle("failed")
-	c.runtime.deps.store.updateSessionStatus(c.session.ID, "failed")
+	c.runtime.deps.updateSessionStatus(c.session.ID, "failed")
 	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentCodex, Kind: "turn.failed", Normalized: eventNormalized("turn.failed", map[string]any{
 		"status":  "failed",
 		"message": message,
@@ -1038,10 +1048,10 @@ func (c *codexClient) markIdle(status string) {
 	editingLast := c.editingLast
 	c.mu.Unlock()
 	if status == "failed" {
-		c.runtime.deps.store.updateSessionStatus(c.session.ID, "failed")
+		c.runtime.deps.updateSessionStatus(c.session.ID, "failed")
 		return
 	}
-	c.runtime.deps.store.updateSessionStatus(c.session.ID, "idle")
+	c.runtime.deps.updateSessionStatus(c.session.ID, "idle")
 	if !editingLast {
 		go c.runtime.deps.startNextQueuedTurn(c.session.ID)
 	}

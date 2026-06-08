@@ -13,6 +13,7 @@ import (
 
 	"github.com/oines/astralops/pkg/cloudmesh"
 	"github.com/oines/astralops/pkg/deviceidentity"
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 const (
@@ -35,20 +36,7 @@ type DeviceIdentity = cloudmesh.DeviceIdentity
 
 type storedDeviceIdentity = deviceidentity.StoredIdentity
 
-type TrustGrant struct {
-	HostDeviceID                   string   `json:"host_device_id"`
-	ControllerDeviceID             string   `json:"controller_device_id"`
-	ControllerDeviceName           string   `json:"controller_device_name,omitempty"`
-	ControllerPublicKey            string   `json:"controller_public_key,omitempty"`
-	ControllerPublicKeyFingerprint string   `json:"controller_public_key_fingerprint,omitempty"`
-	Scope                          string   `json:"scope"`
-	Status                         string   `json:"status"`
-	Capabilities                   []string `json:"capabilities"`
-	WorkspaceExecPolicy            string   `json:"workspace_exec_policy,omitempty"`
-	CreatedAt                      string   `json:"created_at"`
-	UpdatedAt                      string   `json:"updated_at"`
-	RevokedAt                      string   `json:"revoked_at,omitempty"`
-}
+type TrustGrant = protocol.TrustGrant
 
 type trustDeviceRequest struct {
 	ControllerDeviceID             string   `json:"controller_device_id"`

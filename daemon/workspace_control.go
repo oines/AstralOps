@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	internalworkspace "github.com/oines/astralops/daemon/internal/workspace"
+	internalworkspace "github.com/oines/astralops/daemon/internal/core/workspace"
 	"github.com/oines/astralops/pkg/protocol"
 )
 

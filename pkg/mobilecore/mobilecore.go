@@ -548,7 +548,7 @@ func (c *Core) emitError(err error) {
 	if callback == nil || err == nil {
 		return
 	}
-	payload, _ := encode(map[string]any{"error": err.Error()})
+	payload, _ := encode(map[string]any{"error": protocol.ControlErrorFromError(err)})
 	callback.OnError(payload)
 }
 

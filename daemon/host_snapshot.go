@@ -55,7 +55,7 @@ func (a *app) buildHostSnapshot(params hostSnapshotParams) hostSnapshotResult {
 		Workbench:            workbench,
 	}
 	if params.RestoreOnLaunch && len(sessions) > 0 {
-		result.InitialSessionEvents = sanitizeControlEvents(a.eventProjection().QueryEventsWindow("", sessions[0].ID, 0, 0, eventLimit))
+		result.InitialSessionEvents = sanitizeControlEvents(a.sessionProjections().QueryEventsWindow("", sessions[0].ID, 0, 0, eventLimit))
 	}
 	return result
 }

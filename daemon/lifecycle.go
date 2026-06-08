@@ -3,7 +3,7 @@ package main
 import "errors"
 
 func (a *app) stopSessionRuntime(session Session, reason string) {
-	a.clearSessionQueue(session.ID, reason)
+	a.sessionControlPlane().ClearSessionQueue(session.ID, reason)
 	runtime := a.runtimes[session.Agent]
 	if runtime == nil {
 		a.store.updateSessionStatus(session.ID, "idle")

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/oines/astralops/daemon/internal/agents"
 	"github.com/oines/astralops/daemon/internal/apperrors"
 	"github.com/oines/astralops/daemon/internal/sessiontypes"
 	"github.com/oines/astralops/pkg/protocol"
@@ -37,11 +38,11 @@ func (s *Service) EditLastUserMessage(sessionID string, req protocol.EditLastUse
 	if !editableOK || editableSeq != req.EventSeq {
 		return nil, apperrors.New(http.StatusConflict, "editable_message_stale", "editable user message is stale")
 	}
-	runtime, ok := s.runtimes[ss.Agent]
+	runtime, ok := s.agents[ss.Agent]
 	if !ok {
 		return nil, apperrors.New(http.StatusNotImplemented, "runtime_not_implemented", "agent runtime is not implemented")
 	}
-	editor, ok := runtime.(sessiontypes.LastUserMessageEditor)
+	editor, ok := runtime.(agents.LastUserMessageEditor)
 	if !ok {
 		return nil, apperrors.New(http.StatusNotImplemented, "edit_unsupported", "agent runtime does not support editing and resending the last user message")
 	}

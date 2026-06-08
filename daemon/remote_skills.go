@@ -24,7 +24,7 @@ func (a *app) syncRemoteSkillTree(ctx context.Context, ws Workspace, remoteRel s
 	}
 
 	var stat map[string]any
-	if err := a.ssh.call(ctx, ws, "stat", map[string]any{"path": remoteRoot}, &stat); err != nil {
+	if err := a.sshService().Call(ctx, ws, "stat", map[string]any{"path": remoteRoot}, &stat); err != nil {
 		if isRemoteSkillsMissing(err) {
 			return nil
 		}
@@ -35,7 +35,7 @@ func (a *app) syncRemoteSkillTree(ctx context.Context, ws Workspace, remoteRel s
 	}
 
 	var listing map[string]any
-	if err := a.ssh.call(ctx, ws, "dirs", map[string]any{"path": remoteRoot, "limit": remoteSkillsSyncFileLimit + 1}, &listing); err != nil {
+	if err := a.sshService().Call(ctx, ws, "dirs", map[string]any{"path": remoteRoot, "limit": remoteSkillsSyncFileLimit + 1}, &listing); err != nil {
 		if isRemoteSkillsMissing(err) {
 			return nil
 		}
@@ -53,7 +53,7 @@ func (a *app) syncRemoteSkillTree(ctx context.Context, ws Workspace, remoteRel s
 			continue
 		}
 		var out map[string]any
-		if err := a.ssh.call(ctx, ws, "read", map[string]any{"path": remoteFile}, &out); err != nil {
+		if err := a.sshService().Call(ctx, ws, "read", map[string]any{"path": remoteFile}, &out); err != nil {
 			return err
 		}
 		body, err := remoteReadBytes(out)

@@ -9,10 +9,6 @@ type eventProjectionService struct {
 	store *store
 }
 
-func (a *app) eventProjection() eventProjectionService {
-	return eventProjectionService{store: a.store}
-}
-
 func (p eventProjectionService) QueryEvents(workspaceID, sessionID string, afterSeq int64) []AstralEvent {
 	return p.QueryEventsWindow(workspaceID, sessionID, afterSeq, 0, 0)
 }

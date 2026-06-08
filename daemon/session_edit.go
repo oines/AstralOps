@@ -9,7 +9,7 @@ import (
 type editLastUserMessageRequest = protocol.EditLastUserMessageRequest
 
 func (a *app) handleEditLastUserMessage(w http.ResponseWriter, sessionID string, req editLastUserMessageRequest) {
-	result, err := a.sessions().editLastUserMessage(sessionID, req)
+	result, err := a.editLastUserMessage(sessionID, req)
 	if err != nil {
 		writeActionError(w, err)
 		return

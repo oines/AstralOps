@@ -42,7 +42,7 @@ func (a *app) notificationHistory(source AstralEvent, targetSessionID string) []
 		return []AstralEvent{source}
 	}
 	sessionID := firstString(targetSessionID, source.SessionID)
-	return a.eventProjection().QueryEvents(source.WorkspaceID, sessionID, 0)
+	return a.sessionProjections().QueryEvents(source.WorkspaceID, sessionID, 0)
 }
 
 type appNotificationPolicy struct {

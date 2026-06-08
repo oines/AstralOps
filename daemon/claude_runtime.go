@@ -79,7 +79,7 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		var hello map[string]any
-		callErr := r.deps.ssh.call(ctx, workspace, "hello", map[string]any{}, &hello)
+		callErr := r.deps.ssh.Call(ctx, workspace, "hello", map[string]any{}, &hello)
 		if callErr != nil {
 			cancel()
 			return callErr
@@ -391,7 +391,7 @@ func (c *claudeClient) startTurn(session Session, input string, options TurnOpti
 	c.toolStarts = map[string]AstralEvent{}
 	c.mu.Unlock()
 
-	c.runtime.deps.store.updateSessionStatus(session.ID, "running")
+	c.runtime.deps.updateSessionStatus(session.ID, "running")
 	if !options.Internal && !options.SuppressUserMessage {
 		c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", displayInputNormalized(input, options))})
 	}
@@ -659,9 +659,9 @@ func (c *claudeClient) finishCompletedRequiresAction() {
 	if _, finished := c.finishTurnState(); !finished {
 		return
 	}
-	c.runtime.deps.store.updateSessionStatus(c.session.ID, "idle")
+	c.runtime.deps.updateSessionStatus(c.session.ID, "idle")
 	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"status": "idle"})})
-	c.runtime.deps.store.updateSessionStatus(c.session.ID, "requires_action")
+	c.runtime.deps.updateSessionStatus(c.session.ID, "requires_action")
 	c.scheduleIdleStop()
 }
 
@@ -689,7 +689,7 @@ func (c *claudeClient) finishPendingInteraction() {
 	if _, finished := c.finishTurnState(); !finished {
 		return
 	}
-	c.runtime.deps.store.updateSessionStatus(c.session.ID, "requires_action")
+	c.runtime.deps.updateSessionStatus(c.session.ID, "requires_action")
 	c.scheduleIdleStop()
 }
 
@@ -701,10 +701,10 @@ func (c *claudeClient) finishTurn(kind string, message string, cause error, flag
 	}
 	switch kind {
 	case "completed":
-		c.runtime.deps.store.updateSessionStatus(c.session.ID, "idle")
+		c.runtime.deps.updateSessionStatus(c.session.ID, "idle")
 		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"status": "idle"})})
 	case "cancelled":
-		c.runtime.deps.store.updateSessionStatus(c.session.ID, "idle")
+		c.runtime.deps.updateSessionStatus(c.session.ID, "idle")
 		normalized := map[string]any{"status": "idle"}
 		if message != "" {
 			normalized["reason"] = message
@@ -938,7 +938,7 @@ func (c *claudeClient) scanClaudeStream(reader io.Reader) {
 			for _, visibleEvent := range r.prepareClaudeVisibleEvent(session, ev, visibleText) {
 				if visibleEvent.Kind == "approval.requested" || visibleEvent.Kind == "ask.requested" {
 					c.markPendingInteraction()
-					r.deps.store.updateSessionStatus(session.ID, "requires_action")
+					r.deps.updateSessionStatus(session.ID, "requires_action")
 				}
 				r.deps.emit(visibleEvent)
 				if visibleEvent.Kind == "approval.requested" || visibleEvent.Kind == "ask.requested" {
@@ -954,7 +954,7 @@ func (c *claudeClient) scanClaudeStream(reader io.Reader) {
 				}
 				if approval, ok := claudeApprovalFromToolResult(session, visibleEvent, toolStarts); ok {
 					approval = r.remapProjectionEventPaths(approval)
-					r.deps.store.updateSessionStatus(session.ID, "requires_action")
+					r.deps.updateSessionStatus(session.ID, "requires_action")
 					r.deps.emit(approval)
 					c.markPendingInteraction()
 					c.pauseForApproval(session)
@@ -1206,7 +1206,7 @@ func (r *claudeLocalRuntime) finishFailed(session Session, message string, cause
 	if message == "" {
 		message = "claude turn failed"
 	}
-	r.deps.store.updateSessionStatus(session.ID, "failed")
+	r.deps.updateSessionStatus(session.ID, "failed")
 	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.failed", Normalized: eventNormalized("turn.failed", map[string]any{
 		"status":  "failed",
 		"message": message,

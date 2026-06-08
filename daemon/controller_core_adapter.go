@@ -783,7 +783,7 @@ func fromCoreTerminalPayload(frameType string, payload *controllercore.TerminalP
 		return nil
 	}
 	return &terminalStreamFrame{
-		frameType:    frameType,
+		FrameType:    frameType,
 		TerminalID:   payload.TerminalID,
 		WorkspaceID:  payload.WorkspaceID,
 		Target:       payload.Target,

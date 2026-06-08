@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/oines/astralops/daemon/internal/agents"
 	"github.com/oines/astralops/daemon/internal/apperrors"
 	"github.com/oines/astralops/daemon/internal/sessiontypes"
 	"github.com/oines/astralops/pkg/protocol"
@@ -42,17 +43,17 @@ func (s *Service) ForkSession(sessionID string, req protocol.ForkSessionRequest)
 	if err != nil {
 		return protocol.ForkSessionResponse{}, apperrors.New(http.StatusBadRequest, "session_fork_invalid", err.Error())
 	}
-	var forker sessiontypes.SessionForker
+	var forker agents.SessionForker
 	if source.Agent == protocol.AgentCodex {
 		if source.NativeThreadID == "" {
 			return protocol.ForkSessionResponse{}, apperrors.New(http.StatusBadRequest, "session_fork_source_missing_native_thread", "source codex session is missing native thread id")
 		}
-		runtime, ok := s.runtimes[source.Agent]
+		runtime, ok := s.agents[source.Agent]
 		if !ok {
 			return protocol.ForkSessionResponse{}, apperrors.New(http.StatusNotImplemented, "runtime_not_implemented", "agent runtime is not implemented")
 		}
 		var supportsFork bool
-		forker, supportsFork = runtime.(sessiontypes.SessionForker)
+		forker, supportsFork = runtime.(agents.SessionForker)
 		if !supportsFork {
 			return protocol.ForkSessionResponse{}, apperrors.New(http.StatusNotImplemented, "session_fork_unsupported", "agent runtime does not support session fork")
 		}

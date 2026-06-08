@@ -1,6 +1,11 @@
 package main
 
-import "path/filepath"
+import (
+	"context"
+	"path/filepath"
+
+	"github.com/oines/astralops/daemon/internal/eventlog"
+)
 
 func (a *app) backfillHistoricalContextEvents() error {
 	latestContext := map[string]AstralEvent{}
@@ -46,11 +51,10 @@ func (a *app) backfillHistoricalContextEvents() error {
 			handled[source.SessionID] = true
 			continue
 		}
-		saved, err := a.store.appendEvent(contextEvent)
+		saved, err := a.publishHistoricalBackfillEvent(contextEvent)
 		if err != nil {
 			return err
 		}
-		a.sessionProjections().apply(saved)
 		latestContext[source.SessionID] = saved
 		handled[source.SessionID] = true
 	}
@@ -63,11 +67,10 @@ func (a *app) backfillHistoricalContextEvents() error {
 			handled[sessionID] = true
 			continue
 		}
-		saved, err := a.store.appendEvent(contextEvent)
+		saved, err := a.publishHistoricalBackfillEvent(contextEvent)
 		if err != nil {
 			return err
 		}
-		a.sessionProjections().apply(saved)
 		latestContext[sessionID] = saved
 		handled[sessionID] = true
 	}
@@ -109,11 +112,10 @@ func (a *app) backfillHistoricalApprovalEvents() error {
 			if id == "" || seen[id] {
 				continue
 			}
-			saved, err := a.store.appendEvent(event)
+			_, err := a.publishHistoricalBackfillEvent(event)
 			if err != nil {
 				return err
 			}
-			a.sessionProjections().apply(saved)
 			for _, nextID := range ids {
 				seen[nextID] = true
 			}
@@ -122,11 +124,19 @@ func (a *app) backfillHistoricalApprovalEvents() error {
 	return nil
 }
 
+func (a *app) publishHistoricalBackfillEvent(event AstralEvent) (AstralEvent, error) {
+	return eventlog.New(eventlog.Options{
+		Store:       a.store,
+		Projections: a.sessionProjections(),
+		Diagnostics: logDiagnosticEvent,
+	}).Publish(context.Background(), event)
+}
+
 func (a *app) historicalBackfillEvents() []AstralEvent {
 	if a == nil || a.store == nil {
 		return nil
 	}
-	events := a.eventProjection().QueryEvents("", "", 0)
+	events := a.sessionProjections().QueryEvents("", "", 0)
 	legacy, _ := (legacyMigrationReader{dir: filepath.Join(a.store.dataDir, "events")}).Read()
 	return append(events, legacy...)
 }

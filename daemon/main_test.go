@@ -711,7 +711,7 @@ func TestHistoricalContextBackfillCorrectsPersistedClaudeAggregateUsage(t *testi
 
 func TestSessionProjectionKeepsClaudeCurrentContextOverAggregateResult(t *testing.T) {
 	cache := newSessionProjectionCache()
-	cache.apply(AstralEvent{
+	cache.Apply(AstralEvent{
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "control.context",
@@ -722,7 +722,7 @@ func TestSessionProjectionKeepsClaudeCurrentContextOverAggregateResult(t *testin
 				"total_tokens": 30000,
 			}),
 	})
-	cache.apply(AstralEvent{
+	cache.Apply(AstralEvent{
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "control.context",
@@ -755,7 +755,7 @@ func TestSessionProjectionKeepsClaudeCurrentContextOverAggregateResult(t *testin
 
 func TestSessionProjectionInvalidatesContextOnCompact(t *testing.T) {
 	cache := newSessionProjectionCache()
-	cache.apply(AstralEvent{
+	cache.Apply(AstralEvent{
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "control.context",
@@ -767,7 +767,7 @@ func TestSessionProjectionInvalidatesContextOnCompact(t *testing.T) {
 				"model_context_window": 200000,
 			}),
 	})
-	cache.apply(AstralEvent{
+	cache.Apply(AstralEvent{
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "memory.compacted",
@@ -776,7 +776,7 @@ func TestSessionProjectionInvalidatesContextOnCompact(t *testing.T) {
 				"source": "claude",
 			}),
 	})
-	cache.apply(AstralEvent{
+	cache.Apply(AstralEvent{
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "control.context",
@@ -787,7 +787,7 @@ func TestSessionProjectionInvalidatesContextOnCompact(t *testing.T) {
 				"model_context_window": 200000,
 			}),
 	})
-	cache.apply(AstralEvent{
+	cache.Apply(AstralEvent{
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "control.context",
@@ -803,7 +803,7 @@ func TestSessionProjectionInvalidatesContextOnCompact(t *testing.T) {
 	if context := cache.latestContext("sess_claude"); len(context) > 0 {
 		t.Fatalf("projected context = %#v, want compacted session to ignore aggregate-only usage", context)
 	}
-	cache.apply(AstralEvent{
+	cache.Apply(AstralEvent{
 		SessionID: "sess_claude",
 		Agent:     AgentClaude,
 		Kind:      "control.context",
@@ -1712,7 +1712,7 @@ func TestCodexNativeAttachmentManifestProjectsCleanUserMedia(t *testing.T) {
 	st.mu.Unlock()
 
 	app := &app{store: st, hub: newEventHub()}
-	events := app.eventProjection().QueryEvents(workspace.ID, session.ID, 0)
+	events := app.sessionProjections().QueryEvents(workspace.ID, session.ID, 0)
 	userEvents := []AstralEvent{}
 	for _, event := range events {
 		if event.Kind == "message.user" {
@@ -2469,20 +2469,15 @@ done
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	proxy.start()
-	defer proxy.close()
+	proxy.StartForTest()
+	defer proxy.CloseForTest()
 
 	st, err := loadStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	app := &app{store: st, hub: newEventHub()}
-	app.ssh = &sshManager{
-		deps: sshDepsFromApp(app),
-		by: map[string]*sshTarget{
-			ws.ID: {workspace: ws, proxy: proxy, state: initialSSHConnection(ws, connectionConnected)},
-		},
-	}
+	app.seedConnectedSSHProxyForTest(ws, proxy)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -2522,18 +2517,18 @@ func TestSSHManagerContextCancellationDoesNotDegradeWorkspace(t *testing.T) {
 		t.Skip("shell fake proxy is POSIX-only")
 	}
 	app, ws, proxy := newSilentSSHProxyTestApp(t)
-	defer proxy.close()
+	defer proxy.CloseForTest()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := app.ssh.call(ctx, ws, "list", map[string]any{"path": ws.SSH.RemoteCWD}, nil); !errors.Is(err, context.Canceled) {
+	if err := app.sshManagerForTest().Call(ctx, ws, "list", map[string]any{"path": ws.SSH.RemoteCWD}, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("call error = %v, want context canceled", err)
 	}
-	state := app.ssh.getConnection(ws)
+	state := app.sshManagerForTest().Connection(ws)
 	if state.Status != connectionConnected {
 		t.Fatalf("connection status = %s, want connected; message=%s", state.Status, state.Message)
 	}
-	if got := app.ssh.by[ws.ID].proxy; got != proxy {
+	if got := app.sshManagerForTest().ProxyForTest(ws.ID); got != proxy {
 		t.Fatal("context cancellation dropped the live proxy")
 	}
 }
@@ -2543,19 +2538,19 @@ func TestSSHManagerStartEventContextCancellationDoesNotDegradeWorkspace(t *testi
 		t.Skip("shell fake proxy is POSIX-only")
 	}
 	app, ws, proxy := newSilentSSHProxyTestApp(t)
-	defer proxy.close()
+	defer proxy.CloseForTest()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, _, _, err := app.ssh.startExec(ctx, ws, "exec_cancel", map[string]any{"cwd": ws.SSH.RemoteCWD, "command": "pwd"})
+	_, _, _, _, err := app.sshManagerForTest().StartExecWithProxy(ctx, ws, "exec_cancel", map[string]any{"cwd": ws.SSH.RemoteCWD, "command": "pwd"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("startExec error = %v, want context canceled", err)
 	}
-	state := app.ssh.getConnection(ws)
+	state := app.sshManagerForTest().Connection(ws)
 	if state.Status != connectionConnected {
 		t.Fatalf("connection status = %s, want connected; message=%s", state.Status, state.Message)
 	}
-	if got := app.ssh.by[ws.ID].proxy; got != proxy {
+	if got := app.sshManagerForTest().ProxyForTest(ws.ID); got != proxy {
 		t.Fatal("context cancellation dropped the live proxy")
 	}
 }
@@ -2598,14 +2593,14 @@ func TestSSHConnectUpgradesIncompatibleRemoteHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}}
-	app.ssh = newSSHManager(app)
+	app := &app{store: st, hub: newEventHub()}
+	app.setSSHManagerForTest(newSSHManager(app))
 	installFakeSSHProxy(t, dir, "1")
 	t.Setenv("ASTRALOPS_TEST_PROXY_OLD_UNTIL_UPLOAD", "1")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	state, err := app.ssh.connect(ctx, workspace)
+	state, err := app.sshManagerForTest().Connect(ctx, workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2648,14 +2643,14 @@ func TestSSHConnectFallsBackWhenRuntimeCandidateCannotExecute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}}
-	app.ssh = newSSHManager(app)
+	app := &app{store: st, hub: newEventHub()}
+	app.setSSHManagerForTest(newSSHManager(app))
 	installFakeSSHProxy(t, dir, "1")
 	t.Setenv("ASTRALOPS_TEST_PROXY_FAIL_PREFIX", "/run/user/1000/astralops")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	state, err := app.ssh.connect(ctx, workspace)
+	state, err := app.sshManagerForTest().Connect(ctx, workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2696,18 +2691,13 @@ func newSilentSSHProxyTestApp(t *testing.T) (*app, Workspace, *proxyClient) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	proxy.start()
+	proxy.StartForTest()
 	st, err := loadStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	app := &app{store: st, hub: newEventHub()}
-	app.ssh = &sshManager{
-		deps: sshDepsFromApp(app),
-		by: map[string]*sshTarget{
-			ws.ID: {workspace: ws, proxy: proxy, state: initialSSHConnection(ws, connectionConnected)},
-		},
-	}
+	app.seedConnectedSSHProxyForTest(ws, proxy)
 	return app, ws, proxy
 }
 
@@ -4376,12 +4366,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"o
 			AgentClaude: {Path: claudePath, Available: true, Version: "fake"},
 		},
 	}
-	app.ssh = &sshManager{
-		deps: sshDepsFromApp(app),
-		by: map[string]*sshTarget{
-			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
-		},
-	}
+	app.seedConnectedSSHProxyForTest(workspace, proxy)
 	app.runtimes = newRuntimeRegistry(app)
 	session := app.store.createSession(workspace, AgentClaude)
 
@@ -4615,7 +4600,6 @@ func TestClaudeRemoteRealClaudeE2E(t *testing.T) {
 		store:     st,
 		token:     "secret",
 		hub:       newEventHub(),
-		queues:    map[string][]queuedTurn{},
 		codexExec: map[string]codexExecCommand{},
 		agents: map[AgentKind]agentInfo{
 			AgentClaude: {Path: claudePath, Available: true, Version: "real"},
@@ -4624,12 +4608,7 @@ func TestClaudeRemoteRealClaudeE2E(t *testing.T) {
 	}
 	proxy, cleanup := newMutableClaudeRemoteProxy(t, ws, remoteStore)
 	defer cleanup()
-	app.ssh = &sshManager{
-		deps: sshDepsFromApp(app),
-		by: map[string]*sshTarget{
-			ws.ID: {workspace: ws, proxy: proxy, state: initialSSHConnection(ws, connectionConnected)},
-		},
-	}
+	app.seedConnectedSSHProxyForTest(ws, proxy)
 	app.runtimes = newRuntimeRegistry(app)
 	server := startTestAppServer(t, app)
 	defer server.Close()
@@ -4704,18 +4683,17 @@ func TestClaudeRemoteRealSSHRegressionPrompt(t *testing.T) {
 		store:     st,
 		token:     "secret",
 		hub:       newEventHub(),
-		queues:    map[string][]queuedTurn{},
 		codexExec: map[string]codexExecCommand{},
 		agents: map[AgentKind]agentInfo{
 			AgentClaude: {Path: claudePath, Available: true, Version: "real"},
 		},
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
-	app.ssh = newSSHManager(app)
+	app.setSSHManagerForTest(newSSHManager(app))
 	app.runtimes = newRuntimeRegistry(app)
 	server := startTestAppServer(t, app)
 	defer server.Close()
-	defer app.ssh.disconnect(ws)
+	defer app.sshManagerForTest().Disconnect(ws)
 
 	helper := testClaudeRemoteMCPExecutable(t)
 	oldHelperExecutable := claudeRemoteHelperExecutable
@@ -5964,7 +5942,7 @@ func TestCancelQueuedTurnEmitsCancelled(t *testing.T) {
 	workspace := Workspace{ID: "ws_queue", Agent: AgentClaude, Target: "local", LocalCWD: dir}
 	st.workspaces[workspace.ID] = workspace
 	session := st.createSession(workspace, AgentClaude)
-	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}}
+	app := &app{store: st, hub: newEventHub()}
 
 	turn := app.enqueueTurn(session, "queued prompt", TurnOptions{})
 	app.cancelQueuedTurn(session.ID, turn.ID)
@@ -5985,7 +5963,7 @@ func TestSteerQueuedTurnInjectsAndRemovesQueuedMessage(t *testing.T) {
 	st.workspaces[workspace.ID] = workspace
 	session := st.createSession(workspace, AgentClaude)
 	runtime := &recordingSteerRuntime{}
-	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}, runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
 
 	turn := app.enqueueTurn(session, "steer this", TurnOptions{})
 	if err := app.steerQueuedTurn(session.ID, turn.ID); err != nil {
@@ -6016,7 +5994,7 @@ func TestSessionInputQueuesAttachments(t *testing.T) {
 	}
 	session := st.createSession(workspace, AgentCodex)
 	runtime := &recordingRuntime{startErr: ErrSessionRunning}
-	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}, runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentCodex: runtime}}
 	attachmentPath := filepath.Join(dir, "clip.png")
 	if err := os.WriteFile(attachmentPath, []byte("png"), 0o600); err != nil {
 		t.Fatal(err)
@@ -6028,7 +6006,7 @@ func TestSessionInputQueuesAttachments(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
 	}
-	queue := app.queues[session.ID]
+	queue := app.queuedTurns(session.ID)
 	if len(queue) != 1 || len(queue[0].Options.Attachments) != 1 {
 		t.Fatalf("queue = %#v, want one queued attachment", queue)
 	}
@@ -6099,7 +6077,7 @@ func TestStopWorkspaceSessionsInterruptsAndClearsQueue(t *testing.T) {
 	st.workspaces[workspace.ID] = workspace
 	session := st.createSession(workspace, AgentClaude)
 	runtime := &recordingRuntime{}
-	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}, runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
 
 	app.enqueueTurn(session, "queued prompt", TurnOptions{})
 	app.stopWorkspaceSessions(workspace.ID, "test stop")
@@ -6107,8 +6085,8 @@ func TestStopWorkspaceSessionsInterruptsAndClearsQueue(t *testing.T) {
 	if len(runtime.interrupts) != 1 || runtime.interrupts[0] != session.ID {
 		t.Fatalf("interrupts = %#v, want session interrupt", runtime.interrupts)
 	}
-	if len(app.queues[session.ID]) != 0 {
-		t.Fatalf("queue was not cleared: %#v", app.queues[session.ID])
+	if queue := app.queuedTurns(session.ID); len(queue) != 0 {
+		t.Fatalf("queue was not cleared: %#v", queue)
 	}
 	events := testQueryEvents(st, workspace.ID, session.ID, 0)
 	if !containsEventKind(events, "queue.cancelled") {
@@ -6136,15 +6114,15 @@ func TestSSHCallRetriesFiveTransportFailuresThenStopsWorkspace(t *testing.T) {
 	}
 	session := st.createSession(workspace, AgentClaude)
 	runtime := &recordingRuntime{}
-	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}, runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
-	app.ssh = newSSHManager(app)
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
+	app.setSSHManagerForTest(newSSHManager(app))
 	app.enqueueTurn(session, "queued prompt", TurnOptions{})
 	installFakeSSHProxy(t, dir, "99")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var out map[string]any
-	err = app.ssh.call(ctx, workspace, "hello", map[string]any{}, &out)
+	err = app.sshManagerForTest().Call(ctx, workspace, "hello", map[string]any{}, &out)
 	if err == nil {
 		t.Fatal("ssh call succeeded, want retry exhaustion")
 	}
@@ -6154,8 +6132,8 @@ func TestSSHCallRetriesFiveTransportFailuresThenStopsWorkspace(t *testing.T) {
 	if len(runtime.interrupts) != 1 || runtime.interrupts[0] != session.ID {
 		t.Fatalf("interrupts = %#v, want workspace session stopped", runtime.interrupts)
 	}
-	if len(app.queues[session.ID]) != 0 {
-		t.Fatalf("queue was not cleared: %#v", app.queues[session.ID])
+	if queue := app.queuedTurns(session.ID); len(queue) != 0 {
+		t.Fatalf("queue was not cleared: %#v", queue)
 	}
 	events := testQueryEvents(st, workspace.ID, "", 0)
 	if !hasWorkspaceConnectionRetry(events, sshProxyMaxAttempts, sshProxyMaxAttempts) {
@@ -6182,14 +6160,14 @@ func TestSSHCallRetriesTransparentlyUntilSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &recordingRuntime{}
-	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}, runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
-	app.ssh = newSSHManager(app)
+	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{AgentClaude: runtime}}
+	app.setSSHManagerForTest(newSSHManager(app))
 	installFakeSSHProxy(t, dir, "5")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var out map[string]any
-	if err := app.ssh.call(ctx, workspace, "hello", map[string]any{}, &out); err != nil {
+	if err := app.sshManagerForTest().Call(ctx, workspace, "hello", map[string]any{}, &out); err != nil {
 		t.Fatal(err)
 	}
 	if got := readCounter(t, filepath.Join(dir, "proxy-count")); got != sshProxyMaxAttempts {
@@ -6229,12 +6207,13 @@ func TestSSHRestoreReconnectsPreviouslyConnectedWorkspace(t *testing.T) {
 	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: workspace.Agent, Kind: "workspace.connection", Normalized: eventNormalized("workspace.connection", connected)}); err != nil {
 		t.Fatal(err)
 	}
-	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}}
-	app.ssh = newSSHManager(app)
+	app := &app{store: st, hub: newEventHub()}
+	app.setSSHManagerForTest(newSSHManager(app))
 	installFakeSSHProxy(t, dir, "1")
 
-	app.ssh.restorePersistedConnections(context.Background())
-	waitForWorkspaceConnectionStatus(t, app.ssh, workspace, connectionConnected)
+	app.sshManagerForTest().RestorePersistedConnections(context.Background())
+	waitForWorkspaceConnectionStatus(t, app.sshManagerForTest(), workspace, connectionConnected)
+	defer app.sshManagerForTest().Disconnect(workspace)
 	if got := readCounter(t, filepath.Join(dir, "proxy-count")); got == 0 {
 		t.Fatal("restore did not reconnect previously connected workspace")
 	}
@@ -6262,16 +6241,16 @@ func TestSSHRestoreDoesNotReconnectDisconnectedWorkspace(t *testing.T) {
 	if _, err := st.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: workspace.Agent, Kind: "workspace.connection", Normalized: eventNormalized("workspace.connection", disconnected)}); err != nil {
 		t.Fatal(err)
 	}
-	app := &app{store: st, hub: newEventHub(), queues: map[string][]queuedTurn{}}
-	app.ssh = newSSHManager(app)
+	app := &app{store: st, hub: newEventHub()}
+	app.setSSHManagerForTest(newSSHManager(app))
 	installFakeSSHProxy(t, dir, "1")
 
-	app.ssh.restorePersistedConnections(context.Background())
+	app.sshManagerForTest().RestorePersistedConnections(context.Background())
 	time.Sleep(100 * time.Millisecond)
 	if got := readCounter(t, filepath.Join(dir, "proxy-count")); got != 0 {
 		t.Fatalf("proxy attempts = %d, want 0 for disconnected restore", got)
 	}
-	if state := app.ssh.getConnection(workspace); state.Status != connectionDisconnected {
+	if state := app.sshManagerForTest().Connection(workspace); state.Status != connectionDisconnected {
 		t.Fatalf("connection status = %q, want disconnected", state.Status)
 	}
 }
@@ -6769,7 +6748,7 @@ func TestCodexSSHRuntimeUsesRemoteShellEnvironment(t *testing.T) {
 			AgentCodex: {Path: fakeCodexScript(t), Available: true, Version: "fake"},
 		},
 	}
-	app.ssh = newSSHManager(app)
+	app.setSSHManagerForTest(newSSHManager(app))
 	app.runtimes = newRuntimeRegistry(app)
 
 	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "remote smoke", TurnOptions{}); err != nil {
@@ -6832,12 +6811,7 @@ func TestCodexSSHRuntimePreparesRemoteBundledSkills(t *testing.T) {
 	writeLocalFixtureFile(t, sourceHome, "skills/.system/openai-docs/references/latest.md", "latest\n")
 	t.Setenv("CODEX_HOME", sourceHome)
 	app := &app{store: st, hub: newEventHub()}
-	app.ssh = &sshManager{
-		deps: sshDepsFromApp(app),
-		by: map[string]*sshTarget{
-			workspace.ID: {workspace: workspace, proxy: proxy, state: initialSSHConnection(workspace, connectionConnected)},
-		},
-	}
+	app.seedConnectedSSHProxyForTest(workspace, proxy)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -6927,7 +6901,7 @@ func TestCodexSSHRuntimeDisablesLocalShellSnapshot(t *testing.T) {
 			AgentCodex: {Path: fakeCodexScript(t), Available: true, Version: "fake"},
 		},
 	}
-	app.ssh = newSSHManager(app)
+	app.setSSHManagerForTest(newSSHManager(app))
 	app.runtimes = newRuntimeRegistry(app)
 
 	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "remote smoke", TurnOptions{}); err != nil {
@@ -6996,7 +6970,7 @@ func TestCodexSSHRuntimeDisablesLocalNodeREPLMCPServer(t *testing.T) {
 			AgentCodex: {Path: fakeCodexScript(t), Available: true, Version: "fake"},
 		},
 	}
-	app.ssh = newSSHManager(app)
+	app.setSSHManagerForTest(newSSHManager(app))
 	app.runtimes = newRuntimeRegistry(app)
 
 	if err := app.runtimes[AgentCodex].StartTurn(session, workspace, "remote smoke", TurnOptions{}); err != nil {
@@ -7225,16 +7199,11 @@ for line in sys.stdin:
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	proxy.start()
+	proxy.StartForTest()
 	app := &app{store: st, hub: newEventHub()}
-	app.ssh = &sshManager{
-		deps: sshDepsFromApp(app),
-		by: map[string]*sshTarget{
-			ws.ID: {workspace: ws, proxy: proxy, state: initialSSHConnection(ws, connectionConnected)},
-		},
-	}
+	app.seedConnectedSSHProxyForTest(ws, proxy)
 	cleanup := func() {
-		proxy.close()
+		proxy.CloseForTest()
 		_ = cmd.Wait()
 	}
 	return app, ws, cleanup
@@ -7427,10 +7396,10 @@ for line in sys.stdin:
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	proxy.start()
+	proxy.StartForTest()
 	cleanup := func() {
-		proxy.close()
-		<-proxy.done
+		proxy.CloseForTest()
+		<-proxy.DoneForTest()
 	}
 	return proxy, cleanup
 }
@@ -7565,7 +7534,7 @@ func fakeCodexScript(t *testing.T) string {
 	body := `#!/usr/bin/env node
 const readline = require("readline");
 const rl = readline.createInterface({ input: process.stdin });
-function write(payload) { process.stdout.write(JSON.stringify(payload) + "\n"); }
+function write(payload) { require("fs").writeSync(1, JSON.stringify(payload) + "\n"); }
 let turnTimer = null;
 if (process.env.ASTRALOPS_TEST_CODEX_ARGS) {
   require("fs").writeFileSync(process.env.ASTRALOPS_TEST_CODEX_ARGS, JSON.stringify(process.argv.slice(2)));
@@ -7796,7 +7765,7 @@ func waitForWorkspaceConnectionStatus(t *testing.T, manager *sshManager, workspa
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if state := manager.getConnection(workspace); state.Status == status {
+		if state := manager.Connection(workspace); state.Status == status {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

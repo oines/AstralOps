@@ -36,10 +36,10 @@ func newRemoteControlHandlerTestApp(t *testing.T) (*app, Workspace) {
 		runtimes: map[AgentKind]AgentRuntime{AgentCodex: &recordingRuntime{}},
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
-	app.ssh = newSSHManager(app)
+	app.setSSHManagerForTest(newSSHManager(app))
 	t.Cleanup(func() {
 		if terminals := app.terminalManager(); terminals != nil {
-			terminals.closeWorkspace(context.Background(), workspace.ID, "test_cleanup")
+			terminals.CloseWorkspace(context.Background(), workspace.ID, "test_cleanup")
 		}
 	})
 	return app, workspace

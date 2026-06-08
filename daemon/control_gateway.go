@@ -208,7 +208,7 @@ func (s *remoteControlService) dispatchControlAction(ctx context.Context, req Co
 		if err != nil {
 			return nil, err
 		}
-		return sanitizeControlWorkspaceConnection(s.ssh.getConnection(workspace)), nil
+		return sanitizeControlWorkspaceConnection(s.sshService().Connection(ctx, workspace)), nil
 	case ControlActionEvents:
 		var params struct {
 			WorkspaceID string `json:"workspace_id"`
@@ -304,7 +304,7 @@ func (s *remoteControlService) dispatchControlAction(ctx context.Context, req Co
 		if err != nil {
 			return nil, err
 		}
-		return s.ssh.connect(ctx, workspace)
+		return s.sshService().Connect(ctx, workspace)
 	case ControlActionWorkspaceDisconnect:
 		var params workspaceReferenceParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
@@ -314,7 +314,7 @@ func (s *remoteControlService) dispatchControlAction(ctx context.Context, req Co
 		if err != nil {
 			return nil, err
 		}
-		return s.ssh.disconnect(workspace), nil
+		return s.sshService().Disconnect(ctx, workspace), nil
 	case ControlActionWorkspaceDelete:
 		var params workspaceReferenceParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
@@ -506,45 +506,45 @@ func (s *remoteControlService) dispatchControlAction(ctx context.Context, req Co
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return s.terminalManager().open(ctx, req.ControllerDeviceID, params)
+		return s.terminalService().OpenForController(ctx, req.ControllerDeviceID, params)
 	case ControlActionTerminalList:
-		return s.terminalManager().listTabs(), nil
+		return s.terminalService().List(ctx)
 	case ControlActionTerminalAttach:
 		var params terminalAttachParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return s.terminalManager().attach(req.ControllerDeviceID, conn, params)
+		return s.terminalService().AttachForController(ctx, req.ControllerDeviceID, conn, params)
 	case ControlActionTerminalDetach:
 		var params terminalDetachParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return s.terminalManager().detach(req.ControllerDeviceID, conn, params)
+		return s.terminalService().DetachForController(ctx, req.ControllerDeviceID, conn, params)
 	case ControlActionTerminalHeartbeatAck:
 		var params terminalHeartbeatAckParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return s.terminalManager().heartbeatAck(req.ControllerDeviceID, params)
+		return s.terminalService().HeartbeatAckForController(ctx, req.ControllerDeviceID, params)
 	case ControlActionTerminalInput:
 		var params terminalInputParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return s.terminalManager().input(ctx, req.ControllerDeviceID, params)
+		return s.terminalService().InputForController(ctx, req.ControllerDeviceID, params)
 	case ControlActionTerminalResize:
 		var params terminalResizeParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return s.terminalManager().resize(ctx, req.ControllerDeviceID, params)
+		return s.terminalService().ResizeForController(ctx, req.ControllerDeviceID, params)
 	case ControlActionTerminalClose:
 		var params terminalCloseParams
 		if err := decodeControlParams(req.Params, &params); err != nil {
 			return nil, err
 		}
-		return s.terminalManager().close(ctx, req.ControllerDeviceID, params)
+		return s.terminalService().CloseForController(ctx, req.ControllerDeviceID, params)
 	case ControlActionHostFileSystemBrowse:
 		var params hostFileSystemBrowseParams
 		if err := decodeControlParams(req.Params, &params); err != nil {

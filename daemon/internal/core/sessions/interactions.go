@@ -1,12 +1,14 @@
 package sessions
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/oines/astralops/daemon/internal/agents"
 	"github.com/oines/astralops/daemon/internal/apperrors"
 	"github.com/oines/astralops/daemon/internal/sessiontypes"
 	"github.com/oines/astralops/pkg/protocol"
@@ -54,13 +56,11 @@ func (s *Service) processInteractionResponse(id string, origin protocol.AstralEv
 		return s.startCodexPlanFollowup(origin, req)
 	}
 	var lastErr error
-	for _, runtime := range s.runtimes {
-		responder, ok := runtime.(sessiontypes.ApprovalResponder)
-		if !ok {
-			continue
-		}
-		if err := responder.RespondApproval(id, req); err == nil {
+	for _, runtime := range s.agents {
+		if err := runtime.RespondInteraction(context.Background(), agents.InteractionResponse{SessionID: origin.SessionID, InteractionID: id, Response: req}); err == nil {
 			return nil
+		} else if errors.Is(err, agents.ErrInteractionUnsupported) {
+			continue
 		} else {
 			lastErr = err
 		}
@@ -214,11 +214,11 @@ func clientDecisionPayload(available any, actionID string) any {
 }
 
 func (s *Service) interruptInteractionSession(origin protocol.AstralEvent) error {
-	runtime, ok := s.runtimes[origin.Agent]
+	runtime, ok := s.agents[origin.Agent]
 	if !ok {
 		return fmt.Errorf("%s runtime is not available", origin.Agent)
 	}
-	if err := runtime.Interrupt(origin.SessionID); err != nil {
+	if err := runtime.Interrupt(context.Background(), origin.SessionID); err != nil {
 		if errors.Is(err, sessiontypes.ErrSessionIdle) {
 			s.store.UpdateSessionStatus(origin.SessionID, "idle")
 			s.emit(protocol.AstralEvent{WorkspaceID: origin.WorkspaceID, SessionID: origin.SessionID, Agent: origin.Agent, Kind: "turn.cancelled", Normalized: protocol.EventNormalized("turn.cancelled", map[string]any{"status": "idle"})})
@@ -238,13 +238,9 @@ func (s *Service) startCodexPlanFollowup(origin protocol.AstralEvent, response m
 	if !ok {
 		return fmt.Errorf("workspace %s not found", ss.WorkspaceID)
 	}
-	runtime, ok := s.runtimes[protocol.AgentCodex]
-	if !ok {
-		return fmt.Errorf("%s runtime is not available", protocol.AgentCodex)
-	}
 	input := CodexPlanFollowupText(response)
 	options := sessiontypes.TurnOptions{Internal: true, DisplayInput: planInteractionDisplayText(response)}
-	if err := runtime.StartTurn(ss, ws, input, options); err != nil {
+	if err := s.startTurn(ss, ws, input, options); err != nil {
 		if errors.Is(err, sessiontypes.ErrSessionRunning) {
 			s.queue.EnqueueTurn(ss, input, options)
 			return nil
@@ -263,10 +259,6 @@ func (s *Service) startClaudeInteractionFollowup(origin protocol.AstralEvent, re
 	if !ok {
 		return fmt.Errorf("workspace %s not found", ss.WorkspaceID)
 	}
-	runtime, ok := s.runtimes[protocol.AgentClaude]
-	if !ok {
-		return fmt.Errorf("%s runtime is not available", protocol.AgentClaude)
-	}
 	input := ClaudeInteractionFollowupText(origin, response)
 	if strings.TrimSpace(input) == "" {
 		return nil
@@ -275,7 +267,7 @@ func (s *Service) startClaudeInteractionFollowup(origin protocol.AstralEvent, re
 	if tools := claudeAllowedToolsForInteraction(origin, response, ws); len(tools) > 0 {
 		options.AllowedTools = tools
 	}
-	if err := runtime.StartTurn(ss, ws, input, options); err != nil {
+	if err := s.startTurn(ss, ws, input, options); err != nil {
 		if errors.Is(err, sessiontypes.ErrSessionRunning) {
 			s.queue.EnqueueTurn(ss, input, options)
 			return nil

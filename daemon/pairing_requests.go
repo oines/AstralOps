@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 const (
@@ -18,24 +20,7 @@ const (
 	pairingRequestFileName = "pairing_requests.json"
 )
 
-type PairingRequest struct {
-	RequestID                      string   `json:"request_id"`
-	Source                         string   `json:"source,omitempty"`
-	CloudRequestID                 string   `json:"cloud_request_id,omitempty"`
-	HostDeviceID                   string   `json:"host_device_id"`
-	ControllerDeviceID             string   `json:"controller_device_id"`
-	ControllerDeviceName           string   `json:"controller_device_name,omitempty"`
-	ControllerDeviceKind           string   `json:"controller_device_kind,omitempty"`
-	ControllerPublicKey            string   `json:"controller_public_key"`
-	ControllerPublicKeyFingerprint string   `json:"controller_public_key_fingerprint"`
-	Scope                          string   `json:"scope"`
-	Status                         string   `json:"status"`
-	Capabilities                   []string `json:"capabilities"`
-	WorkspaceExecPolicy            string   `json:"workspace_exec_policy,omitempty"`
-	CreatedAt                      string   `json:"created_at"`
-	UpdatedAt                      string   `json:"updated_at"`
-	ResolvedAt                     string   `json:"resolved_at,omitempty"`
-}
+type PairingRequest = protocol.PairingRequest
 
 type pairingRequestInput struct {
 	ControllerDeviceID             string   `json:"controller_device_id"`
@@ -48,22 +33,15 @@ type pairingRequestInput struct {
 	WorkspaceExecPolicy            string   `json:"workspace_exec_policy,omitempty"`
 }
 
-type pairingRequestListResult struct {
-	Requests []PairingRequest `json:"requests"`
-}
+type pairingRequestListResult = protocol.PairingRequestListResult
 
 type pairingRequestSubmitResult struct {
 	Request PairingRequest `json:"request"`
 }
 
-type pairingRequestResolveParams struct {
-	RequestID string `json:"request_id"`
-}
+type pairingRequestResolveParams = protocol.PairingRequestResolveParams
 
-type pairingRequestResolveResult struct {
-	Request PairingRequest `json:"request"`
-	Grant   *TrustGrant    `json:"grant,omitempty"`
-}
+type pairingRequestResolveResult = protocol.PairingRequestResolveResult
 
 func pairingRequestsPath(dataDir string) string {
 	return filepath.Join(dataDir, deviceIdentityDir, pairingRequestFileName)

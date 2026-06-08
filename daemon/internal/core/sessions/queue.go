@@ -3,12 +3,12 @@ package sessions
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/oines/astralops/daemon/internal/agents"
 	"github.com/oines/astralops/daemon/internal/sessiontypes"
 	"github.com/oines/astralops/pkg/protocol"
 )
@@ -25,25 +25,31 @@ type Store interface {
 }
 
 type QueueService struct {
-	store    Store
-	runtimes map[protocol.AgentKind]sessiontypes.AgentRuntime
-	queueMu  *sync.Mutex
-	queues   *map[string][]sessiontypes.QueuedTurn
-	emit     func(protocol.AstralEvent)
+	store   Store
+	agents  map[protocol.AgentKind]agents.Runtime
+	queueMu sync.Mutex
+	queues  map[string][]sessiontypes.QueuedTurn
+	emit    func(protocol.AstralEvent)
 }
 
-func NewQueueService(store Store, runtimes map[protocol.AgentKind]sessiontypes.AgentRuntime, queueMu *sync.Mutex, queues *map[string][]sessiontypes.QueuedTurn, emit func(protocol.AstralEvent)) *QueueService {
-	return &QueueService{store: store, runtimes: runtimes, queueMu: queueMu, queues: queues, emit: emit}
+func NewQueueService(store Store, agentsRegistry map[protocol.AgentKind]agents.Runtime, emit func(protocol.AstralEvent)) *QueueService {
+	return &QueueService{store: store, agents: agentsRegistry, queues: map[string][]sessiontypes.QueuedTurn{}, emit: emit}
+}
+
+func (s *QueueService) UpdateDependencies(store Store, agentsRegistry map[protocol.AgentKind]agents.Runtime, emit func(protocol.AstralEvent)) {
+	if s == nil {
+		return
+	}
+	s.store = store
+	s.agents = agentsRegistry
+	s.emit = emit
 }
 
 func (s *QueueService) EnsureQueues() map[string][]sessiontypes.QueuedTurn {
 	if s.queues == nil {
-		return nil
+		s.queues = map[string][]sessiontypes.QueuedTurn{}
 	}
-	if *s.queues == nil {
-		*s.queues = map[string][]sessiontypes.QueuedTurn{}
-	}
-	return *s.queues
+	return s.queues
 }
 
 func (s *QueueService) EnqueueTurn(session protocol.Session, input string, options sessiontypes.TurnOptions) sessiontypes.QueuedTurn {
@@ -125,11 +131,11 @@ func (s *QueueService) SteerQueuedTurn(sessionID, queueID string) error {
 	if !ok {
 		return fmt.Errorf("session not found")
 	}
-	runtime, ok := s.runtimes[ss.Agent]
+	runtime, ok := s.agents[ss.Agent]
 	if !ok {
 		return fmt.Errorf("agent runtime is not implemented")
 	}
-	steerer, ok := runtime.(sessiontypes.TurnSteerer)
+	steerer, ok := runtime.(agents.Steerer)
 	if !ok {
 		return sessiontypes.ErrSteerUnsupported
 	}
@@ -152,57 +158,6 @@ func (s *QueueService) SteerQueuedTurn(sessionID, queueID string) error {
 	}
 	s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.steered", Normalized: protocol.EventNormalized("queue.steered", normalized)})
 	return nil
-}
-
-func (s *QueueService) StartNextQueuedTurn(sessionID string) {
-	turn, ok := s.PopQueuedTurn(sessionID)
-	if !ok {
-		return
-	}
-	ss, ok := s.store.GetSession(sessionID)
-	if !ok {
-		return
-	}
-	ws, ok := s.store.GetWorkspace(ss.WorkspaceID)
-	if !ok {
-		return
-	}
-	runtime, ok := s.runtimes[ss.Agent]
-	if !ok {
-		return
-	}
-	if err := runtime.StartTurn(ss, ws, turn.Input, turn.Options); err != nil {
-		if errors.Is(err, sessiontypes.ErrSessionRunning) {
-			s.RequeueFront(sessionID, turn)
-			return
-		}
-		normalized := map[string]any{
-			"queue_id": turn.ID,
-			"message":  err.Error(),
-		}
-		if turn.Options.Internal {
-			normalized["internal"] = true
-		}
-		if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
-			normalized["text"] = text
-		}
-		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.failed", Normalized: protocol.EventNormalized("queue.failed", normalized)})
-		s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "control.error", Normalized: protocol.EventNormalized("control.error", map[string]any{
-			"message":  err.Error(),
-			"queue_id": turn.ID,
-		})})
-		return
-	}
-	normalized := map[string]any{
-		"queue_id": turn.ID,
-	}
-	if turn.Options.Internal {
-		normalized["internal"] = true
-	}
-	if text := turnDisplayInput(turn.Input, turn.Options); text != "" {
-		normalized["text"] = text
-	}
-	s.emit(protocol.AstralEvent{WorkspaceID: ss.WorkspaceID, SessionID: ss.ID, Agent: ss.Agent, Kind: "queue.dequeued", Normalized: protocol.EventNormalized("queue.dequeued", normalized)})
 }
 
 func (s *QueueService) PopQueuedTurn(sessionID string) (sessiontypes.QueuedTurn, bool) {
@@ -261,6 +216,13 @@ func (s *QueueService) RequeueFront(sessionID string, turn sessiontypes.QueuedTu
 	defer s.queueMu.Unlock()
 	queues := s.EnsureQueues()
 	queues[sessionID] = append([]sessiontypes.QueuedTurn{turn}, queues[sessionID]...)
+}
+
+func (s *QueueService) Snapshot(sessionID string) []sessiontypes.QueuedTurn {
+	s.queueMu.Lock()
+	defer s.queueMu.Unlock()
+	queues := s.EnsureQueues()
+	return append([]sessiontypes.QueuedTurn(nil), queues[sessionID]...)
 }
 
 func turnDisplayInput(input string, options sessiontypes.TurnOptions) string {

@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
+
+	internalterminal "github.com/oines/astralops/daemon/internal/core/terminal"
 )
 
 type workbenchState struct {
@@ -67,21 +70,24 @@ func (a *app) buildWorkbenchState() workbenchState {
 	for _, workspace := range workspaces {
 		state.Workspaces[workspace.ID] = workspace
 		if workspace.Target == "ssh" {
-			state.WorkspaceConnections[workspace.ID] = sanitizeControlWorkspaceConnection(a.ssh.getConnection(workspace))
+			state.WorkspaceConnections[workspace.ID] = sanitizeControlWorkspaceConnection(a.sshService().Connection(context.Background(), workspace))
 		}
 	}
 	for _, session := range sessions {
 		state.Sessions[session.ID] = session
 	}
-	a.terminalMu.Lock()
-	terminals := a.terminals
-	a.terminalMu.Unlock()
-	if terminals != nil {
-		for _, tab := range terminals.listTabs() {
-			state.TerminalTabs[tab.TerminalID] = tab
-		}
+	for _, tab := range mustListTerminalTabs(a.terminalService()) {
+		state.TerminalTabs[tab.TerminalID] = tab
 	}
 	return state
+}
+
+func mustListTerminalTabs(service *internalterminal.Service) []terminalTab {
+	tabs, err := service.List(context.Background())
+	if err != nil {
+		return nil
+	}
+	return tabs
 }
 
 func (a *app) workbenchVersion() int64 {
