@@ -27,21 +27,29 @@ func newControlGatewayTestApp(t *testing.T, agent AgentKind, runtime AgentRuntim
 	}
 	session := st.createSession(workspace, agent)
 	app := &app{store: st, hub: newEventHub(), runtimes: map[AgentKind]AgentRuntime{agent: runtime}}
-	app.ssh = newSSHManager(app)
+	app.setSSHManagerForTest(newSSHManager(app))
 	return app, workspace, session
 }
 
-func trustControlDevice(t *testing.T, app *app, deviceID string, capabilities ...string) TrustGrant {
+func trustControlDevice(t *testing.T, app *app, deviceID string, capabilities ...ControlCapability) TrustGrant {
 	t.Helper()
 
 	grant, err := app.store.trustDevice(trustDeviceRequest{
 		ControllerDeviceID: deviceID,
-		Capabilities:       capabilities,
+		Capabilities:       capabilityStrings(capabilities...),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return grant
+}
+
+func capabilityStrings(capabilities ...ControlCapability) []string {
+	values := make([]string, 0, len(capabilities))
+	for _, capability := range capabilities {
+		values = append(values, string(capability))
+	}
+	return values
 }
 
 func assertActionError(t *testing.T, err error, status int, code string) {
@@ -51,7 +59,7 @@ func assertActionError(t *testing.T, err error, status int, code string) {
 	if !errors.As(err, &actionErr) {
 		t.Fatalf("err = %#v, want actionError", err)
 	}
-	if actionErr.Status != status || actionErr.Code != code {
+	if actionErr.Status != status || string(actionErr.Code) != code {
 		t.Fatalf("action error = status %d code %q, want status %d code %q", actionErr.Status, actionErr.Code, status, code)
 	}
 }
@@ -66,10 +74,10 @@ func TestControlGatewayRequiresCapability(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionSessionInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"input":      "run tests",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 	if len(runtime.inputs) != 0 {
@@ -85,10 +93,10 @@ func TestControlGatewayRejectsCapabilityMismatch(t *testing.T) {
 		ControllerDeviceID: "device_desktop",
 		Capability:         CapabilityCoreRead,
 		Action:             ControlActionSessionInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"input":      "hello",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_mismatch")
 }
@@ -152,7 +160,7 @@ func TestControlGatewayReadsSessionView(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreRead,
 		Action:             ControlActionSessionView,
-		Params:             map[string]any{"session_id": session.ID},
+		Params:             controlParams(map[string]any{"session_id": session.ID}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -183,13 +191,14 @@ func TestControlGatewaySessionViewProjectsPendingInteractionPaths(t *testing.T) 
 		SessionID:   session.ID,
 		Agent:       session.Agent,
 		Kind:        "approval.requested",
-		Normalized: map[string]any{
-			"approval_id": "approval_1",
-			"kind":        "command",
-			"command":     "pwd",
-			"cwd":         filepath.Join(workspace.LocalCWD, "nested"),
-			"path":        filepath.Join(workspace.LocalCWD, "nested", "note.txt"),
-		},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{
+				"approval_id": "approval_1",
+				"kind":        "command",
+				"command":     "pwd",
+				"cwd":         filepath.Join(workspace.LocalCWD, "nested"),
+				"path":        filepath.Join(workspace.LocalCWD, "nested", "note.txt"),
+			}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +208,7 @@ func TestControlGatewaySessionViewProjectsPendingInteractionPaths(t *testing.T) 
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreRead,
 		Action:             ControlActionSessionView,
-		Params:             map[string]any{"session_id": session.ID},
+		Params:             controlParams(map[string]any{"session_id": session.ID}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -261,13 +270,14 @@ func TestControlGatewaySessionViewProjectsSSHPendingInteractionPaths(t *testing.
 		SessionID:   session.ID,
 		Agent:       session.Agent,
 		Kind:        "approval.requested",
-		Normalized: map[string]any{
-			"approval_id": "approval_ssh_1",
-			"kind":        "command",
-			"command":     "pwd",
-			"cwd":         "/remote/project/nested",
-			"path":        "/remote/project/nested/note.txt",
-		},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{
+				"approval_id": "approval_ssh_1",
+				"kind":        "command",
+				"command":     "pwd",
+				"cwd":         "/remote/project/nested",
+				"path":        "/remote/project/nested/note.txt",
+			}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +287,7 @@ func TestControlGatewaySessionViewProjectsSSHPendingInteractionPaths(t *testing.
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreRead,
 		Action:             ControlActionSessionView,
-		Params:             map[string]any{"session_id": session.ID},
+		Params:             controlParams(map[string]any{"session_id": session.ID}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -333,7 +343,7 @@ func TestControlGatewayCoreReadHidesHostWorkspaceAndSessionInternals(t *testing.
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreRead,
 		Action:             ControlActionSessions,
-		Params:             map[string]any{"workspace_id": workspace.ID},
+		Params:             controlParams(map[string]any{"workspace_id": workspace.ID}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -359,6 +369,14 @@ func TestControlGatewayCoreReadHidesHostWorkspaceAndSessionInternals(t *testing.
 
 func TestControlGatewayReadsHostSnapshot(t *testing.T) {
 	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	app.agents = map[AgentKind]agentInfo{
+		AgentCodex: {
+			Path:         filepath.Join(t.TempDir(), "codex"),
+			Available:    true,
+			CurrentModel: "gpt-test",
+			Models:       []modelInfo{{ID: "gpt-test", Label: "GPT Test"}},
+		},
+	}
 	workspace.LocalProjectionRoot = "/host/private/projection"
 	workspace.NativeSessionID = "workspace-native-session"
 	app.store.mu.Lock()
@@ -372,8 +390,9 @@ func TestControlGatewayReadsHostSnapshot(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       session.Agent,
 		Kind:        "message.user",
-		Normalized:  map[string]any{"text": "hello"},
-		Raw:         map[string]any{"native": "secret"},
+		Normalized: eventNormalized("message.user",
+			map[string]any{"text": "hello"}),
+		Raw: map[string]any{"native": "secret"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -383,10 +402,10 @@ func TestControlGatewayReadsHostSnapshot(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreRead,
 		Action:             ControlActionHostSnapshot,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"event_limit":       10,
 			"restore_on_launch": true,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -404,14 +423,49 @@ func TestControlGatewayReadsHostSnapshot(t *testing.T) {
 	if len(snapshot.Sessions) != 1 || snapshot.Sessions[0].NativeSessionID != "" || snapshot.Sessions[0].NativeThreadID != "" {
 		t.Fatalf("snapshot sessions = %#v, want sanitized session", snapshot.Sessions)
 	}
-	if len(snapshot.SessionViews) != 1 || snapshot.SessionViews[0].Session.NativeSessionID != "" {
-		t.Fatalf("snapshot session views = %#v, want sanitized session view", snapshot.SessionViews)
+	if len(snapshot.SessionViews) != 0 {
+		t.Fatalf("snapshot session views = %#v, want lazy session views omitted", snapshot.SessionViews)
 	}
-	if len(snapshot.Events) != 1 || snapshot.Events[0].Raw != nil {
-		t.Fatalf("snapshot events = %#v, want sanitized events", snapshot.Events)
+	if got := snapshot.Agents[AgentCodex]; got.Path != "" || got.CurrentModel != "gpt-test" || len(got.Models) != 1 {
+		t.Fatalf("snapshot agents = %#v, want model info without Host path", snapshot.Agents)
+	}
+	if len(snapshot.Events) != 0 {
+		t.Fatalf("snapshot events = %#v, want global events omitted from lightweight snapshot", snapshot.Events)
 	}
 	if len(snapshot.InitialSessionEvents) != 1 || snapshot.InitialSessionEvents[0].SessionID != session.ID {
 		t.Fatalf("initial session events = %#v, want selected session events", snapshot.InitialSessionEvents)
+	}
+}
+
+func TestControlGatewayReadsWorkbench(t *testing.T) {
+	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
+	workspace.LocalProjectionRoot = "/host/private/projection"
+	session.NativeSessionID = "session-native-id"
+	app.store.mu.Lock()
+	app.store.workspaces[workspace.ID] = workspace
+	app.store.sessions[session.ID] = session
+	app.store.mu.Unlock()
+	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
+
+	response, err := app.executeControlRequest(ControlRequest{
+		ControllerDeviceID: "device_mobile",
+		Capability:         CapabilityCoreRead,
+		Action:             ControlActionWorkbench,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workbench, ok := response.Result.(workbenchState)
+	if !ok {
+		t.Fatalf("workbench result = %#v, want workbenchState", response.Result)
+	}
+	remoteWorkspace := workbench.Workspaces[workspace.ID]
+	if remoteWorkspace.ID != workspace.ID || remoteWorkspace.LocalProjectionRoot != "" || remoteWorkspace.LocalCWD != "" {
+		t.Fatalf("remote workbench workspace = %#v, want sanitized workspace", remoteWorkspace)
+	}
+	remoteSession := workbench.Sessions[session.ID]
+	if remoteSession.ID != session.ID || remoteSession.NativeSessionID != "" {
+		t.Fatalf("remote workbench session = %#v, want sanitized session", remoteSession)
 	}
 }
 
@@ -428,7 +482,7 @@ func TestControlGatewayReadsWorkspaceConnectionFromHostState(t *testing.T) {
 	}
 	state := initialSSHConnection(workspace, connectionConnected)
 	state.RemoteOS = "linux"
-	app.ssh.seedState(workspace, state)
+	app.sshManagerForTest().SeedState(workspace, state)
 	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
 
 	response, err := app.executeControlRequest(ControlRequest{
@@ -436,7 +490,7 @@ func TestControlGatewayReadsWorkspaceConnectionFromHostState(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreRead,
 		Action:             ControlActionWorkspaceConnection,
-		Params:             map[string]any{"workspace_id": workspace.ID},
+		Params:             controlParams(map[string]any{"workspace_id": workspace.ID}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -452,8 +506,7 @@ func TestControlGatewayReadsWorkspaceConnectionFromHostState(t *testing.T) {
 
 func TestControlGatewayDeletesWorkspaceOnHost(t *testing.T) {
 	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
-	terminal := newTerminalSession(workspace.ID, AgentCodex, "local", ".", "zsh")
-	app.terminalManager().register(terminal)
+	app.terminalManager().RegisterSessionForTest(workspace.ID, AgentCodex, "local", ".", "zsh")
 	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
 
 	response, err := app.executeControlRequest(ControlRequest{
@@ -461,7 +514,7 @@ func TestControlGatewayDeletesWorkspaceOnHost(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionWorkspaceDelete,
-		Params:             map[string]any{"workspace_id": workspace.ID},
+		Params:             controlParams(map[string]any{"workspace_id": workspace.ID}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -476,10 +529,10 @@ func TestControlGatewayDeletesWorkspaceOnHost(t *testing.T) {
 	if _, ok := app.store.getSession(session.ID); ok {
 		t.Fatalf("session %s still exists after workspace delete", session.ID)
 	}
-	if tabs := app.terminalManager().listTabs(); len(tabs) != 0 {
+	if tabs := app.terminalManager().ListTabs(); len(tabs) != 0 {
 		t.Fatalf("terminal tabs = %#v, want workspace terminals closed", tabs)
 	}
-	events := app.store.queryEvents(workspace.ID, "", 0)
+	events := testQueryEvents(app.store, workspace.ID, "", 0)
 	if len(events) != 1 || events[0].Kind != "workspace.removed" {
 		t.Fatalf("events = %#v, want workspace.removed", events)
 	}
@@ -493,10 +546,10 @@ func TestControlGatewayCreatesSession(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionSessionCreate,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"agent":        AgentClaude,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -515,27 +568,27 @@ func TestControlGatewayCreatesSession(t *testing.T) {
 	if !ok || stored.NativeSessionID == "" {
 		t.Fatalf("stored session = %#v ok=%v, want Host-owned native id", stored, ok)
 	}
-	if !containsEventKind(app.store.queryEvents("", session.ID, 0), "session.started") {
-		t.Fatalf("events = %#v, want session.started", eventKinds(app.store.queryEvents("", session.ID, 0)))
+	if !containsEventKind(testQueryEvents(app.store, "", session.ID, 0), "session.started") {
+		t.Fatalf("events = %#v, want session.started", eventKinds(testQueryEvents(app.store, "", session.ID, 0)))
 	}
 }
 
 func TestControlGatewayReadsEventsWindow(t *testing.T) {
 	app, workspace, session := newControlGatewayTestApp(t, AgentCodex, &recordingRuntime{})
 	trustControlDevice(t, app, "device_mobile", CapabilityCoreRead)
-	first, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "one"}})
+	first, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "one"})})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-1"}})
+	second, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"turn_id": "turn-1"})})
 	if err != nil {
 		t.Fatal(err)
 	}
-	third, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "answer"}})
+	third, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: eventNormalized("message.assistant", map[string]any{"text": "answer"})})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = app.store.appendEvent(AstralEvent{WorkspaceID: "other_workspace", SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "filtered"}})
+	_, err = app.store.appendEvent(AstralEvent{WorkspaceID: "other_workspace", SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "filtered"})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -545,13 +598,13 @@ func TestControlGatewayReadsEventsWindow(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreRead,
 		Action:             ControlActionEvents,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"session_id":   session.ID,
 			"after_seq":    first.Seq,
 			"before_seq":   third.Seq + 1,
 			"limit":        2,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -579,15 +632,15 @@ func TestControlGatewayEventsHideHostSessionAndWorkspaceInternals(t *testing.T) 
 	session.NativeThreadID = "session-native-thread"
 	session.ForkedFromNativeAnchor = "native-anchor"
 
-	workspaceEvent, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: workspace.Agent, Kind: "workspace.created", Normalized: workspace, Raw: map[string]any{"secret": "workspace"}})
+	workspaceEvent, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: workspace.Agent, Kind: "workspace.created", Normalized: eventNormalized("workspace.created", workspace), Raw: map[string]any{"secret": "workspace"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessionEvent, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: session, Raw: map[string]any{"secret": "session"}})
+	sessionEvent, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: eventNormalized("session.started", session), Raw: map[string]any{"secret": "session"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	contextEvent, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.context", Normalized: map[string]any{"native_thread_id": "native-thread", "total_tokens": 42}})
+	contextEvent, err := app.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "control.context", Normalized: eventNormalized("control.context", map[string]any{"native_thread_id": "native-thread", "total_tokens": 42})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,11 +649,11 @@ func TestControlGatewayEventsHideHostSessionAndWorkspaceInternals(t *testing.T) 
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreRead,
 		Action:             ControlActionEvents,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"after_seq":    workspaceEvent.Seq - 1,
 			"limit":        10,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -621,13 +674,14 @@ func TestControlGatewayEventsHideHostSessionAndWorkspaceInternals(t *testing.T) 
 	if stringValue(contextNormalized["native_thread_id"]) != "" || int64(numberValue(contextNormalized["total_tokens"])) != 42 {
 		t.Fatalf("context event projection = %#v, want native thread id removed and totals preserved", contextNormalized)
 	}
-	stored := app.store.queryEvents(workspace.ID, "", 0)
-	storedWorkspace, ok := stored[0].Normalized.(Workspace)
-	if !ok || storedWorkspace.SSH == nil || storedWorkspace.LocalCWD == "" {
+	stored := testQueryEvents(app.store, workspace.ID, "", 0)
+	storedWorkspace := mapValue(stored[0].Normalized)
+	storedSSH := mapValue(storedWorkspace["ssh"])
+	if len(storedSSH) == 0 || stringValue(storedWorkspace["local_cwd"]) == "" {
 		t.Fatalf("stored workspace event was mutated: %#v", stored[0])
 	}
-	storedSession, ok := stored[1].Normalized.(Session)
-	if !ok || storedSession.NativeSessionID != "session-native-id" {
+	storedSession := mapValue(stored[1].Normalized)
+	if stringValue(storedSession["native_session_id"]) != "session-native-id" {
 		t.Fatalf("stored events were mutated: %#v", stored)
 	}
 }
@@ -641,19 +695,20 @@ func TestControlGatewayEventsHideHostPrivateMediaPaths(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       session.Agent,
 		Kind:        "message.user",
-		Normalized: map[string]any{
-			"text": "with attachment",
-			"attachments": []map[string]any{{
-				"id":         "att_1",
-				"media_id":   "att_1",
-				"kind":       "image",
-				"path":       hostPath,
-				"saved_path": hostPath + ".saved",
-				"name":       "clip.png",
-				"mime_type":  "image/png",
-				"size":       12,
-			}},
-		},
+		Normalized: eventNormalized("message.user",
+			map[string]any{
+				"text": "with attachment",
+				"attachments": []map[string]any{{
+					"id":         "att_1",
+					"media_id":   "att_1",
+					"kind":       "image",
+					"path":       hostPath,
+					"saved_path": hostPath + ".saved",
+					"name":       "clip.png",
+					"mime_type":  "image/png",
+					"size":       12,
+				}},
+			}),
 		Raw: map[string]any{"path": hostPath, "secret": "raw"},
 	})
 	if err != nil {
@@ -664,13 +719,14 @@ func TestControlGatewayEventsHideHostPrivateMediaPaths(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       session.Agent,
 		Kind:        "message.media",
-		Normalized: map[string]any{
-			"media_id": "media_1",
-			"kind":     "image",
-			"path":     hostPath,
-			"filePath": hostPath,
-			"name":     "generated.png",
-		},
+		Normalized: eventNormalized("message.media",
+			map[string]any{
+				"media_id": "media_1",
+				"kind":     "image",
+				"path":     hostPath,
+				"filePath": hostPath,
+				"name":     "generated.png",
+			}),
 		Raw: map[string]any{"path": hostPath, "secret": "raw-media"},
 	})
 	if err != nil {
@@ -681,16 +737,17 @@ func TestControlGatewayEventsHideHostPrivateMediaPaths(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       session.Agent,
 		Kind:        "message.assistant",
-		Normalized: map[string]any{
-			"text": "generated media",
-			"media": []map[string]any{{
-				"media_id":   "media_nested",
-				"kind":       "image",
-				"path":       hostPath,
-				"saved_path": hostPath + ".saved",
-				"name":       "nested.png",
-			}},
-		},
+		Normalized: eventNormalized("message.assistant",
+			map[string]any{
+				"text": "generated media",
+				"media": []map[string]any{{
+					"media_id":   "media_nested",
+					"kind":       "image",
+					"path":       hostPath,
+					"saved_path": hostPath + ".saved",
+					"name":       "nested.png",
+				}},
+			}),
 		Raw: map[string]any{"path": hostPath, "secret": "raw-assistant-media"},
 	})
 	if err != nil {
@@ -701,12 +758,12 @@ func TestControlGatewayEventsHideHostPrivateMediaPaths(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreRead,
 		Action:             ControlActionEvents,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"session_id":   session.ID,
 			"after_seq":    userEvent.Seq - 1,
 			"limit":        10,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -732,7 +789,7 @@ func TestControlGatewayEventsHideHostPrivateMediaPaths(t *testing.T) {
 	}
 	var storedUser AstralEvent
 	var storedAssistant AstralEvent
-	for _, event := range app.store.queryEvents(workspace.ID, session.ID, 0) {
+	for _, event := range testQueryEvents(app.store, workspace.ID, session.ID, 0) {
 		if event.Seq == userEvent.Seq {
 			storedUser = event
 		}
@@ -764,11 +821,12 @@ func TestControlEventFrameHidesHostPrivateMediaPaths(t *testing.T) {
 	frame := controlEventFrame("stream_1", "request_1", AstralEvent{
 		Seq:  7,
 		Kind: "message.media",
-		Normalized: map[string]any{
-			"media_id": "media_1",
-			"path":     "/host/private/generated.png",
-			"name":     "generated.png",
-		},
+		Normalized: eventNormalized("message.media",
+			map[string]any{
+				"media_id": "media_1",
+				"path":     "/host/private/generated.png",
+				"name":     "generated.png",
+			}),
 		Raw: map[string]any{"path": "/host/private/generated.png"},
 	})
 	if frame.Event.Raw != nil {
@@ -782,14 +840,15 @@ func TestControlEventFrameHidesHostPrivateMediaPaths(t *testing.T) {
 	nestedFrame := controlEventFrame("stream_1", "request_2", AstralEvent{
 		Seq:  8,
 		Kind: "message.assistant",
-		Normalized: map[string]any{
-			"text": "single media",
-			"media": map[string]any{
-				"media_id":  "media_single",
-				"localPath": "/host/private/single.png",
-				"name":      "single.png",
-			},
-		},
+		Normalized: eventNormalized("message.assistant",
+			map[string]any{
+				"text": "single media",
+				"media": map[string]any{
+					"media_id":  "media_single",
+					"localPath": "/host/private/single.png",
+					"name":      "single.png",
+				},
+			}),
 		Raw: map[string]any{"path": "/host/private/single.png"},
 	})
 	nested := mapValue(mapValue(nestedFrame.Event.Normalized)["media"])
@@ -807,13 +866,13 @@ func TestControlGatewayStartsSessionInput(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionSessionInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id":       session.ID,
 			"input":            "implement gateway",
 			"model":            "gpt-test",
 			"reasoning_effort": "low",
 			"permission_mode":  "auto",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -842,10 +901,10 @@ func TestControlGatewaySessionInputQueuesWhenRuntimeIsRunning(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionSessionInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"input":      "queue this",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -854,8 +913,8 @@ func TestControlGatewaySessionInputQueuesWhenRuntimeIsRunning(t *testing.T) {
 	if stringValue(result["mode"]) != "queue" || !boolValue(result["queued"]) || stringValue(result["queue_id"]) == "" {
 		t.Fatalf("session input result = %#v, want queue mode", result)
 	}
-	if !containsEventKind(app.store.queryEvents("", session.ID, 0), "queue.queued") {
-		t.Fatalf("events = %#v, want queue.queued", app.store.queryEvents("", session.ID, 0))
+	if !containsEventKind(testQueryEvents(app.store, "", session.ID, 0), "queue.queued") {
+		t.Fatalf("events = %#v, want queue.queued", testQueryEvents(app.store, "", session.ID, 0))
 	}
 }
 
@@ -868,10 +927,10 @@ func TestControlGatewaySessionInputSteersWhenRuntimeSupportsSteer(t *testing.T) 
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionSessionInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"input":      "steer this",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -894,10 +953,10 @@ func TestControlGatewayQueueCancelCancelsQueuedInput(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionQueueCancel,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"queue_id":   turn.ID,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -909,7 +968,7 @@ func TestControlGatewayQueueCancelCancelsQueuedInput(t *testing.T) {
 	if _, ok := app.peekQueuedTurn(session.ID, turn.ID); ok {
 		t.Fatal("queued input still exists after cancel")
 	}
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if !containsEventKind(events, "queue.cancelled") {
 		t.Fatalf("events = %#v, want queue.cancelled", events)
 	}
@@ -925,10 +984,10 @@ func TestControlGatewayQueueSteerSteersQueuedInput(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionQueueSteer,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"queue_id":   turn.ID,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -943,7 +1002,7 @@ func TestControlGatewayQueueSteerSteersQueuedInput(t *testing.T) {
 	if _, ok := app.peekQueuedTurn(session.ID, turn.ID); ok {
 		t.Fatal("queued input still exists after steer")
 	}
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if !containsEventKind(events, "queue.steered") {
 		t.Fatalf("events = %#v, want queue.steered", events)
 	}
@@ -957,10 +1016,10 @@ func TestControlGatewayQueueCancelRequiresExistingQueue(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionQueueCancel,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"queue_id":   "queue_missing",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusNotFound, "queue_not_found")
 }
@@ -974,16 +1033,16 @@ func TestControlGatewayForksSession(t *testing.T) {
 	app.store.mu.Unlock()
 	trustControlDevice(t, app, "device_mobile", CapabilityCoreControl)
 
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "one"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-1", "status": "running"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "answer", "item_id": "item-1"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn-1", "status": "idle"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": "two"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: map[string]any{"turn_id": "turn-2", "status": "running"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: map[string]any{"text": "later", "item_id": "item-2"}})
-	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"turn_id": "turn-2", "status": "idle"}})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "one"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"turn_id": "turn-1", "status": "running"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: eventNormalized("message.assistant", map[string]any{"text": "answer", "item_id": "item-1"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"turn_id": "turn-1", "status": "idle"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": "two"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: eventNormalized("turn.started", map[string]any{"turn_id": "turn-2", "status": "running"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.assistant", Normalized: eventNormalized("message.assistant", map[string]any{"text": "later", "item_id": "item-2"})})
+	app.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"turn_id": "turn-2", "status": "idle"})})
 	targetSeq := int64(0)
-	for _, event := range app.store.queryEvents("", session.ID, 0) {
+	for _, event := range testQueryEvents(app.store, "", session.ID, 0) {
 		if event.Kind == "message.assistant" && stringValue(mapValue(event.Normalized)["text"]) == "answer" {
 			targetSeq = event.Seq
 			break
@@ -997,10 +1056,10 @@ func TestControlGatewayForksSession(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionSessionFork,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"event_seq":  targetSeq,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1018,8 +1077,8 @@ func TestControlGatewayForksSession(t *testing.T) {
 	if runtime.rollbackTurns != 1 {
 		t.Fatalf("rollbackTurns = %d, want 1", runtime.rollbackTurns)
 	}
-	if !containsEventKind(app.store.queryEvents("", result.Session.ID, 0), "session.started") {
-		t.Fatalf("fork events = %#v, want session.started", eventKinds(app.store.queryEvents("", result.Session.ID, 0)))
+	if !containsEventKind(testQueryEvents(app.store, "", result.Session.ID, 0), "session.started") {
+		t.Fatalf("fork events = %#v, want session.started", eventKinds(testQueryEvents(app.store, "", result.Session.ID, 0)))
 	}
 }
 
@@ -1033,9 +1092,9 @@ func TestControlGatewayDeletesSession(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionSessionDelete,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1056,7 +1115,7 @@ func TestControlGatewayDeletesSession(t *testing.T) {
 	if len(runtime.interrupts) != 1 || runtime.interrupts[0] != session.ID {
 		t.Fatalf("runtime interrupts = %#v, want deleted session interrupted", runtime.interrupts)
 	}
-	events := app.store.queryEvents("", session.ID, 0)
+	events := testQueryEvents(app.store, "", session.ID, 0)
 	if !containsEventKind(events, "session.deleted") {
 		t.Fatalf("events = %#v, want session.deleted", eventKinds(events))
 	}
@@ -1071,7 +1130,8 @@ func TestControlGatewayRejectsReplacedInteraction(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       AgentCodex,
 		Kind:        "approval.requested",
-		Normalized:  map[string]any{"approval_id": "approval_replaced"},
+		Normalized: eventNormalized("approval.requested",
+			map[string]any{"approval_id": "approval_replaced"}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1081,11 +1141,12 @@ func TestControlGatewayRejectsReplacedInteraction(t *testing.T) {
 		SessionID:   session.ID,
 		Agent:       AgentCodex,
 		Kind:        "turn.replaced",
-		Normalized: map[string]any{
-			"start_seq": request.Seq,
-			"end_seq":   request.Seq,
-			"hidden":    true,
-		},
+		Normalized: eventNormalized("turn.replaced",
+			map[string]any{
+				"start_seq": request.Seq,
+				"end_seq":   request.Seq,
+				"hidden":    true,
+			}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1094,10 +1155,10 @@ func TestControlGatewayRejectsReplacedInteraction(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityInteractionRespond,
 		Action:             ControlActionInteractionRespond,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"interaction_id": "approval_replaced",
 			"response":       map[string]any{"decision": "accept"},
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusConflict, "interaction_stale")
 	if len(runtime.approvalResponses) != 0 {
@@ -1114,11 +1175,11 @@ func TestControlGatewayRejectsStaleSessionEdit(t *testing.T) {
 		ControllerDeviceID: "device_desktop",
 		Capability:         CapabilitySessionEdit,
 		Action:             ControlActionSessionEdit,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"event_seq":  int64(999),
 			"input":      "replacement",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusConflict, "editable_message_stale")
 	if runtime.editCalls != 0 {
@@ -1185,9 +1246,9 @@ func TestControlGatewayHostTrustRevokeRevokesTrustedDevice(t *testing.T) {
 		ControllerDeviceID: "device_admin",
 		Capability:         CapabilityHostManage,
 		Action:             ControlActionHostTrustRevoke,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"controller_device_id": "device_reader",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1202,7 +1263,7 @@ func TestControlGatewayHostTrustRevokeRevokesTrustedDevice(t *testing.T) {
 	if _, ok := app.store.trustedControlGrant("device_reader"); ok {
 		t.Fatal("revoked device still has trusted control grant")
 	}
-	if countKind(app.store.queryEvents("", "", 0), "control.trust.revoked") != 1 {
-		t.Fatalf("events = %#v, want one trust revoke audit event", eventKinds(app.store.queryEvents("", "", 0)))
+	if countKind(testQueryEvents(app.store, "", "", 0), "control.trust.revoked") != 1 {
+		t.Fatalf("events = %#v, want one trust revoke audit event", eventKinds(testQueryEvents(app.store, "", "", 0)))
 	}
 }

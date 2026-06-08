@@ -202,13 +202,13 @@ func terminalErrorFrame(frame controlPlainFrame, err error) controlPlainFrame {
 	message := "terminal frame failed"
 	if response != nil && response.Error != nil {
 		if response.Error.Code != "" {
-			code = response.Error.Code
+			code = string(response.Error.Code)
 		}
 		if response.Error.Message != "" {
 			message = response.Error.Message
 		}
 	}
-	payload := &terminalStreamFrame{frameType: terminalFrameError, Code: code, Reason: message}
+	payload := &terminalStreamFrame{FrameType: terminalFrameError, Code: code, Reason: message}
 	if frame.Terminal != nil {
 		payload.TerminalID = frame.Terminal.TerminalID
 		payload.WorkspaceID = frame.Terminal.WorkspaceID
@@ -231,7 +231,6 @@ func terminalFrameControlRequest(controllerDeviceID string, frame controlPlainFr
 	}
 	req := ControlRequest{
 		ControllerDeviceID: controllerDeviceID,
-		Params:             params,
 	}
 	switch frame.Type {
 	case terminalFrameInput:
@@ -251,6 +250,7 @@ func terminalFrameControlRequest(controllerDeviceID string, frame controlPlainFr
 	default:
 		return ControlRequest{}, newActionError(http.StatusBadRequest, "terminal_frame_invalid", "unsupported terminal frame type")
 	}
+	req.Params = controlParams(params)
 	return req, nil
 }
 
@@ -692,7 +692,7 @@ func controlResponseFromError(requestID string, err error) *ControlResponse {
 	}
 	var actionErr *actionError
 	if errors.As(err, &actionErr) {
-		return controlResponseError(requestID, actionErr.Status, actionErr.Code, actionErr.Message)
+		return controlResponseError(requestID, actionErr.Status, string(actionErr.Code), actionErr.Message)
 	}
 	return controlResponseError(requestID, http.StatusInternalServerError, "internal_error", err.Error())
 }
@@ -703,7 +703,7 @@ func controlResponseError(requestID string, status int, code, message string) *C
 		OK:        false,
 		Error: &ControlError{
 			Status:  status,
-			Code:    code,
+			Code:    ControlErrorCode(code),
 			Message: message,
 		},
 	}

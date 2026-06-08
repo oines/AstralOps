@@ -1,8 +1,6 @@
 package protocol
 
-import "github.com/oines/astralops/pkg/controlwire"
-
-//go:generate go run ../../tools/protocolgen -pkg . -out ../../protocol/src/generated.ts
+//go:generate go run ../../tools/protocolgen -pkg . -out ../../protocol/src/generated.ts -swift-out ../../apps/ios/Sources/AstralOpsIOSKit/GeneratedProtocol.swift
 
 type AgentKind string
 
@@ -61,15 +59,113 @@ type WorkspaceConnection struct {
 	Raw          map[string]any `json:"raw,omitempty"`
 }
 
+type AstralEventFamily string
+
+const (
+	AstralEventFamilySession   AstralEventFamily = "session"
+	AstralEventFamilyTurn      AstralEventFamily = "turn"
+	AstralEventFamilyMessage   AstralEventFamily = "message"
+	AstralEventFamilyReasoning AstralEventFamily = "reasoning"
+	AstralEventFamilyTool      AstralEventFamily = "tool"
+	AstralEventFamilyApproval  AstralEventFamily = "approval"
+	AstralEventFamilyAsk       AstralEventFamily = "ask"
+	AstralEventFamilyPlan      AstralEventFamily = "plan"
+	AstralEventFamilyQueue     AstralEventFamily = "queue"
+	AstralEventFamilyWorkspace AstralEventFamily = "workspace"
+	AstralEventFamilyMemory    AstralEventFamily = "memory"
+	AstralEventFamilySubagent  AstralEventFamily = "subagent"
+	AstralEventFamilyHook      AstralEventFamily = "hook"
+	AstralEventFamilyControl   AstralEventFamily = "control"
+)
+
+type AstralEventKind string
+
+const (
+	AstralEventKindApprovalRequested AstralEventKind = "approval.requested"
+	AstralEventKindApprovalResolved  AstralEventKind = "approval.resolved"
+	AstralEventKindApprovalResponded AstralEventKind = "approval.responded"
+
+	AstralEventKindAskRequested AstralEventKind = "ask.requested"
+	AstralEventKindAskResolved  AstralEventKind = "ask.resolved"
+
+	AstralEventKindControlContext          AstralEventKind = "control.context"
+	AstralEventKindControlError            AstralEventKind = "control.error"
+	AstralEventKindControlInterrupt        AstralEventKind = "control.interrupt"
+	AstralEventKindControlModel            AstralEventKind = "control.model"
+	AstralEventKindControlNotification     AstralEventKind = "control.notification"
+	AstralEventKindControlPairingApproved  AstralEventKind = "control.pairing.approved"
+	AstralEventKindControlPairingDenied    AstralEventKind = "control.pairing.denied"
+	AstralEventKindControlPairingRequested AstralEventKind = "control.pairing.requested"
+	AstralEventKindControlRateLimit        AstralEventKind = "control.rate_limit"
+	AstralEventKindControlRaw              AstralEventKind = "control.raw"
+	AstralEventKindControlStatus           AstralEventKind = "control.status"
+	AstralEventKindControlSteer            AstralEventKind = "control.steer"
+	AstralEventKindControlTerminalAttached AstralEventKind = "control.terminal.attached"
+	AstralEventKindControlTerminalClosed   AstralEventKind = "control.terminal.closed"
+	AstralEventKindControlTerminalDetached AstralEventKind = "control.terminal.detached"
+	AstralEventKindControlTerminalOpened   AstralEventKind = "control.terminal.opened"
+	AstralEventKindControlTrustGranted     AstralEventKind = "control.trust.granted"
+	AstralEventKindControlTrustRevoked     AstralEventKind = "control.trust.revoked"
+	AstralEventKindControlWarning          AstralEventKind = "control.warning"
+
+	AstralEventKindHookCompleted AstralEventKind = "hook.completed"
+	AstralEventKindHookProgress  AstralEventKind = "hook.progress"
+	AstralEventKindHookStarted   AstralEventKind = "hook.started"
+
+	AstralEventKindMemoryCompacted  AstralEventKind = "memory.compacted"
+	AstralEventKindMemoryCompacting AstralEventKind = "memory.compacting"
+
+	AstralEventKindMessageAssistant AstralEventKind = "message.assistant"
+	AstralEventKindMessageDelta     AstralEventKind = "message.delta"
+	AstralEventKindMessageMedia     AstralEventKind = "message.media"
+	AstralEventKindMessageStarted   AstralEventKind = "message.started"
+	AstralEventKindMessageUser      AstralEventKind = "message.user"
+
+	AstralEventKindPlanDelta   AstralEventKind = "plan.delta"
+	AstralEventKindPlanUpdated AstralEventKind = "plan.updated"
+
+	AstralEventKindQueueCancelled AstralEventKind = "queue.cancelled"
+	AstralEventKindQueueDequeued  AstralEventKind = "queue.dequeued"
+	AstralEventKindQueueFailed    AstralEventKind = "queue.failed"
+	AstralEventKindQueueQueued    AstralEventKind = "queue.queued"
+	AstralEventKindQueueSteered   AstralEventKind = "queue.steered"
+
+	AstralEventKindReasoningCompleted AstralEventKind = "reasoning.completed"
+	AstralEventKindReasoningDelta     AstralEventKind = "reasoning.delta"
+	AstralEventKindReasoningStarted   AstralEventKind = "reasoning.started"
+
+	AstralEventKindSessionDeleted AstralEventKind = "session.deleted"
+	AstralEventKindSessionNative  AstralEventKind = "session.native"
+	AstralEventKindSessionStarted AstralEventKind = "session.started"
+	AstralEventKindSessionUpdated AstralEventKind = "session.updated"
+
+	AstralEventKindToolCompleted   AstralEventKind = "tool.completed"
+	AstralEventKindToolDiff        AstralEventKind = "tool.diff"
+	AstralEventKindToolOutputDelta AstralEventKind = "tool.output_delta"
+	AstralEventKindToolProgress    AstralEventKind = "tool.progress"
+	AstralEventKindToolStarted     AstralEventKind = "tool.started"
+	AstralEventKindToolTodo        AstralEventKind = "tool.todo"
+
+	AstralEventKindTurnCancelled AstralEventKind = "turn.cancelled"
+	AstralEventKindTurnCompleted AstralEventKind = "turn.completed"
+	AstralEventKindTurnFailed    AstralEventKind = "turn.failed"
+	AstralEventKindTurnReplaced  AstralEventKind = "turn.replaced"
+	AstralEventKindTurnStarted   AstralEventKind = "turn.started"
+
+	AstralEventKindWorkspaceConnection AstralEventKind = "workspace.connection"
+	AstralEventKindWorkspaceCreated    AstralEventKind = "workspace.created"
+	AstralEventKindWorkspaceRemoved    AstralEventKind = "workspace.removed"
+)
+
 type AstralEvent struct {
-	Seq         int64     `json:"seq"`
-	TS          string    `json:"ts"`
-	WorkspaceID string    `json:"workspace_id"`
-	SessionID   string    `json:"session_id"`
-	Agent       AgentKind `json:"agent"`
-	Kind        string    `json:"kind"`
-	Normalized  any       `json:"normalized"`
-	Raw         any       `json:"raw,omitempty"`
+	Seq         int64                 `json:"seq"`
+	TS          string                `json:"ts"`
+	WorkspaceID string                `json:"workspace_id"`
+	SessionID   string                `json:"session_id"`
+	Agent       AgentKind             `json:"agent"`
+	Kind        AstralEventKind       `json:"kind"`
+	Normalized  AstralEventNormalized `json:"normalized"`
+	Raw         any                   `json:"raw,omitempty"`
 }
 
 type SessionStatus string
@@ -82,20 +178,51 @@ const (
 	SessionStatusFailed         SessionStatus = "failed"
 )
 
+type SessionSource string
+
+const (
+	SessionSourceManaged        SessionSource = "managed"
+	SessionSourceLinked         SessionSource = "linked"
+	SessionSourceDiscovered     SessionSource = "discovered"
+	SessionSourceLegacyUnlinked SessionSource = "legacy_unlinked"
+)
+
+type NativeSessionRef struct {
+	Agent           AgentKind `json:"agent"`
+	LocalPath       string    `json:"local_path,omitempty"`
+	RemotePath      string    `json:"remote_path,omitempty"`
+	NativeSessionID string    `json:"native_session_id,omitempty"`
+	NativeThreadID  string    `json:"native_thread_id,omitempty"`
+	WorkspaceCWD    string    `json:"workspace_cwd,omitempty"`
+}
+
+type SessionLinkState struct {
+	SessionID          string            `json:"session_id"`
+	WorkspaceID        string            `json:"workspace_id"`
+	Source             SessionSource     `json:"source"`
+	NativeRef          *NativeSessionRef `json:"native_ref,omitempty"`
+	ManagedByAstralOps bool              `json:"managed_by_astralops"`
+	CreatedAt          string            `json:"created_at"`
+	UpdatedAt          string            `json:"updated_at"`
+}
+
 type Session struct {
-	ID                     string    `json:"id"`
-	WorkspaceID            string    `json:"workspace_id"`
-	Agent                  AgentKind `json:"agent"`
-	Title                  string    `json:"title,omitempty"`
-	Status                 string    `json:"status"`
-	NativeSessionID        string    `json:"native_session_id,omitempty"`
-	NativeThreadID         string    `json:"native_thread_id,omitempty"`
-	ForkedFromSessionID    string    `json:"forked_from_session_id,omitempty"`
-	ForkedFromEventSeq     int64     `json:"forked_from_event_seq,omitempty"`
-	ForkedFromNativeAnchor string    `json:"forked_from_native_anchor,omitempty"`
-	ForkedFromTitle        string    `json:"forked_from_title,omitempty"`
-	CreatedAt              string    `json:"created_at"`
-	UpdatedAt              string    `json:"updated_at"`
+	ID                     string            `json:"id"`
+	WorkspaceID            string            `json:"workspace_id"`
+	Agent                  AgentKind         `json:"agent"`
+	Title                  string            `json:"title,omitempty"`
+	Status                 string            `json:"status"`
+	Source                 SessionSource     `json:"source,omitempty"`
+	NativeRef              *NativeSessionRef `json:"native_ref,omitempty"`
+	ManagedByAstralOps     bool              `json:"managed_by_astralops,omitempty"`
+	NativeSessionID        string            `json:"native_session_id,omitempty"`
+	NativeThreadID         string            `json:"native_thread_id,omitempty"`
+	ForkedFromSessionID    string            `json:"forked_from_session_id,omitempty"`
+	ForkedFromEventSeq     int64             `json:"forked_from_event_seq,omitempty"`
+	ForkedFromNativeAnchor string            `json:"forked_from_native_anchor,omitempty"`
+	ForkedFromTitle        string            `json:"forked_from_title,omitempty"`
+	CreatedAt              string            `json:"created_at"`
+	UpdatedAt              string            `json:"updated_at"`
 }
 
 type SessionCommandKind string
@@ -142,6 +269,74 @@ type SessionView struct {
 	EditableUserMessage *EditableUserMessageView `json:"editable_user_message,omitempty"`
 }
 
+type HostSnapshotRequest struct {
+	EventLimit      int  `json:"event_limit,omitempty"`
+	RestoreOnLaunch bool `json:"restore_on_launch,omitempty"`
+}
+
+type HostSnapshotResponse struct {
+	Host                 HostInfo                `json:"host"`
+	Agents               map[AgentKind]AgentInfo `json:"agents,omitempty"`
+	Workspaces           []Workspace             `json:"workspaces"`
+	Sessions             []Session               `json:"sessions"`
+	WorkspaceConnections []WorkspaceConnection   `json:"workspace_connections,omitempty"`
+	Events               []AstralEvent           `json:"events"`
+	SessionViews         []SessionView           `json:"session_views"`
+	InitialSessionEvents []AstralEvent           `json:"initial_session_events,omitempty"`
+	Workbench            *WorkbenchState         `json:"workbench,omitempty"`
+}
+
+type WorkbenchState struct {
+	Version              int64                          `json:"version"`
+	UpdatedAt            string                         `json:"updated_at"`
+	Agents               map[AgentKind]AgentInfo        `json:"agents,omitempty"`
+	Workspaces           map[string]Workspace           `json:"workspaces"`
+	Sessions             map[string]Session             `json:"sessions"`
+	SessionViews         map[string]SessionView         `json:"session_views"`
+	WorkspaceConnections map[string]WorkspaceConnection `json:"workspace_connections"`
+	TerminalTabs         map[string]TerminalTab         `json:"terminal_tabs"`
+	Panels               map[string]WorkbenchPanel      `json:"panels"`
+}
+
+type WorkbenchPanel struct {
+	ID        string         `json:"id"`
+	Kind      string         `json:"kind"`
+	State     map[string]any `json:"state,omitempty"`
+	UpdatedAt string         `json:"updated_at,omitempty"`
+}
+
+type EventWindowParams struct {
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	AfterSeq    int64  `json:"after_seq,omitempty"`
+	BeforeSeq   int64  `json:"before_seq,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+}
+
+type EventSubscriptionParams struct {
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	AfterSeq    int64  `json:"after_seq,omitempty"`
+	ReplayLimit int    `json:"replay_limit,omitempty"`
+}
+
+type EventSubscriptionResult struct {
+	StreamID    string `json:"stream_id"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	AfterSeq    int64  `json:"after_seq,omitempty"`
+	ReplayLimit int    `json:"replay_limit,omitempty"`
+}
+
+type EventSubscriptionCancelParams struct {
+	StreamID string `json:"stream_id"`
+}
+
+type EventSubscriptionCancelResult struct {
+	StreamID  string `json:"stream_id"`
+	Cancelled bool   `json:"cancelled"`
+}
+
 type PendingInteractionView struct {
 	ID         string                  `json:"id"`
 	Kind       string                  `json:"kind"`
@@ -177,9 +372,85 @@ type EditableUserMessageView struct {
 	Text     string `json:"text"`
 }
 
+type CreateWorkspaceRequest struct {
+	Name     string     `json:"name"`
+	Target   string     `json:"target"`
+	Agent    AgentKind  `json:"agent,omitempty"`
+	LocalCWD string     `json:"local_cwd,omitempty"`
+	SSH      *SSHConfig `json:"ssh,omitempty"`
+}
+
+type CreateSessionRequest struct {
+	WorkspaceID string    `json:"workspace_id"`
+	Agent       AgentKind `json:"agent,omitempty"`
+}
+
+type SessionInputRequest struct {
+	Input           string                    `json:"input"`
+	Attachments     []ControlAttachmentHandle `json:"attachments,omitempty"`
+	Model           string                    `json:"model,omitempty"`
+	ReasoningEffort string                    `json:"reasoning_effort,omitempty"`
+	PermissionMode  string                    `json:"permission_mode,omitempty"`
+}
+
+type SessionInputControlParams struct {
+	SessionID       string                    `json:"session_id"`
+	Input           string                    `json:"input"`
+	Attachments     []ControlAttachmentHandle `json:"attachments,omitempty"`
+	Model           string                    `json:"model,omitempty"`
+	ReasoningEffort string                    `json:"reasoning_effort,omitempty"`
+	PermissionMode  string                    `json:"permission_mode,omitempty"`
+}
+
+type SessionReferenceParams struct {
+	SessionID string `json:"session_id"`
+}
+
+type SessionsReadParams struct {
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type NativeSessionsReadParams struct {
+	WorkspaceID string `json:"workspace_id"`
+}
+
+type NativeSessionListResponse struct {
+	Sessions []Session `json:"sessions"`
+}
+
+type NativeSessionImportParams struct {
+	WorkspaceID string `json:"workspace_id"`
+	SessionID   string `json:"session_id"`
+}
+
+type NativeSessionImportResponse struct {
+	Session Session `json:"session"`
+}
+
 type QueueControlParams struct {
 	SessionID string `json:"session_id"`
 	QueueID   string `json:"queue_id"`
+}
+
+type QueueControlResult struct {
+	OK      bool   `json:"ok"`
+	QueueID string `json:"queue_id"`
+}
+
+type OkResult struct {
+	OK bool `json:"ok"`
+}
+
+type SessionInputResult struct {
+	OK      bool   `json:"ok"`
+	Mode    string `json:"mode"`
+	Queued  bool   `json:"queued,omitempty"`
+	Steered bool   `json:"steered,omitempty"`
+	QueueID string `json:"queue_id,omitempty"`
+}
+
+type SessionForkResponse struct {
+	Session Session `json:"session"`
 }
 
 type SessionDeleteParams struct {
@@ -199,6 +470,20 @@ type EditLastUserMessageRequest struct {
 	PermissionMode  string `json:"permission_mode"`
 }
 
+type SessionEditParams struct {
+	SessionID       string `json:"session_id"`
+	EventSeq        int64  `json:"event_seq"`
+	Input           string `json:"input"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	PermissionMode  string `json:"permission_mode,omitempty"`
+}
+
+type InteractionRespondParams struct {
+	InteractionID string         `json:"interaction_id"`
+	Response      map[string]any `json:"response"`
+}
+
 type ForkSessionRequest struct {
 	EventSeq int64 `json:"event_seq"`
 }
@@ -212,9 +497,108 @@ type SessionForkControlParams struct {
 	EventSeq  int64  `json:"event_seq"`
 }
 
-type ControlRequest = controlwire.ControlRequest
-type ControlResponse = controlwire.ControlResponse
-type ControlError = controlwire.ControlError
+type HostInfo struct {
+	Identity     DeviceIdentity      `json:"identity"`
+	Platform     map[string]string   `json:"platform"`
+	Features     map[string]any      `json:"features"`
+	Capabilities []ControlCapability `json:"capabilities"`
+}
+
+type DeviceIdentity struct {
+	DeviceID             string              `json:"device_id"`
+	DeviceName           string              `json:"device_name"`
+	DeviceKind           string              `json:"device_kind"`
+	PublicKey            string              `json:"public_key"`
+	PublicKeyFingerprint string              `json:"public_key_fingerprint"`
+	Capabilities         []ControlCapability `json:"capabilities"`
+	CreatedAt            string              `json:"created_at"`
+	UpdatedAt            string              `json:"updated_at"`
+}
+
+type TrustGrant struct {
+	HostDeviceID                   string   `json:"host_device_id"`
+	ControllerDeviceID             string   `json:"controller_device_id"`
+	ControllerDeviceName           string   `json:"controller_device_name,omitempty"`
+	ControllerPublicKey            string   `json:"controller_public_key,omitempty"`
+	ControllerPublicKeyFingerprint string   `json:"controller_public_key_fingerprint,omitempty"`
+	Scope                          string   `json:"scope"`
+	Status                         string   `json:"status"`
+	Capabilities                   []string `json:"capabilities"`
+	WorkspaceExecPolicy            string   `json:"workspace_exec_policy,omitempty"`
+	CreatedAt                      string   `json:"created_at"`
+	UpdatedAt                      string   `json:"updated_at"`
+	RevokedAt                      string   `json:"revoked_at,omitempty"`
+}
+
+type PairingRequest struct {
+	RequestID                      string   `json:"request_id"`
+	Source                         string   `json:"source,omitempty"`
+	CloudRequestID                 string   `json:"cloud_request_id,omitempty"`
+	HostDeviceID                   string   `json:"host_device_id"`
+	ControllerDeviceID             string   `json:"controller_device_id"`
+	ControllerDeviceName           string   `json:"controller_device_name,omitempty"`
+	ControllerDeviceKind           string   `json:"controller_device_kind,omitempty"`
+	ControllerPublicKey            string   `json:"controller_public_key"`
+	ControllerPublicKeyFingerprint string   `json:"controller_public_key_fingerprint"`
+	Scope                          string   `json:"scope"`
+	Status                         string   `json:"status"`
+	Capabilities                   []string `json:"capabilities"`
+	WorkspaceExecPolicy            string   `json:"workspace_exec_policy,omitempty"`
+	CreatedAt                      string   `json:"created_at"`
+	UpdatedAt                      string   `json:"updated_at"`
+	ResolvedAt                     string   `json:"resolved_at,omitempty"`
+}
+
+type PairingRequestListResult struct {
+	Requests []PairingRequest `json:"requests"`
+}
+
+type PairingRequestResolveParams struct {
+	RequestID string `json:"request_id"`
+}
+
+type PairingRequestResolveResult struct {
+	Request PairingRequest `json:"request"`
+	Grant   *TrustGrant    `json:"grant,omitempty"`
+}
+
+type HostTrustListResult struct {
+	Grants []TrustGrant `json:"grants"`
+}
+
+type HostTrustRevokeParams struct {
+	ControllerDeviceID string `json:"controller_device_id"`
+}
+
+type HostTrustRevokeResult struct {
+	ControllerDeviceID      string     `json:"controller_device_id"`
+	Grant                   TrustGrant `json:"grant"`
+	ClosedControlSessions   int        `json:"closed_control_sessions"`
+	ReleasedTerminalWriters int        `json:"released_terminal_writers"`
+	RevokedAt               string     `json:"revoked_at,omitempty"`
+}
+
+type AgentInfo struct {
+	Path          string      `json:"path,omitempty"`
+	Version       string      `json:"version,omitempty"`
+	Available     bool        `json:"available"`
+	CurrentModel  string      `json:"current_model,omitempty"`
+	CurrentEffort string      `json:"current_effort,omitempty"`
+	Models        []ModelInfo `json:"models,omitempty"`
+}
+
+type ModelInfo struct {
+	ID                            string   `json:"id"`
+	Label                         string   `json:"label,omitempty"`
+	Source                        string   `json:"source,omitempty"`
+	Slot                          string   `json:"slot,omitempty"`
+	DefaultReasoningEffort        string   `json:"default_reasoning_effort,omitempty"`
+	SupportedReasoningEfforts     []string `json:"supported_reasoning_efforts,omitempty"`
+	ContextWindow                 int64    `json:"context_window,omitempty"`
+	MaxContextWindow              int64    `json:"max_context_window,omitempty"`
+	EffectiveContextWindow        int64    `json:"effective_context_window,omitempty"`
+	EffectiveContextWindowPercent float64  `json:"effective_context_window_percent,omitempty"`
+}
 
 type TerminalOpenParams struct {
 	WorkspaceID string `json:"workspace_id"`
@@ -361,6 +745,38 @@ type WorkspaceFileStreamCancelParams struct {
 
 type WorkspaceReferenceParams struct {
 	WorkspaceID string `json:"workspace_id"`
+}
+
+type HostFileSystemBrowseParams struct {
+	Target string     `json:"target"`
+	Path   string     `json:"path,omitempty"`
+	SSH    *SSHConfig `json:"ssh,omitempty"`
+}
+
+type HostFileSystemRoot struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Path  string `json:"path"`
+	Kind  string `json:"kind"`
+}
+
+type HostFileSystemEntry struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Kind    string `json:"kind"`
+	Size    int64  `json:"size,omitempty"`
+	ModTime string `json:"mod_time,omitempty"`
+}
+
+type HostFileSystemBrowseResult struct {
+	Target     string                `json:"target"`
+	Platform   string                `json:"platform"`
+	Separator  string                `json:"separator"`
+	Path       string                `json:"path"`
+	ParentPath string                `json:"parent_path,omitempty"`
+	Roots      []HostFileSystemRoot  `json:"roots"`
+	Entries    []HostFileSystemEntry `json:"entries"`
+	Truncated  bool                  `json:"truncated,omitempty"`
 }
 
 type WorkspaceExecParams struct {

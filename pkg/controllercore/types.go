@@ -2,42 +2,44 @@ package controllercore
 
 import (
 	"context"
-	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/oines/astralops/pkg/controlwire"
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 const (
-	CapabilityCoreRead           = "core.read"
-	CapabilityCoreControl        = "core.control"
-	CapabilityWorkspaceFilesRead = "workspace.files.read"
-	CapabilityMediaRead          = "media.read"
-	CapabilityTerminalOpen       = "terminal.open"
-	CapabilityTerminalInput      = "terminal.input"
-	ActionPing                   = "core.read.ping"
-	ActionHostSnapshot           = "core.read.host_snapshot"
-	ActionSessionView            = "core.read.session_view"
-	ActionSessions               = "core.read.sessions"
-	ActionWorkspaces             = "core.read.workspaces"
-	ActionWorkspaceConnection    = "core.read.workspace.connection"
-	ActionWorkspaceConnect       = "core.control.workspace.connect"
-	ActionSessionInput           = "core.control.session_input"
-	ActionEvents                 = "core.read.events"
-	ActionEventsSubscribe        = "core.subscribe.events"
-	ActionEventsUnsubscribe      = "core.unsubscribe.events"
-	ActionWorkspaceFilesRead     = "workspace.files.read"
-	ActionMediaRead              = "media.read"
-	ActionTerminalOpen           = "terminal.open"
-	ActionTerminalList           = "terminal.list"
-	ActionTerminalAttach         = "terminal.attach"
-	ActionTerminalDetach         = "terminal.detach"
-	ActionTerminalHeartbeatAck   = "terminal.heartbeat_ack"
-	ActionTerminalInput          = "terminal.input"
-	ActionTerminalResize         = "terminal.resize"
-	ActionTerminalClose          = "terminal.close"
+	CapabilityCoreRead           = protocol.CapabilityCoreRead
+	CapabilityCoreControl        = protocol.CapabilityCoreControl
+	CapabilityWorkspaceFilesRead = protocol.CapabilityWorkspaceFilesRead
+	CapabilityInteractionRespond = protocol.CapabilityInteractionRespond
+	CapabilityMediaRead          = protocol.CapabilityMediaRead
+	CapabilityTerminalOpen       = protocol.CapabilityTerminalOpen
+	CapabilityTerminalInput      = protocol.CapabilityTerminalInput
+	ActionPing                   = protocol.ControlActionPing
+	ActionHostSnapshot           = protocol.ControlActionHostSnapshot
+	ActionWorkbench              = protocol.ControlActionWorkbench
+	ActionSessionView            = protocol.ControlActionSessionView
+	ActionSessions               = protocol.ControlActionSessions
+	ActionWorkspaces             = protocol.ControlActionWorkspaces
+	ActionWorkspaceConnection    = protocol.ControlActionWorkspaceConnection
+	ActionWorkspaceConnect       = protocol.ControlActionWorkspaceConnect
+	ActionSessionInput           = protocol.ControlActionSessionInput
+	ActionEvents                 = protocol.ControlActionEvents
+	ActionEventsSubscribe        = protocol.ControlActionEventsSubscribe
+	ActionEventsUnsubscribe      = protocol.ControlActionEventsUnsubscribe
+	ActionWorkspaceFilesRead     = protocol.ControlActionWorkspaceFilesRead
+	ActionInteractionRespond     = protocol.ControlActionInteractionRespond
+	ActionMediaRead              = protocol.ControlActionMediaRead
+	ActionTerminalOpen           = protocol.ControlActionTerminalOpen
+	ActionTerminalList           = protocol.ControlActionTerminalList
+	ActionTerminalAttach         = protocol.ControlActionTerminalAttach
+	ActionTerminalDetach         = protocol.ControlActionTerminalDetach
+	ActionTerminalHeartbeatAck   = protocol.ControlActionTerminalHeartbeatAck
+	ActionTerminalInput          = protocol.ControlActionTerminalInput
+	ActionTerminalResize         = protocol.ControlActionTerminalResize
+	ActionTerminalClose          = protocol.ControlActionTerminalClose
 	AuthorizationRequiredCode    = "control_authorization_required"
 	TerminalViewerNotReadyCode   = "terminal_viewer_not_live"
 	StateIdle                    = "idle"
@@ -69,44 +71,23 @@ const (
 	TransportRelay               = "relay"
 )
 
+type ControlCapability = protocol.ControlCapability
+type ControlAction = protocol.ControlAction
 type ControlRequest = controlwire.ControlRequest
 type ControlResponse = controlwire.ControlResponse
 type ControlError = controlwire.ControlError
-
-type ActionError struct {
-	Status  int
-	Code    string
-	Message string
-}
-
-func (e *ActionError) Error() string {
-	if e == nil {
-		return ""
-	}
-	if strings.TrimSpace(e.Message) != "" {
-		return e.Message
-	}
-	return e.Code
-}
+type ActionError = protocol.ActionError
 
 func NewActionError(status int, code, message string) *ActionError {
-	return &ActionError{Status: status, Code: code, Message: message}
+	return protocol.NewActionErrorString(status, code, message)
 }
 
 func ErrorCode(err error) string {
-	var actionErr *ActionError
-	if errors.As(err, &actionErr) {
-		return actionErr.Code
-	}
-	return ""
+	return protocol.ActionErrorCode(err)
 }
 
 func ErrorStatus(err error) int {
-	var actionErr *ActionError
-	if errors.As(err, &actionErr) {
-		return actionErr.Status
-	}
-	return 0
+	return protocol.ActionErrorStatus(err)
 }
 
 type ControlState struct {
@@ -201,7 +182,7 @@ type TerminalStream interface {
 
 type Transport interface {
 	ControlState(hostDeviceID string) ControlState
-	Request(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error)
+	Request(ctx context.Context, hostDeviceID string, capability ControlCapability, action ControlAction, params map[string]any) (ControlResponse, error)
 	SubscribeEvents(ctx context.Context, hostDeviceID string, params EventSubscriptionParams) (EventStream, error)
 	OpenTerminal(ctx context.Context, hostDeviceID, workspaceID string, afterSeq int64) (TerminalStream, error)
 	AttachTerminal(ctx context.Context, hostDeviceID, terminalID string, afterSeq int64) (TerminalStream, error)

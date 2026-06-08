@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { AstralEvent, Session } from "../types";
+import { normalizedRecord, type AstralEvent, type Session } from "../types";
 import {
   buildOperationGroups,
   compactStreamingEvents,
@@ -116,7 +116,7 @@ export function Transcript({
   const forkProjectionBoundarySeq = useMemo(() => {
     if (!activeSession?.forked_from_session_id) return 0;
     return events.reduce((latest, event) => {
-      const value = event.normalized as Record<string, unknown>;
+      const value = normalizedRecord(event);
       return value.fork_projection === true ? Math.max(latest, event.seq) : latest;
     }, 0);
   }, [activeSession?.forked_from_session_id, events]);
@@ -440,7 +440,7 @@ const TurnBlock = React.memo(function TurnBlock({
       flushOperations();
       timeline.push(
         <UserMessage
-          canEdit={editableUserMessage?.event_seq === event.seq && textValue(event.normalized as Record<string, unknown>, "text") === editableUserMessage.text}
+          canEdit={editableUserMessage?.event_seq === event.seq && textValue(normalizedRecord(event), "text") === editableUserMessage.text}
           event={event}
           key={event.seq}
           mediaUrl={mediaUrl}
@@ -477,7 +477,7 @@ const TurnBlock = React.memo(function TurnBlock({
     <motion.article animate={{ opacity: 1, y: 0 }} className="mb-6 min-w-0" initial={{ opacity: 0, y: 4 }} transition={{ duration: 0.14 }}>
       {group.user ? (
         <UserMessage
-          canEdit={editableUserMessage?.event_seq === group.user.seq && textValue(group.user.normalized as Record<string, unknown>, "text") === editableUserMessage.text}
+          canEdit={editableUserMessage?.event_seq === group.user.seq && textValue(normalizedRecord(group.user), "text") === editableUserMessage.text}
           event={group.user}
           mediaUrl={mediaUrl}
           onEdit={onEditUserMessage}
@@ -522,7 +522,7 @@ function UserMessage({
   mediaUrl?: MediaUrlResolver;
   onEdit?: (eventSeq: number, input: string) => Promise<void>;
 }): React.JSX.Element {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const text = textValue(value, "text");
   const attachments = attachmentsFromEvent(event);
   const [editing, setEditing] = useState(false);
@@ -631,7 +631,7 @@ function DetailEvent({
 }: {
   event: AstralEvent;
 }): React.ReactNode {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const text = textValue(value, "text");
 
   if (event.kind === "turn.failed" || event.kind === "turn.cancelled" || event.kind === "control.error") {
@@ -730,7 +730,7 @@ function FileReadBlock({ file }: { file: NonNullable<ReturnType<typeof fileReadF
 }
 
 function TodoBlock({ event }: { event: AstralEvent }): React.JSX.Element {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const todos = todoItems(value);
   const counts = todos.reduce(
     (acc, todo) => {
@@ -763,7 +763,7 @@ function TodoBlock({ event }: { event: AstralEvent }): React.JSX.Element {
 }
 
 function PlanBlock({ event }: { event: AstralEvent }): React.JSX.Element {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const plan = planItems(value);
   const text = textValue(value, "text");
   const path = textValue(value, "path");
@@ -801,7 +801,7 @@ function planTitle(event: AstralEvent, value: Record<string, unknown>): string {
 }
 
 function ReasoningBlock({ event }: { event: AstralEvent }): React.JSX.Element {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const text = textValue(value, "text");
   const running = event.kind !== "reasoning.completed";
   const title = running ? "正在思考" : "思考";
@@ -819,7 +819,7 @@ function ReasoningBlock({ event }: { event: AstralEvent }): React.JSX.Element {
 }
 
 function ToolEventBlock({ event }: { event: AstralEvent }): React.JSX.Element {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   if (isTodoToolEvent(event)) return <TodoBlock event={event} />;
   const meta = toolMeta(event);
   const running = event.kind.endsWith("started") || event.kind.endsWith("progress");
@@ -855,7 +855,7 @@ function ToolDetail({ value }: { value: Record<string, unknown> }): React.JSX.El
 }
 
 function HookEventBlock({ event }: { event: AstralEvent }): React.JSX.Element {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const hook = hookEventName(value);
   const meta = hookMeta(hook);
   const summary = firstText(value, value.input as Record<string, unknown> | undefined, ["tool_name", "toolName", "matcher", "cwd", "file_path", "path", "name", "message"]);
@@ -883,7 +883,7 @@ function AssistantEvent({
   mediaUrl?: MediaUrlResolver;
   onFork?: (event: AstralEvent) => void;
 }): React.ReactNode {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const text = textValue(value, "text");
   if (event.kind === "message.media") {
     const media = mediaFromEvent(event);
@@ -920,7 +920,7 @@ function AssistantEvent({
 }
 
 function TranscriptPlanBubble({ event }: { event: AstralEvent }): React.ReactNode {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const text = transcriptPlanText(event);
   const plan = planItems(value);
   if (!text && plan.length === 0) return null;
@@ -1045,7 +1045,7 @@ function MetaLine({ icon, text, time }: { icon: React.ReactNode; text: string; t
 }
 
 function QueueEventBlock({ event }: { event: AstralEvent }): React.JSX.Element {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const text = textValue(value, "text");
 
   return (
@@ -1076,7 +1076,7 @@ function toolMeta(event: AstralEvent): {
   runningLabel: string;
   summary: string;
 } {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const name = toolName(event).toLowerCase();
   const category = textValue(value, "category").toLowerCase();
   const input = value.input as Record<string, unknown> | undefined;

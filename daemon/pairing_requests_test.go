@@ -46,7 +46,7 @@ func TestPairingRequestApprovePersistsTrustGrant(t *testing.T) {
 	if !ok || grant.ControllerPublicKey != input.ControllerPublicKey || grant.ControllerPublicKeyFingerprint != input.ControllerPublicKeyFingerprint {
 		t.Fatalf("trusted grant = %#v ok = %v", grant, ok)
 	}
-	events := reloaded.allEvents()
+	events := testAllEvents(reloaded)
 	if !containsEventKind(events, "control.trust.granted") || !containsEventKind(events, "control.pairing.approved") {
 		t.Fatalf("events = %#v, want trust granted and pairing approved", eventKinds(events))
 	}
@@ -176,7 +176,7 @@ func TestControlGatewayHostPairingApproveRequiresHostManage(t *testing.T) {
 		ControllerDeviceID: "device_reader",
 		Capability:         CapabilityHostManage,
 		Action:             ControlActionHostPairingApprove,
-		Params:             map[string]any{"request_id": request.RequestID},
+		Params:             controlParams(map[string]any{"request_id": request.RequestID}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }
@@ -193,7 +193,7 @@ func TestControlGatewayHostPairingApproveGrantsTrust(t *testing.T) {
 		ControllerDeviceID: "device_admin",
 		Capability:         CapabilityHostManage,
 		Action:             ControlActionHostPairingApprove,
-		Params:             map[string]any{"request_id": request.RequestID},
+		Params:             controlParams(map[string]any{"request_id": request.RequestID}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -219,6 +219,6 @@ func testPairingRequestInput(t *testing.T, deviceID string) pairingRequestInput 
 		ControllerDeviceKind:           "mobile",
 		ControllerPublicKey:            base64.StdEncoding.EncodeToString(publicKey),
 		ControllerPublicKeyFingerprint: devicePublicKeyFingerprint(publicKey),
-		Capabilities:                   []string{CapabilityCoreRead, CapabilityHostManage},
+		Capabilities:                   capabilityStrings(CapabilityCoreRead, CapabilityHostManage),
 	}
 }

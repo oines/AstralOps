@@ -39,6 +39,7 @@ export function useSessionEventWindow({
 } {
   const [sessionWindows, setSessionWindows] = useState<SessionWindows>({});
   const latestWindowLoadsRef = useRef(new Set<string>());
+  const latestWindowResultCountsRef = useRef<Record<string, number>>({});
 
   const activeSessionEvents = useMemo(
     () => (activeSessionId ? selectSessionEvents(eventIndex, activeSessionId) : []),
@@ -51,6 +52,7 @@ export function useSessionEventWindow({
       latestWindowLoadsRef.current.add(sessionId);
       try {
         const sessionEvents = await api.events({ session_id: sessionId, limit: EVENT_WINDOW_SIZE });
+        latestWindowResultCountsRef.current[sessionId] = sessionEvents.length;
         mergeEvents(sessionEvents);
         setSessionWindows((current) => updateWindowAfterLatest(current, sessionId, sessionEvents, EVENT_WINDOW_SIZE));
       } catch (loadError) {
@@ -63,9 +65,12 @@ export function useSessionEventWindow({
   );
 
   useEffect(() => {
-    if (!activeSessionId || !api || sessionWindows[activeSessionId]) return;
+    if (!activeSessionId || !api) return;
+    const loadedWindow = sessionWindows[activeSessionId];
+    const loadedCount = latestWindowResultCountsRef.current[activeSessionId];
+    if (loadedWindow && (activeSessionEvents.length > 0 || loadedCount === 0)) return;
     void loadLatestSessionEvents(activeSessionId);
-  }, [activeSessionId, api, loadLatestSessionEvents, sessionWindows]);
+  }, [activeSessionEvents.length, activeSessionId, api, loadLatestSessionEvents, sessionWindows]);
 
   const loadOlderEvents = useCallback(async () => {
     if (!api || !activeSessionId) return;

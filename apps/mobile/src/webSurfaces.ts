@@ -181,6 +181,19 @@ export function createTerminalWebViewHtml(colors: WebSurfacePalette): string {
         term.open(terminalEl);
         term.onData(function (data) {
           if (!canInput) return;
+          if (ctrlMode) {
+            ctrlMode = false;
+            var mapped = "";
+            for (var i = 0; i < data.length; i++) {
+              var ch = data.charCodeAt(i);
+              if (ch >= 97 && ch <= 122) { mapped += String.fromCharCode(ch - 96); }
+              else if (ch >= 65 && ch <= 90) { mapped += String.fromCharCode(ch - 64); }
+              else { mapped += data[i]; }
+            }
+            post({ type: "terminal.input", data: mapped });
+            post({ type: "terminal.ctrlDone" });
+            return;
+          }
           post({ type: "terminal.input", data: data });
         });
         terminalEl.addEventListener("touchstart", function () {
@@ -197,9 +210,15 @@ export function createTerminalWebViewHtml(colors: WebSurfacePalette): string {
         }
       }
 
+      var ctrlMode = false;
+
       window.__ASTRAL_RECEIVE__ = function (message) {
-        if (!message || message.type !== "terminal.render") return;
-        renderTerminal(message.payload || {});
+        if (!message) return;
+        if (message.type === "terminal.render") {
+          renderTerminal(message.payload || {});
+        } else if (message.type === "terminal.ctrlMode") {
+          ctrlMode = !!(message.payload && message.payload.active);
+        }
       };
 
       window.addEventListener("load", function () {

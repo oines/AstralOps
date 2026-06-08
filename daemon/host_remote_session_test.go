@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,7 +27,15 @@ func TestHostRemoteSessionPingFailuresPauseTerminalInput(t *testing.T) {
 
 func TestHostRemoteSessionControlFailurePausesTerminalInput(t *testing.T) {
 	session, viewer := newLiveHostRemoteSessionTestRig()
-	manager := &hostRemoteSessionManager{sessions: map[string]*hostRemoteSession{"dev_host": session}}
+	invalidations := 0
+	manager := &hostRemoteSessionManager{
+		deps: hostRemoteSessionDeps{
+			invalidate: func(string, string) {
+				invalidations++
+			},
+		},
+		sessions: map[string]*hostRemoteSession{"dev_host": session},
+	}
 	session.manager = manager
 	session.active = true
 
@@ -36,6 +46,55 @@ func TestHostRemoteSessionControlFailurePausesTerminalInput(t *testing.T) {
 		LastError:     "control read failed",
 	})
 	assertHostRemoteSessionPaused(t, session, viewer)
+	if invalidations != 0 {
+		t.Fatalf("transport failure invalidations = %d, want 0", invalidations)
+	}
+}
+
+func TestHostRemoteSessionSkipsHealthProbeDuringRequest(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startedOnce atomic.Bool
+	session := &hostRemoteSession{
+		hostDeviceID: "dev_host",
+		manager: &hostRemoteSessionManager{
+			deps: hostRemoteSessionDeps{
+				request: func(context.Context, string, ControlCapability, ControlAction, map[string]any) (ControlResponse, error) {
+					if startedOnce.CompareAndSwap(false, true) {
+						close(started)
+					}
+					<-release
+					return ControlResponse{OK: true}, nil
+				},
+			},
+		},
+		state: remoteHostSessionState{
+			HostDeviceID: "dev_host",
+			State:        hostRemoteStateIdle,
+			Workbench:    remoteHostWorkbenchState{State: hostWorkbenchStateLoading},
+			Terminals:    map[string]remoteHostTerminalState{},
+			UpdatedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		},
+		terminals:   map[string]remoteHostTerminalState{},
+		subscribers: map[chan remoteHostSessionState]struct{}{},
+		viewers:     map[*remoteHostTerminalViewer]struct{}{},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = session.Request(context.Background(), CapabilityCoreRead, ControlActionHostSnapshot, nil)
+	}()
+
+	<-started
+	if session.shouldProbeHealth() {
+		t.Fatal("health probe should pause while a remote request is in flight")
+	}
+	close(release)
+	<-done
+	if !session.shouldProbeHealth() {
+		t.Fatal("health probe should resume after the remote request finishes")
+	}
 }
 
 func newLiveHostRemoteSessionTestRig() (*hostRemoteSession, *remoteHostTerminalViewer) {

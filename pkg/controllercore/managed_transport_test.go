@@ -252,6 +252,36 @@ func TestManagedTransportClearLANFailureRestoresLANPreference(t *testing.T) {
 	}
 }
 
+func TestManagedTransportForceRelayOnlyReplacesActiveLANSession(t *testing.T) {
+	forceRelayOnly := false
+	opener := &fakeManagedOpener{
+		transport: func(index int, _ bool) string {
+			if index == 0 {
+				return TransportLAN
+			}
+			return TransportRelay
+		},
+	}
+	manager := NewManagedTransport(ManagedTransportConfig{
+		OpenFrameConn:  opener.open,
+		ForceRelayOnly: func() bool { return forceRelayOnly },
+	})
+
+	if _, err := manager.Request(context.Background(), "dev_host", CapabilityCoreRead, ActionHostSnapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	forceRelayOnly = true
+	if _, err := manager.Request(context.Background(), "dev_host", CapabilityCoreRead, ActionWorkbench, nil); err != nil {
+		t.Fatal(err)
+	}
+	if opener.count() != 2 {
+		t.Fatalf("open count = %d, want LAN session replaced by relay session", opener.count())
+	}
+	if !opener.preferRelayAt(1) {
+		t.Fatal("relay-only request did not force relay on replacement session")
+	}
+}
+
 type fakeManagedOpener struct {
 	mu        sync.Mutex
 	conns     []*fakeManagedFrameConn
@@ -360,7 +390,7 @@ func (c *fakeManagedFrameConn) ReadPlain(timeout time.Duration) (controlwire.Pla
 	}
 }
 
-func (c *fakeManagedFrameConn) requestCount(action string) int {
+func (c *fakeManagedFrameConn) requestCount(action ControlAction) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	count := 0
@@ -372,7 +402,7 @@ func (c *fakeManagedFrameConn) requestCount(action string) int {
 	return count
 }
 
-func (c *fakeManagedFrameConn) lastRequestParam(action, key string) any {
+func (c *fakeManagedFrameConn) lastRequestParam(action ControlAction, key string) any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for i := len(c.writes) - 1; i >= 0; i-- {
@@ -383,7 +413,7 @@ func (c *fakeManagedFrameConn) lastRequestParam(action, key string) any {
 		if request.Params == nil {
 			return nil
 		}
-		return request.Params[key]
+		return requestParam(request, key)
 	}
 	return nil
 }
@@ -418,11 +448,22 @@ func (c *fakeManagedFrameConn) responseFor(request *controlwire.ControlRequest) 
 		attachCount := c.attachCount
 		c.mu.Unlock()
 		suffix := strconv.Itoa(attachCount)
-		response.Result = map[string]any{"viewer_id": "viewer_" + suffix, "input_lease_id": "lease_" + suffix, "output_seq": request.Params["after_seq"]}
+		response.Result = map[string]any{"viewer_id": "viewer_" + suffix, "input_lease_id": "lease_" + suffix, "output_seq": requestParam(request, "after_seq")}
 	case ActionTerminalList:
 		response.Result = []map[string]any{{"terminal_id": "term_1", "shell": "zsh", "cwd": "/", "status": "open", "output_seq": 1}}
 	default:
 		response.Result = map[string]any{"ok": true}
 	}
 	return response
+}
+
+func requestParam(request *controlwire.ControlRequest, key string) any {
+	if request == nil || len(request.Params) == 0 {
+		return nil
+	}
+	var params map[string]any
+	if err := json.Unmarshal(request.Params, &params); err != nil {
+		return nil
+	}
+	return params[key]
 }

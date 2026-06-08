@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -330,41 +331,105 @@ func JSONRequest(ctx context.Context, serviceName, baseURLValue string, httpClie
 	if baseURL == "" {
 		return fmt.Errorf("%s base url required", serviceName)
 	}
-	var reader io.Reader
+	var payload []byte
 	if body != nil {
-		payload, err := json.Marshal(body)
+		var err error
+		payload, err = json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		reader = bytes.NewReader(payload)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, reader)
-	if err != nil {
-		return err
-	}
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
 	}
 	client := httpClient
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	res, err := client.Do(req)
-	if err != nil {
-		return err
+	attempts := 1
+	if isSafeHTTPMethod(method) {
+		attempts = 3
 	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		payload, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return fmt.Errorf("%s request failed: %s: %s", serviceName, res.Status, strings.TrimSpace(string(payload)))
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			if err := sleepForRetry(ctx); err != nil {
+				return err
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, method, baseURL+path, bytes.NewReader(payload))
+		if err != nil {
+			return err
+		}
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		res, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			if shouldRetryRequest(err) && attempt+1 < attempts {
+				closeIdleConnections(client)
+				continue
+			}
+			return err
+		}
+		defer res.Body.Close()
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			payload, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+			return fmt.Errorf("%s request failed: %s: %s", serviceName, res.Status, strings.TrimSpace(string(payload)))
+		}
+		if out == nil {
+			return nil
+		}
+		return json.NewDecoder(res.Body).Decode(out)
 	}
-	if out == nil {
+	if lastErr != nil {
+		return lastErr
+	}
+	return nil
+}
+
+func isSafeHTTPMethod(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldRetryRequest(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+func sleepForRetry(ctx context.Context) error {
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
 		return nil
 	}
-	return json.NewDecoder(res.Body).Decode(out)
+}
+
+type idleConnectionCloser interface {
+	CloseIdleConnections()
+}
+
+func closeIdleConnections(client *http.Client) {
+	if client != nil {
+		if closer, ok := client.Transport.(idleConnectionCloser); ok {
+			closer.CloseIdleConnections()
+			return
+		}
+		if client.Transport != nil {
+			return
+		}
+	}
+	if closer, ok := http.DefaultTransport.(idleConnectionCloser); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 func PathEscape(value string) string {

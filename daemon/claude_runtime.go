@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,22 +17,45 @@ import (
 type claudeLocalRuntime struct {
 	deps    runtimeDeps
 	mu      sync.Mutex
-	running map[string]*claudeRun
+	clients map[string]*claudeClient
 }
 
-type claudeRun struct {
-	cancel            context.CancelFunc
-	stdin             io.WriteCloser
-	done              chan struct{}
-	mu                sync.Mutex
-	pausedForApproval bool
-	skipQueueAfterRun bool
+type claudeClient struct {
+	runtime *claudeLocalRuntime
+	session Session
+	cwd     string
+	path    string
+	remote  claudeRemoteOptions
+	config  string
+
+	cmd   *exec.Cmd
+	stdin io.WriteCloser
+	done  chan struct{}
+
+	writeMu sync.Mutex
+	mu      sync.Mutex
+
+	active             bool
+	activeDone         chan struct{}
+	pendingInteraction bool
+	pausedForApproval  bool
+	skipQueueAfterTurn bool
+	cancelRequested    bool
+	cancelReason       string
+	cancelHidden       bool
+	interruptSucceeded bool
+	interruptRequestID string
+	endSessionID       string
+	stopping           bool
+	finishedTurn       bool
+	idleTimer          *time.Timer
+	toolStarts         map[string]AstralEvent
 }
 
 func newClaudeLocalRuntime(deps runtimeDeps) *claudeLocalRuntime {
 	return &claudeLocalRuntime{
 		deps:    deps,
-		running: map[string]*claudeRun{},
+		clients: map[string]*claudeClient{},
 	}
 }
 
@@ -57,7 +79,7 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		var hello map[string]any
-		callErr := r.deps.ssh.call(ctx, workspace, "hello", map[string]any{}, &hello)
+		callErr := r.deps.ssh.Call(ctx, workspace, "hello", map[string]any{}, &hello)
 		if callErr != nil {
 			cancel()
 			return callErr
@@ -86,34 +108,26 @@ func (r *claudeLocalRuntime) StartTurn(session Session, workspace Workspace, inp
 		return fmt.Errorf("session is missing native Claude session id")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	r.mu.Lock()
-	if _, ok := r.running[session.ID]; ok {
-		r.mu.Unlock()
-		cancel()
-		return ErrSessionRunning
-	}
-	run := &claudeRun{cancel: cancel, done: make(chan struct{})}
-	r.running[session.ID] = run
-	r.mu.Unlock()
-
-	r.deps.store.updateSessionStatus(session.ID, "running")
-	if !options.Internal && !options.SuppressUserMessage {
-		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
-	}
-	started := map[string]any{"status": "running"}
-	if options.Internal {
-		started["internal"] = true
-	}
-	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: started})
-
-	go r.runClaude(ctx, session, cwd, info.Path, input, options, run, claudeRemoteOptions{
+	remote := claudeRemoteOptions{
 		MCPConfigPath:  mcpConfigPath,
 		RemoteCWD:      remoteCWD,
 		AppendPrompt:   appendPrompt,
 		SettingSources: settingSources,
-	})
-	return nil
+	}
+	args, argErr := r.claudeArgs(session, options, remote)
+	if argErr != nil {
+		return argErr
+	}
+	config, configErr := claudeClientConfig(info.Path, cwd, options, remote)
+	if configErr != nil {
+		return configErr
+	}
+
+	client, err := r.clientForTurn(session, cwd, info.Path, args, config, remote)
+	if err != nil {
+		return err
+	}
+	return client.startTurn(session, input, options)
 }
 
 func claudeRemotePermissionMode(mode string) string {
@@ -126,39 +140,39 @@ func claudeRemotePermissionMode(mode string) string {
 func (r *claudeLocalRuntime) Interrupt(sessionID string) error {
 	r.ensureDeps()
 	r.mu.Lock()
-	run, ok := r.running[sessionID]
-	if ok {
-		delete(r.running, sessionID)
-	}
+	client := r.clients[sessionID]
 	r.mu.Unlock()
-	if !ok {
+	if client == nil || !client.isActive() {
 		return ErrSessionIdle
 	}
-	run.cancel()
 	session, _ := r.deps.store.getSession(sessionID)
-	r.deps.store.updateSessionStatus(sessionID, "idle")
-	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.interrupt", Normalized: map[string]any{"status": "requested"}})
-	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle"}})
-	return nil
+	return client.requestInterrupt(session, "user", false, false)
 }
 
 func (r *claudeLocalRuntime) StopSession(sessionID string, reason string) {
 	r.ensureDeps()
-	if err := r.Interrupt(sessionID); err != nil && !errors.Is(err, ErrSessionIdle) {
+	r.mu.Lock()
+	client := r.clients[sessionID]
+	delete(r.clients, sessionID)
+	r.mu.Unlock()
+	if client == nil {
+		return
+	}
+	if err := client.stop(reason, claudeEndSessionTimeout); err != nil {
 		session, _ := r.deps.store.getSession(sessionID)
-		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.warning", Normalized: map[string]any{
+		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.warning", Normalized: eventNormalized("control.warning", map[string]any{
 			"message": err.Error(),
 			"reason":  reason,
-		}})
+		})})
 	}
 }
 
 func (r *claudeLocalRuntime) Steer(sessionID string, input string, options TurnOptions) error {
 	r.ensureDeps()
 	r.mu.Lock()
-	run, ok := r.running[sessionID]
+	client := r.clients[sessionID]
 	r.mu.Unlock()
-	if !ok {
+	if client == nil || !client.isActive() {
 		return ErrSessionIdle
 	}
 
@@ -171,47 +185,26 @@ func (r *claudeLocalRuntime) Steer(sessionID string, input string, options TurnO
 		return fmt.Errorf("workspace %s not found", session.WorkspaceID)
 	}
 
-	run.mu.Lock()
-	run.skipQueueAfterRun = true
-	if run.stdin != nil {
-		_ = run.stdin.Close()
-		run.stdin = nil
-	}
-	cancel := run.cancel
-	done := run.done
-	run.mu.Unlock()
-
 	startOptions := options
 	if !options.Internal && !options.SuppressUserMessage {
-		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "message.user", Normalized: displayInputNormalized(input, options)})
+		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "message.user", Normalized: eventNormalized("message.user", displayInputNormalized(input, options))})
 		startOptions.SuppressUserMessage = true
 	}
-	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.steer", Normalized: map[string]any{"status": "interrupting"}})
-	r.deps.store.updateSessionStatus(sessionID, "idle")
-	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "turn.cancelled", Normalized: map[string]any{"status": "idle", "reason": "steer", "hidden": true}})
-	cancel()
+	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: sessionID, Agent: AgentClaude, Kind: "control.steer", Normalized: eventNormalized("control.steer", map[string]any{"status": "interrupting"})})
+
+	done, err := client.requestSteerInterrupt(session)
+	if err != nil {
+		return err
+	}
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(claudeInterruptTimeout + time.Second):
 		return fmt.Errorf("timed out interrupting Claude turn before steering")
 	}
 	if updated, ok := r.deps.store.getSession(sessionID); ok {
 		session = updated
 	}
 	return r.StartTurn(session, workspace, input, startOptions)
-}
-
-func (run *claudeRun) pauseForApproval() {
-	run.mu.Lock()
-	run.pausedForApproval = true
-	run.skipQueueAfterRun = true
-	if run.stdin != nil {
-		_ = run.stdin.Close()
-		run.stdin = nil
-	}
-	cancel := run.cancel
-	run.mu.Unlock()
-	cancel()
 }
 
 type claudeRemoteOptions struct {
@@ -221,26 +214,43 @@ type claudeRemoteOptions struct {
 	SettingSources string
 }
 
-func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd, path, input string, options TurnOptions, run *claudeRun, remote claudeRemoteOptions) {
-	defer func() {
-		run.mu.Lock()
-		startQueued := !run.skipQueueAfterRun
-		run.mu.Unlock()
-		r.mu.Lock()
-		delete(r.running, session.ID)
-		r.mu.Unlock()
-		close(run.done)
-		if startQueued {
-			go r.deps.startNextQueuedTurn(session.ID)
-		}
-	}()
+const (
+	claudeInterruptTimeout  = 10 * time.Second
+	claudeEndSessionTimeout = 5 * time.Second
+	claudeIdleTimeout       = 15 * time.Minute
+)
 
-	args, argErr := r.claudeArgs(session, options, remote)
-	if argErr != nil {
-		r.finishFailed(session, argErr.Error(), nil)
-		return
+func (r *claudeLocalRuntime) clientForTurn(session Session, cwd, path string, args []string, config string, remote claudeRemoteOptions) (*claudeClient, error) {
+	for {
+		r.mu.Lock()
+		client := r.clients[session.ID]
+		if client == nil {
+			r.mu.Unlock()
+			return r.launchClaudeClient(session, cwd, path, args, config, remote)
+		}
+		active, sameConfig := client.stateForReuse(config)
+		if active {
+			r.mu.Unlock()
+			return nil, ErrSessionRunning
+		}
+		if sameConfig {
+			client.cancelIdleTimer()
+			r.mu.Unlock()
+			return client, nil
+		}
+		delete(r.clients, session.ID)
+		r.mu.Unlock()
+		if err := client.stop("claude runtime arguments changed", claudeEndSessionTimeout); err != nil {
+			r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: AgentClaude, Kind: "control.warning", Normalized: eventNormalized("control.warning", map[string]any{
+				"message": err.Error(),
+				"reason":  "claude runtime arguments changed",
+			})})
+		}
 	}
-	cmd := exec.CommandContext(ctx, path, args...)
+}
+
+func (r *claudeLocalRuntime) launchClaudeClient(session Session, cwd, path string, args []string, config string, remote claudeRemoteOptions) (*claudeClient, error) {
+	cmd := exec.Command(path, args...)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
 	if remote.RemoteCWD != "" {
@@ -250,80 +260,530 @@ func (r *claudeLocalRuntime) runClaude(ctx context.Context, session Session, cwd
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		r.finishFailed(session, err.Error(), nil)
-		return
+		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		r.finishFailed(session, err.Error(), nil)
-		return
+		return nil, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		r.finishFailed(session, err.Error(), nil)
-		return
+		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		r.finishFailed(session, err.Error(), nil)
-		return
+		return nil, err
 	}
-	run.mu.Lock()
-	run.stdin = stdin
-	run.mu.Unlock()
-	if err := writeClaudeUserInput(stdin, input, options.Attachments); err != nil {
-		r.finishFailed(session, err.Error(), nil)
-		_ = cmd.Process.Kill()
-		return
+
+	client := &claudeClient{
+		runtime:    r,
+		session:    session,
+		cwd:        cwd,
+		path:       path,
+		remote:     remote,
+		config:     config,
+		cmd:        cmd,
+		stdin:      stdin,
+		done:       make(chan struct{}),
+		toolStarts: map[string]AstralEvent{},
 	}
+	r.mu.Lock()
+	r.clients[session.ID] = client
+	r.mu.Unlock()
 
 	var stderrText strings.Builder
-	var completedMu sync.Mutex
-	completed := false
-	failTurn := func(message string, cause error) {
-		completedMu.Lock()
-		if completed {
-			completedMu.Unlock()
-			return
-		}
-		completed = true
-		completedMu.Unlock()
-		r.finishFailed(session, message, cause)
-	}
-	completeTurn := func() {
-		completedMu.Lock()
-		if completed {
-			completedMu.Unlock()
-			return
-		}
-		completed = true
-		completedMu.Unlock()
-		r.deps.store.updateSessionStatus(session.ID, "idle")
-		r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.completed", Normalized: map[string]any{"status": "idle"}})
-	}
-	var wg sync.WaitGroup
-	wg.Add(2)
+	stdoutDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		r.scanClaudeStream(ctx, session, stdout, run, completeTurn, failTurn)
+		defer close(stdoutDone)
+		client.scanClaudeStream(stdout)
 	}()
+	stderrDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
+		defer close(stderrDone)
 		_, _ = io.Copy(&stderrText, stderr)
 	}()
-	wg.Wait()
+	go func() {
+		<-stdoutDone
+		<-stderrDone
+		err := cmd.Wait()
+		client.processExited(err, strings.TrimSpace(stderrText.String()))
+	}()
+	return client, nil
+}
 
-	err = cmd.Wait()
-	run.mu.Lock()
-	run.stdin = nil
-	run.mu.Unlock()
-	if errors.Is(ctx.Err(), context.Canceled) {
-		return
+func claudeClientConfig(path, cwd string, options TurnOptions, remote claudeRemoteOptions) (string, error) {
+	allowedTools := append([]string{}, options.AllowedTools...)
+	if remote.RemoteCWD != "" {
+		allowedTools = append(allowedTools, claudeRemoteMCPAllowedTools()...)
 	}
+	permissionMode := strings.TrimSpace(options.PermissionMode)
+	if permissionMode == "default" {
+		permissionMode = ""
+	}
+	value := map[string]any{
+		"path":             path,
+		"cwd":              filepath.Clean(cwd),
+		"model":            strings.TrimSpace(options.Model),
+		"effort":           strings.TrimSpace(options.ReasoningEffort),
+		"permission_mode":  permissionMode,
+		"allowed_tools":    allowedTools,
+		"attachment_dirs":  attachmentAllowedDirs(options.Attachments),
+		"mcp_config":       remote.MCPConfigPath,
+		"remote_cwd":       remote.RemoteCWD,
+		"append_prompt":    remote.AppendPrompt,
+		"setting_sources":  remote.SettingSources,
+		"disallowed_tools": claudeRemoteNativeDisallowedTools(),
+	}
+	data, err := json.Marshal(value)
 	if err != nil {
-		failTurn(strings.TrimSpace(stderrText.String()), err)
+		return "", err
+	}
+	return string(data), nil
+}
+
+func (c *claudeClient) stateForReuse(config string) (bool, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.active, !c.stopping && c.config == config
+}
+
+func (c *claudeClient) isActive() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.active && !c.finishedTurn
+}
+
+func (c *claudeClient) cancelIdleTimer() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.idleTimer != nil {
+		c.idleTimer.Stop()
+		c.idleTimer = nil
+	}
+}
+
+func (c *claudeClient) startTurn(session Session, input string, options TurnOptions) error {
+	c.runtime.ensureDeps()
+	c.mu.Lock()
+	if c.stopping {
+		c.mu.Unlock()
+		return ErrSessionIdle
+	}
+	if c.active && !c.finishedTurn {
+		c.mu.Unlock()
+		return ErrSessionRunning
+	}
+	if c.idleTimer != nil {
+		c.idleTimer.Stop()
+		c.idleTimer = nil
+	}
+	c.session = session
+	c.active = true
+	c.activeDone = make(chan struct{})
+	c.pendingInteraction = false
+	c.pausedForApproval = false
+	c.skipQueueAfterTurn = false
+	c.cancelRequested = false
+	c.cancelReason = ""
+	c.cancelHidden = false
+	c.interruptSucceeded = false
+	c.interruptRequestID = ""
+	c.finishedTurn = false
+	c.toolStarts = map[string]AstralEvent{}
+	c.mu.Unlock()
+
+	c.runtime.deps.updateSessionStatus(session.ID, "running")
+	if !options.Internal && !options.SuppressUserMessage {
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", displayInputNormalized(input, options))})
+	}
+	started := map[string]any{"status": "running"}
+	if options.Internal {
+		started["internal"] = true
+	}
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.started", Normalized: eventNormalized("turn.started", started)})
+
+	if err := c.writeUserInput(input, options.Attachments); err != nil {
+		c.finishFailed(err.Error(), nil)
+		c.forceKill()
+		return nil
+	}
+	return nil
+}
+
+func (c *claudeClient) writeUserInput(input string, attachments []InputAttachment) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.mu.Lock()
+	stdin := c.stdin
+	stopping := c.stopping
+	c.mu.Unlock()
+	if stdin == nil || stopping {
+		return fmt.Errorf("Claude stdin is not available")
+	}
+	return writeClaudeUserInput(stdin, input, attachments)
+}
+
+func (c *claudeClient) writeControlRequest(subtype, reason string) (string, error) {
+	requestID := "claude_control_" + randomID(12)
+	payload := map[string]any{
+		"type":       "control_request",
+		"request_id": requestID,
+		"request": map[string]any{
+			"subtype": subtype,
+		},
+	}
+	if strings.TrimSpace(reason) != "" {
+		mapValue(payload["request"])["reason"] = reason
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.mu.Lock()
+	stdin := c.stdin
+	stopping := c.stopping
+	c.mu.Unlock()
+	if stdin == nil || (stopping && subtype != "end_session") {
+		return "", fmt.Errorf("Claude stdin is not available")
+	}
+	if _, err := stdin.Write(append(data, '\n')); err != nil {
+		return "", err
+	}
+	return requestID, nil
+}
+
+func (c *claudeClient) requestInterrupt(session Session, reason string, hidden bool, skipQueue bool) error {
+	c.mu.Lock()
+	if c.stopping || c.stdin == nil {
+		c.mu.Unlock()
+		return ErrSessionIdle
+	}
+	c.cancelRequested = true
+	c.cancelReason = reason
+	c.cancelHidden = hidden
+	if skipQueue {
+		c.skipQueueAfterTurn = true
+	}
+	c.mu.Unlock()
+
+	requestID, err := c.writeControlRequest("interrupt", "")
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.interruptRequestID = requestID
+	c.mu.Unlock()
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: AgentClaude, Kind: "control.interrupt", Normalized: eventNormalized("control.interrupt", map[string]any{"status": "requested", "request_id": requestID})})
+	go c.cancelTimeout(requestID)
+	return nil
+}
+
+func (c *claudeClient) requestSteerInterrupt(session Session) (<-chan struct{}, error) {
+	c.mu.Lock()
+	done := c.activeDone
+	c.mu.Unlock()
+	if done == nil {
+		return nil, ErrSessionIdle
+	}
+	if err := c.requestInterrupt(session, "steer", true, true); err != nil {
+		return nil, err
+	}
+	return done, nil
+}
+
+func (c *claudeClient) pauseForApproval(session Session) {
+	c.mu.Lock()
+	if c.pausedForApproval || c.stopping {
+		c.mu.Unlock()
 		return
 	}
-	completeTurn()
+	c.pausedForApproval = true
+	c.pendingInteraction = true
+	c.cancelRequested = true
+	c.cancelReason = "requires_action"
+	c.skipQueueAfterTurn = true
+	c.mu.Unlock()
+	_, _ = c.writeControlRequest("interrupt", "")
+}
+
+func (c *claudeClient) repeatInterruptIfCancelling(session Session) {
+	c.mu.Lock()
+	cancelRequested := c.cancelRequested
+	paused := c.pausedForApproval
+	c.mu.Unlock()
+	if !cancelRequested || paused {
+		return
+	}
+	requestID, err := c.writeControlRequest("interrupt", "")
+	if err != nil {
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: AgentClaude, Kind: "control.warning", Normalized: eventNormalized("control.warning", map[string]any{
+			"message": err.Error(),
+			"reason":  "claude interrupt retry",
+		})})
+		return
+	}
+	c.mu.Lock()
+	c.interruptRequestID = requestID
+	c.mu.Unlock()
+}
+
+func (c *claudeClient) cancelTimeout(requestID string) {
+	time.Sleep(claudeInterruptTimeout)
+	c.mu.Lock()
+	stale := c.interruptRequestID != requestID
+	active := c.active && !c.finishedTurn
+	cancelRequested := c.cancelRequested
+	c.mu.Unlock()
+	if stale || !active || !cancelRequested {
+		return
+	}
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: AgentClaude, Kind: "control.warning", Normalized: eventNormalized("control.warning", map[string]any{
+		"message": "Claude interrupt timed out; terminating process",
+		"reason":  "interrupt timeout",
+	})})
+	c.finishCancelled()
+	c.forceKill()
+}
+
+func (c *claudeClient) stop(reason string, timeout time.Duration) error {
+	c.cancelIdleTimer()
+	c.mu.Lock()
+	wasActive := c.active && !c.finishedTurn
+	c.stopping = true
+	c.skipQueueAfterTurn = true
+	c.mu.Unlock()
+	if wasActive {
+		c.finishCancelledWithReason(reason, false)
+	}
+	requestID, err := c.writeControlRequest("end_session", reason)
+	if err != nil {
+		c.forceKill()
+		return err
+	}
+	c.mu.Lock()
+	c.endSessionID = requestID
+	c.mu.Unlock()
+	select {
+	case <-c.done:
+		return nil
+	case <-time.After(timeout):
+		c.forceKill()
+		select {
+		case <-c.done:
+		case <-time.After(time.Second):
+		}
+		return fmt.Errorf("timed out ending Claude session")
+	}
+}
+
+func (c *claudeClient) forceKill() {
+	c.mu.Lock()
+	cmd := c.cmd
+	c.mu.Unlock()
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
+func (c *claudeClient) processExited(err error, stderrText string) {
+	c.mu.Lock()
+	stdin := c.stdin
+	active := c.active && !c.finishedTurn
+	stopping := c.stopping
+	c.stdin = nil
+	if c.idleTimer != nil {
+		c.idleTimer.Stop()
+		c.idleTimer = nil
+	}
+	c.mu.Unlock()
+	if stdin != nil {
+		_ = stdin.Close()
+	}
+	if active && !stopping {
+		if c.shouldFinishPendingOnExit() {
+			c.finishPendingInteraction()
+		} else if c.shouldFinishCancelledOnExit() {
+			c.finishCancelled()
+		} else {
+			if stderrText == "" && err != nil {
+				stderrText = err.Error()
+			}
+			c.finishFailed(stderrText, err)
+		}
+	}
+	c.runtime.mu.Lock()
+	if c.runtime.clients[c.session.ID] == c {
+		delete(c.runtime.clients, c.session.ID)
+	}
+	c.runtime.mu.Unlock()
+	close(c.done)
+}
+
+func (c *claudeClient) shouldFinishPendingOnExit() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pausedForApproval
+}
+
+func (c *claudeClient) shouldFinishCancelledOnExit() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cancelRequested
+}
+
+func (c *claudeClient) markControlResponse(line []byte) {
+	requestID, subtype, ok := claudeControlResponse(line)
+	if !ok || subtype != "success" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if requestID == c.interruptRequestID {
+		c.interruptSucceeded = true
+	}
+}
+
+func (c *claudeClient) finishCompleted() {
+	c.mu.Lock()
+	pendingInteraction := c.pendingInteraction
+	c.mu.Unlock()
+	if pendingInteraction {
+		c.finishCompletedRequiresAction()
+		return
+	}
+	c.finishTurn("completed", "", nil)
+}
+
+func (c *claudeClient) finishCompletedRequiresAction() {
+	if _, finished := c.finishTurnState(); !finished {
+		return
+	}
+	c.runtime.deps.updateSessionStatus(c.session.ID, "idle")
+	c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"status": "idle"})})
+	c.runtime.deps.updateSessionStatus(c.session.ID, "requires_action")
+	c.scheduleIdleStop()
+}
+
+func (c *claudeClient) finishFailed(message string, cause error) {
+	c.finishTurn("failed", message, cause)
+}
+
+func (c *claudeClient) finishCancelled() {
+	c.finishCancelledWithReason("", false)
+}
+
+func (c *claudeClient) finishCancelledWithReason(reason string, hidden bool) {
+	c.mu.Lock()
+	if reason == "" {
+		reason = c.cancelReason
+	}
+	if !hidden {
+		hidden = c.cancelHidden
+	}
+	c.mu.Unlock()
+	c.finishTurn("cancelled", reason, nil, hidden)
+}
+
+func (c *claudeClient) finishPendingInteraction() {
+	if _, finished := c.finishTurnState(); !finished {
+		return
+	}
+	c.runtime.deps.updateSessionStatus(c.session.ID, "requires_action")
+	c.scheduleIdleStop()
+}
+
+func (c *claudeClient) finishTurn(kind string, message string, cause error, flags ...bool) {
+	hidden := len(flags) > 0 && flags[0]
+	startQueued, finished := c.finishTurnState()
+	if !finished {
+		return
+	}
+	switch kind {
+	case "completed":
+		c.runtime.deps.updateSessionStatus(c.session.ID, "idle")
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "turn.completed", Normalized: eventNormalized("turn.completed", map[string]any{"status": "idle"})})
+	case "cancelled":
+		c.runtime.deps.updateSessionStatus(c.session.ID, "idle")
+		normalized := map[string]any{"status": "idle"}
+		if message != "" {
+			normalized["reason"] = message
+		}
+		if hidden {
+			normalized["hidden"] = true
+		}
+		c.runtime.deps.emit(AstralEvent{WorkspaceID: c.session.WorkspaceID, SessionID: c.session.ID, Agent: c.session.Agent, Kind: "turn.cancelled", Normalized: eventNormalized("turn.cancelled", normalized)})
+	case "failed":
+		c.runtime.finishFailed(c.session, message, cause)
+	}
+	if startQueued {
+		go c.runtime.deps.startNextQueuedTurn(c.session.ID)
+	}
+	c.scheduleIdleStop()
+}
+
+func (c *claudeClient) finishTurnState() (bool, bool) {
+	c.mu.Lock()
+	if !c.active || c.finishedTurn {
+		c.mu.Unlock()
+		return false, false
+	}
+	startQueued := !c.skipQueueAfterTurn && !c.pendingInteraction
+	c.active = false
+	c.finishedTurn = true
+	done := c.activeDone
+	c.activeDone = nil
+	c.pendingInteraction = false
+	c.pausedForApproval = false
+	c.skipQueueAfterTurn = false
+	c.cancelRequested = false
+	c.cancelReason = ""
+	c.cancelHidden = false
+	c.interruptSucceeded = false
+	c.interruptRequestID = ""
+	c.toolStarts = map[string]AstralEvent{}
+	c.mu.Unlock()
+	if done != nil {
+		close(done)
+	}
+	return startQueued, true
+}
+
+func (c *claudeClient) scheduleIdleStop() {
+	c.mu.Lock()
+	if c.stopping || c.active || c.stdin == nil {
+		c.mu.Unlock()
+		return
+	}
+	if c.idleTimer != nil {
+		c.idleTimer.Stop()
+	}
+	sessionID := c.session.ID
+	c.idleTimer = time.AfterFunc(claudeIdleTimeout, func() {
+		c.runtime.stopIdleClient(sessionID)
+	})
+	c.mu.Unlock()
+}
+
+func (r *claudeLocalRuntime) stopIdleClient(sessionID string) {
+	r.mu.Lock()
+	client := r.clients[sessionID]
+	if client == nil {
+		r.mu.Unlock()
+		return
+	}
+	r.mu.Unlock()
+	if client.isActive() {
+		return
+	}
+	r.mu.Lock()
+	if r.clients[sessionID] != client {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.clients, sessionID)
+	r.mu.Unlock()
+	_ = client.stop("idle timeout", claudeEndSessionTimeout)
 }
 
 func (r *claudeLocalRuntime) claudeArgs(session Session, options TurnOptions, remote claudeRemoteOptions) ([]string, error) {
@@ -336,7 +796,7 @@ func (r *claudeLocalRuntime) claudeArgs(session Session, options TurnOptions, re
 		"--include-partial-messages",
 		"--include-hook-events",
 	}
-	if r.deps.store.hasEventKind(session.ID, "session.native") {
+	if r.deps.store.shouldResumeClaudeSession(session) {
 		args = append(args, "--resume", session.NativeSessionID)
 	} else if session.ForkedFromSessionID != "" {
 		source, ok := r.deps.store.getSession(session.ForkedFromSessionID)
@@ -452,65 +912,101 @@ func appendClaudeSettingsEnv(env []string) []string {
 	return env
 }
 
-func (r *claudeLocalRuntime) scanClaudeStream(ctx context.Context, session Session, reader io.Reader, run *claudeRun, completeTurn func(), failTurn func(string, error)) {
+func (c *claudeClient) scanClaudeStream(reader io.Reader) {
+	r := c.runtime
 	r.ensureDeps()
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	toolStarts := map[string]AstralEvent{}
-	pendingInteraction := false
+	session := c.currentSession()
 	visibleText := r.claudeRemoteVisibleTextStream(session)
 	for scanner.Scan() {
+		session = c.currentSession()
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
+		lineBytes := []byte(line)
+		c.markControlResponse(lineBytes)
 		resultLine := claudeLineType([]byte(line)) == "result"
-		resultError := claudeResultErrorMessage([]byte(line))
-		for _, ev := range normalizeClaudeStreamJSON(session, []byte(line)) {
+		resultError := claudeResultErrorMessage(lineBytes)
+		if c.suppressUntilResult() && !resultLine {
+			continue
+		}
+		for _, ev := range normalizeClaudeStreamJSON(session, lineBytes) {
 			ev = r.remapProjectionEventPaths(ev)
 			for _, visibleEvent := range r.prepareClaudeVisibleEvent(session, ev, visibleText) {
+				if visibleEvent.Kind == "approval.requested" || visibleEvent.Kind == "ask.requested" {
+					c.markPendingInteraction()
+					r.deps.updateSessionStatus(session.ID, "requires_action")
+				}
 				r.deps.emit(visibleEvent)
 				if visibleEvent.Kind == "approval.requested" || visibleEvent.Kind == "ask.requested" {
-					pendingInteraction = true
-					r.deps.store.updateSessionStatus(session.ID, "requires_action")
 					if visibleEvent.Kind == "ask.requested" && isClaudeAskUserQuestionEvent(visibleEvent) {
-						run.pauseForApproval()
-						return
+						c.pauseForApproval(session)
 					}
 				}
 				if visibleEvent.Kind == "tool.started" {
 					if id := stringValue(mapValue(visibleEvent.Normalized)["id"]); id != "" {
 						toolStarts[id] = visibleEvent
 					}
+					c.repeatInterruptIfCancelling(session)
 				}
 				if approval, ok := claudeApprovalFromToolResult(session, visibleEvent, toolStarts); ok {
-					r.deps.emit(r.remapProjectionEventPaths(approval))
-					r.deps.store.updateSessionStatus(session.ID, "requires_action")
-					run.pauseForApproval()
-					return
+					approval = r.remapProjectionEventPaths(approval)
+					r.deps.updateSessionStatus(session.ID, "requires_action")
+					r.deps.emit(approval)
+					c.markPendingInteraction()
+					c.pauseForApproval(session)
 				}
 			}
 		}
 		if resultLine {
-			if resultError != "" {
-				failTurn(resultError, nil)
-				return
-			}
-			completeTurn()
-			if pendingInteraction {
-				r.deps.store.updateSessionStatus(session.ID, "requires_action")
-			}
-			run.mu.Lock()
-			if run.stdin != nil {
-				_ = run.stdin.Close()
-				run.stdin = nil
-			}
-			run.mu.Unlock()
+			c.handleResult(resultError)
+			toolStarts = map[string]AstralEvent{}
 		}
 	}
-	if err := scanner.Err(); err != nil && ctx.Err() == nil {
-		failTurn(err.Error(), nil)
+	if err := scanner.Err(); err != nil {
+		c.finishFailed(err.Error(), nil)
 	}
+}
+
+func (c *claudeClient) currentSession() Session {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.session
+}
+
+func (c *claudeClient) suppressUntilResult() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pausedForApproval
+}
+
+func (c *claudeClient) markPendingInteraction() {
+	c.mu.Lock()
+	c.pendingInteraction = true
+	c.mu.Unlock()
+}
+
+func (c *claudeClient) handleResult(resultError string) {
+	c.mu.Lock()
+	pausedForApproval := c.pausedForApproval
+	cancelRequested := c.cancelRequested
+	c.mu.Unlock()
+	if pausedForApproval {
+		c.finishPendingInteraction()
+		return
+	}
+	if cancelRequested {
+		c.finishCancelled()
+		return
+	}
+	if resultError != "" {
+		c.finishFailed(resultError, nil)
+		return
+	}
+	c.finishCompleted()
 }
 
 func (r *claudeLocalRuntime) claudeRemoteVisibleTextStream(session Session) *claudeVisibleTextStream {
@@ -542,7 +1038,7 @@ func (r *claudeLocalRuntime) prepareClaudeVisibleEvent(session Session, ev Astra
 		}
 		next := copyStringAny(value)
 		next["text"] = out
-		ev.Normalized = next
+		ev.Normalized = eventNormalized(ev.Kind, next)
 		return []AstralEvent{ev}
 	}
 	if out := stream.Flush(); out != "" {
@@ -643,13 +1139,30 @@ func claudeLineType(line []byte) string {
 	return stringValue(raw["type"])
 }
 
+func claudeControlResponse(line []byte) (string, string, bool) {
+	var raw map[string]any
+	if json.Unmarshal(line, &raw) != nil {
+		return "", "", false
+	}
+	if stringValue(raw["type"]) != "control_response" {
+		return "", "", false
+	}
+	response := mapValue(raw["response"])
+	requestID := stringValue(response["request_id"])
+	subtype := stringValue(response["subtype"])
+	if requestID == "" {
+		return "", "", false
+	}
+	return requestID, subtype, true
+}
+
 func (r *claudeLocalRuntime) remapProjectionEventPaths(ev AstralEvent) AstralEvent {
 	r.ensureDeps()
 	ws, ok := r.deps.store.getWorkspace(ev.WorkspaceID)
 	if !ok || ws.Target != "ssh" || ws.SSH == nil {
 		return ev
 	}
-	ev.Normalized = remapProjectionValue(ev.Normalized, filepath.Clean(ws.LocalProjectionRoot), remotePathClean(ws.SSH.RemoteCWD))
+	ev.Normalized = eventNormalized(ev.Kind, remapProjectionValue(ev.Normalized, filepath.Clean(ws.LocalProjectionRoot), remotePathClean(ws.SSH.RemoteCWD)))
 	return ev
 }
 
@@ -693,9 +1206,9 @@ func (r *claudeLocalRuntime) finishFailed(session Session, message string, cause
 	if message == "" {
 		message = "claude turn failed"
 	}
-	r.deps.store.updateSessionStatus(session.ID, "failed")
-	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.failed", Normalized: map[string]any{
+	r.deps.updateSessionStatus(session.ID, "failed")
+	r.deps.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "turn.failed", Normalized: eventNormalized("turn.failed", map[string]any{
 		"status":  "failed",
 		"message": message,
-	}})
+	})})
 }

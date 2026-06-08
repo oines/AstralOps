@@ -20,7 +20,7 @@ func (a *app) handleForkSession(w http.ResponseWriter, sessionID string, r *http
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	response, err := a.sessions().forkSession(sessionID, req)
+	response, err := a.forkSession(sessionID, req)
 	if err != nil {
 		writeActionError(w, err)
 		return

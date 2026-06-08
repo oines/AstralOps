@@ -43,11 +43,12 @@ type mediaService struct {
 }
 
 func (a *app) mediaService() *mediaService {
-	return &mediaService{service: internalmedia.New(mediaStoreAdapter{store: a.store})}
+	return &mediaService{service: internalmedia.New(mediaStoreAdapter{store: a.store, queryEvents: a.sessionProjections().QueryEvents})}
 }
 
 type mediaStoreAdapter struct {
-	store *store
+	store       *store
+	queryEvents func(workspaceID, sessionID string, afterSeq int64) []AstralEvent
 }
 
 func (s mediaStoreAdapter) DataDir() string {
@@ -65,10 +66,10 @@ func (s mediaStoreAdapter) GetSession(id string) (Session, bool) {
 }
 
 func (s mediaStoreAdapter) QueryEvents(workspaceID, sessionID string, afterSeq int64) []AstralEvent {
-	if s.store == nil {
-		return nil
+	if s.queryEvents != nil {
+		return s.queryEvents(workspaceID, sessionID, afterSeq)
 	}
-	return s.store.queryEvents(workspaceID, sessionID, afterSeq)
+	return nil
 }
 
 type mediaControlStream struct {

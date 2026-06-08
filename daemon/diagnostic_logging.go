@@ -171,7 +171,7 @@ func logControlActionFailed(req ControlRequest, startedAt time.Time, err error) 
 	status := 0
 	var actionErr *actionError
 	if errors.As(err, &actionErr) && actionErr != nil {
-		code = actionErr.Code
+		code = string(actionErr.Code)
 		status = actionErr.Status
 	}
 	log.Printf("control action failed action=%q capability=%q controller_device_id=%q request_id=%q duration_ms=%d status=%d code=%q error=%q", req.Action, req.Capability, req.ControllerDeviceID, req.RequestID, time.Since(startedAt).Milliseconds(), status, code, err)
@@ -244,7 +244,7 @@ func safeHTTPQueryJSON(r *http.Request) string {
 }
 
 func logDiagnosticEvent(event AstralEvent) {
-	if !daemonDiagnosticLoggingEnabled() || !diagnosticEventVisible(event.Kind) {
+	if !daemonDiagnosticLoggingEnabled() || !diagnosticEventVisible(string(event.Kind)) {
 		return
 	}
 	log.Printf("event emitted seq=%d kind=%q workspace_id=%q session_id=%q summary=%s", event.Seq, event.Kind, event.WorkspaceID, event.SessionID, diagnosticEventSummaryJSON(event))
@@ -295,36 +295,7 @@ func diagnosticEventSummaryJSON(event AstralEvent) string {
 }
 
 func diagnosticEventNormalizedMap(event AstralEvent) map[string]any {
-	if value := mapValue(event.Normalized); len(value) > 0 {
-		return value
-	}
-	switch normalized := event.Normalized.(type) {
-	case WorkspaceConnection:
-		body, err := json.Marshal(normalized)
-		if err != nil {
-			return map[string]any{}
-		}
-		var value map[string]any
-		if err := json.Unmarshal(body, &value); err != nil {
-			return map[string]any{}
-		}
-		return value
-	case *WorkspaceConnection:
-		if normalized == nil {
-			return map[string]any{}
-		}
-		body, err := json.Marshal(normalized)
-		if err != nil {
-			return map[string]any{}
-		}
-		var value map[string]any
-		if err := json.Unmarshal(body, &value); err != nil {
-			return map[string]any{}
-		}
-		return value
-	default:
-		return map[string]any{}
-	}
+	return mapValue(event.Normalized)
 }
 
 func logSSHProxyCallStart(workspace Workspace, method string, params any) time.Time {
@@ -478,18 +449,22 @@ func safeSSHProxyParamsJSON(method string, params any) string {
 	return string(body)
 }
 
-func safeControlParamsJSON(action string, params map[string]any) string {
+func safeControlParamsJSON(action ControlAction, params json.RawMessage) string {
 	if len(params) == 0 {
 		return "{}"
 	}
-	body, err := json.Marshal(safeControlParams(action, params))
+	var value map[string]any
+	if err := json.Unmarshal(params, &value); err != nil {
+		return "{}"
+	}
+	body, err := json.Marshal(safeControlParams(action, value))
 	if err != nil {
 		return "{}"
 	}
 	return string(body)
 }
 
-func safeControlParams(action string, params map[string]any) map[string]any {
+func safeControlParams(action ControlAction, params map[string]any) map[string]any {
 	out := map[string]any{}
 	copyStringParam(out, params, "workspace_id")
 	copyStringParam(out, params, "session_id")

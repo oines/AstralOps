@@ -51,9 +51,11 @@ func (a *cloudmeshService) applyCloudSettingsWithOffline(settings CloudSettings,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	if a.cloudCancel != nil {
-		*a.cloudCancel = cancel
+	if a.cloudCancel == nil {
+		cancel()
+		return newActionError(http.StatusServiceUnavailable, "cloud_runtime_unavailable", "cloud sync cancel handle is not initialized")
 	}
+	*a.cloudCancel = cancel
 	go a.cloudSyncLoop(ctx, settings, markOfflineOnStop)
 	return nil
 }

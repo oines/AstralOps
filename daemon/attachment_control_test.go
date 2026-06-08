@@ -22,12 +22,12 @@ func TestControlGatewayIngestsAttachmentWithoutHostPath(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityAttachmentIngest,
 		Action:             ControlActionAttachmentIngest,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id":     session.ID,
 			"name":           "clip.png",
 			"mime_type":      "image/png",
 			"content_base64": base64.StdEncoding.EncodeToString(secret),
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -54,12 +54,12 @@ func TestControlGatewayIngestsAttachmentWithoutHostPath(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionSessionInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"attachments": []map[string]any{{
 				"id": result.Attachment.ID,
 			}},
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -88,11 +88,11 @@ func TestControlGatewayAttachmentIngestRejectsOversizedMetadata(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityAttachmentIngest,
 		Action:             ControlActionAttachmentIngest,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id":     session.ID,
 			"name":           strings.Repeat("n", controlAttachmentNameMaxBytes+1),
 			"content_base64": base64.StdEncoding.EncodeToString([]byte("note")),
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusRequestEntityTooLarge, "attachment_metadata_too_large")
 }
@@ -107,11 +107,11 @@ func TestControlGatewayRejectsCrossSessionAttachmentHandle(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityAttachmentIngest,
 		Action:             ControlActionAttachmentIngest,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id":     session.ID,
 			"name":           "session-scoped.txt",
 			"content_base64": base64.StdEncoding.EncodeToString([]byte("session-scoped-secret")),
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -125,12 +125,12 @@ func TestControlGatewayRejectsCrossSessionAttachmentHandle(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionSessionInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": otherSession.ID,
 			"attachments": []map[string]any{{
 				"id": result.Attachment.ID,
 			}},
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusNotFound, "attachment_not_found")
 	if len(runtime.inputs) != 0 {
@@ -152,13 +152,13 @@ func TestControlGatewayChunkedAttachmentIngest(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityAttachmentIngest,
 		Action:             ControlActionAttachmentIngestStart,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"name":       "upload.txt",
 			"mime_type":  "text/plain",
 			"size":       len(secret),
 			"sha256":     bytesToHex(sum[:]),
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -178,13 +178,13 @@ func TestControlGatewayChunkedAttachmentIngest(t *testing.T) {
 			ControllerDeviceID: "device_mobile",
 			Capability:         CapabilityAttachmentIngest,
 			Action:             ControlActionAttachmentIngestChunk,
-			Params: map[string]any{
+			Params: controlParams(map[string]any{
 				"session_id":  session.ID,
 				"upload_id":   startResult.UploadID,
 				"seq":         index + 1,
 				"offset":      offset,
 				"data_base64": base64.StdEncoding.EncodeToString(chunk),
-			},
+			}),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -203,10 +203,10 @@ func TestControlGatewayChunkedAttachmentIngest(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityAttachmentIngest,
 		Action:             ControlActionAttachmentIngestFinish,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"upload_id":  startResult.UploadID,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -223,12 +223,12 @@ func TestControlGatewayChunkedAttachmentIngest(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionSessionInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"attachments": []map[string]any{{
 				"id": finishResult.Attachment.ID,
 			}},
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -254,11 +254,11 @@ func TestControlGatewayChunkedAttachmentRejectsOversizedMetadata(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityAttachmentIngest,
 		Action:             ControlActionAttachmentIngestStart,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"name":       "upload.txt",
 			"mime_type":  strings.Repeat("m", controlAttachmentMIMETypeMaxBytes+1),
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusRequestEntityTooLarge, "attachment_metadata_too_large")
 }
@@ -271,10 +271,10 @@ func TestControlGatewayChunkedAttachmentRejectsBadOffset(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityAttachmentIngest,
 		Action:             ControlActionAttachmentIngestStart,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"name":       "upload.txt",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -284,13 +284,13 @@ func TestControlGatewayChunkedAttachmentRejectsBadOffset(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityAttachmentIngest,
 		Action:             ControlActionAttachmentIngestChunk,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id":  session.ID,
 			"upload_id":   uploadID,
 			"seq":         1,
 			"offset":      5,
 			"data_base64": base64.StdEncoding.EncodeToString([]byte("chunk")),
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "attachment_chunk_offset_invalid")
 }
@@ -303,10 +303,10 @@ func TestControlGatewayChunkedAttachmentExpiresStaleUpload(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityAttachmentIngest,
 		Action:             ControlActionAttachmentIngestStart,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"name":       "stale-upload.txt",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -317,13 +317,13 @@ func TestControlGatewayChunkedAttachmentExpiresStaleUpload(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityAttachmentIngest,
 		Action:             ControlActionAttachmentIngestChunk,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id":  session.ID,
 			"upload_id":   uploadID,
 			"seq":         1,
 			"offset":      0,
 			"data_base64": base64.StdEncoding.EncodeToString([]byte("partial")),
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -344,10 +344,10 @@ func TestControlGatewayChunkedAttachmentExpiresStaleUpload(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityAttachmentIngest,
 		Action:             ControlActionAttachmentIngestFinish,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"upload_id":  uploadID,
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusGone, "attachment_upload_expired")
 	if _, err := os.Stat(app.controlAttachmentUploadMetadataPath(session.ID, uploadID)); !os.IsNotExist(err) {
@@ -367,13 +367,13 @@ func TestControlGatewayRejectsControllerAttachmentPaths(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityCoreControl,
 		Action:             ControlActionSessionInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"attachments": []map[string]any{{
 				"id":   "att_controller_path",
 				"path": "/controller/local/file.png",
 			}},
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "attachment_path_forbidden")
 	if len(runtime.inputs) != 0 {
@@ -393,11 +393,11 @@ func TestControlGatewayAttachmentIngestRequiresCapability(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityAttachmentIngest,
 		Action:             ControlActionAttachmentIngest,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id":     session.ID,
 			"name":           "note.txt",
 			"content_base64": base64.StdEncoding.EncodeToString([]byte("note")),
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }

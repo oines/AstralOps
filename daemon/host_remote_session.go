@@ -58,7 +58,7 @@ type hostRemoteSessionDeps struct {
 	coreSession      func(string) *controllercore.HostSession
 	controlState     func(string) controllercore.ControlState
 	hasActiveSession func(string) bool
-	request          func(context.Context, string, string, string, map[string]any) (ControlResponse, error)
+	request          func(context.Context, string, ControlCapability, ControlAction, map[string]any) (ControlResponse, error)
 	subscribeEvents  func(context.Context, string, eventSubscriptionParams) (remoteControlEventStream, error)
 	openTerminal     func(context.Context, string, string, int64) (remoteHostTerminalStream, error)
 	attachTerminal   func(context.Context, string, string, int64) (remoteHostTerminalStream, error)
@@ -82,6 +82,7 @@ type hostRemoteSession struct {
 	healthStarted             bool
 	lastSeenAt                time.Time
 	missedHeartbeatCount      int
+	pendingRequests           int
 	activeTransport           string
 	reconnectAttemptStartedAt time.Time
 }
@@ -191,7 +192,7 @@ func (m *hostRemoteSessionManager) session(hostDeviceID string) *hostRemoteSessi
 	return session
 }
 
-func (m *hostRemoteSessionManager) Request(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
+func (m *hostRemoteSessionManager) Request(ctx context.Context, hostDeviceID string, capability ControlCapability, action ControlAction, params map[string]any) (ControlResponse, error) {
 	session := m.session(hostDeviceID)
 	if session == nil {
 		return ControlResponse{}, newActionError(http.StatusBadRequest, "remote_host_required", "remote Host device id is required")
@@ -241,7 +242,7 @@ func (m *hostRemoteSessionManager) ApplyControlState(hostDeviceID string, state 
 		}
 		reason := firstString(state.LastErrorCode, state.State)
 		message := firstString(state.LastError, reason)
-		session.markConnectionUntrusted(reason, errors.New(message))
+		session.markTransportReconnecting(reason, errors.New(message))
 	}
 }
 
@@ -351,7 +352,7 @@ func (s *hostRemoteSession) shouldProbeHealth() bool {
 		return false
 	}
 	s.mu.Lock()
-	if !s.active {
+	if !s.active || s.pendingRequests > 0 {
 		s.mu.Unlock()
 		return false
 	}
@@ -435,6 +436,14 @@ func (s *hostRemoteSession) recordPingFailure(err error) {
 }
 
 func (s *hostRemoteSession) markConnectionUntrusted(reason string, err error) {
+	s.markConnectionInterrupted(reason, err, true)
+}
+
+func (s *hostRemoteSession) markTransportReconnecting(reason string, err error) {
+	s.markConnectionInterrupted(reason, err, false)
+}
+
+func (s *hostRemoteSession) markConnectionInterrupted(reason string, err error, invalidate bool) {
 	if s == nil {
 		return
 	}
@@ -458,7 +467,7 @@ func (s *hostRemoteSession) markConnectionUntrusted(reason string, err error) {
 	s.state.Terminals = cloneRemoteHostTerminalStates(s.terminals)
 	s.mu.Unlock()
 	s.setHostState(hostRemoteStateReconnecting, "", err)
-	if s.manager != nil && s.manager.deps.invalidate != nil {
+	if invalidate && s.manager != nil && s.manager.deps.invalidate != nil {
 		s.invalidateControlSession(reason)
 	}
 }
@@ -490,11 +499,13 @@ func (s *hostRemoteSession) pauseTerminalViewers(err error) {
 	}
 }
 
-func (s *hostRemoteSession) Request(ctx context.Context, capability, action string, params map[string]any) (ControlResponse, error) {
+func (s *hostRemoteSession) Request(ctx context.Context, capability ControlCapability, action ControlAction, params map[string]any) (ControlResponse, error) {
 	if s == nil || s.manager == nil || s.manager.deps.request == nil {
 		return ControlResponse{}, errors.New("remote control manager is not initialized")
 	}
 	s.activate()
+	done := s.beginRequest()
+	defer done()
 	s.setConnectingIfNotLive()
 	response, err := s.manager.deps.request(ctx, s.hostDeviceID, capability, action, params)
 	if err != nil {
@@ -510,19 +521,35 @@ func (s *hostRemoteSession) Request(ctx context.Context, capability, action stri
 	return response, nil
 }
 
+func (s *hostRemoteSession) beginRequest() func() {
+	if s == nil {
+		return func() {}
+	}
+	s.mu.Lock()
+	s.pendingRequests++
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		if s.pendingRequests > 0 {
+			s.pendingRequests--
+		}
+		s.mu.Unlock()
+	}
+}
+
 func (s *hostRemoteSession) Workbench(ctx context.Context) (workbenchState, error) {
 	s.activate()
-	response, err := s.Request(ctx, CapabilityCoreRead, ControlActionHostSnapshot, map[string]any{"event_limit": 1})
+	response, err := s.Request(ctx, CapabilityCoreRead, ControlActionWorkbench, nil)
 	if err != nil {
 		s.setWorkbenchState(hostWorkbenchStateFailed, err)
 		return workbenchState{}, err
 	}
 	if !response.OK {
-		err := controlResponseActionError(response, ControlActionHostSnapshot)
+		err := controlResponseActionError(response, ControlActionWorkbench)
 		s.setWorkbenchState(hostWorkbenchStateFailed, err)
 		return workbenchState{}, err
 	}
-	workbench, err := remoteWorkbenchFromSnapshotResult(response.Result)
+	workbench, err := remoteWorkbenchFromResult(response.Result)
 	if err != nil {
 		s.setWorkbenchState(hostWorkbenchStateFailed, err)
 		return workbenchState{}, err
@@ -625,7 +652,7 @@ func hostRemoteRequestFailureState(err error) string {
 	return hostRemoteStateReconnecting
 }
 
-func controlResponseActionError(response ControlResponse, action string) error {
+func controlResponseActionError(response ControlResponse, action ControlAction) error {
 	status := http.StatusBadGateway
 	message := "remote control request failed"
 	code := "remote_control_failed"
@@ -637,11 +664,11 @@ func controlResponseActionError(response ControlResponse, action string) error {
 			message = response.Error.Message
 		}
 		if response.Error.Code != "" {
-			code = response.Error.Code
+			code = string(response.Error.Code)
 		}
 	}
 	if action != "" && message == "remote control request failed" {
-		message = "remote control request failed: " + action
+		message = "remote control request failed: " + string(action)
 	}
 	return newActionError(status, code, message)
 }

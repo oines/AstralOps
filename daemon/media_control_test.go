@@ -20,11 +20,11 @@ func TestControlGatewayReadsMediaWithoutHostPath(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaRead,
 		Action:             ControlActionMediaRead,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"event_seq":  media.eventSeq,
 			"media_id":   media.mediaID,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -64,11 +64,11 @@ func TestControlGatewayMediaDownloadRequiresDownloadCapability(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaDownload,
 		Action:             ControlActionMediaDownload,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"event_seq":  media.eventSeq,
 			"media_id":   media.mediaID,
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }
@@ -82,11 +82,11 @@ func TestControlGatewayMediaDownloadMarksDownloadResponse(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaDownload,
 		Action:             ControlActionMediaDownload,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"event_seq":  media.eventSeq,
 			"media_id":   media.mediaID,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +117,7 @@ func TestControlGatewayMediaReadRequiresStreamForLargeMedia(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaRead,
 		Action:             ControlActionMediaRead,
-		Params:             params,
+		Params:             controlParams(params),
 	})
 	assertActionError(t, err, http.StatusRequestEntityTooLarge, "media_too_large")
 
@@ -125,7 +125,7 @@ func TestControlGatewayMediaReadRequiresStreamForLargeMedia(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaDownload,
 		Action:             ControlActionMediaDownload,
-		Params:             params,
+		Params:             controlParams(params),
 	})
 	assertActionError(t, err, http.StatusRequestEntityTooLarge, "media_too_large")
 
@@ -133,7 +133,7 @@ func TestControlGatewayMediaReadRequiresStreamForLargeMedia(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaStream,
 		Action:             ControlActionMediaStream,
-		Params:             params,
+		Params:             controlParams(params),
 	}, &controlWSConn{})
 	if err != nil {
 		t.Fatal(err)
@@ -154,11 +154,11 @@ func TestControlGatewayMediaReferenceRequiresMatchingSessionEventAndMediaID(t *t
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaRead,
 		Action:             ControlActionMediaRead,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"event_seq":  media.eventSeq,
 			"media_id":   media.mediaID,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +216,7 @@ func TestControlGatewayMediaReferenceRequiresMatchingSessionEventAndMediaID(t *t
 				ControllerDeviceID: "device_mobile",
 				Capability:         CapabilityMediaRead,
 				Action:             ControlActionMediaRead,
-				Params:             tc.params,
+				Params:             controlParams(tc.params),
 			})
 			assertActionError(t, err, http.StatusNotFound, tc.code)
 		})
@@ -232,11 +232,11 @@ func TestControlGatewayMediaStreamRequiresEncryptedConnection(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaStream,
 		Action:             ControlActionMediaStream,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"event_seq":  media.eventSeq,
 			"media_id":   media.mediaID,
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "control_connection_required")
 }
@@ -250,11 +250,11 @@ func TestControlGatewayMediaStreamRequiresCapability(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaStream,
 		Action:             ControlActionMediaStream,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"session_id": session.ID,
 			"event_seq":  media.eventSeq,
 			"media_id":   media.mediaID,
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }
@@ -267,9 +267,9 @@ func TestControlGatewayMediaStreamRejectsInvalidResumeToken(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaStream,
 		Action:             ControlActionMediaStream,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"resume_token": "invalid",
-		},
+		}),
 	}, &controlWSConn{})
 	assertActionError(t, err, http.StatusBadRequest, "media_stream_resume_token_invalid")
 }
@@ -283,10 +283,10 @@ func TestControlGatewayMediaStreamRejectsResumeTokenMismatch(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaStream,
 		Action:             ControlActionMediaStream,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"resume_token": mediaStreamResumeToken(session.ID, media.eventSeq, media.mediaID),
 			"media_id":     "other_media",
-		},
+		}),
 	}, &controlWSConn{})
 	assertActionError(t, err, http.StatusBadRequest, "media_stream_resume_token_mismatch")
 }
@@ -302,9 +302,9 @@ func TestControlGatewayMediaStreamCancelCancelsRegisteredStream(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaStream,
 		Action:             ControlActionMediaStreamCancel,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"stream_id": "media_stream_1",
-		},
+		}),
 	}, conn)
 	if err != nil {
 		t.Fatal(err)
@@ -331,9 +331,9 @@ func TestControlGatewayMediaStreamCancelRequiresConnection(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityMediaStream,
 		Action:             ControlActionMediaStreamCancel,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"stream_id": "media_stream_1",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "control_connection_required")
 }
@@ -357,16 +357,17 @@ func addControlMediaFixture(t *testing.T, app *app, workspace Workspace, session
 		SessionID:   session.ID,
 		Agent:       session.Agent,
 		Kind:        "message.user",
-		Normalized: map[string]any{"text": "", "attachments": []map[string]any{{
-			"id":        mediaID,
-			"media_id":  mediaID,
-			"kind":      "image",
-			"path":      path,
-			"name":      "clip.png",
-			"mime_type": "image/png",
-		}}},
+		Normalized: eventNormalized("message.user",
+			map[string]any{"text": "", "attachments": []map[string]any{{
+				"id":        mediaID,
+				"media_id":  mediaID,
+				"kind":      "image",
+				"path":      path,
+				"name":      "clip.png",
+				"mime_type": "image/png",
+			}}}),
 	})
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if len(events) == 0 {
 		t.Fatal("media fixture event was not persisted")
 	}
@@ -385,15 +386,16 @@ func addControlMessageMediaFixture(t *testing.T, app *app, workspace Workspace, 
 		SessionID:   session.ID,
 		Agent:       session.Agent,
 		Kind:        "message.media",
-		Normalized: map[string]any{
-			"media_id":  mediaID,
-			"kind":      "image",
-			"path":      path,
-			"name":      "generated.png",
-			"mime_type": "image/png",
-		},
+		Normalized: eventNormalized("message.media",
+			map[string]any{
+				"media_id":  mediaID,
+				"kind":      "image",
+				"path":      path,
+				"name":      "generated.png",
+				"mime_type": "image/png",
+			}),
 	})
-	events := app.store.queryEvents(workspace.ID, session.ID, 0)
+	events := testQueryEvents(app.store, workspace.ID, session.ID, 0)
 	if len(events) == 0 {
 		t.Fatal("message media fixture event was not persisted")
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/oines/astralops/pkg/controlwire"
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 const (
@@ -36,12 +37,13 @@ type ResolvedTarget struct {
 }
 
 type ManagedTransportConfig struct {
-	OpenFrameConn func(ctx context.Context, hostDeviceID string, preferRelay bool) (FrameConn, ResolvedTarget, error)
-	SelfDeviceID  func() string
-	DecodeEvent   func(json.RawMessage) (EventEnvelope, bool)
-	StateChanged  func(hostDeviceID string, state ControlState)
-	Activity      func(hostDeviceID string)
-	RefreshMesh   func(discover bool)
+	OpenFrameConn  func(ctx context.Context, hostDeviceID string, preferRelay bool) (FrameConn, ResolvedTarget, error)
+	SelfDeviceID   func() string
+	DecodeEvent    func(json.RawMessage) (EventEnvelope, bool)
+	StateChanged   func(hostDeviceID string, state ControlState)
+	Activity       func(hostDeviceID string)
+	RefreshMesh    func(discover bool)
+	ForceRelayOnly func() bool
 }
 
 type ManagedTransport struct {
@@ -142,13 +144,17 @@ func (m *ManagedTransport) ClearLANFailure(hostDeviceID string) {
 	m.clearLANFailure(hostDeviceID)
 }
 
-func (m *ManagedTransport) Request(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
+func (m *ManagedTransport) Request(ctx context.Context, hostDeviceID string, capability ControlCapability, action ControlAction, params map[string]any) (ControlResponse, error) {
+	rawParams, err := protocol.MarshalControlParams(params)
+	if err != nil {
+		return ControlResponse{}, err
+	}
 	req := func() ControlRequest {
 		return ControlRequest{
 			RequestID:  managedRequestPrefix + randomID(12),
 			Capability: capability,
 			Action:     action,
-			Params:     params,
+			Params:     rawParams,
 		}
 	}
 	response, err := m.requestOnce(ctx, hostDeviceID, req())
@@ -174,12 +180,12 @@ func (m *ManagedTransport) SubscribeEvents(ctx context.Context, hostDeviceID str
 		RequestID:  managedRequestPrefix + "events_" + randomID(12),
 		Capability: CapabilityCoreRead,
 		Action:     ActionEventsSubscribe,
-		Params: map[string]any{
+		Params: mustControlParams(map[string]any{
 			"workspace_id": params.WorkspaceID,
 			"session_id":   params.SessionID,
 			"after_seq":    params.AfterSeq,
 			"replay_limit": params.ReplayLimit,
-		},
+		}),
 	})
 	if err != nil {
 		return EventStream{}, fmt.Errorf("remote event subscription failed: %w", err)
@@ -236,7 +242,7 @@ func (m *ManagedTransport) SubscribeEvents(ctx context.Context, hostDeviceID str
 				RequestID:  managedRequestPrefix + "events_close_" + randomID(8),
 				Capability: CapabilityCoreRead,
 				Action:     ActionEventsUnsubscribe,
-				Params:     map[string]any{"stream_id": streamID},
+				Params:     mustControlParams(map[string]any{"stream_id": streamID}),
 			})
 		})
 	}
@@ -304,6 +310,30 @@ func (m *ManagedTransport) InvalidateAll(reason string) {
 	m.refreshMesh(true)
 }
 
+func (m *ManagedTransport) InvalidateLAN(reason string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	sessions := make([]*managedSession, 0, len(m.sessions))
+	for hostDeviceID, session := range m.sessions {
+		if session == nil || session.target.Transport != TransportLAN {
+			continue
+		}
+		delete(m.sessions, hostDeviceID)
+		sessions = append(sessions, session)
+	}
+	m.mu.Unlock()
+	if len(sessions) == 0 {
+		return
+	}
+	for _, session := range sessions {
+		session.closeWithError(fmt.Errorf("remote control session invalidated: %s", reason))
+		m.setControlState(session.hostDeviceID, StateReconnecting, session.target, fmt.Errorf("%s", reason))
+	}
+	m.refreshMesh(true)
+}
+
 func (m *ManagedTransport) requestOnce(ctx context.Context, hostDeviceID string, req ControlRequest) (ControlResponse, error) {
 	session, err := m.getSession(ctx, hostDeviceID)
 	if err != nil {
@@ -320,16 +350,27 @@ func (m *ManagedTransport) getSession(ctx context.Context, hostDeviceID string) 
 	if m == nil || m.config.OpenFrameConn == nil {
 		return nil, errors.New("controller transport opener is not initialized")
 	}
+	forceRelayOnly := m.forceRelayOnly()
 	m.mu.Lock()
 	if session := m.sessions[hostDeviceID]; session != nil && !session.isClosed() {
+		if forceRelayOnly && session.target.Transport != TransportRelay {
+			delete(m.sessions, hostDeviceID)
+			m.mu.Unlock()
+			session.closeWithError(errors.New("remote control session invalidated: force_relay_only"))
+			m.setControlState(hostDeviceID, StateReconnecting, ResolvedTarget{HostDeviceID: hostDeviceID, Transport: session.target.Transport}, errors.New("force_relay_only"))
+		} else {
+			m.mu.Unlock()
+			return session, nil
+		}
+	} else {
 		m.mu.Unlock()
-		return session, nil
 	}
+	m.mu.Lock()
 	delete(m.sessions, hostDeviceID)
 	m.mu.Unlock()
 
 	m.setControlState(hostDeviceID, StateConnecting, ResolvedTarget{}, nil)
-	preferRelay := m.lanSuppressed(hostDeviceID)
+	preferRelay := forceRelayOnly || m.lanSuppressed(hostDeviceID)
 	conn, target, err := m.config.OpenFrameConn(ctx, hostDeviceID, preferRelay)
 	if err != nil {
 		if !preferRelay {
@@ -375,7 +416,7 @@ func (m *ManagedTransport) attachTerminal(ctx context.Context, session *managedS
 		RequestID:  managedRequestPrefix + "pty_attach_" + randomID(12),
 		Capability: CapabilityTerminalOpen,
 		Action:     ActionTerminalAttach,
-		Params:     map[string]any{"terminal_id": terminalID, "after_seq": afterSeq},
+		Params:     mustControlParams(map[string]any{"terminal_id": terminalID, "after_seq": afterSeq}),
 	})
 	if err != nil {
 		unregister()
@@ -595,7 +636,7 @@ func (s *managedSession) remoteTerminalForWorkspace(ctx context.Context, workspa
 		RequestID:  managedRequestPrefix + "pty_open_" + randomID(12),
 		Capability: CapabilityTerminalOpen,
 		Action:     ActionTerminalOpen,
-		Params:     map[string]any{"workspace_id": workspaceID, "cols": 80, "rows": 24},
+		Params:     mustControlParams(map[string]any{"workspace_id": workspaceID, "cols": 80, "rows": 24}),
 	})
 	if err != nil {
 		return "", "", "", false, fmt.Errorf("remote terminal open failed: %w", err)
@@ -661,7 +702,7 @@ func (s *managedSession) remoteTerminalClose(terminalID string) error {
 		RequestID:  managedRequestPrefix + "pty_close_" + randomID(8),
 		Capability: CapabilityTerminalInput,
 		Action:     ActionTerminalClose,
-		Params:     map[string]any{"terminal_id": terminalID},
+		Params:     mustControlParams(map[string]any{"terminal_id": terminalID}),
 	})
 }
 
@@ -673,7 +714,7 @@ func (s *managedSession) remoteTerminalDetach(terminalID string) error {
 		RequestID:  managedRequestPrefix + "pty_detach_" + randomID(8),
 		Capability: CapabilityTerminalOpen,
 		Action:     ActionTerminalDetach,
-		Params:     map[string]any{"terminal_id": terminalID},
+		Params:     mustControlParams(map[string]any{"terminal_id": terminalID}),
 	})
 }
 
@@ -956,12 +997,13 @@ func (t *managedTerminalStream) Detach() error {
 	return t.session.remoteTerminalDetach(t.terminalID)
 }
 
-func requestCanRetry(capability, action string) bool {
+func requestCanRetry(capability ControlCapability, action ControlAction) bool {
 	if capability != CapabilityCoreRead && capability != CapabilityWorkspaceFilesRead && capability != CapabilityMediaRead {
 		return false
 	}
 	switch action {
 	case ActionHostSnapshot,
+		ActionWorkbench,
 		ActionSessionView,
 		ActionSessions,
 		ActionWorkspaces,
@@ -973,6 +1015,13 @@ func requestCanRetry(capability, action string) bool {
 	default:
 		return false
 	}
+}
+
+func (m *ManagedTransport) forceRelayOnly() bool {
+	if m == nil || m.config.ForceRelayOnly == nil {
+		return false
+	}
+	return m.config.ForceRelayOnly()
 }
 
 func requestRoundTripTimeout(transportTimeout time.Duration, req ControlRequest) time.Duration {
@@ -1095,6 +1144,14 @@ func maxDuration(left, right time.Duration) time.Duration {
 		return left
 	}
 	return right
+}
+
+func mustControlParams(params any) json.RawMessage {
+	raw, err := protocol.MarshalControlParams(params)
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }
 
 func randomID(n int) string {

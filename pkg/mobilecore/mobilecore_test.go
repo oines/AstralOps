@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/oines/astralops/pkg/cloudmesh"
 	"github.com/oines/astralops/pkg/controllercore"
 	"github.com/oines/astralops/pkg/deviceidentity"
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 func TestMobileCoreFacadeDelegatesRemoteActionsToGoController(t *testing.T) {
@@ -24,6 +27,15 @@ func TestMobileCoreFacadeDelegatesRemoteActionsToGoController(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := core.SendInput("dev_host", "session_1", mustJSON(t, map[string]any{"input": "hello"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.RespondInteraction("dev_host", "approval_1", mustJSON(t, map[string]any{"decision": "accept"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.ControlRequest("dev_host", "workspace.files.read", "workspace.files.read", mustJSON(t, map[string]any{"workspace_id": "workspace_1", "path": "."})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.ListTerminals("dev_host"); err != nil {
 		t.Fatal(err)
 	}
 	body, err := core.OpenTerminal("dev_host", "workspace_1")
@@ -43,11 +55,29 @@ func TestMobileCoreFacadeDelegatesRemoteActionsToGoController(t *testing.T) {
 	if _, err := core.TerminalResize("dev_host", "term_1", 100, 40); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := core.TerminalHeartbeatAck("dev_host", "term_1", 3, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.DetachTerminal("dev_host", "term_1"); err != nil {
+		t.Fatal(err)
+	}
 	if transport.requestCount(controllercore.ActionHostSnapshot) != 1 {
 		t.Fatalf("snapshot requests = %d, want 1", transport.requestCount(controllercore.ActionHostSnapshot))
 	}
 	if transport.requestCount(controllercore.ActionSessionInput) != 1 {
 		t.Fatalf("session input requests = %d, want 1", transport.requestCount(controllercore.ActionSessionInput))
+	}
+	if transport.requestCount(controllercore.ActionInteractionRespond) != 1 {
+		t.Fatalf("interaction respond requests = %d, want 1", transport.requestCount(controllercore.ActionInteractionRespond))
+	}
+	if response := transport.requestForAction(controllercore.ActionInteractionRespond); requestParam(response, "interaction_id") != "approval_1" {
+		t.Fatalf("interaction params = %#v, want approval_1", response.Params)
+	}
+	if response := transport.requestForAction("workspace.files.read"); requestParam(response, "workspace_id") != "workspace_1" {
+		t.Fatalf("workspace files params = %#v, want workspace_1", response.Params)
+	}
+	if transport.requestCount("terminal.list") != 1 {
+		t.Fatalf("terminal list requests = %d, want 1", transport.requestCount("terminal.list"))
 	}
 	if transport.terminal.input != "pwd\n" {
 		t.Fatalf("terminal input = %q, want pwd", transport.terminal.input)
@@ -55,6 +85,190 @@ func TestMobileCoreFacadeDelegatesRemoteActionsToGoController(t *testing.T) {
 	if transport.terminal.cols != 100 || transport.terminal.rows != 40 {
 		t.Fatalf("terminal resize = %dx%d, want 100x40", transport.terminal.cols, transport.terminal.rows)
 	}
+	if transport.terminal.heartbeatSeq != 3 || transport.terminal.renderedSeq != 2 {
+		t.Fatalf("terminal heartbeat ack = %d/%d, want 3/2", transport.terminal.heartbeatSeq, transport.terminal.renderedSeq)
+	}
+	if !transport.terminal.detached {
+		t.Fatal("terminal was not detached")
+	}
+}
+
+func TestMobileCoreReplacingTerminalViewerDetachesPreviousStream(t *testing.T) {
+	first := newFakeMobileCoreTerminal("term_1")
+	second := newFakeMobileCoreTerminal("term_1")
+	transport := &fakeMobileCoreTransport{terminals: []*fakeMobileCoreTerminal{first, second}}
+	core := New()
+	core.controller = controllercore.New(transport)
+
+	if _, err := core.OpenTerminal("dev_host", "workspace_1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.AttachTerminal("dev_host", "term_1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if !first.detached {
+		t.Fatal("previous terminal viewer was not detached")
+	}
+	if second.detached {
+		t.Fatal("new terminal viewer was detached")
+	}
+	if _, err := core.TerminalInput("dev_host", "term_1", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if first.input != "" {
+		t.Fatalf("old terminal input = %q, want empty", first.input)
+	}
+	if second.input != "x" {
+		t.Fatalf("new terminal input = %q, want x", second.input)
+	}
+}
+
+func TestMobileCoreNetworkChangedDropsCachedTerminalViewerWhenLANUnavailable(t *testing.T) {
+	transport := &fakeMobileCoreTransport{terminal: newFakeMobileCoreTerminal("term_1")}
+	core := New()
+	core.controller = controllercore.New(transport)
+
+	if _, err := core.OpenTerminal("dev_host", "workspace_1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.TerminalInput("dev_host", "term_1", "before"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = core.NetworkChanged(`{"lan_available":false}`)
+	if _, err := core.TerminalInput("dev_host", "term_1", "after"); controllercore.ErrorCode(err) != controllercore.TerminalViewerNotReadyCode {
+		t.Fatalf("TerminalInput error = %v, want %s", err, controllercore.TerminalViewerNotReadyCode)
+	}
+	if transport.terminal.input != "before" {
+		t.Fatalf("terminal input = %q, want only pre-network-change input", transport.terminal.input)
+	}
+}
+
+func TestMobileCoreControlRequestRejectsUnsupportedAction(t *testing.T) {
+	core := New()
+	core.controller = controllercore.New(&fakeMobileCoreTransport{terminal: newFakeMobileCoreTerminal("term_1")})
+
+	if _, err := core.ControlRequest("dev_host", "core.read", "workspace.files.read", "{}"); controllercore.ErrorCode(err) != "capability_mismatch" {
+		t.Fatalf("capability mismatch error = %v, want capability_mismatch", err)
+	}
+	if _, err := core.ControlRequest("dev_host", "core.read", "core.control.unknown", "{}"); controllercore.ErrorCode(err) != "control_action_unknown" {
+		t.Fatalf("unknown action error = %v, want control_action_unknown", err)
+	}
+}
+
+func TestMobileCoreErrorCallbackPreservesTypedErrorEnvelope(t *testing.T) {
+	core := New()
+	callback := &recordingMobileCoreCallback{}
+	core.SetCallback(callback)
+
+	_, err := core.CloudSession()
+	if controllercore.ErrorCode(err) != "cloud_session_missing" {
+		t.Fatalf("CloudSession error = %v, want cloud_session_missing", err)
+	}
+	if controllercore.ErrorStatus(err) != http.StatusUnauthorized {
+		t.Fatalf("CloudSession status = %d, want %d", controllercore.ErrorStatus(err), http.StatusUnauthorized)
+	}
+	if len(callback.errors) != 1 {
+		t.Fatalf("callback errors = %d, want 1", len(callback.errors))
+	}
+	var payload struct {
+		Error protocol.ControlError `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(callback.errors[0]), &payload); err != nil {
+		t.Fatalf("callback payload is invalid JSON: %v", err)
+	}
+	if payload.Error.Status != http.StatusUnauthorized || payload.Error.Code != "cloud_session_missing" || payload.Error.Message == "" {
+		t.Fatalf("callback error = %#v, want typed status/code/message", payload.Error)
+	}
+}
+
+func TestMobileCoreOpenHostSessionPrewarmsControlConnection(t *testing.T) {
+	transport := &fakeMobileCoreTransport{}
+	core := New()
+	core.controller = controllercore.New(transport)
+
+	body, err := core.OpenHostSession("dev_host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state controllercore.HostSessionState
+	if err := json.Unmarshal([]byte(body), &state); err != nil {
+		t.Fatal(err)
+	}
+	if transport.requestCount(controllercore.ActionPing) != 1 {
+		t.Fatalf("ping requests = %d, want prewarm ping", transport.requestCount(controllercore.ActionPing))
+	}
+	if state.State != controllercore.StateLive {
+		t.Fatalf("state = %#v, want live after prewarm", state)
+	}
+}
+
+func TestMobileCoreSnapshotPassesOptionsToControlRequest(t *testing.T) {
+	transport := &fakeMobileCoreTransport{}
+	core := New()
+	core.controller = controllercore.New(transport)
+
+	if _, err := core.Snapshot("dev_host", mustJSON(t, map[string]any{"restore_on_launch": true, "event_limit": 1000})); err != nil {
+		t.Fatal(err)
+	}
+	request := transport.requestForAction(controllercore.ActionHostSnapshot)
+	if requestParam(request, "restore_on_launch") != true {
+		t.Fatalf("restore_on_launch param = %#v, want true", requestParam(request, "restore_on_launch"))
+	}
+	if requestParam(request, "event_limit") != float64(1000) {
+		t.Fatalf("event_limit param = %#v, want 1000", requestParam(request, "event_limit"))
+	}
+}
+
+func TestStartReturnsPersistentStoredIdentity(t *testing.T) {
+	core := New()
+	body, err := core.Start(mustJSON(t, map[string]any{"device_name": "iPhone"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Started        bool                          `json:"started"`
+		Identity       cloudmesh.DeviceIdentity      `json:"identity"`
+		StoredIdentity deviceidentity.StoredIdentity `json:"stored_identity"`
+	}
+	if err := json.Unmarshal([]byte(body), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Started || result.Identity.DeviceID == "" {
+		t.Fatalf("start result = %#v, want started identity", result)
+	}
+	if result.StoredIdentity.DeviceID != result.Identity.DeviceID || strings.TrimSpace(result.StoredIdentity.PrivateKey) == "" {
+		t.Fatalf("stored_identity = %#v, want persistent identity for %q", result.StoredIdentity, result.Identity.DeviceID)
+	}
+	if _, _, err := deviceidentity.ValidateStored(result.StoredIdentity, deviceidentity.MobileControllerCapabilities()); err != nil {
+		t.Fatalf("stored_identity invalid: %v", err)
+	}
+
+	body, err = core.Start(mustJSON(t, map[string]any{"stored_identity": result.StoredIdentity}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restarted struct {
+		Identity       cloudmesh.DeviceIdentity      `json:"identity"`
+		StoredIdentity deviceidentity.StoredIdentity `json:"stored_identity"`
+	}
+	if err := json.Unmarshal([]byte(body), &restarted); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Identity.DeviceID != result.Identity.DeviceID || restarted.StoredIdentity.PrivateKey != result.StoredIdentity.PrivateKey {
+		t.Fatalf("restarted = %#v, want same persistent identity", restarted)
+	}
+}
+
+type recordingMobileCoreCallback struct {
+	errors []string
+}
+
+func (r *recordingMobileCoreCallback) OnHostState(payload string)      {}
+func (r *recordingMobileCoreCallback) OnWorkbenchPatch(payload string) {}
+func (r *recordingMobileCoreCallback) OnEvents(payload string)         {}
+func (r *recordingMobileCoreCallback) OnTerminalFrame(payload string)  {}
+func (r *recordingMobileCoreCallback) OnError(payload string) {
+	r.errors = append(r.errors, payload)
 }
 
 func TestSetCloudSessionRefreshesMeshThroughGoCore(t *testing.T) {
@@ -119,19 +333,65 @@ func TestSetCloudSessionRefreshesMeshThroughGoCore(t *testing.T) {
 	}
 }
 
+func TestMobileRemoteHostsPreferLANCandidateOverRelayRecord(t *testing.T) {
+	host := cloudmesh.DeviceRecord{
+		AccountIDHash:        "acct_test",
+		DeviceID:             "dev_host",
+		DeviceName:           "Desktop",
+		DeviceKind:           deviceidentity.DeviceKindDesktop,
+		PublicKey:            "host-public-key",
+		PublicKeyFingerprint: "sha256:HOST",
+		CanHost:              true,
+		CanControl:           true,
+		Status:               cloudmesh.DeviceStatusOnline,
+		RelayURL:             "http://relay.test",
+		UpdatedAt:            "2026-01-01T00:00:00Z",
+	}
+	hosts := mobileRemoteHosts("dev_mobile", []cloudmesh.DeviceRecord{host}, []cloudmesh.PairingSignal{{
+		RequestID:          "pair_1",
+		HostDeviceID:       host.DeviceID,
+		ControllerDeviceID: "dev_mobile",
+		Status:             controllercore.PairingStatusApproved,
+		UpdatedAt:          "2026-01-01T00:00:00Z",
+	}}, "http://relay.test", "2026-01-01T00:00:01Z", map[string]controllercore.LanHostCandidate{
+		host.DeviceID: {
+			DeviceID:             host.DeviceID,
+			DeviceName:           host.DeviceName,
+			PublicKeyFingerprint: host.PublicKeyFingerprint,
+			Host:                 "192.168.0.40",
+			Port:                 controllercore.DefaultDiscoveryPort,
+			BaseURL:              "http://192.168.0.40:43900",
+		},
+	}, nil)
+	if len(hosts) != 1 {
+		t.Fatalf("hosts = %#v, want one host", hosts)
+	}
+	if hosts[0].Connection != controllercore.TransportLAN || hosts[0].LANBaseURL != "http://192.168.0.40:43900" {
+		t.Fatalf("host = %#v, want LAN connection with LAN base URL", hosts[0])
+	}
+	if hosts[0].Control.Transport != controllercore.TransportLAN {
+		t.Fatalf("control = %#v, want LAN transport", hosts[0].Control)
+	}
+}
+
 type fakeMobileCoreTransport struct {
-	mu       sync.Mutex
-	requests []controllercore.ControlRequest
-	terminal *fakeMobileCoreTerminal
+	mu        sync.Mutex
+	requests  []controllercore.ControlRequest
+	terminal  *fakeMobileCoreTerminal
+	terminals []*fakeMobileCoreTerminal
 }
 
 func (f *fakeMobileCoreTransport) ControlState(string) controllercore.ControlState {
 	return controllercore.ControlState{State: controllercore.StateLive, Transport: controllercore.TransportRelay}
 }
 
-func (f *fakeMobileCoreTransport) Request(_ context.Context, _ string, capability, action string, params map[string]any) (controllercore.ControlResponse, error) {
+func (f *fakeMobileCoreTransport) Request(_ context.Context, _ string, capability controllercore.ControlCapability, action controllercore.ControlAction, params map[string]any) (controllercore.ControlResponse, error) {
+	raw, err := protocol.MarshalControlParams(params)
+	if err != nil {
+		return controllercore.ControlResponse{}, err
+	}
 	f.mu.Lock()
-	f.requests = append(f.requests, controllercore.ControlRequest{Capability: capability, Action: action, Params: params})
+	f.requests = append(f.requests, controllercore.ControlRequest{Capability: capability, Action: action, Params: raw})
 	f.mu.Unlock()
 	return controllercore.ControlResponse{OK: true, Result: map[string]any{"ok": true}}, nil
 }
@@ -143,16 +403,27 @@ func (f *fakeMobileCoreTransport) SubscribeEvents(context.Context, string, contr
 }
 
 func (f *fakeMobileCoreTransport) OpenTerminal(context.Context, string, string, int64) (controllercore.TerminalStream, error) {
-	return f.terminal, nil
+	return f.nextTerminal(), nil
 }
 
 func (f *fakeMobileCoreTransport) AttachTerminal(context.Context, string, string, int64) (controllercore.TerminalStream, error) {
-	return f.terminal, nil
+	return f.nextTerminal(), nil
 }
 
 func (f *fakeMobileCoreTransport) Invalidate(string, string) {}
 
-func (f *fakeMobileCoreTransport) requestCount(action string) int {
+func (f *fakeMobileCoreTransport) nextTerminal() *fakeMobileCoreTerminal {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.terminals) > 0 {
+		terminal := f.terminals[0]
+		f.terminals = f.terminals[1:]
+		return terminal
+	}
+	return f.terminal
+}
+
+func (f *fakeMobileCoreTransport) requestCount(action controllercore.ControlAction) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	count := 0
@@ -164,22 +435,57 @@ func (f *fakeMobileCoreTransport) requestCount(action string) int {
 	return count
 }
 
-type fakeMobileCoreTerminal struct {
-	terminalID string
-	frames     chan controllercore.TerminalFrame
-	input      string
-	cols       int
-	rows       int
+func (f *fakeMobileCoreTransport) requestForAction(action controllercore.ControlAction) controllercore.ControlRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, request := range f.requests {
+		if request.Action == action {
+			return request
+		}
+	}
+	return controllercore.ControlRequest{}
 }
 
+func requestParam(request controllercore.ControlRequest, key string) any {
+	if len(request.Params) == 0 {
+		return nil
+	}
+	var params map[string]any
+	if err := json.Unmarshal(request.Params, &params); err != nil {
+		return nil
+	}
+	return params[key]
+}
+
+type fakeMobileCoreTerminal struct {
+	terminalID   string
+	viewerID     string
+	inputLeaseID string
+	frames       chan controllercore.TerminalFrame
+	input        string
+	cols         int
+	rows         int
+	heartbeatSeq int64
+	renderedSeq  int64
+	detached     bool
+}
+
+var fakeMobileCoreTerminalSeq int64
+
 func newFakeMobileCoreTerminal(terminalID string) *fakeMobileCoreTerminal {
-	return &fakeMobileCoreTerminal{terminalID: terminalID, frames: make(chan controllercore.TerminalFrame)}
+	suffix := strconv.FormatInt(atomic.AddInt64(&fakeMobileCoreTerminalSeq, 1), 10)
+	return &fakeMobileCoreTerminal{
+		terminalID:   terminalID,
+		viewerID:     "viewer_" + terminalID + "_" + suffix,
+		inputLeaseID: "lease_" + terminalID + "_" + suffix,
+		frames:       make(chan controllercore.TerminalFrame),
+	}
 }
 
 func (f *fakeMobileCoreTerminal) TerminalID() string { return f.terminalID }
-func (f *fakeMobileCoreTerminal) ViewerID() string   { return "viewer_1" }
+func (f *fakeMobileCoreTerminal) ViewerID() string   { return f.viewerID }
 func (f *fakeMobileCoreTerminal) InputLeaseID() string {
-	return "lease_1"
+	return f.inputLeaseID
 }
 func (f *fakeMobileCoreTerminal) Shell() string    { return "zsh" }
 func (f *fakeMobileCoreTerminal) CWD() string      { return "/" }
@@ -196,9 +502,16 @@ func (f *fakeMobileCoreTerminal) Resize(cols, rows int) error {
 	f.rows = rows
 	return nil
 }
-func (f *fakeMobileCoreTerminal) AckHeartbeat(int64, int64) error { return nil }
-func (f *fakeMobileCoreTerminal) Close() error                    { return nil }
-func (f *fakeMobileCoreTerminal) Detach() error                   { return nil }
+func (f *fakeMobileCoreTerminal) AckHeartbeat(seq, renderedSeq int64) error {
+	f.heartbeatSeq = seq
+	f.renderedSeq = renderedSeq
+	return nil
+}
+func (f *fakeMobileCoreTerminal) Close() error { return nil }
+func (f *fakeMobileCoreTerminal) Detach() error {
+	f.detached = true
+	return nil
+}
 
 func TestRequestPairingUsesCloudMeshClient(t *testing.T) {
 	stored := testMobileStoredIdentity(t)
@@ -325,6 +638,23 @@ func TestSetCloudSessionCanExchangeLoginCode(t *testing.T) {
 	if state.Cloud == nil || state.Cloud.AccountIDHash != "acct_test" {
 		t.Fatalf("state = %#v, want exchanged cloud state", state)
 	}
+	sessionBody, err := core.CloudSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sessionResult struct {
+		OK      bool `json:"ok"`
+		Session struct {
+			BaseURL      string `json:"base_url"`
+			AccountToken string `json:"account_token"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal([]byte(sessionBody), &sessionResult); err != nil {
+		t.Fatal(err)
+	}
+	if !sessionResult.OK || sessionResult.Session.BaseURL != server.URL || sessionResult.Session.AccountToken != "token_test" {
+		t.Fatalf("cloud session = %#v, want exchanged token for keychain persistence", sessionResult)
+	}
 }
 
 func TestLogoutRemovesCloudDeviceAndResetsMeshIdentity(t *testing.T) {
@@ -366,9 +696,10 @@ func TestLogoutRemovesCloudDeviceAndResetsMeshIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var result struct {
-		CloudRemoved bool                     `json:"cloud_removed"`
-		MeshReset    bool                     `json:"mesh_reset"`
-		Identity     cloudmesh.DeviceIdentity `json:"identity"`
+		CloudRemoved   bool                          `json:"cloud_removed"`
+		MeshReset      bool                          `json:"mesh_reset"`
+		Identity       cloudmesh.DeviceIdentity      `json:"identity"`
+		StoredIdentity deviceidentity.StoredIdentity `json:"stored_identity"`
 	}
 	if err := json.Unmarshal([]byte(body), &result); err != nil {
 		t.Fatal(err)
@@ -378,6 +709,12 @@ func TestLogoutRemovesCloudDeviceAndResetsMeshIdentity(t *testing.T) {
 	}
 	if result.Identity.DeviceID == "" || result.Identity.DeviceID == identity.DeviceID {
 		t.Fatalf("identity = %#v, want fresh mobile identity", result.Identity)
+	}
+	if result.StoredIdentity.DeviceID != result.Identity.DeviceID || strings.TrimSpace(result.StoredIdentity.PrivateKey) == "" {
+		t.Fatalf("stored_identity = %#v, want fresh persistent identity", result.StoredIdentity)
+	}
+	if _, _, err := deviceidentity.ValidateStored(result.StoredIdentity, deviceidentity.MobileControllerCapabilities()); err != nil {
+		t.Fatalf("stored_identity invalid: %v", err)
 	}
 	if _, err := core.RefreshMesh(); controllercore.ErrorCode(err) != "cloud_session_missing" {
 		t.Fatalf("RefreshMesh error = %v, want cloud_session_missing", err)

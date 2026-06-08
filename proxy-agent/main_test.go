@@ -556,11 +556,7 @@ func TestPTYKillTerminatesProcessGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(2500 * time.Millisecond)
-	if body, err := os.ReadFile(marker); err == nil {
-		t.Fatalf("pty background child survived kill and wrote marker: %q", body)
-	} else if !os.IsNotExist(err) {
-		t.Fatalf("checking marker failed: %v", err)
-	}
+	assertMarkerDidNotSurvive(t, marker, "pty background child")
 }
 
 func TestCleanupManagedProcessesTerminatesPTYAndExecProcessGroups(t *testing.T) {
@@ -631,11 +627,7 @@ func TestCleanupManagedProcessesTerminatesPTYAndExecProcessGroups(t *testing.T) 
 	cleanupManagedProcesses()
 	time.Sleep(2500 * time.Millisecond)
 	for _, marker := range []string{ptyMarker, execMarker} {
-		if body, err := os.ReadFile(marker); err == nil {
-			t.Fatalf("managed child survived cleanup and wrote %s: %q", marker, body)
-		} else if !os.IsNotExist(err) {
-			t.Fatalf("checking marker failed: %v", err)
-		}
+		assertMarkerDidNotSurvive(t, marker, "managed child")
 	}
 }
 
@@ -788,10 +780,20 @@ func TestStartExecKillTerminatesProcessGroup(t *testing.T) {
 	}
 
 	time.Sleep(2500 * time.Millisecond)
-	if body, err := os.ReadFile(marker); err == nil {
-		t.Fatalf("background child survived kill and wrote marker: %q", body)
-	} else if !os.IsNotExist(err) {
+	assertMarkerDidNotSurvive(t, marker, "background child")
+}
+
+func assertMarkerDidNotSurvive(t *testing.T, marker, label string) {
+	t.Helper()
+	body, err := os.ReadFile(marker)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
 		t.Fatalf("checking marker failed: %v", err)
+	}
+	if string(body) == "survived" {
+		t.Fatalf("%s survived and wrote %s: %q", label, marker, body)
 	}
 }
 

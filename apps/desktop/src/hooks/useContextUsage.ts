@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { AstralEvent } from "../types";
+import { normalizedRecord, type AstralEvent } from "../types";
 
 type ContextUsage = {
   totalTokens?: number;
@@ -40,21 +40,23 @@ function latestContextUsage(events: AstralEvent[]): ContextUsage | undefined {
     const event = events[index];
     if (event.kind === "memory.compacted") return undefined;
     if (event.kind !== "control.context") continue;
-    const value = event.normalized as Record<string, unknown>;
+    const value = normalizedRecord(event);
     const eventWindow = numberValue(value.model_context_window);
     inheritedModelContextWindow ??= eventWindow;
-    const totalTokens = numberValue(value.total_tokens);
     const modelContextWindow = eventWindow ?? inheritedModelContextWindow;
+    if (value.scope === "aggregate") {
+      if (!aggregateFallback && modelContextWindow) {
+        aggregateFallback = { modelContextWindow };
+      }
+      continue;
+    }
+    const totalTokens = numberValue(value.total_tokens);
     const usedPercent = numberValue(value.used_percent) || (totalTokens && modelContextWindow ? Math.max(1, Math.round((totalTokens / modelContextWindow) * 100)) : undefined);
     const usage = {
       totalTokens,
       modelContextWindow,
       usedPercent,
     };
-    if (value.scope === "aggregate") {
-      aggregateFallback ??= usage;
-      continue;
-    }
     return usage;
   }
   return aggregateFallback;

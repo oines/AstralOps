@@ -4,7 +4,9 @@ import (
 	"context"
 	"time"
 
-	internalworkspace "github.com/oines/astralops/daemon/internal/workspace"
+	internalworkspace "github.com/oines/astralops/daemon/internal/core/workspace"
+	internalssh "github.com/oines/astralops/daemon/internal/ssh"
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 type workspaceService struct {
@@ -13,10 +15,22 @@ type workspaceService struct {
 
 func (a *app) workspaceService() *workspaceService {
 	var ssh internalworkspace.SSHService
-	if a.ssh != nil {
-		ssh = workspaceSSHAdapter{ssh: a.ssh}
+	if a.sshService() != nil {
+		ssh = workspaceSSHAdapter{ssh: a.sshService()}
 	}
-	return &workspaceService{service: internalworkspace.New(workspaceStoreAdapter{store: a.store}, ssh, a.runRemoteWorkspaceExecAt)}
+	hooks := internalworkspace.LifecycleHooks{
+		Emit:                  a.emit,
+		StopWorkspaceSessions: a.stopWorkspaceSessions,
+		CloseWorkspaceTerms: func(ctx context.Context, workspaceID string, reason string) {
+			a.terminalService().CloseWorkspace(ctx, workspaceID, reason)
+		},
+		DisconnectWorkspace: func(ctx context.Context, ws Workspace) {
+			if ssh := a.sshService(); ssh != nil {
+				ssh.Disconnect(ctx, ws)
+			}
+		},
+	}
+	return &workspaceService{service: internalworkspace.New(workspaceStoreAdapter{store: a.store}, ssh, a.runRemoteWorkspaceExecAt, hooks)}
 }
 
 type workspaceStoreAdapter struct {
@@ -30,15 +44,29 @@ func (s workspaceStoreAdapter) GetWorkspace(id string) (Workspace, bool) {
 	return s.store.getWorkspace(id)
 }
 
+func (s workspaceStoreAdapter) CreateWorkspace(req protocol.CreateWorkspaceRequest) (Workspace, error) {
+	if s.store == nil {
+		return Workspace{}, newActionError(503, "workspace_store_unavailable", "workspace store is not initialized")
+	}
+	return s.store.createWorkspace(createWorkspaceRequest(req))
+}
+
+func (s workspaceStoreAdapter) DeleteWorkspace(id string) {
+	if s.store == nil {
+		return
+	}
+	s.store.deleteWorkspace(id)
+}
+
 type workspaceSSHAdapter struct {
-	ssh *sshManager
+	ssh *internalssh.Service
 }
 
 func (s workspaceSSHAdapter) Call(ctx context.Context, ws Workspace, action string, params any, out any) error {
 	if s.ssh == nil {
 		return newActionError(501, "ssh_unavailable", "ssh manager unavailable")
 	}
-	return s.ssh.call(ctx, ws, action, params, out)
+	return s.ssh.Call(ctx, ws, action, params, out)
 }
 
 type workspaceFileControlStream struct {
@@ -54,6 +82,14 @@ func (s workspaceFileControlStream) WriteWorkspaceFile(frameType string, frame *
 
 func (s *workspaceService) controlWorkspace(workspaceID string) (Workspace, error) {
 	return s.service.ControlWorkspace(workspaceID)
+}
+
+func (s *workspaceService) createWorkspace(req protocol.CreateWorkspaceRequest) (Workspace, error) {
+	return s.service.CreateWorkspace(req)
+}
+
+func (s *workspaceService) deleteWorkspace(ctx context.Context, workspaceID string) (protocol.OkResult, error) {
+	return s.service.DeleteWorkspace(ctx, workspaceID)
 }
 
 func (s *workspaceService) readControlWorkspaceFiles(ctx context.Context, params workspaceFilesReadParams) (workspaceFilesReadResult, error) {

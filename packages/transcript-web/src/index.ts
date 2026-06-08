@@ -1,4 +1,4 @@
-import type { AstralEvent } from "@astralops/protocol";
+import { normalizedRecord, type AstralEvent } from "@astralops/protocol";
 import {
   buildOperationGroups,
   compactStreamingEvents,
@@ -503,7 +503,7 @@ function buildTranscriptWebGroup(group: TurnGroup, labels: TranscriptWebLabels):
 }
 
 function eventText(event: AstralEvent): string {
-  const normalized = event.normalized as Record<string, unknown>;
+  const normalized = normalizedRecord(event);
   const text = textValue(normalized, "text") || textValue(normalized, "message") || textValue(normalized, "output");
   if (text) return text;
   if (event.kind === "message.user" && typeof normalized.input === "string") return normalized.input;

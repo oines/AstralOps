@@ -10,41 +10,16 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 const hostFileSystemBrowseEntryLimit = 500
 
-type hostFileSystemBrowseParams struct {
-	Target string     `json:"target"`
-	Path   string     `json:"path,omitempty"`
-	SSH    *SSHConfig `json:"ssh,omitempty"`
-}
-
-type hostFileSystemRoot struct {
-	ID    string `json:"id"`
-	Label string `json:"label"`
-	Path  string `json:"path"`
-	Kind  string `json:"kind"`
-}
-
-type hostFileSystemEntry struct {
-	Name    string `json:"name"`
-	Path    string `json:"path"`
-	Kind    string `json:"kind"`
-	Size    int64  `json:"size,omitempty"`
-	ModTime string `json:"mod_time,omitempty"`
-}
-
-type hostFileSystemBrowseResult struct {
-	Target     string                `json:"target"`
-	Platform   string                `json:"platform"`
-	Separator  string                `json:"separator"`
-	Path       string                `json:"path"`
-	ParentPath string                `json:"parent_path,omitempty"`
-	Roots      []hostFileSystemRoot  `json:"roots"`
-	Entries    []hostFileSystemEntry `json:"entries"`
-	Truncated  bool                  `json:"truncated,omitempty"`
-}
+type hostFileSystemBrowseParams = protocol.HostFileSystemBrowseParams
+type hostFileSystemRoot = protocol.HostFileSystemRoot
+type hostFileSystemEntry = protocol.HostFileSystemEntry
+type hostFileSystemBrowseResult = protocol.HostFileSystemBrowseResult
 
 func (a *app) handleHostFileSystemBrowse(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -69,7 +44,7 @@ func (a *app) browseHostFileSystem(ctx context.Context, params hostFileSystemBro
 	case "local", "":
 		return browseLocalHostFileSystem(params.Path)
 	case "ssh":
-		if a.ssh == nil {
+		if a.sshService() == nil {
 			return hostFileSystemBrowseResult{}, newActionError(http.StatusNotImplemented, "ssh_unavailable", "ssh manager unavailable")
 		}
 		return a.browseSSHHostFileSystem(ctx, params)
@@ -219,7 +194,7 @@ func (a *app) browseSSHHostFileSystem(ctx context.Context, params hostFileSystem
 		SSH:    &ssh,
 	}
 	var raw []map[string]any
-	if err := a.ssh.callBrowse(ctx, ws, "list", map[string]any{"path": path}, &raw); err != nil {
+	if err := a.sshService().CallBrowse(ctx, ws, "list", map[string]any{"path": path}, &raw); err != nil {
 		return hostFileSystemBrowseResult{}, newActionError(http.StatusBadRequest, "host_fs_list_failed", err.Error())
 	}
 	entries := make([]hostFileSystemEntry, 0, len(raw))

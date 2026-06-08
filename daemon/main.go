@@ -18,7 +18,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	internalsessions "github.com/oines/astralops/daemon/internal/core/sessions"
+	internalterminal "github.com/oines/astralops/daemon/internal/core/terminal"
 	"github.com/oines/astralops/daemon/internal/eventlog"
+	internalssh "github.com/oines/astralops/daemon/internal/ssh"
 	"github.com/oines/astralops/pkg/controllercore"
 	"github.com/oines/astralops/pkg/hostcore"
 )
@@ -36,17 +39,18 @@ type app struct {
 	upgrader             websocket.Upgrader
 	agents               map[AgentKind]agentInfo
 	runtimes             map[AgentKind]AgentRuntime
-	ssh                  *sshManager
-	projections          *sessionProjectionCache
+	runtimeEvents        *runtimeEventBridge
+	sshCore              *internalssh.Service
+	projections          *sessionProjectionOwner
+	sessionsMu           sync.Mutex
+	sessionsCore         *internalsessions.Service
 	controlHelloLimit    int64
 	controlFrameLimit    int64
 	controlMu            sync.Mutex
 	controlSessions      map[string]*controlWSConn
 	controlRelaySessions map[string]*controlRelaySession
 	terminalMu           sync.Mutex
-	terminals            *terminalManager
-	queueMu              sync.Mutex
-	queues               map[string][]queuedTurn
+	terminalCore         *internalterminal.Service
 	codexExecMu          sync.Mutex
 	codexExec            map[string]codexExecCommand
 	codexRemoteHomeMu    sync.Mutex
@@ -107,88 +111,56 @@ func main() {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	a := &app{
-		store:       st,
-		settings:    settings,
-		token:       token,
-		addr:        localTCPHostPort(ln.Addr().String()),
-		runtimePort: port,
-		hub:         newEventHub(),
-		agents:      discoverAgents(),
-		projections: newSessionProjectionCache(),
-		queues:      map[string][]queuedTurn{},
-		codexExec:   map[string]codexExecCommand{},
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
-		},
-	}
-	a.eventPublisher()
-	a.controllerCore = a.newControllerCore()
-	a.hostRemoteSessions = newHostRemoteSessionManager(hostRemoteSessionDepsFromApp(a))
-	a.network = newNetworkMonitor(networkMonitorDepsFromApp(a))
-	a.mesh = newMeshStateManager(meshStateDepsFromApp(a))
-	a.rebuildSessionProjections()
-	if err := a.backfillHistoricalContextEvents(); err != nil {
-		log.Fatal(err)
-	}
-	if err := a.backfillHistoricalApprovalEvents(); err != nil {
-		log.Fatal(err)
-	}
-	a.ssh = newSSHManager(a)
-	a.runtimes = newRuntimeRegistry(a)
-	a.ssh.restorePersistedConnections(context.Background())
-
-	if err := a.applyRemoteControlSettings(a.currentSettings().RemoteControl); err != nil {
-		log.Fatal(err)
-	}
-	if err := a.applyCloudSettings(a.currentSettings().Cloud); err != nil {
-		log.Fatal(err)
-	}
-	a.network.start(context.Background())
-
-	if err := a.writeRuntimeFile(); err != nil {
+	a := newApp(st, settings, token, localTCPHostPort(ln.Addr().String()), port)
+	if err := a.startAppServices(context.Background()); err != nil {
 		log.Fatal(err)
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/health", a.handleHealth)
-	mux.HandleFunc("/v1/control/ws", a.handleControlWS)
-	mux.HandleFunc("/v1/host", a.auth(a.handleHost))
-	mux.HandleFunc("/v1/snapshot", a.auth(a.handleHostSnapshot))
-	mux.HandleFunc("/v1/workbench", a.auth(a.handleWorkbench))
-	mux.HandleFunc("/v1/settings", a.auth(a.handleSettings))
-	mux.HandleFunc("/v1/settings/", a.auth(a.handleSettingsAction))
-	mux.HandleFunc("/v1/cloud/auth/callback", a.handleCloudAuthCallback)
-	mux.HandleFunc("/v1/cloud/auth/", a.auth(a.handleCloudAuthAction))
-	mux.HandleFunc("/v1/cloud/account", a.auth(a.handleCloudAccount))
-	mux.HandleFunc("/v1/cloud/account/relay", a.auth(a.handleCloudAccountRelay))
-	mux.HandleFunc("/v1/cloud/relays", a.auth(a.handleCloudRelays))
-	mux.HandleFunc("/v1/cloud/devices", a.auth(a.handleCloudDevices))
-	mux.HandleFunc("/v1/cloud/devices/", a.auth(a.handleCloudDeviceAction))
-	mux.HandleFunc("/v1/cloud/heartbeat", a.auth(a.handleCloudHeartbeat))
-	mux.HandleFunc("/v1/cloud/pairing/requests", a.auth(a.handleCloudPairingRequests))
-	mux.HandleFunc("/v1/cloud/pairing/requests/", a.auth(a.handleCloudPairingRequestAction))
-	mux.HandleFunc("/v1/pairing/requests", a.auth(a.handlePairingRequests))
-	mux.HandleFunc("/v1/pairing/requests/", a.auth(a.handlePairingRequestAction))
-	mux.HandleFunc("/v1/trust/devices", a.auth(a.handleTrustDevices))
-	mux.HandleFunc("/v1/trust/devices/", a.auth(a.handleTrustDeviceAction))
-	mux.HandleFunc("/v1/mesh/state", a.auth(a.handleMeshState))
-	mux.HandleFunc("/v1/remote/hosts", a.auth(a.handleRemoteHosts))
-	mux.HandleFunc("/v1/remote/hosts/", a.auth(a.handleRemoteHostAction))
-	mux.HandleFunc("/v1/fs/browse", a.auth(a.handleHostFileSystemBrowse))
-	mux.HandleFunc("/v1/workspaces", a.auth(a.handleWorkspaces))
-	mux.HandleFunc("/v1/workspaces/", a.auth(a.handleWorkspaceAction))
-	mux.HandleFunc("/v1/codex-exec/", a.auth(a.handleCodexExecServerWS))
-	mux.HandleFunc("/v1/sessions", a.auth(a.handleSessions))
-	mux.HandleFunc("/v1/sessions/", a.auth(a.handleSessionAction))
-	mux.HandleFunc("/v1/approvals/", a.auth(a.handleApprovalAction))
-	mux.HandleFunc("/v1/events", a.auth(a.handleEvents))
+	a.registerRoutes(mux)
 
 	handler := withCORS(a.diagnosticHTTPLogger(mux))
 	log.Printf("astralopsd listening on 127.0.0.1:%d", port)
 	if err := http.Serve(ln, handler); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+func newApp(st *store, settings *settingsStore, token string, addr string, runtimePort int) *app {
+	return &app{
+		store:       st,
+		settings:    settings,
+		token:       token,
+		addr:        addr,
+		runtimePort: runtimePort,
+		hub:         newEventHub(),
+		agents:      discoverAgents(),
+		codexExec:   map[string]codexExecCommand{},
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool { return true },
+		},
+	}
+}
+
+func (a *app) startAppServices(ctx context.Context) error {
+	a.rebuildSessionProjections()
+	a.eventPublisher()
+	a.controllerCore = a.newControllerCore()
+	a.hostRemoteSessions = newHostRemoteSessionManager(hostRemoteSessionDepsFromApp(a))
+	a.network = newNetworkMonitor(networkMonitorDepsFromApp(a))
+	a.mesh = newMeshStateManager(meshStateDepsFromApp(a))
+	a.runtimeEvents = newRuntimeEventBridge(a.emit)
+	a.runtimes = newRuntimeRegistry(a)
+	a.sshService().RestorePersistedConnections(ctx)
+
+	if err := a.applyRemoteControlSettings(a.currentSettings().RemoteControl); err != nil {
+		return err
+	}
+	if err := a.applyCloudSettings(a.currentSettings().Cloud); err != nil {
+		return err
+	}
+	a.network.start(ctx)
+	return a.writeRuntimeFile()
 }
 
 func withCORS(next http.Handler) http.Handler {

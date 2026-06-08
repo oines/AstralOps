@@ -3,11 +3,18 @@ package cloudmesh
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestClientRegisterDeviceSendsOnlyPublicMetadata(t *testing.T) {
 	identity := DeviceIdentity{
@@ -88,5 +95,65 @@ func TestClientListRelaysStripsCredentials(t *testing.T) {
 	}
 	if len(relays.Relays) != 1 || relays.Relays[0].RelayID != "cn" || relays.Relays[0].Credential != "" || relays.Relays[0].CredentialExpiresAt != "" {
 		t.Fatalf("relays = %#v", relays)
+	}
+}
+
+func TestClientRetriesSafeAccountRequestAfterEOF(t *testing.T) {
+	attempts := 0
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		if req.Method != http.MethodGet || req.URL.Path != "/v1/account" {
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+		}
+		if req.Header.Get("Authorization") != "Bearer account-token" {
+			t.Fatalf("authorization = %q", req.Header.Get("Authorization"))
+		}
+		if attempts == 1 {
+			return nil, io.EOF
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"account_id_hash":"acct_hash"}`)),
+			Request:    req,
+		}, nil
+	})}
+
+	account, err := (Client{BaseURL: "https://cloud.example.test", Token: "account-token", HTTPClient: httpClient}).GetAccount(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.AccountIDHash != "acct_hash" {
+		t.Fatalf("account = %#v", account)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d", attempts)
+	}
+}
+
+func TestClientDoesNotRetryDeviceRegistrationAfterEOF(t *testing.T) {
+	attempts := 0
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		if req.Method != http.MethodPost || req.URL.Path != "/v1/devices" {
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+		}
+		return nil, io.EOF
+	})}
+	identity := DeviceIdentity{
+		DeviceID:             "dev_phone",
+		DeviceName:           "Phone",
+		DeviceKind:           "mobile",
+		PublicKey:            "public-key",
+		PublicKeyFingerprint: "sha256:PUBLIC",
+	}
+
+	_, err := (Client{BaseURL: "https://cloud.example.test", Token: "account-token", HTTPClient: httpClient}).RegisterDevice(context.Background(), identity, false, true, "")
+	if err == nil {
+		t.Fatal("expected registration error")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d", attempts)
 	}
 }

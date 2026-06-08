@@ -185,6 +185,7 @@ func TestControlClientTransportPlanOrdersDirectFallbackRelay(t *testing.T) {
 	transports := controlClientTransportPlan(controlClientTarget{
 		BaseURL:      "http://lan-host",
 		FallbackHost: "http://explicit-host",
+		Timeout:      remoteHostLANTimeout,
 		RelayClient:  RelayClient{BaseURL: "https://relay.example.test", Token: "account-token"},
 	})
 	kinds := controlClientTransportKinds(transports)
@@ -196,6 +197,16 @@ func TestControlClientTransportPlanOrdersDirectFallbackRelay(t *testing.T) {
 		if kinds[i] != want[i] {
 			t.Fatalf("transport plan = %#v, want %#v", kinds, want)
 		}
+	}
+	relayTransport, ok := transports[2].(controlClientTargetTransport)
+	if !ok {
+		t.Fatalf("relay transport = %T, want controlClientTargetTransport", transports[2])
+	}
+	if !relayTransport.target.UseRelay {
+		t.Fatal("relay fallback target is not marked for relay")
+	}
+	if relayTransport.target.Timeout != controlRelayRoundTripTimeout {
+		t.Fatalf("relay fallback timeout = %s, want %s", relayTransport.target.Timeout, controlRelayRoundTripTimeout)
 	}
 }
 
@@ -209,6 +220,25 @@ func TestControlClientTransportPlanUsesOnlyRelayForForcedRelay(t *testing.T) {
 	kinds := controlClientTransportKinds(transports)
 	if len(kinds) != 1 || kinds[0] != controlClientTransportRelay {
 		t.Fatalf("transport plan = %#v, want forced relay only", kinds)
+	}
+}
+
+func TestControlClientRelayTargetUsesRelayTimeout(t *testing.T) {
+	target := controlClientRelayTarget(controlClientTarget{
+		BaseURL: "http://lan-host",
+		Timeout: remoteHostLANTimeout,
+	})
+	if !target.UseRelay {
+		t.Fatal("relay target is not marked for relay")
+	}
+	if target.Timeout != controlRelayRoundTripTimeout {
+		t.Fatalf("relay target timeout = %s, want %s", target.Timeout, controlRelayRoundTripTimeout)
+	}
+
+	longTimeout := 30 * time.Second
+	target = controlClientRelayTarget(controlClientTarget{Timeout: longTimeout})
+	if target.Timeout != longTimeout {
+		t.Fatalf("relay target long timeout = %s, want %s", target.Timeout, longTimeout)
 	}
 }
 
@@ -248,7 +278,7 @@ func TestControlClientRequestFallsBackWhenLanControlDialFails(t *testing.T) {
 		ControllerDeviceID:             controllerStore.deviceIdentity.DeviceID,
 		ControllerPublicKey:            controllerStore.deviceIdentity.PublicKey,
 		ControllerPublicKeyFingerprint: controllerStore.deviceIdentity.PublicKeyFingerprint,
-		Capabilities:                   []string{CapabilityCoreRead},
+		Capabilities:                   []string{string(CapabilityCoreRead)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -287,7 +317,7 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 	mediaBody := []byte("media-stream-smoke-secret-0123456789")
 	media := addControlMediaFixture(t, hostApp, workspace, session, mediaBody)
 	eventSecret := "event-smoke-secret-0123456789"
-	hostApp.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: map[string]any{"text": eventSecret}})
+	hostApp.emit(AstralEvent{WorkspaceID: workspace.ID, SessionID: session.ID, Agent: session.Agent, Kind: "message.user", Normalized: eventNormalized("message.user", map[string]any{"text": eventSecret})})
 	hostServer := httptest.NewServer(remoteControlHandler(hostApp, true))
 	defer hostServer.Close()
 
@@ -296,11 +326,11 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTestCloudMembership(t, controllerStore, false, true)
-	capabilities := []string{CapabilityCoreRead, CapabilityWorkspaceFilesRead, CapabilityWorkspaceFilesWrite, CapabilityWorkspaceExec, CapabilityAttachmentIngest, CapabilityMediaStream, CapabilityHostManage}
+	capabilities := []string{string(CapabilityCoreRead), string(CapabilityWorkspaceFilesRead), string(CapabilityWorkspaceFilesWrite), string(CapabilityWorkspaceExec), string(CapabilityAttachmentIngest), string(CapabilityMediaStream), string(CapabilityHostManage)}
 	runTerminal := terminalAvailableOnHost()
 	if runTerminal {
 		t.Setenv("SHELL", terminalManagerTestShell(t))
-		capabilities = append(capabilities, CapabilityTerminalOpen, CapabilityTerminalInput)
+		capabilities = append(capabilities, string(CapabilityTerminalOpen), string(CapabilityTerminalInput))
 	}
 	if _, err := controlClientPair(hostServer.URL, controllerStore, capabilities); err != nil {
 		t.Fatal(err)
@@ -439,8 +469,8 @@ func TestControlClientSmokeRunsRemoteGatewayChecks(t *testing.T) {
 		strings.Contains(wireText, media.path) {
 		t.Fatalf("smoke result leaked streamed file content, attached file content, media content, workspace write content, or Host path: %s", string(wire))
 	}
-	if runTerminal && countKind(hostApp.store.queryEvents(workspace.ID, "", 0), "control.terminal.closed") != 1 {
-		t.Fatalf("host events = %#v, want terminal close event", eventKinds(hostApp.store.queryEvents(workspace.ID, "", 0)))
+	if runTerminal && countKind(testQueryEvents(hostApp.store, workspace.ID, "", 0), "control.terminal.closed") != 1 {
+		t.Fatalf("host events = %#v, want terminal close event", eventKinds(testQueryEvents(hostApp.store, workspace.ID, "", 0)))
 	}
 }
 

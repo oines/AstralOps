@@ -51,5 +51,5 @@ func (c *codexClient) enrichServerRequestEvent(ev *AstralEvent) {
 	if status := item["status"]; status != nil {
 		value["status"] = status
 	}
-	ev.Normalized = value
+	ev.Normalized = eventNormalized(ev.Kind, value)
 }

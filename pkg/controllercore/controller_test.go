@@ -160,7 +160,7 @@ func (f *fakeTransport) ControlState(string) ControlState {
 	return ControlState{State: StateLive, Transport: TransportRelay}
 }
 
-func (f *fakeTransport) Request(context.Context, string, string, string, map[string]any) (ControlResponse, error) {
+func (f *fakeTransport) Request(context.Context, string, ControlCapability, ControlAction, map[string]any) (ControlResponse, error) {
 	f.requests++
 	return f.response, f.err
 }

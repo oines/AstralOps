@@ -16,12 +16,15 @@
   "scripts": {
     "dev": "npm run dev -w apps/desktop",
     "generate:protocol": "go generate ./pkg/protocol",
+    "generate:ios": "npm run build -w @astralops/transcript-web && node apps/ios/scripts/build-web-assets.mjs && (cd apps/ios && xcodegen generate)",
+    "check:ios": "xcodebuild -project apps/ios/AstralOpsIOS.xcodeproj -scheme AstralOpsIOS -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build",
     "build": "npm run build -w protocol && npm run build -w @astralops/transcript && npm run build -w @astralops/transcript-web && npm run build -w @astralops/workbench-state && npm run build -w @astralops/i18n && npm run build -w @astralops/controller-client && npm run build -w apps/desktop && npm run build -w apps/mobile && go build ./daemon ./proxy-agent ./relay",
     "test": "go test ./...",
-    "check": "npm run generate:protocol && git diff --exit-code protocol/src/generated.ts && npm run check -w protocol && npm run check -w @astralops/transcript && npm run check -w @astralops/transcript-web && npm run check -w @astralops/workbench-state && npm run check -w @astralops/i18n && npm run check -w @astralops/controller-client && npm run check -w apps/desktop && npm run check -w apps/mobile && go test ./...",
+    "check": "npm run generate:protocol && git diff --exit-code protocol/src/generated.ts apps/ios/Sources/AstralOpsIOSKit/GeneratedProtocol.swift && npm run check -w protocol && npm run check -w @astralops/transcript && npm run check -w @astralops/transcript-web && npm run check -w @astralops/workbench-state && npm run check -w @astralops/i18n && npm run check -w @astralops/controller-client && npm test -w @astralops/controller-client && npm run check -w apps/desktop && npm run check:i18n -w apps/desktop && npm run check -w apps/mobile && go vet ./... && go test ./...",
     "package:desktop": "node scripts/package-desktop.mjs"
   },
   "devDependencies": {
+    "@xterm/xterm": "^6.0.0",
     "electron-builder": "^26.8.1",
     "react-native": "^0.81.5"
   }

@@ -336,7 +336,7 @@ func TestRemoteHostActionUsesApprovedCloudPairingKnownHost(t *testing.T) {
 		HostDeviceID:       hostApp.store.hostInfo().Identity.DeviceID,
 		ControllerDeviceID: controllerStore.deviceIdentity.DeviceID,
 		Scope:              TrustScopeFull,
-		Capabilities:       []string{CapabilityCoreRead},
+		Capabilities:       []string{string(CapabilityCoreRead)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -499,7 +499,7 @@ func TestControlClientSmokeRunsRelayStreamingChecks(t *testing.T) {
 	if err := os.WriteFile(workspace.LocalCWD+"/relay-stream.txt", body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := hostApp.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: AgentCodex, Kind: "control.status", Normalized: map[string]any{"status": "running"}}); err != nil {
+	if _, err := hostApp.store.appendEvent(AstralEvent{WorkspaceID: workspace.ID, Agent: AgentCodex, Kind: "control.status", Normalized: eventNormalized("control.status", map[string]any{"status": "running"})}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -560,8 +560,12 @@ func TestControlRelayMediaStreamReturnsChunks(t *testing.T) {
 	}
 }
 
-func newControlRelayTestRig(t *testing.T, capabilities ...string) (*app, Workspace, *store, *httptest.Server, *httptest.Server) {
+func newControlRelayTestRig(t *testing.T, capabilities ...ControlCapability) (*app, Workspace, *store, *httptest.Server, *httptest.Server) {
 	t.Helper()
+	values := make([]string, 0, len(capabilities))
+	for _, capability := range capabilities {
+		values = append(values, string(capability))
+	}
 	cloudBroker, cloudServer := newTestCloudBrokerServer(t, "account-token")
 	relayBroker, err := relaybroker.NewServer(relaybroker.ServerOptions{
 		RelayID:           "test",
@@ -591,7 +595,7 @@ func newControlRelayTestRig(t *testing.T, capabilities ...string) (*app, Workspa
 	if _, err := hostStore.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  controllerStore.deviceIdentity.DeviceID,
 		ControllerPublicKey: controllerStore.deviceIdentity.PublicKey,
-		Capabilities:        capabilities,
+		Capabilities:        values,
 	}); err != nil {
 		t.Fatal(err)
 	}

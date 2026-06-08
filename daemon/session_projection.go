@@ -1,126 +1,77 @@
 package main
 
-import "sync"
+import (
+	internalprojection "github.com/oines/astralops/daemon/internal/projection"
+	runtimeevents "github.com/oines/astralops/daemon/internal/runtimes/events"
+)
 
-type sessionProjection struct {
-	LatestContext       map[string]any
-	ContextCompacted    bool
-	ClaudeSlashCommands []string
+type sessionProjectionOwner struct {
+	*internalprojection.Service
+	events eventProjectionService
 }
 
-type sessionProjectionCache struct {
-	mu       sync.Mutex
-	sessions map[string]sessionProjection
+func newSessionProjectionOwner(store *store) *sessionProjectionOwner {
+	return &sessionProjectionOwner{Service: internalprojection.New(internalprojection.Options{
+		ClaudeSlashCommands: func(ev AstralEvent) []string {
+			if ev.Agent != AgentClaude {
+				return nil
+			}
+			return runtimeevents.ClaudeSlashCommandNames(mapValue(ev.Raw))
+		},
+	}), events: eventProjectionService{store: store}}
 }
 
-func newSessionProjectionCache() *sessionProjectionCache {
-	return &sessionProjectionCache{sessions: map[string]sessionProjection{}}
+func newSessionProjectionCache() *sessionProjectionOwner {
+	return newSessionProjectionOwner(nil)
 }
 
-func (a *app) sessionProjections() *sessionProjectionCache {
+func (a *app) sessionProjections() *sessionProjectionOwner {
 	if a.projections == nil {
-		a.projections = newSessionProjectionCache()
-		a.rebuildSessionProjections()
+		a.projections = newSessionProjectionOwner(a.store)
+		return a.projections
 	}
+	a.projections.updateStore(a.store)
 	return a.projections
 }
 
 func (a *app) rebuildSessionProjections() {
-	cache := a.projections
-	if cache == nil {
-		cache = newSessionProjectionCache()
-		a.projections = cache
-	}
-	cache.mu.Lock()
-	cache.sessions = map[string]sessionProjection{}
-	cache.mu.Unlock()
-	if a.store == nil {
+	cache := a.sessionProjections()
+	cache.Replay(cache.QueryEvents("", "", 0))
+}
+
+func (c *sessionProjectionOwner) updateStore(store *store) {
+	if c == nil {
 		return
 	}
-	for _, ev := range a.store.allEvents() {
-		cache.apply(ev)
-	}
+	c.events.store = store
 }
 
-func (c *sessionProjectionCache) apply(ev AstralEvent) {
-	if c == nil || ev.SessionID == "" {
-		return
+func (c *sessionProjectionOwner) QueryEvents(workspaceID, sessionID string, afterSeq int64) []AstralEvent {
+	if c == nil {
+		return nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	projection := c.sessions[ev.SessionID]
-	switch ev.Kind {
-	case "control.context":
-		if value := mapValue(ev.Normalized); len(value) > 0 {
-			projection.LatestContext = mergeProjectedContext(projection.LatestContext, value, projection.ContextCompacted)
-			if !(projection.ContextCompacted && compactedContextShouldStayInvalid(value)) {
-				projection.ContextCompacted = false
-			}
-		}
-	case "memory.compacted":
-		projection.LatestContext = nil
-		projection.ContextCompacted = true
-	case "session.native":
-		if ev.Agent == AgentClaude {
-			if commands := claudeSlashCommandNames(mapValue(ev.Raw)); len(commands) > 0 {
-				projection.ClaudeSlashCommands = commands
-			}
-		}
-	}
-	c.sessions[ev.SessionID] = projection
+	return c.events.QueryEvents(workspaceID, sessionID, afterSeq)
 }
 
-func (c *sessionProjectionCache) Apply(ev AstralEvent) {
-	c.apply(ev)
+func (c *sessionProjectionOwner) QueryEventsWindow(workspaceID, sessionID string, afterSeq, beforeSeq int64, limit int) []AstralEvent {
+	if c == nil {
+		return nil
+	}
+	return c.events.QueryEventsWindow(workspaceID, sessionID, afterSeq, beforeSeq, limit)
 }
 
-func mergeProjectedContext(existing map[string]any, next map[string]any, compacted bool) map[string]any {
-	if len(next) == 0 {
-		return existing
+func (c *sessionProjectionOwner) latestContext(sessionID string) map[string]any {
+	if c == nil {
+		return nil
 	}
-	if compacted && compactedContextShouldStayInvalid(next) {
-		return existing
-	}
-	if len(existing) == 0 {
-		return copyStringAny(next)
-	}
-	scope := stringValue(next["scope"])
-	existingScope := stringValue(existing["scope"])
-	if scope == "aggregate" && existingScope == "current" {
-		merged := copyStringAny(existing)
-		copyContextFields(merged, next, []string{
-			"model",
-			"model_context_window",
-			"model_usage",
-			"cumulative_total_tokens",
-			"cumulative_input_tokens",
-			"cumulative_output_tokens",
-			"cumulative_cached_input_tokens",
-			"cumulative_cache_creation_input_tokens",
-		})
-		refreshProjectedContextPercent(merged)
-		return merged
-	}
-	if scope == "current" {
-		merged := copyStringAny(next)
-		copyContextFields(merged, existing, []string{
-			"model",
-			"model_context_window",
-			"model_usage",
-			"cumulative_total_tokens",
-			"cumulative_input_tokens",
-			"cumulative_output_tokens",
-			"cumulative_cached_input_tokens",
-			"cumulative_cache_creation_input_tokens",
-		})
-		refreshProjectedContextPercent(merged)
-		return merged
-	}
-	return copyStringAny(next)
+	return c.LatestContext(sessionID)
 }
 
-func compactedContextShouldStayInvalid(value map[string]any) bool {
-	return stringValue(value["scope"]) == "aggregate" || stringValue(value["source"]) == "astralops"
+func (c *sessionProjectionOwner) claudeSlashCommands(sessionID string) []string {
+	if c == nil {
+		return nil
+	}
+	return c.ClaudeSlashCommands(sessionID)
 }
 
 func copyContextFields(target map[string]any, source map[string]any, keys []string) {
@@ -135,31 +86,4 @@ func refreshProjectedContextPercent(value map[string]any) {
 	if percent := contextUsedPercent(value); percent > 0 {
 		value["used_percent"] = percent
 	}
-}
-
-func (c *sessionProjectionCache) latestContext(sessionID string) map[string]any {
-	if c == nil || sessionID == "" {
-		return nil
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if value := c.sessions[sessionID].LatestContext; len(value) > 0 {
-		return copyStringAny(value)
-	}
-	return nil
-}
-
-func (c *sessionProjectionCache) claudeSlashCommands(sessionID string) []string {
-	if c == nil || sessionID == "" {
-		return nil
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	values := c.sessions[sessionID].ClaudeSlashCommands
-	if len(values) == 0 {
-		return nil
-	}
-	out := make([]string, len(values))
-	copy(out, values)
-	return out
 }

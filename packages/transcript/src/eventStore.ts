@@ -1,9 +1,9 @@
 import type { AstralEvent } from "@astralops/protocol";
 
 export type EventIndex = {
-  bySeq: Map<number, AstralEvent>;
-  allSeqs: number[];
-  sessionSeqs: Record<string, number[]>;
+  byKey: Map<string, AstralEvent>;
+  allKeys: string[];
+  sessionKeys: Record<string, string[]>;
 };
 
 export type SessionWindow = {
@@ -15,47 +15,48 @@ export type SessionWindow = {
 export type SessionWindows = Record<string, SessionWindow>;
 
 export const EMPTY_EVENT_INDEX: EventIndex = {
-  bySeq: new Map(),
-  allSeqs: [],
-  sessionSeqs: {},
+  byKey: new Map(),
+  allKeys: [],
+  sessionKeys: {},
 };
 
 export function mergeEventIndex(current: EventIndex, incoming: AstralEvent[]): EventIndex {
   if (incoming.length === 0) return current;
 
   let changed = false;
-  const bySeq = new Map(current.bySeq);
-  const allSeqs = [...current.allSeqs];
-  const sessionSeqs: Record<string, number[]> = { ...current.sessionSeqs };
-  const touchedSessionSeqs = new Set<string>();
+  const byKey = new Map(current.byKey);
+  const allKeys = [...current.allKeys];
+  const sessionKeys: Record<string, string[]> = { ...current.sessionKeys };
+  const touchedSessionKeys = new Set<string>();
 
   for (const event of incoming) {
-    if (bySeq.has(event.seq)) continue;
+    const key = eventIndexKey(event);
+    if (byKey.has(key)) continue;
     changed = true;
-    bySeq.set(event.seq, event);
-    insertSorted(allSeqs, event.seq);
+    byKey.set(key, event);
+    insertSortedKey(allKeys, key, byKey);
     if (event.session_id) {
-      let seqs = sessionSeqs[event.session_id];
-      if (!touchedSessionSeqs.has(event.session_id)) {
-        seqs = seqs ? [...seqs] : [];
-        sessionSeqs[event.session_id] = seqs;
-        touchedSessionSeqs.add(event.session_id);
+      let keys = sessionKeys[event.session_id];
+      if (!touchedSessionKeys.has(event.session_id)) {
+        keys = keys ? [...keys] : [];
+        sessionKeys[event.session_id] = keys;
+        touchedSessionKeys.add(event.session_id);
       }
-      if (!seqs) {
-        seqs = [];
-        sessionSeqs[event.session_id] = seqs;
+      if (!keys) {
+        keys = [];
+        sessionKeys[event.session_id] = keys;
       }
-      insertSorted(seqs, event.seq);
+      insertSortedKey(keys, key, byKey);
     }
   }
 
   if (!changed) return current;
-  return { bySeq, allSeqs, sessionSeqs };
+  return { byKey, allKeys, sessionKeys };
 }
 
 export function removeWorkspaceEvents(current: EventIndex, workspaceID: string): EventIndex {
-  const kept = current.allSeqs
-    .map((seq) => current.bySeq.get(seq))
+  const kept = current.allKeys
+    .map((key) => current.byKey.get(key))
     .filter((event): event is AstralEvent => {
       return event !== undefined && event.workspace_id !== workspaceID;
     });
@@ -63,8 +64,8 @@ export function removeWorkspaceEvents(current: EventIndex, workspaceID: string):
 }
 
 export function removeSessionEvents(current: EventIndex, sessionID: string): EventIndex {
-  const kept = current.allSeqs
-    .map((seq) => current.bySeq.get(seq))
+  const kept = current.allKeys
+    .map((key) => current.byKey.get(key))
     .filter((event): event is AstralEvent => {
       return event !== undefined && event.session_id !== sessionID;
     });
@@ -72,20 +73,25 @@ export function removeSessionEvents(current: EventIndex, sessionID: string): Eve
 }
 
 export function selectSessionEvents(index: EventIndex, sessionID: string): AstralEvent[] {
-  const seqs = index.sessionSeqs[sessionID] ?? [];
-  return seqs.map((seq) => index.bySeq.get(seq)).filter((event): event is AstralEvent => Boolean(event));
+  const keys = index.sessionKeys[sessionID] ?? [];
+  return keys.map((key) => index.byKey.get(key)).filter((event): event is AstralEvent => Boolean(event));
 }
 
 export function selectWorkspaceEvents(index: EventIndex, workspaceID: string): AstralEvent[] {
-  return index.allSeqs
-    .map((seq) => index.bySeq.get(seq))
+  return index.allKeys
+    .map((key) => index.byKey.get(key))
     .filter((event): event is AstralEvent => {
       return event !== undefined && (!event.workspace_id || event.workspace_id === workspaceID);
     });
 }
 
 export function maxEventSeq(index: EventIndex): number {
-  return index.allSeqs.at(-1) ?? 0;
+  let max = 0;
+  for (const key of index.allKeys) {
+    const event = index.byKey.get(key);
+    if (event && event.seq > max) max = event.seq;
+  }
+  return max;
 }
 
 export function updateWindowAfterLatest(current: SessionWindows, sessionID: string, events: AstralEvent[], pageSize: number): SessionWindows {
@@ -124,17 +130,60 @@ function buildEventIndex(events: AstralEvent[]): EventIndex {
   return mergeEventIndex(EMPTY_EVENT_INDEX, events);
 }
 
-function insertSorted(values: number[], value: number): void {
-  if (values.length === 0 || values[values.length - 1] < value) {
-    values.push(value);
+function eventIndexKey(event: AstralEvent): string {
+  const identity = eventIdentity(event);
+  if (event.session_id) return `session:${event.session_id}:${event.seq}:${event.kind}:${identity}`;
+  if (event.workspace_id) return `workspace:${event.workspace_id}:${event.seq}:${event.kind}:${identity}`;
+  return `global:${event.seq}:${event.kind}:${identity}`;
+}
+
+function eventIdentity(event: AstralEvent): string {
+  const normalized = normalizedObject(event.normalized);
+  const stable = firstString(
+    normalized.id,
+    normalized.item_id,
+    normalized.message_id,
+    normalized.native_message_uuid,
+    normalized.turn_id,
+    normalized.approval_id,
+    normalized.ask_id,
+    normalized.queue_id,
+    normalized.text,
+  );
+  return `${event.ts ?? ""}:${stable}`;
+}
+
+function normalizedObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim() !== "") return value;
+  }
+  return "";
+}
+
+function insertSortedKey(keys: string[], key: string, byKey: Map<string, AstralEvent>): void {
+  if (keys.length === 0 || compareEventKeys(keys[keys.length - 1], key, byKey) < 0) {
+    keys.push(key);
     return;
   }
   let low = 0;
-  let high = values.length;
+  let high = keys.length;
   while (low < high) {
     const mid = (low + high) >> 1;
-    if (values[mid] < value) low = mid + 1;
+    if (compareEventKeys(keys[mid], key, byKey) < 0) low = mid + 1;
     else high = mid;
   }
-  values.splice(low, 0, value);
+  keys.splice(low, 0, key);
+}
+
+function compareEventKeys(leftKey: string, rightKey: string, byKey: Map<string, AstralEvent>): number {
+  const left = byKey.get(leftKey);
+  const right = byKey.get(rightKey);
+  if (!left || !right) return leftKey.localeCompare(rightKey);
+  if (left.seq !== right.seq) return left.seq - right.seq;
+  if (left.ts && right.ts && left.ts !== right.ts) return left.ts < right.ts ? -1 : 1;
+  return leftKey.localeCompare(rightKey);
 }

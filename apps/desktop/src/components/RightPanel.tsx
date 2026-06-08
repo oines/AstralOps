@@ -535,11 +535,9 @@ function TerminalTab({
   const onTitleChangeRef = useRef(onTitleChange);
   const workspaceId = workspace?.id ?? "";
   const workspaceRoot = workspace?.local_cwd ?? "";
-  const theme = useSystemTerminalTheme();
+  const theme = useVSCodeTerminalTheme();
   const [viewerHealth, setViewerHealth] = useState<TerminalViewerHealth>("connecting");
   const [blockedNotice, setBlockedNotice] = useState(false);
-  const [fontId] = useState(() => storedTerminalPreference("astralops-terminal-font", "sf-mono"));
-  const font = terminalFonts.find((item) => item.id === fontId) ?? terminalFonts[0];
 
   useEffect(() => {
     onReadyRef.current = onReady;
@@ -561,16 +559,6 @@ function TerminalTab({
   }, [active]);
 
   useEffect(() => {
-    localStorage.setItem("astralops-terminal-font", fontId);
-    const term = termRef.current;
-    if (!term) return;
-    term.options.fontFamily = font.family;
-    term.options.fontSize = font.size;
-    term.options.lineHeight = font.lineHeight;
-    fitRef.current?.fit();
-  }, [font.family, font.lineHeight, font.size, fontId]);
-
-  useEffect(() => {
     if (!api || !workspaceId || !terminalId || !hostRef.current) return;
     const connectionId = connectionIdRef.current + 1;
     connectionIdRef.current = connectionId;
@@ -579,12 +567,20 @@ function TerminalTab({
     setViewerHealth("connecting");
     setBlockedNotice(false);
     const term = new Terminal({
-      cursorBlink: true,
+      cursorBlink: false,
+      cursorInactiveStyle: "outline",
+      cursorStyle: "block",
       convertEol: true,
-      fontFamily: font.family,
-      fontSize: font.size,
-      lineHeight: font.lineHeight,
-      scrollback: 12000,
+      drawBoldTextInBrightColors: true,
+      fontFamily: vscodeTerminalFont.family,
+      fontSize: vscodeTerminalFont.size,
+      fontWeight: "normal",
+      fontWeightBold: "bold",
+      letterSpacing: 0,
+      lineHeight: vscodeTerminalFont.lineHeight,
+      minimumContrastRatio: 4.5,
+      scrollback: 1000,
+      tabStopWidth: 8,
       theme,
     });
     const fit = new FitAddon();
@@ -700,22 +696,30 @@ function basename(path: string): string {
   return path.split("/").filter(Boolean).at(-1) || path || "/";
 }
 
-function useSystemTerminalTheme(): ITheme {
-  const [dark, setDark] = useState(() => prefersDarkColorScheme());
+function useVSCodeTerminalTheme(): ITheme {
+  const [dark, setDark] = useState(() => resolvedAppThemeIsDark());
 
   useEffect(() => {
-    if (!("matchMedia" in window)) return;
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const updateTheme = (): void => setDark(media.matches);
+    const updateTheme = (): void => setDark(resolvedAppThemeIsDark());
+    const media = "matchMedia" in window ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+    const observer = new MutationObserver(updateTheme);
+
     updateTheme();
-    media.addEventListener("change", updateTheme);
-    return () => media.removeEventListener("change", updateTheme);
+    media?.addEventListener("change", updateTheme);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => {
+      media?.removeEventListener("change", updateTheme);
+      observer.disconnect();
+    };
   }, []);
 
-  return dark ? terminalSystemDarkTheme : terminalSystemLightTheme;
+  return dark ? terminalVSCodeDarkTheme : terminalVSCodeLightTheme;
 }
 
-function prefersDarkColorScheme(): boolean {
+function resolvedAppThemeIsDark(): boolean {
+  const appTheme = document.documentElement.dataset.theme;
+  if (appTheme === "dark") return true;
+  if (appTheme === "light") return false;
   try {
     return window.matchMedia("(prefers-color-scheme: dark)").matches;
   } catch {
@@ -724,9 +728,9 @@ function prefersDarkColorScheme(): boolean {
 }
 
 const terminalLightScrollbarTheme = {
-  scrollbarSliderBackground: "rgba(216, 213, 205, 0.7)",
-  scrollbarSliderHoverBackground: "rgba(190, 186, 176, 0.85)",
-  scrollbarSliderActiveBackground: "rgba(176, 171, 161, 0.95)",
+  scrollbarSliderBackground: "rgba(0, 0, 0, 0.15)",
+  scrollbarSliderHoverBackground: "rgba(0, 0, 0, 0.25)",
+  scrollbarSliderActiveBackground: "rgba(0, 0, 0, 0.3)",
 };
 
 const terminalDarkScrollbarTheme = {
@@ -735,94 +739,63 @@ const terminalDarkScrollbarTheme = {
   scrollbarSliderActiveBackground: "rgba(255, 255, 255, 0.36)",
 };
 
-const terminalSystemLightTheme = {
-  background: "#ffffff",
-  foreground: "#24292f",
-  cursor: "#24292f",
+const terminalVSCodeLightTheme = {
+  background: "#f8f8f8",
+  foreground: "#3b3b3b",
+  cursor: "#005fb8",
   cursorAccent: "#ffffff",
-  selectionBackground: "#c8ddff",
+  selectionBackground: "#add6ff",
+  selectionInactiveBackground: "#e5ebf1",
   ...terminalLightScrollbarTheme,
-  black: "#24292f",
-  red: "#cf222e",
-  green: "#00a33f",
-  yellow: "#f0b400",
-  blue: "#2f81f7",
-  magenta: "#8250df",
-  cyan: "#1f9bab",
-  white: "#d0d7de",
-  brightBlack: "#8c959f",
-  brightRed: "#ff5a5f",
-  brightGreen: "#00b84a",
-  brightYellow: "#f5c542",
-  brightBlue: "#4090ff",
-  brightMagenta: "#a371f7",
-  brightCyan: "#39c5cf",
-  brightWhite: "#ffffff",
+  black: "#000000",
+  red: "#cd3131",
+  green: "#107c10",
+  yellow: "#949800",
+  blue: "#0451a5",
+  magenta: "#bc05bc",
+  cyan: "#0598bc",
+  white: "#555555",
+  brightBlack: "#666666",
+  brightRed: "#cd3131",
+  brightGreen: "#14ce14",
+  brightYellow: "#b5ba00",
+  brightBlue: "#0451a5",
+  brightMagenta: "#bc05bc",
+  brightCyan: "#0598bc",
+  brightWhite: "#a5a5a5",
 } satisfies ITheme;
 
-const terminalSystemDarkTheme = {
-  background: "#18191a",
-  foreground: "#e8e8e6",
-  cursor: "#e8e8e6",
-  cursorAccent: "#18191a",
-  selectionBackground: "#33455f",
+const terminalVSCodeDarkTheme = {
+  background: "#181818",
+  foreground: "#cccccc",
+  cursor: "#cccccc",
+  cursorAccent: "#181818",
+  selectionBackground: "#264f78",
+  selectionInactiveBackground: "#3a3d41",
   ...terminalDarkScrollbarTheme,
-  black: "#18191a",
-  red: "#ff7a66",
-  green: "#5fce8f",
-  yellow: "#f0a75d",
-  blue: "#61a9ff",
-  magenta: "#c79cff",
-  cyan: "#5fcad6",
-  white: "#c7c8ca",
-  brightBlack: "#999b9f",
-  brightRed: "#ff9a88",
-  brightGreen: "#7ee3a8",
-  brightYellow: "#ffc777",
-  brightBlue: "#8cc2ff",
-  brightMagenta: "#d9b8ff",
-  brightCyan: "#80e0ea",
-  brightWhite: "#f4f4f2",
+  black: "#000000",
+  red: "#cd3131",
+  green: "#0dbc79",
+  yellow: "#e5e510",
+  blue: "#2472c8",
+  magenta: "#bc3fbc",
+  cyan: "#11a8cd",
+  white: "#e5e5e5",
+  brightBlack: "#666666",
+  brightRed: "#f14c4c",
+  brightGreen: "#23d18b",
+  brightYellow: "#f5f543",
+  brightBlue: "#3b8eea",
+  brightMagenta: "#d670d6",
+  brightCyan: "#29b8db",
+  brightWhite: "#e5e5e5",
 } satisfies ITheme;
 
-const terminalFonts = [
-  {
-    id: "sf-mono",
-    label: "SF Mono",
-    family: "SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace",
-    size: 13,
-    lineHeight: 1.4,
-  },
-  {
-    id: "jetbrains",
-    label: "JetBrains",
-    family: "\"JetBrains Mono\", SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace",
-    size: 14,
-    lineHeight: 1.4,
-  },
-  {
-    id: "menlo",
-    label: "Menlo",
-    family: "Menlo, Monaco, Consolas, monospace",
-    size: 13,
-    lineHeight: 1.4,
-  },
-  {
-    id: "large",
-    label: "Large",
-    family: "SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace",
-    size: 15,
-    lineHeight: 1.45,
-  },
-];
-
-function storedTerminalPreference(key: string, fallback: string): string {
-  try {
-    return localStorage.getItem(key) || fallback;
-  } catch {
-    return fallback;
-  }
-}
+const vscodeTerminalFont = {
+  family: "Menlo, Monaco, 'Courier New', monospace",
+  size: 12,
+  lineHeight: 1,
+};
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;

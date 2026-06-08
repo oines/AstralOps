@@ -4,27 +4,32 @@ import (
 	"context"
 	"sync"
 
+	internalterminal "github.com/oines/astralops/daemon/internal/core/terminal"
+	internalssh "github.com/oines/astralops/daemon/internal/ssh"
 	"github.com/oines/astralops/pkg/controllercore"
 	"github.com/oines/astralops/pkg/hostcore"
 )
 
 type remoteControlService struct {
 	store                *store
-	ssh                  *sshManager
 	controlMu            *sync.Mutex
 	controlSessions      *map[string]*controlWSConn
 	controlRelaySessions *map[string]*controlRelaySession
 
 	buildHostSnapshotFn                  func(hostSnapshotParams) hostSnapshotResult
+	buildWorkbenchStateFn                func() workbenchState
 	buildSessionViewFn                   func(string) (sessionView, bool)
+	queryEventsWindowFn                  func(workspaceID, sessionID string, afterSeq, beforeSeq int64, limit int) []AstralEvent
+	emitFn                               func(AstralEvent)
 	workspaceServiceFn                   func() *workspaceService
+	sshServiceFn                         func() *internalssh.Service
 	prepareControlEventSubscriptionFn    func(eventSubscriptionParams) (eventSubscriptionResult, error)
 	streamControlEventsFn                func(context.Context, eventSubscriptionResult, controlConnection, string)
 	mediaServiceFn                       func() *mediaService
 	sessionsFn                           func() *sessionService
 	createWorkspaceFn                    func(createWorkspaceRequest) (Workspace, error)
 	deleteWorkspaceFn                    func(string) (map[string]any, error)
-	terminalManagerFn                    func() *terminalManager
+	terminalServiceFn                    func() *internalterminal.Service
 	browseHostFileSystemFn               func(context.Context, hostFileSystemBrowseParams) (hostFileSystemBrowseResult, error)
 	revokeTrustedControlDeviceFn         func(string, string) (hostTrustRevokeResult, error)
 	approvePairingRequestFn              func(string) (pairingRequestResolveResult, error)
@@ -54,20 +59,23 @@ func remoteControlServiceDepsFromApp(a *app) remoteControlService {
 	}
 	return remoteControlService{
 		store:                                a.store,
-		ssh:                                  a.ssh,
 		controlMu:                            &a.controlMu,
 		controlSessions:                      &a.controlSessions,
 		controlRelaySessions:                 &a.controlRelaySessions,
 		buildHostSnapshotFn:                  a.buildHostSnapshot,
+		buildWorkbenchStateFn:                a.buildWorkbenchState,
 		buildSessionViewFn:                   a.buildSessionView,
+		queryEventsWindowFn:                  a.sessionProjections().QueryEventsWindow,
+		emitFn:                               a.emit,
 		workspaceServiceFn:                   a.workspaceService,
+		sshServiceFn:                         a.sshService,
 		prepareControlEventSubscriptionFn:    a.prepareControlEventSubscription,
 		streamControlEventsFn:                a.streamControlEvents,
 		mediaServiceFn:                       a.mediaService,
 		sessionsFn:                           a.sessions,
 		createWorkspaceFn:                    a.createWorkspace,
 		deleteWorkspaceFn:                    a.deleteWorkspace,
-		terminalManagerFn:                    a.terminalManager,
+		terminalServiceFn:                    a.terminalService,
 		browseHostFileSystemFn:               a.browseHostFileSystem,
 		revokeTrustedControlDeviceFn:         a.revokeTrustedControlDevice,
 		approvePairingRequestFn:              a.approvePairingRequest,
@@ -91,11 +99,31 @@ func (s *remoteControlService) buildHostSnapshot(params hostSnapshotParams) host
 	return s.buildHostSnapshotFn(params)
 }
 
+func (s *remoteControlService) buildWorkbenchState() workbenchState {
+	if s.buildWorkbenchStateFn == nil {
+		return workbenchState{}
+	}
+	return s.buildWorkbenchStateFn()
+}
+
 func (s *remoteControlService) buildSessionView(sessionID string) (sessionView, bool) {
 	if s.buildSessionViewFn == nil {
 		return sessionView{}, false
 	}
 	return s.buildSessionViewFn(sessionID)
+}
+
+func (s *remoteControlService) queryEventsWindow(workspaceID, sessionID string, afterSeq, beforeSeq int64, limit int) []AstralEvent {
+	if s.queryEventsWindowFn != nil {
+		return s.queryEventsWindowFn(workspaceID, sessionID, afterSeq, beforeSeq, limit)
+	}
+	return nil
+}
+
+func (s *remoteControlService) emit(event AstralEvent) {
+	if s.emitFn != nil {
+		s.emitFn(event)
+	}
 }
 
 func (s *remoteControlService) workspaceService() *workspaceService {
@@ -146,11 +174,18 @@ func (s *remoteControlService) deleteWorkspace(workspaceID string) (map[string]a
 	return s.deleteWorkspaceFn(workspaceID)
 }
 
-func (s *remoteControlService) terminalManager() *terminalManager {
-	if s.terminalManagerFn == nil {
+func (s *remoteControlService) terminalService() *internalterminal.Service {
+	if s.terminalServiceFn == nil {
 		return nil
 	}
-	return s.terminalManagerFn()
+	return s.terminalServiceFn()
+}
+
+func (s *remoteControlService) sshService() *internalssh.Service {
+	if s.sshServiceFn == nil {
+		return nil
+	}
+	return s.sshServiceFn()
 }
 
 func (s *remoteControlService) browseHostFileSystem(ctx context.Context, params hostFileSystemBrowseParams) (hostFileSystemBrowseResult, error) {
@@ -306,6 +341,10 @@ func (a *app) remoteHostTarget(hostDeviceID string) (controlClientTarget, error)
 	return a.remoteControlService().remoteHostTarget(hostDeviceID)
 }
 
-func (a *app) remoteControlResponse(hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
+func (a *app) remoteHostTargetWithPreference(hostDeviceID string, preferRelay bool) (controlClientTarget, error) {
+	return a.remoteControlService().remoteHostTargetWithPreference(hostDeviceID, preferRelay)
+}
+
+func (a *app) remoteControlResponse(hostDeviceID string, capability ControlCapability, action ControlAction, params map[string]any) (ControlResponse, error) {
 	return a.remoteControlService().remoteControlResponse(hostDeviceID, capability, action, params)
 }

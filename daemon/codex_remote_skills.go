@@ -42,8 +42,8 @@ func (a *app) prepareCodexRemoteBundledSkills(ctx context.Context, ws Workspace,
 	}
 
 	runtimeDir := ""
-	if a.ssh != nil {
-		runtimeDir = a.ssh.remoteWorkspaceRuntimeDir(ws)
+	if ssh := a.sshService(); ssh != nil {
+		runtimeDir = ssh.RemoteWorkspaceRuntimeDir(ws)
 	}
 	if runtimeDir == "" {
 		runtimeDir = remotePathJoin("/tmp/.astralops", ws.ID)
@@ -60,10 +60,10 @@ func (a *app) prepareCodexRemoteBundledSkills(ctx context.Context, ws Workspace,
 		return remoteCodexHome, nil
 	}
 
-	_ = a.ssh.call(ctx, ws, "remove", map[string]any{"path": root, "recursive": true, "force": true}, nil)
-	_ = a.ssh.call(ctx, ws, "remove", map[string]any{"path": workspaceAgentsRoot, "recursive": true, "force": true}, nil)
+	_ = a.sshService().Call(ctx, ws, "remove", map[string]any{"path": root, "recursive": true, "force": true}, nil)
+	_ = a.sshService().Call(ctx, ws, "remove", map[string]any{"path": workspaceAgentsRoot, "recursive": true, "force": true}, nil)
 	for _, dir := range []string{remoteSystemRoot, remoteAgentsRoot, workspaceAgentsRoot} {
-		if err := a.ssh.call(ctx, ws, "mkdir", map[string]any{"path": dir, "recursive": true}, nil); err != nil {
+		if err := a.sshService().Call(ctx, ws, "mkdir", map[string]any{"path": dir, "recursive": true}, nil); err != nil {
 			return "", err
 		}
 	}
@@ -71,7 +71,7 @@ func (a *app) prepareCodexRemoteBundledSkills(ctx context.Context, ws Workspace,
 	for _, file := range bundle.Files {
 		rel := filepath.ToSlash(file.Rel)
 		for _, destRoot := range []string{remoteSystemRoot, remoteAgentsRoot, workspaceAgentsRoot} {
-			if err := a.ssh.call(ctx, ws, "write", map[string]any{
+			if err := a.sshService().Call(ctx, ws, "write", map[string]any{
 				"path":       remotePathJoin(destRoot, rel),
 				"dataBase64": base64.StdEncoding.EncodeToString(file.Body),
 			}, nil); err != nil {
@@ -83,7 +83,7 @@ func (a *app) prepareCodexRemoteBundledSkills(ctx context.Context, ws Workspace,
 		remotePathJoin(root, codexBundledSkillsMarker),
 		remotePathJoin(workspaceAgentsRoot, codexBundledSkillsMarker),
 	} {
-		if err := a.ssh.call(ctx, ws, "write", map[string]any{
+		if err := a.sshService().Call(ctx, ws, "write", map[string]any{
 			"path":       markerPath,
 			"dataBase64": base64.StdEncoding.EncodeToString(marker),
 		}, nil); err != nil {
@@ -95,7 +95,7 @@ func (a *app) prepareCodexRemoteBundledSkills(ctx context.Context, ws Workspace,
 
 func (a *app) remoteCodexBundledSkillsReady(ctx context.Context, ws Workspace, markerPath string, expected []byte) bool {
 	var out map[string]any
-	if err := a.ssh.call(ctx, ws, "read", map[string]any{"path": markerPath}, &out); err != nil {
+	if err := a.sshService().Call(ctx, ws, "read", map[string]any{"path": markerPath}, &out); err != nil {
 		return false
 	}
 	body, err := remoteReadBytes(out)

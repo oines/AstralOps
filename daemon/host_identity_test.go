@@ -23,7 +23,7 @@ func TestStoreDeviceIdentityGeneratedAndPersisted(t *testing.T) {
 	if info.Identity.DeviceKind != DeviceKindDesktop {
 		t.Fatalf("device kind = %q, want desktop", info.Identity.DeviceKind)
 	}
-	if !containsString(info.Capabilities, CapabilityCoreRead) || !containsString(info.Capabilities, CapabilityHostManage) {
+	if !containsString(info.Capabilities, string(CapabilityCoreRead)) || !containsString(info.Capabilities, string(CapabilityHostManage)) {
 		t.Fatalf("capabilities = %#v, want core.read and host.manage", info.Capabilities)
 	}
 
@@ -70,7 +70,7 @@ func TestTrustGrantPersistsRevokesAndBlocksGateway(t *testing.T) {
 		ControllerDeviceID:             "dev_mobile",
 		ControllerDeviceName:           "Phone",
 		ControllerPublicKeyFingerprint: "sha256:PHONE",
-		Capabilities:                   []string{CapabilityCoreRead, CapabilityCoreRead},
+		Capabilities:                   []string{string(CapabilityCoreRead), string(CapabilityCoreRead)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -81,13 +81,13 @@ func TestTrustGrantPersistsRevokesAndBlocksGateway(t *testing.T) {
 	if grant.WorkspaceExecPolicy != WorkspaceExecPolicyTrusted {
 		t.Fatalf("workspace exec policy = %q, want trusted", grant.WorkspaceExecPolicy)
 	}
-	if len(grant.Capabilities) != 1 || grant.Capabilities[0] != CapabilityCoreRead {
+	if len(grant.Capabilities) != 1 || grant.Capabilities[0] != string(CapabilityCoreRead) {
 		t.Fatalf("grant capabilities = %#v, want normalized core.read", grant.Capabilities)
 	}
 
 	grant, err = st.trustDevice(trustDeviceRequest{
 		ControllerDeviceID:  "dev_exec_review",
-		Capabilities:        []string{CapabilityWorkspaceExec},
+		Capabilities:        []string{string(CapabilityWorkspaceExec)},
 		WorkspaceExecPolicy: WorkspaceExecPolicyRequireApproval,
 	})
 	if err != nil {
@@ -119,7 +119,7 @@ func TestTrustGrantPersistsRevokesAndBlocksGateway(t *testing.T) {
 		ControllerDeviceID: "dev_mobile",
 		Capability:         CapabilityCoreRead,
 		Action:             ControlActionSessionView,
-		Params:             map[string]any{"session_id": session.ID},
+		Params:             controlParams(map[string]any{"session_id": session.ID}),
 	})
 	if err != nil || !response.OK {
 		t.Fatalf("trusted control response = %#v err = %v", response, err)
@@ -132,7 +132,7 @@ func TestTrustGrantPersistsRevokesAndBlocksGateway(t *testing.T) {
 		ControllerDeviceID: "dev_mobile",
 		Capability:         CapabilityCoreRead,
 		Action:             ControlActionSessionView,
-		Params:             map[string]any{"session_id": session.ID},
+		Params:             controlParams(map[string]any{"session_id": session.ID}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 	if len(runtime.inputs) != 0 {
@@ -200,7 +200,7 @@ func TestHostAndTrustHandlers(t *testing.T) {
 	if revokeResult.ControllerDeviceID != "dev_phone" || revokeResult.Grant.Status != TrustStatusRevoked || revokeResult.RevokedAt == "" {
 		t.Fatalf("revoke result = %#v, want protocol revoke result", revokeResult)
 	}
-	events := st.allEvents()
+	events := testAllEvents(st)
 	if !containsEventKind(events, "control.trust.granted") || !containsEventKind(events, "control.trust.revoked") {
 		t.Fatalf("events = %#v, want trust granted and revoked audit events", events)
 	}

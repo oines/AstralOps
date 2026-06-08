@@ -277,11 +277,11 @@ func (c *Core) Dispatch(ctx context.Context, session Session, req controlwire.Co
 	if req.ControllerDeviceID == "" {
 		return controlwire.ControlResponse{RequestID: req.RequestID}, coreError(http.StatusBadRequest, "controller_device_required", "controller_device_id required")
 	}
-	requiredCapability := c.adapters.Capabilities.RequiredCapability(req.Action)
+	requiredCapability := c.adapters.Capabilities.RequiredCapability(string(req.Action))
 	if requiredCapability == "" {
 		return controlwire.ControlResponse{RequestID: req.RequestID}, coreError(http.StatusNotFound, ErrorCodeControlActionUnknown, "control action not found")
 	}
-	if req.Capability != requiredCapability {
+	if string(req.Capability) != requiredCapability {
 		return controlwire.ControlResponse{RequestID: req.RequestID}, coreError(http.StatusForbidden, ErrorCodeCapabilityMismatch, "control capability does not match action")
 	}
 	grant, ok, err := c.adapters.Trust.TrustedController(ctx, req.ControllerDeviceID)

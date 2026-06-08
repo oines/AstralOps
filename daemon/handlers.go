@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/oines/astralops/daemon/internal/ports"
+	"github.com/oines/astralops/pkg/protocol"
 )
 
 const terminalLocalSocketWriteTimeout = 2 * time.Second
@@ -77,29 +79,15 @@ func (a *app) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) createWorkspace(req createWorkspaceRequest) (Workspace, error) {
-	ws, err := a.store.createWorkspace(req)
-	if err != nil {
-		return Workspace{}, err
-	}
-	a.emit(AstralEvent{WorkspaceID: ws.ID, SessionID: "", Agent: ws.Agent, Kind: "workspace.created", Normalized: ws})
-	return ws, nil
+	return a.workspaceService().createWorkspace(protocol.CreateWorkspaceRequest(req))
 }
 
 func (a *app) deleteWorkspace(workspaceID string) (map[string]any, error) {
-	ws, ok := a.store.getWorkspace(workspaceID)
-	if !ok {
-		return nil, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found")
+	result, err := a.workspaceService().deleteWorkspace(context.Background(), workspaceID)
+	if err != nil {
+		return nil, err
 	}
-	a.stopWorkspaceSessions(ws.ID, "workspace deleted")
-	if terminals := a.terminalManager(); terminals != nil {
-		terminals.closeWorkspace(context.Background(), ws.ID, "workspace_deleted")
-	}
-	if ws.Target == "ssh" {
-		a.ssh.disconnect(ws)
-	}
-	a.store.deleteWorkspace(workspaceID)
-	a.emit(AstralEvent{WorkspaceID: ws.ID, Agent: ws.Agent, Kind: "workspace.removed", Normalized: map[string]any{"workspace_id": ws.ID}})
-	return map[string]any{"ok": true}, nil
+	return map[string]any{"ok": result.OK}, nil
 }
 
 func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +99,33 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "native-sessions" && r.Method == http.MethodGet {
+		if _, ok := a.store.getWorkspace(parts[0]); !ok {
+			writeActionError(w, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found"))
+			return
+		}
+		writeJSON(w, http.StatusOK, nativeSessionListResponse{Sessions: a.store.listNativeSessionCandidates(parts[0])})
+		return
+	}
+	if len(parts) == 3 && parts[1] == "native-sessions" && parts[2] == "import" && r.Method == http.MethodPost {
+		if _, ok := a.store.getWorkspace(parts[0]); !ok {
+			writeActionError(w, newActionError(http.StatusNotFound, "workspace_not_found", "workspace not found"))
+			return
+		}
+		var req importNativeSessionRequest
+		if err := decodeJSON(r.Body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		session, err := a.store.importNativeSession(parts[0], req.SessionID)
+		if err != nil {
+			writeActionError(w, newActionError(http.StatusNotFound, "native_session_not_found", err.Error()))
+			return
+		}
+		a.emit(AstralEvent{WorkspaceID: session.WorkspaceID, SessionID: session.ID, Agent: session.Agent, Kind: "session.started", Normalized: eventNormalized("session.started", session)})
+		writeJSON(w, http.StatusOK, importNativeSessionResponse{Session: session})
 		return
 	}
 	if len(parts) == 2 && parts[1] == "files" && r.Method == http.MethodGet {
@@ -128,7 +143,7 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
 			return
 		}
-		open, err := a.terminalManager().open(r.Context(), a.store.hostInfo().Identity.DeviceID, terminalOpenParams{WorkspaceID: ws.ID, Cols: defaultTerminalCols, Rows: defaultTerminalRows})
+		open, err := a.terminalService().OpenLegacyWorkspace(r.Context(), protocol.WorkspaceReferenceParams{WorkspaceID: ws.ID})
 		if err != nil {
 			writeActionError(w, err)
 			return
@@ -142,12 +157,7 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
 			return
 		}
-		open, ok := a.terminalManager().openTerminalResult(parts[2])
-		if !ok || open.WorkspaceID != ws.ID {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "terminal not found"})
-			return
-		}
-		closed, err := a.terminalManager().close(r.Context(), a.store.hostInfo().Identity.DeviceID, terminalCloseParams{TerminalID: parts[2]})
+		closed, err := a.terminalService().CloseLegacyWorkspace(r.Context(), ws.ID, parts[2])
 		if err != nil {
 			writeActionError(w, err)
 			return
@@ -186,7 +196,7 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
 			return
 		}
-		writeJSON(w, http.StatusOK, a.ssh.getConnection(ws))
+		writeJSON(w, http.StatusOK, a.sshService().Connection(r.Context(), ws))
 		return
 	}
 	if len(parts) == 2 && parts[1] == "connect" && r.Method == http.MethodPost {
@@ -197,7 +207,7 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 		defer cancel()
-		state, err := a.ssh.connect(ctx, ws)
+		state, err := a.sshService().Connect(ctx, ws)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "connection": state})
 			return
@@ -211,7 +221,7 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
 			return
 		}
-		writeJSON(w, http.StatusOK, a.ssh.disconnect(ws))
+		writeJSON(w, http.StatusOK, a.sshService().Disconnect(r.Context(), ws))
 		return
 	}
 	if len(parts) == 2 && parts[1] == "claude-remote-tool" && r.Method == http.MethodPost {
@@ -227,29 +237,28 @@ func (a *app) handleWorkspaceAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleWorkspaceFiles(w http.ResponseWriter, ws Workspace, queryPath string) {
-	if ws.Target == "ssh" {
-		a.handleRemoteWorkspaceFiles(w, ws, queryPath)
+	result, err := a.legacyWorkspaceFilesResult(context.Background(), ws, queryPath)
+	if err != nil {
+		writeLegacyWorkspaceError(w, err)
 		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *app) legacyWorkspaceFilesResult(ctx context.Context, ws Workspace, queryPath string) (ports.LegacyWorkspaceFilesResult, error) {
+	if ws.Target == "ssh" {
+		return a.legacyRemoteWorkspaceFilesResult(ctx, ws, queryPath)
 	}
 	root := filepath.Clean(ws.LocalCWD)
 	target, rel, err := resolveWorkspacePath(root, queryPath)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
+		return ports.LegacyWorkspaceFilesResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
 	}
 	entries, err := os.ReadDir(target)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
+		return ports.LegacyWorkspaceFilesResult{}, newActionError(http.StatusBadRequest, "workspace_files_read_failed", err.Error())
 	}
-	type fileEntry struct {
-		Name    string `json:"name"`
-		Path    string `json:"path"`
-		Kind    string `json:"kind"`
-		Size    int64  `json:"size,omitempty"`
-		ModTime string `json:"mod_time,omitempty"`
-	}
-	out := make([]fileEntry, 0, len(entries))
+	out := make([]ports.LegacyWorkspaceFileEntry, 0, len(entries))
 	for _, entry := range entries {
 		info, err := entry.Info()
 		if err != nil {
@@ -263,7 +272,7 @@ func (a *app) handleWorkspaceFiles(w http.ResponseWriter, ws Workspace, queryPat
 		if rel != "" {
 			entryRel = filepath.ToSlash(filepath.Join(rel, entry.Name()))
 		}
-		out = append(out, fileEntry{
+		out = append(out, ports.LegacyWorkspaceFileEntry{
 			Name:    entry.Name(),
 			Path:    entryRel,
 			Kind:    kind,
@@ -280,35 +289,34 @@ func (a *app) handleWorkspaceFiles(w http.ResponseWriter, ws Workspace, queryPat
 	if len(out) > 300 {
 		out = out[:300]
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"path":    rel,
-		"root":    root,
-		"entries": out,
-	})
+	return ports.LegacyWorkspaceFilesResult{Path: rel, Root: root, Entries: out}, nil
 }
 
 func (a *app) handleRemoteWorkspaceFiles(w http.ResponseWriter, ws Workspace, queryPath string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	result, err := a.legacyRemoteWorkspaceFilesResult(context.Background(), ws, queryPath)
+	if err != nil {
+		writeLegacyWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *app) legacyRemoteWorkspaceFilesResult(ctx context.Context, ws Workspace, queryPath string) (ports.LegacyWorkspaceFilesResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	root := remotePathClean(ws.SSH.RemoteCWD)
 	target, rel, err := resolveRemoteWorkspacePath(root, queryPath)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
+		return ports.LegacyWorkspaceFilesResult{}, newActionError(http.StatusBadRequest, "workspace_path_invalid", err.Error())
 	}
 	var raw []map[string]any
-	if err := a.ssh.call(ctx, ws, "list", map[string]any{"path": target}, &raw); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
+	if err := a.sshService().Call(ctx, ws, "list", map[string]any{"path": target}, &raw); err != nil {
+		return ports.LegacyWorkspaceFilesResult{}, newActionError(http.StatusBadRequest, "workspace_files_read_failed", err.Error())
 	}
-	type fileEntry struct {
-		Name    string `json:"name"`
-		Path    string `json:"path"`
-		Kind    string `json:"kind"`
-		Size    int64  `json:"size,omitempty"`
-		ModTime string `json:"mod_time,omitempty"`
-	}
-	out := make([]fileEntry, 0, len(raw))
+	out := make([]ports.LegacyWorkspaceFileEntry, 0, len(raw))
 	for _, entry := range raw {
 		name := stringValue(entry["name"])
 		path := stringValue(entry["path"])
@@ -320,7 +328,7 @@ func (a *app) handleRemoteWorkspaceFiles(w http.ResponseWriter, ws Workspace, qu
 		if boolValue(entry["is_dir"]) {
 			kind = "dir"
 		}
-		out = append(out, fileEntry{
+		out = append(out, ports.LegacyWorkspaceFileEntry{
 			Name:    name,
 			Path:    entryRel,
 			Kind:    kind,
@@ -337,18 +345,25 @@ func (a *app) handleRemoteWorkspaceFiles(w http.ResponseWriter, ws Workspace, qu
 	if len(out) > 300 {
 		out = out[:300]
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"path": rel, "root": root, "entries": out})
+	return ports.LegacyWorkspaceFilesResult{Path: rel, Root: root, Entries: out}, nil
 }
 
 func (a *app) handleWorkspaceExec(parent context.Context, w http.ResponseWriter, ws Workspace, command string) {
-	if ws.Target == "ssh" {
-		a.handleRemoteWorkspaceExec(parent, w, ws, command)
+	out, err := a.legacyWorkspaceExecResult(parent, ws, command)
+	if err != nil {
+		writeLegacyWorkspaceError(w, err)
 		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *app) legacyWorkspaceExecResult(parent context.Context, ws Workspace, command string) (map[string]any, error) {
+	if ws.Target == "ssh" {
+		return a.legacyRemoteWorkspaceExecResult(parent, ws, command)
 	}
 	command = strings.TrimSpace(command)
 	if command == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is required"})
-		return
+		return nil, newActionError(http.StatusBadRequest, "workspace_exec_command_required", "command is required")
 	}
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
@@ -370,30 +385,46 @@ func (a *app) handleWorkspaceExec(parent context.Context, w http.ResponseWriter,
 			exitCode = 124
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"command":     command,
 		"cwd":         ws.LocalCWD,
 		"exit_code":   exitCode,
 		"stdout":      stdout.String(),
 		"stderr":      stderr.String(),
 		"duration_ms": time.Since(start).Milliseconds(),
-	})
+	}, nil
 }
 
 func (a *app) handleRemoteWorkspaceExec(parent context.Context, w http.ResponseWriter, ws Workspace, command string) {
+	out, err := a.legacyRemoteWorkspaceExecResult(parent, ws, command)
+	if err != nil {
+		writeLegacyWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *app) legacyRemoteWorkspaceExecResult(parent context.Context, ws Workspace, command string) (map[string]any, error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is required"})
-		return
+		return nil, newActionError(http.StatusBadRequest, "workspace_exec_command_required", "command is required")
 	}
 	ctx, cancel := context.WithTimeout(parent, 70*time.Second)
 	defer cancel()
 	out, err := a.runRemoteWorkspaceExec(ctx, ws, command)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
+		return nil, newActionError(http.StatusBadRequest, "workspace_exec_failed", err.Error())
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out, nil
+}
+
+func writeLegacyWorkspaceError(w http.ResponseWriter, err error) {
+	controlErr := protocol.ControlErrorFromError(err)
+	status := controlErr.Status
+	if status == 0 {
+		status = http.StatusBadRequest
+	}
+	writeJSON(w, status, map[string]string{"error": controlErr.Message})
 }
 
 func (a *app) runRemoteWorkspaceExec(ctx context.Context, ws Workspace, command string) (map[string]any, error) {
@@ -408,7 +439,7 @@ func (a *app) runRemoteWorkspaceExecAt(ctx context.Context, ws Workspace, comman
 		timeoutMs = 60000
 	}
 	execID := "workspace_exec_" + randomID(12)
-	proxy, events, unsubscribe, _, err := a.ssh.startExec(ctx, ws, execID, map[string]any{"cwd": cwd, "command": command, "timeout_ms": timeoutMs})
+	events, unsubscribe, _, err := a.sshService().StartExec(ctx, ws, execID, map[string]any{"cwd": cwd, "command": command, "timeout_ms": timeoutMs})
 	if err != nil {
 		return nil, err
 	}
@@ -437,7 +468,7 @@ func (a *app) runRemoteWorkspaceExecAt(ctx context.Context, ws Workspace, comman
 			return out, nil
 		case <-ctx.Done():
 			killCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = proxy.call(killCtx, "exec_kill", map[string]any{"id": execID}, nil)
+			_ = a.sshService().Call(killCtx, ws, "exec_kill", map[string]any{"id": execID}, nil)
 			cancel()
 			return nil, ctx.Err()
 		}
@@ -467,12 +498,12 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 	defer conn.Close()
 
 	controllerID := a.store.hostInfo().Identity.DeviceID
-	terminals := a.terminalManager()
+	terminals := a.terminalService()
 	terminalID := strings.TrimSpace(r.URL.Query().Get("terminal_id"))
 	afterSeq, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
 	open, ok := terminalOpenResult{}, false
 	if terminalID != "" {
-		open, ok = terminals.openTerminalResult(terminalID)
+		open, ok = terminals.OpenResult(r.Context(), terminalID)
 		if !ok || open.WorkspaceID != ws.ID {
 			_ = conn.WriteJSON(map[string]any{"type": "error", "message": "terminal not found"})
 			return
@@ -480,7 +511,7 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 	}
 	if !ok {
 		var err error
-		open, err = terminals.open(r.Context(), controllerID, terminalOpenParams{WorkspaceID: ws.ID, Cols: defaultTerminalCols, Rows: defaultTerminalRows})
+		open, err = terminals.OpenForController(r.Context(), controllerID, terminalOpenParams{WorkspaceID: ws.ID, Cols: defaultTerminalCols, Rows: defaultTerminalRows})
 		if err != nil {
 			_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 			return
@@ -489,14 +520,14 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	localControl := newLocalPTYControlConnection(ctx, cancel, controllerID, conn)
-	attach, err := terminals.attach(controllerID, localControl, terminalAttachParams{TerminalID: open.TerminalID, AfterSeq: afterSeq})
+	attach, err := terminals.AttachForController(r.Context(), controllerID, localControl, terminalAttachParams{TerminalID: open.TerminalID, AfterSeq: afterSeq})
 	if err != nil {
 		_ = conn.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
 	_ = localControl.writeJSON(terminalReadySocketPayload(open.TerminalID, open.Shell, open.CWD, attach.OutputSeq, attach.ViewerID, attach.InputLeaseID, attach.CanInput))
 	defer func() {
-		_, _ = terminals.detach(controllerID, localControl, terminalDetachParams{TerminalID: open.TerminalID})
+		_, _ = terminals.DetachForController(context.Background(), controllerID, localControl, terminalDetachParams{TerminalID: open.TerminalID})
 	}()
 
 	for {
@@ -511,21 +542,21 @@ func (a *app) handleWorkspacePTY(w http.ResponseWriter, r *http.Request, ws Work
 		}
 		switch message.Type {
 		case "input":
-			if _, err := terminals.input(r.Context(), controllerID, terminalInputParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, Data: message.Data}); err != nil {
+			if _, err := terminals.InputForController(r.Context(), controllerID, terminalInputParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, Data: message.Data}); err != nil {
 				_ = localControl.writeJSON(terminalSocketErrorPayload(err))
 			}
 		case "resize":
 			if message.Cols > 0 && message.Rows > 0 {
-				if _, err := terminals.resize(r.Context(), controllerID, terminalResizeParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, Cols: message.Cols, Rows: message.Rows}); err != nil {
+				if _, err := terminals.ResizeForController(r.Context(), controllerID, terminalResizeParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, Cols: message.Cols, Rows: message.Rows}); err != nil {
 					_ = localControl.writeJSON(terminalSocketErrorPayload(err))
 				}
 			}
 		case "heartbeat_ack":
-			if ack, err := terminals.heartbeatAck(controllerID, terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: message.HeartbeatSeq, RenderedSeq: message.RenderedSeq}); err == nil {
+			if ack, err := terminals.HeartbeatAckForController(r.Context(), controllerID, terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: message.HeartbeatSeq, RenderedSeq: message.RenderedSeq}); err == nil {
 				_ = localControl.writeJSON(map[string]any{"type": "status", "terminal_id": ack.TerminalID, "state": "live", "can_input": ack.CanInput, "output_seq": ack.OutputSeq})
 			}
 		case "close":
-			_, _ = terminals.close(r.Context(), controllerID, terminalCloseParams{TerminalID: open.TerminalID})
+			_, _ = terminals.CloseForController(r.Context(), controllerID, terminalCloseParams{TerminalID: open.TerminalID})
 			return
 		case "detach":
 			return
@@ -559,6 +590,10 @@ func (c *localPTYControlConnection) connectionID() string {
 	return c.id
 }
 
+func (c *localPTYControlConnection) ConnectionID() string {
+	return c.connectionID()
+}
+
 func (c *localPTYControlConnection) controllerID() string {
 	if c == nil {
 		return ""
@@ -566,11 +601,19 @@ func (c *localPTYControlConnection) controllerID() string {
 	return c.controllerDeviceID
 }
 
+func (c *localPTYControlConnection) ControllerID() string {
+	return c.controllerID()
+}
+
 func (c *localPTYControlConnection) requestContext() context.Context {
 	if c == nil || c.ctx == nil {
 		return context.Background()
 	}
 	return c.ctx
+}
+
+func (c *localPTYControlConnection) RequestContext() context.Context {
+	return c.requestContext()
 }
 
 func (c *localPTYControlConnection) writePlain(frame controlPlainFrame) {
@@ -598,6 +641,25 @@ func (c *localPTYControlConnection) writePlain(frame controlPlainFrame) {
 			_ = c.writeJSON(terminalControlResponseErrorPayload(*frame.Response))
 		}
 	}
+}
+
+func (c *localPTYControlConnection) WriteTerminalFrame(frameType string, frame any) {
+	payload, _ := frame.(terminalStreamFrame)
+	c.writePlain(controlPlainFrame{Type: frameType, Terminal: &payload})
+}
+
+func (c *localPTYControlConnection) WriteTerminalError(code string, message string) {
+	c.writePlain(controlPlainFrame{
+		Type: "response",
+		Response: &ControlResponse{
+			OK: false,
+			Error: &ControlError{
+				Status:  http.StatusServiceUnavailable,
+				Code:    ControlErrorCode(code),
+				Message: message,
+			},
+		},
+	})
 }
 
 func (c *localPTYControlConnection) writeJSON(payload any) error {
@@ -651,6 +713,10 @@ func (c *localPTYControlConnection) terminateControlConnection(code, reason stri
 	if c.socket != nil {
 		_ = c.socket.Close()
 	}
+}
+
+func (c *localPTYControlConnection) TerminateTerminalConnection(code string, reason string) {
+	c.terminateControlConnection(code, reason)
 }
 
 func resolveWorkspacePath(root, queryPath string) (string, string, error) {
@@ -717,6 +783,18 @@ type createSessionRequest struct {
 	Agent       AgentKind `json:"agent,omitempty"`
 }
 
+type nativeSessionListResponse struct {
+	Sessions []Session `json:"sessions"`
+}
+
+type importNativeSessionRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+type importNativeSessionResponse struct {
+	Session Session `json:"session"`
+}
+
 func (a *app) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, a.store.listSessions(r.URL.Query().Get("workspace_id")))
@@ -731,7 +809,7 @@ func (a *app) handleSessions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	ss, err := a.sessions().createSession(req)
+	ss, err := a.createSession(req)
 	if err != nil {
 		writeActionError(w, err)
 		return
@@ -742,7 +820,7 @@ func (a *app) handleSessions(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/sessions/"), "/")
 	if len(parts) == 1 && r.Method == http.MethodDelete {
-		if _, err := a.sessions().deleteSessionByID(parts[0]); err != nil {
+		if _, err := a.deleteSessionByID(parts[0]); err != nil {
 			writeActionError(w, err)
 			return
 		}
@@ -798,10 +876,10 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 	case action == "interrupt" && r.Method == http.MethodPost:
 		a.handleSessionInterrupt(w, sessionID)
 	case action == "queue" && len(parts) == 4 && parts[3] == "cancel" && r.Method == http.MethodPost:
-		a.sessions().cancelQueuedTurn(sessionID, parts[2])
+		a.sessionControlPlane().CancelQueuedTurn(sessionID, parts[2])
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case action == "queue" && len(parts) == 4 && parts[3] == "steer" && r.Method == http.MethodPost:
-		if err := a.sessions().steerQueuedTurn(sessionID, parts[2]); err != nil {
+		if err := a.sessionControlPlane().SteerQueuedTurn(sessionID, parts[2]); err != nil {
 			status := http.StatusConflict
 			if err.Error() == "session not found" {
 				status = http.StatusNotFound
@@ -819,7 +897,7 @@ func (a *app) handleSessionAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleSessionInput(w http.ResponseWriter, sessionID, input string, options TurnOptions) {
-	result, err := a.sessions().startSessionInput(sessionID, input, options)
+	result, err := a.startSessionInput(sessionID, input, options)
 	if err != nil {
 		writeActionError(w, err)
 		return
@@ -828,7 +906,7 @@ func (a *app) handleSessionInput(w http.ResponseWriter, sessionID, input string,
 }
 
 func (a *app) handleSessionInterrupt(w http.ResponseWriter, sessionID string) {
-	result, err := a.sessions().interruptSession(sessionID)
+	result, err := a.interruptSession(sessionID)
 	if err != nil {
 		writeActionError(w, err)
 		return
@@ -848,7 +926,7 @@ func (a *app) handleEvents(w http.ResponseWriter, r *http.Request) {
 	afterSeq, _ := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
 	beforeSeq, _ := strconv.ParseInt(r.URL.Query().Get("before_seq"), 10, 64)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	events := a.store.queryEventsWindow(r.URL.Query().Get("workspace_id"), r.URL.Query().Get("session_id"), afterSeq, beforeSeq, limit)
+	events := a.sessionProjections().QueryEventsWindow(r.URL.Query().Get("workspace_id"), r.URL.Query().Get("session_id"), afterSeq, beforeSeq, limit)
 	writeJSON(w, http.StatusOK, events)
 }
 
@@ -882,7 +960,7 @@ func (a *app) handleEventsSSE(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("session_id")
 
 	writeSSE(w, flusher, "heartbeat", map[string]any{"ts": time.Now().UTC().Format(time.RFC3339Nano)})
-	for _, ev := range a.store.queryEvents(workspaceID, sessionID, afterSeq) {
+	for _, ev := range a.eventStreamReplayEvents(workspaceID, sessionID, afterSeq) {
 		writeSSE(w, flusher, "astral-event", ev)
 	}
 
@@ -913,6 +991,24 @@ func (a *app) handleEventsSSE(w http.ResponseWriter, r *http.Request) {
 			writeSSE(w, flusher, "astral-event", ev)
 		}
 	}
+}
+
+func (a *app) eventStreamReplayEvents(workspaceID, sessionID string, afterSeq int64) []AstralEvent {
+	if workspaceID != "" || sessionID != "" {
+		return a.sessionProjections().QueryEvents(workspaceID, sessionID, afterSeq)
+	}
+	out := []AstralEvent{}
+	out = append(out, a.store.runtimeEventsSnapshot()...)
+	out = append(out, a.store.overlayEventsSnapshot("")...)
+	out = append(out, a.store.controlEventsSnapshot()...)
+	out = filterEvents(dedupeProjectedEvents(out), "", "", afterSeq, 0)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Seq == out[j].Seq {
+			return out[i].TS < out[j].TS
+		}
+		return out[i].Seq < out[j].Seq
+	})
+	return out
 }
 
 func writeSSE(w io.Writer, flusher http.Flusher, name string, payload any) {

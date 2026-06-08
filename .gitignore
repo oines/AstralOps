@@ -6,6 +6,7 @@ build/
 coverage/
 tmp/
 release/
+.cache/
 daemon/astralopsd
 proxy-agent/astral-proxy-agent
 
@@ -17,6 +18,9 @@ proxy-agent/astral-proxy-agent
 .npmrc.local
 .vercel/
 apps/mobile/.expo/
+apps/ios/Frameworks/
+apps/ios/Resources/terminal-*.html
+apps/ios/Resources/transcript-*.html
 secrets/
 credentials/
 private/

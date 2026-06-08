@@ -101,22 +101,24 @@ func (a *app) approvePairingRequest(requestID string) (pairingRequestResolveResu
 	}
 	a.emit(AstralEvent{
 		Kind: "control.trust.granted",
-		Normalized: map[string]any{
-			"host_device_id":       grant.HostDeviceID,
-			"controller_device_id": grant.ControllerDeviceID,
-			"scope":                grant.Scope,
-			"capabilities":         grant.Capabilities,
-			"pairing_request_id":   request.RequestID,
-		},
+		Normalized: eventNormalized("control.trust.granted",
+			map[string]any{
+				"host_device_id":       grant.HostDeviceID,
+				"controller_device_id": grant.ControllerDeviceID,
+				"scope":                grant.Scope,
+				"capabilities":         grant.Capabilities,
+				"pairing_request_id":   request.RequestID,
+			}),
 	})
 	a.emit(AstralEvent{
 		Kind: "control.pairing.approved",
-		Normalized: map[string]any{
-			"request_id":           request.RequestID,
-			"host_device_id":       request.HostDeviceID,
-			"controller_device_id": request.ControllerDeviceID,
-			"status":               request.Status,
-		},
+		Normalized: eventNormalized("control.pairing.approved",
+			map[string]any{
+				"request_id":           request.RequestID,
+				"host_device_id":       request.HostDeviceID,
+				"controller_device_id": request.ControllerDeviceID,
+				"status":               request.Status,
+			}),
 	})
 	a.syncCloudPairingResolution(request)
 	return pairingRequestResolveResult{Request: request, Grant: &grant}, nil
@@ -129,12 +131,13 @@ func (a *app) denyPairingRequest(requestID string) (pairingRequestResolveResult,
 	}
 	a.emit(AstralEvent{
 		Kind: "control.pairing.denied",
-		Normalized: map[string]any{
-			"request_id":           request.RequestID,
-			"host_device_id":       request.HostDeviceID,
-			"controller_device_id": request.ControllerDeviceID,
-			"status":               request.Status,
-		},
+		Normalized: eventNormalized("control.pairing.denied",
+			map[string]any{
+				"request_id":           request.RequestID,
+				"host_device_id":       request.HostDeviceID,
+				"controller_device_id": request.ControllerDeviceID,
+				"status":               request.Status,
+			}),
 	})
 	a.syncCloudPairingResolution(request)
 	return pairingRequestResolveResult{Request: request}, nil
@@ -159,8 +162,9 @@ func (a *app) emitPairingRequested(request PairingRequest) {
 		normalized["cloud_request_id"] = request.CloudRequestID
 	}
 	a.emit(AstralEvent{
-		Kind:       "control.pairing.requested",
-		Normalized: normalized,
+		Kind: "control.pairing.requested",
+		Normalized: eventNormalized("control.pairing.requested",
+			normalized),
 	})
 }
 

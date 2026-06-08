@@ -3,23 +3,15 @@ package main
 import (
 	"net/http"
 	"strings"
+
+	"github.com/oines/astralops/pkg/protocol"
 )
 
-type hostTrustListResult struct {
-	Grants []TrustGrant `json:"grants"`
-}
+type hostTrustListResult = protocol.HostTrustListResult
 
-type hostTrustRevokeParams struct {
-	ControllerDeviceID string `json:"controller_device_id"`
-}
+type hostTrustRevokeParams = protocol.HostTrustRevokeParams
 
-type hostTrustRevokeResult struct {
-	ControllerDeviceID      string     `json:"controller_device_id"`
-	Grant                   TrustGrant `json:"grant"`
-	ClosedControlSessions   int        `json:"closed_control_sessions"`
-	ReleasedTerminalWriters int        `json:"released_terminal_writers"`
-	RevokedAt               string     `json:"revoked_at,omitempty"`
-}
+type hostTrustRevokeResult = protocol.HostTrustRevokeResult
 
 func (a *app) handleHost(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -46,12 +38,13 @@ func (a *app) handleTrustDevices(w http.ResponseWriter, r *http.Request) {
 		}
 		a.emit(AstralEvent{
 			Kind: "control.trust.granted",
-			Normalized: map[string]any{
-				"host_device_id":       grant.HostDeviceID,
-				"controller_device_id": grant.ControllerDeviceID,
-				"scope":                grant.Scope,
-				"capabilities":         grant.Capabilities,
-			},
+			Normalized: eventNormalized("control.trust.granted",
+				map[string]any{
+					"host_device_id":       grant.HostDeviceID,
+					"controller_device_id": grant.ControllerDeviceID,
+					"scope":                grant.Scope,
+					"capabilities":         grant.Capabilities,
+				}),
 		})
 		writeJSON(w, http.StatusCreated, grant)
 	default:
@@ -87,12 +80,13 @@ func (a *app) revokeTrustedControlDevice(controllerDeviceID, exceptConnectionID 
 	releasedWriters := a.releaseTerminalWritersForDevice(grant.ControllerDeviceID)
 	a.emit(AstralEvent{
 		Kind: "control.trust.revoked",
-		Normalized: map[string]any{
-			"host_device_id":            grant.HostDeviceID,
-			"controller_device_id":      grant.ControllerDeviceID,
-			"revoked_at":                grant.RevokedAt,
-			"released_terminal_writers": releasedWriters,
-		},
+		Normalized: eventNormalized("control.trust.revoked",
+			map[string]any{
+				"host_device_id":            grant.HostDeviceID,
+				"controller_device_id":      grant.ControllerDeviceID,
+				"revoked_at":                grant.RevokedAt,
+				"released_terminal_writers": releasedWriters,
+			}),
 	})
 	return hostTrustRevokeResult{
 		ControllerDeviceID:      grant.ControllerDeviceID,

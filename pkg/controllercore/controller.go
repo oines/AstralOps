@@ -51,7 +51,7 @@ func (c *Controller) State(hostDeviceID string) HostSessionState {
 	return HostSessionState{}
 }
 
-func (c *Controller) Request(ctx context.Context, hostDeviceID, capability, action string, params map[string]any) (ControlResponse, error) {
+func (c *Controller) Request(ctx context.Context, hostDeviceID string, capability ControlCapability, action ControlAction, params map[string]any) (ControlResponse, error) {
 	session := c.OpenHostSession(hostDeviceID)
 	if session == nil {
 		return ControlResponse{}, NewActionError(400, "remote_host_required", "remote Host device id is required")
@@ -127,7 +127,7 @@ func (s *HostSession) UpdateTerminalState(terminalID, state string, canInput boo
 	s.setTerminalState(terminalID, state, canInput, outputSeq, err)
 }
 
-func (s *HostSession) Request(ctx context.Context, capability, action string, params map[string]any) (ControlResponse, error) {
+func (s *HostSession) Request(ctx context.Context, capability ControlCapability, action ControlAction, params map[string]any) (ControlResponse, error) {
 	if s == nil || s.controller == nil || s.controller.transport == nil {
 		return ControlResponse{}, errors.New("controller transport is not initialized")
 	}
@@ -479,9 +479,9 @@ func cloneTerminalStates(values map[string]TerminalState) map[string]TerminalSta
 	return out
 }
 
-func responseActionError(response ControlResponse, action string) error {
+func responseActionError(response ControlResponse, action ControlAction) error {
 	if response.Error != nil {
-		return NewActionError(response.Error.Status, response.Error.Code, response.Error.Message)
+		return NewActionError(response.Error.Status, string(response.Error.Code), response.Error.Message)
 	}
-	return NewActionError(500, "control_action_failed", "control action failed: "+action)
+	return NewActionError(500, "control_action_failed", "control action failed: "+string(action))
 }

@@ -1,8 +1,16 @@
 package main
 
+import (
+	"context"
+	"path/filepath"
+
+	"github.com/oines/astralops/daemon/internal/eventlog"
+)
+
 func (a *app) backfillHistoricalContextEvents() error {
 	latestContext := map[string]AstralEvent{}
-	for _, ev := range a.store.allEvents() {
+	events := a.historicalBackfillEvents()
+	for _, ev := range events {
 		if ev.Kind == "control.context" {
 			latestContext[ev.SessionID] = ev
 		}
@@ -10,7 +18,6 @@ func (a *app) backfillHistoricalContextEvents() error {
 			delete(latestContext, ev.SessionID)
 		}
 	}
-	events := a.store.allEvents()
 	handled := map[string]bool{}
 	claudeAggregateFallbacks := map[string]AstralEvent{}
 	claudeAggregateOrder := []string{}
@@ -44,11 +51,10 @@ func (a *app) backfillHistoricalContextEvents() error {
 			handled[source.SessionID] = true
 			continue
 		}
-		saved, err := a.store.appendEvent(contextEvent)
+		saved, err := a.publishHistoricalBackfillEvent(contextEvent)
 		if err != nil {
 			return err
 		}
-		a.sessionProjections().apply(saved)
 		latestContext[source.SessionID] = saved
 		handled[source.SessionID] = true
 	}
@@ -61,11 +67,10 @@ func (a *app) backfillHistoricalContextEvents() error {
 			handled[sessionID] = true
 			continue
 		}
-		saved, err := a.store.appendEvent(contextEvent)
+		saved, err := a.publishHistoricalBackfillEvent(contextEvent)
 		if err != nil {
 			return err
 		}
-		a.sessionProjections().apply(saved)
 		latestContext[sessionID] = saved
 		handled[sessionID] = true
 	}
@@ -74,7 +79,8 @@ func (a *app) backfillHistoricalContextEvents() error {
 
 func (a *app) backfillHistoricalApprovalEvents() error {
 	seen := map[string]bool{}
-	for _, ev := range a.store.allEvents() {
+	events := a.historicalBackfillEvents()
+	for _, ev := range events {
 		if ev.Kind != "approval.requested" {
 			continue
 		}
@@ -82,7 +88,7 @@ func (a *app) backfillHistoricalApprovalEvents() error {
 			seen[id] = true
 		}
 	}
-	for _, source := range a.store.allEvents() {
+	for _, source := range events {
 		if source.Agent != AgentClaude {
 			continue
 		}
@@ -106,17 +112,33 @@ func (a *app) backfillHistoricalApprovalEvents() error {
 			if id == "" || seen[id] {
 				continue
 			}
-			saved, err := a.store.appendEvent(event)
+			_, err := a.publishHistoricalBackfillEvent(event)
 			if err != nil {
 				return err
 			}
-			a.sessionProjections().apply(saved)
 			for _, nextID := range ids {
 				seen[nextID] = true
 			}
 		}
 	}
 	return nil
+}
+
+func (a *app) publishHistoricalBackfillEvent(event AstralEvent) (AstralEvent, error) {
+	return eventlog.New(eventlog.Options{
+		Store:       a.store,
+		Projections: a.sessionProjections(),
+		Diagnostics: logDiagnosticEvent,
+	}).Publish(context.Background(), event)
+}
+
+func (a *app) historicalBackfillEvents() []AstralEvent {
+	if a == nil || a.store == nil {
+		return nil
+	}
+	events := a.sessionProjections().QueryEvents("", "", 0)
+	legacy, _ := (legacyMigrationReader{dir: filepath.Join(a.store.dataDir, "events")}).Read()
+	return append(events, legacy...)
 }
 
 func (a *app) contextEventFromHistoricalRaw(source AstralEvent) (AstralEvent, bool) {
@@ -194,7 +216,7 @@ func hydrateHistoricalCurrentContext(candidate AstralEvent, source AstralEvent) 
 		"cumulative_cache_creation_input_tokens",
 	})
 	refreshProjectedContextPercent(next)
-	candidate.Normalized = next
+	candidate.Normalized = eventNormalized(candidate.Kind, next)
 	return candidate
 }
 

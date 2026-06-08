@@ -84,7 +84,7 @@ func (a *app) streamControlEvents(ctx context.Context, result eventSubscriptionR
 
 	latestSeq := result.AfterSeq
 	if result.ReplayLimit > 0 {
-		for _, event := range a.store.queryEventsWindow(result.WorkspaceID, result.SessionID, result.AfterSeq, 0, result.ReplayLimit) {
+		for _, event := range a.sessionProjections().QueryEventsWindow(result.WorkspaceID, result.SessionID, result.AfterSeq, 0, result.ReplayLimit) {
 			if event.Seq > latestSeq {
 				latestSeq = event.Seq
 			}

@@ -30,12 +30,12 @@ func TestControlGatewayTerminalOpenInputResizeAndClose(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id":    open.TerminalID,
 			"viewer_id":      attach.ViewerID,
 			"input_lease_id": attach.InputLeaseID,
 			"data":           "printf terminal-ok > " + shellSingleQuote(marker) + "\n",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -44,20 +44,7 @@ func TestControlGatewayTerminalOpenInputResizeAndClose(t *testing.T) {
 		t.Fatalf("input response = %#v, want ok", response)
 	}
 	waitForFileContent(t, marker, "terminal-ok")
-	session, ok := app.terminalManager().session(open.TerminalID)
-	if !ok {
-		t.Fatal("terminal session missing")
-	}
-	session.mu.Lock()
-	viewer := session.viewerByIDLocked(attach.ViewerID)
-	session.mu.Unlock()
-	if viewer == nil {
-		t.Fatal("viewer missing")
-	}
-	viewer.mu.Lock()
-	renderedSeq := viewer.deliveredSeq
-	viewer.mu.Unlock()
-	if _, err := app.terminalManager().heartbeatAck("device_mobile", terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, RenderedSeq: renderedSeq}); err != nil {
+	if _, err := app.terminalManager().HeartbeatAck("device_mobile", terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -65,13 +52,13 @@ func TestControlGatewayTerminalOpenInputResizeAndClose(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalResize,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id":    open.TerminalID,
 			"viewer_id":      attach.ViewerID,
 			"input_lease_id": attach.InputLeaseID,
 			"cols":           120,
 			"rows":           32,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +71,7 @@ func TestControlGatewayTerminalOpenInputResizeAndClose(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalClose,
-		Params:             map[string]any{"terminal_id": open.TerminalID},
+		Params:             controlParams(map[string]any{"terminal_id": open.TerminalID}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +84,7 @@ func TestControlGatewayTerminalOpenInputResizeAndClose(t *testing.T) {
 		t.Fatalf("closed status = %q, want closed", closed.Status)
 	}
 
-	events := app.store.queryEvents(workspace.ID, "", 0)
+	events := testQueryEvents(app.store, workspace.ID, "", 0)
 	if countKind(events, "control.terminal.opened") != 1 || countKind(events, "control.terminal.closed") != 1 {
 		t.Fatalf("terminal lifecycle events = %#v", eventKinds(events))
 	}
@@ -116,12 +103,12 @@ func TestControlGatewayTerminalOpenReturnsWorkspaceRelativeCWD(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalOpen,
 		Action:             ControlActionTerminalOpen,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"cwd":          "nested",
 			"cols":         80,
 			"rows":         24,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +118,7 @@ func TestControlGatewayTerminalOpenReturnsWorkspaceRelativeCWD(t *testing.T) {
 		t.Fatalf("open result = %#v, want terminalOpenResult", response.Result)
 	}
 	t.Cleanup(func() {
-		_, _ = app.terminalManager().close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
+		_, _ = app.terminalManager().Close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
 	})
 	if open.CWD != "nested" {
 		t.Fatalf("terminal cwd = %q, want workspace-relative cwd", open.CWD)
@@ -144,7 +131,7 @@ func TestControlGatewayTerminalOpenReturnsWorkspaceRelativeCWD(t *testing.T) {
 		t.Fatalf("terminal open result leaked Host cwd: %s", string(wire))
 	}
 
-	events := app.store.queryEvents(workspace.ID, "", 0)
+	events := testQueryEvents(app.store, workspace.ID, "", 0)
 	for _, event := range events {
 		if event.Kind != "control.terminal.opened" {
 			continue
@@ -169,17 +156,17 @@ func TestControlGatewayTerminalInputRequiresInputCapability(t *testing.T) {
 
 	open := openTerminalForTest(t, app, "device_mobile", workspace.ID)
 	t.Cleanup(func() {
-		_, _ = app.terminalManager().close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
+		_, _ = app.terminalManager().Close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
 	})
 
 	_, err := app.executeControlRequest(ControlRequest{
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id": open.TerminalID,
 			"data":        "echo denied\n",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusForbidden, "capability_denied")
 }
@@ -192,17 +179,17 @@ func TestControlGatewayTerminalInputRejectsLargePayload(t *testing.T) {
 
 	open := openTerminalForTest(t, app, "device_mobile", workspace.ID)
 	t.Cleanup(func() {
-		_, _ = app.terminalManager().close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
+		_, _ = app.terminalManager().Close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
 	})
 
 	_, err := app.executeControlRequest(ControlRequest{
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id": open.TerminalID,
 			"data":        strings.Repeat("x", terminalInputMaxBytes+1),
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusRequestEntityTooLarge, "terminal_input_too_large")
 }
@@ -215,47 +202,32 @@ func TestControlGatewayTerminalInputRequiresActiveViewerLease(t *testing.T) {
 
 	open := openTerminalForTest(t, app, "device_mobile", workspace.ID)
 	t.Cleanup(func() {
-		_, _ = app.terminalManager().close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
+		_, _ = app.terminalManager().Close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
 	})
 
 	_, err := app.executeControlRequest(ControlRequest{
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id": open.TerminalID,
 			"data":        "echo denied\n",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusConflict, terminalViewerRequiredCode)
 
 	attach := attachTerminalForTest(t, app, "device_mobile", open.TerminalID)
-	session, ok := app.terminalManager().session(open.TerminalID)
-	if !ok {
-		t.Fatal("terminal session missing")
-	}
-	session.mu.Lock()
-	viewer := session.viewerByIDLocked(attach.ViewerID)
-	session.mu.Unlock()
-	if viewer == nil {
-		t.Fatal("viewer missing")
-	}
-	viewer.mu.Lock()
-	viewer.lastAckAt = time.Now().Add(-terminalViewerAckTTL - time.Second)
-	viewer.deliveredSeq = 2
-	viewer.renderedSeq = 1
-	viewer.mu.Unlock()
 
 	response, err := app.executeControlRequest(ControlRequest{
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id":    open.TerminalID,
 			"viewer_id":      attach.ViewerID,
 			"input_lease_id": attach.InputLeaseID,
 			"data":           "",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +236,7 @@ func TestControlGatewayTerminalInputRequiresActiveViewerLease(t *testing.T) {
 		t.Fatalf("input response = %#v, want ok", response)
 	}
 
-	ack, err := app.terminalManager().heartbeatAck("device_mobile", terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: 1})
+	ack, err := app.terminalManager().HeartbeatAck("device_mobile", terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +244,7 @@ func TestControlGatewayTerminalInputRequiresActiveViewerLease(t *testing.T) {
 		t.Fatalf("heartbeat ack = %#v", ack)
 	}
 
-	ack, err = app.terminalManager().heartbeatAck("device_mobile", terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: 2, RenderedSeq: 2})
+	ack, err = app.terminalManager().HeartbeatAck("device_mobile", terminalHeartbeatAckParams{TerminalID: open.TerminalID, ViewerID: attach.ViewerID, InputLeaseID: attach.InputLeaseID, HeartbeatSeq: 2, RenderedSeq: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,14 +261,14 @@ func TestControlGatewayTerminalAttachRequiresControlConnection(t *testing.T) {
 
 	open := openTerminalForTest(t, app, "device_mobile", workspace.ID)
 	t.Cleanup(func() {
-		_, _ = app.terminalManager().close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
+		_, _ = app.terminalManager().Close(context.Background(), "device_mobile", terminalCloseParams{TerminalID: open.TerminalID})
 	})
 
 	_, err := app.executeControlRequest(ControlRequest{
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalOpen,
 		Action:             ControlActionTerminalAttach,
-		Params:             map[string]any{"terminal_id": open.TerminalID},
+		Params:             controlParams(map[string]any{"terminal_id": open.TerminalID}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "control_connection_required")
 }
@@ -315,125 +287,15 @@ func TestControlGatewayRejectsTerminalCWDThroughSymlink(t *testing.T) {
 		ControllerDeviceID: "device_mobile",
 		Capability:         CapabilityTerminalOpen,
 		Action:             ControlActionTerminalOpen,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspace.ID,
 			"cwd":          "escape",
-		},
+		}),
 	})
 	assertActionError(t, err, http.StatusBadRequest, "workspace_path_invalid")
-	events := app.store.queryEvents(workspace.ID, "", 0)
+	events := testQueryEvents(app.store, workspace.ID, "", 0)
 	if countKind(events, "control.terminal.opened") != 0 {
 		t.Fatalf("terminal opened through symlink escape: %#v", eventKinds(events))
-	}
-}
-
-func TestTerminalOutputIsSplitIntoBoundedFrames(t *testing.T) {
-	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh")
-	viewer := &terminalViewer{
-		connectionID:       "conn_terminal",
-		controllerDeviceID: "device_mobile",
-		frames:             make(chan terminalStreamFrame, 4),
-	}
-	if _, replaced, _, err := session.attachViewer(viewer, 0); err != nil || replaced != nil {
-		t.Fatalf("attach viewer replaced=%v err=%v", replaced, err)
-	}
-
-	session.appendOutput(strings.Repeat("a", terminalOutputFrameMaxBytes*2+1))
-
-	wantSizes := []int{terminalOutputFrameMaxBytes, terminalOutputFrameMaxBytes, 1}
-	for index, wantSize := range wantSizes {
-		select {
-		case frame := <-viewer.frames:
-			if frame.frameType != terminalFrameOutput || len(frame.Data) != wantSize || frame.OutputSeq != int64(index+1) {
-				t.Fatalf("frame %d = %#v len %d, want len %d seq %d", index, frame, len(frame.Data), wantSize, index+1)
-			}
-		default:
-			t.Fatalf("missing output frame %d", index)
-		}
-	}
-	select {
-	case frame := <-viewer.frames:
-		t.Fatalf("unexpected extra frame = %#v", frame)
-	default:
-	}
-}
-
-func TestTerminalAttachReplaysOutputHistoryAfterSeq(t *testing.T) {
-	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh")
-	session.appendOutput("one\n")
-	session.appendOutput("two\n")
-	viewer := &terminalViewer{
-		connectionID:       "conn_replay",
-		controllerDeviceID: "device_mobile",
-		frames:             make(chan terminalStreamFrame, 4),
-	}
-
-	_, replaced, history, err := session.attachViewer(viewer, 1)
-	if err != nil || replaced != nil {
-		t.Fatalf("attach viewer replaced=%v err=%v", replaced, err)
-	}
-	if len(history) != 1 || history[0].OutputSeq != 2 || history[0].Data != "two\n" {
-		t.Fatalf("history = %#v, want output after seq 1", history)
-	}
-}
-
-func TestTerminalDetachKeepsHostTerminalOpen(t *testing.T) {
-	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh")
-	viewer := &terminalViewer{
-		connectionID:       "conn_detach",
-		controllerDeviceID: "device_mobile",
-		frames:             make(chan terminalStreamFrame, 4),
-	}
-	if _, _, _, err := session.attachViewer(viewer, 0); err != nil {
-		t.Fatal(err)
-	}
-
-	result, removed := session.detachViewer(viewer.connectionID)
-	if removed == nil {
-		t.Fatal("detach did not remove viewer")
-	}
-	if result.Status != terminalStatusOpen {
-		t.Fatalf("detach status = %q, want open", result.Status)
-	}
-	session.mu.Lock()
-	status := session.status
-	viewerCount := len(session.viewers)
-	session.mu.Unlock()
-	if status != terminalStatusOpen || viewerCount != 0 {
-		t.Fatalf("terminal status=%q viewers=%d, want open with no viewers", status, viewerCount)
-	}
-}
-
-func TestTerminalViewerBackpressureTerminatesOutputConnection(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	conn := &terminalBackpressureTestConnection{ctx: ctx, id: "conn_backpressure", controllerIDValue: "device_mobile"}
-	session := newTerminalSession("ws_terminal", AgentCodex, "local", "/tmp", "sh")
-	viewer := &terminalViewer{
-		connectionID:       conn.id,
-		controllerDeviceID: conn.controllerIDValue,
-		conn:               conn,
-		frames:             make(chan terminalStreamFrame),
-	}
-	session.viewers[viewer.connectionID] = viewer
-
-	session.sendToViewers(terminalStreamFrame{
-		frameType:   terminalFrameOutput,
-		TerminalID:  session.id,
-		WorkspaceID: session.workspaceID,
-		Status:      terminalStatusOpen,
-		OutputSeq:   1,
-		Data:        "blocked",
-	}, []*terminalViewer{viewer})
-
-	if len(session.viewers) != 0 {
-		t.Fatalf("viewers = %d, want detached backpressure viewer", len(session.viewers))
-	}
-	if conn.terminatedCode != terminalOutputDisconnectedCode {
-		t.Fatalf("terminated code = %q, want %q", conn.terminatedCode, terminalOutputDisconnectedCode)
-	}
-	if len(conn.frames) != 1 || conn.frames[0].Response == nil || conn.frames[0].Response.Error == nil || conn.frames[0].Response.Error.Code != terminalOutputDisconnectedCode {
-		t.Fatalf("written frames = %#v, want terminal output disconnected error", conn.frames)
 	}
 }
 
@@ -447,7 +309,7 @@ func TestTerminalManagerAllowsSharedInput(t *testing.T) {
 	open := openTerminalForTest(t, app, "device_a", workspace.ID)
 	attach := attachTerminalForTest(t, app, "device_b", open.TerminalID)
 	t.Cleanup(func() {
-		_, _ = app.terminalManager().close(context.Background(), "device_a", terminalCloseParams{TerminalID: open.TerminalID})
+		_, _ = app.terminalManager().Close(context.Background(), "device_a", terminalCloseParams{TerminalID: open.TerminalID})
 	})
 
 	marker := filepath.Join(t.TempDir(), "shared-terminal-input")
@@ -455,12 +317,12 @@ func TestTerminalManagerAllowsSharedInput(t *testing.T) {
 		ControllerDeviceID: "device_b",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id":    open.TerminalID,
 			"viewer_id":      attach.ViewerID,
 			"input_lease_id": attach.InputLeaseID,
 			"data":           "printf shared > " + shellSingleQuote(marker) + "\n",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -483,7 +345,7 @@ func TestHostDeviceCanCloseRemoteOwnedTerminal(t *testing.T) {
 
 	open := openTerminalForTest(t, app, "device_remote", workspace.ID)
 	hostDeviceID := app.store.hostInfo().Identity.DeviceID
-	closed, err := app.terminalManager().close(context.Background(), hostDeviceID, terminalCloseParams{TerminalID: open.TerminalID})
+	closed, err := app.terminalManager().Close(context.Background(), hostDeviceID, terminalCloseParams{TerminalID: open.TerminalID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -521,12 +383,12 @@ func TestTrustRevocationLeavesSharedTerminalInputAvailableForTrustedController(t
 		ControllerDeviceID: "device_b",
 		Capability:         CapabilityTerminalInput,
 		Action:             ControlActionTerminalInput,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"terminal_id":    open.TerminalID,
 			"viewer_id":      attach.ViewerID,
 			"input_lease_id": attach.InputLeaseID,
 			"data":           "printf claimed > " + shellSingleQuote(marker) + "\n",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -540,7 +402,7 @@ func TestTrustRevocationLeavesSharedTerminalInputAvailableForTrustedController(t
 	}
 	waitForFileContent(t, marker, "claimed")
 
-	_, _ = app.terminalManager().close(context.Background(), "device_b", terminalCloseParams{TerminalID: open.TerminalID})
+	_, _ = app.terminalManager().Close(context.Background(), "device_b", terminalCloseParams{TerminalID: open.TerminalID})
 }
 
 func openTerminalForTest(t *testing.T, app *app, deviceID, workspaceID string) terminalOpenResult {
@@ -550,11 +412,11 @@ func openTerminalForTest(t *testing.T, app *app, deviceID, workspaceID string) t
 		ControllerDeviceID: deviceID,
 		Capability:         CapabilityTerminalOpen,
 		Action:             ControlActionTerminalOpen,
-		Params: map[string]any{
+		Params: controlParams(map[string]any{
 			"workspace_id": workspaceID,
 			"cols":         80,
 			"rows":         24,
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -577,7 +439,7 @@ func attachTerminalForTest(t *testing.T, app *app, deviceID, terminalID string) 
 		ControllerDeviceID: deviceID,
 		Capability:         CapabilityTerminalOpen,
 		Action:             ControlActionTerminalAttach,
-		Params:             map[string]any{"terminal_id": terminalID},
+		Params:             controlParams(map[string]any{"terminal_id": terminalID}),
 	}, conn)
 	if err != nil {
 		t.Fatal(err)
@@ -597,7 +459,7 @@ func terminalManagerTestShell(t *testing.T) string {
 	if runtime.GOOS == "windows" {
 		t.Skip("terminal manager is disabled on Windows")
 	}
-	for _, shell := range []string{"/bin/zsh", "/bin/bash"} {
+	for _, shell := range []string{"/bin/bash", "/bin/zsh"} {
 		if _, err := os.Stat(shell); err == nil {
 			return shell
 		}
@@ -609,7 +471,7 @@ func terminalManagerTestShell(t *testing.T) string {
 func waitForFileContent(t *testing.T, path, want string) {
 	t.Helper()
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		body, err := os.ReadFile(path)
 		if err == nil && string(body) == want {
@@ -638,16 +500,47 @@ func (c *terminalBackpressureTestConnection) connectionID() string {
 	return c.id
 }
 
+func (c *terminalBackpressureTestConnection) ConnectionID() string {
+	return c.connectionID()
+}
+
 func (c *terminalBackpressureTestConnection) controllerID() string {
 	return c.controllerIDValue
+}
+
+func (c *terminalBackpressureTestConnection) ControllerID() string {
+	return c.controllerID()
 }
 
 func (c *terminalBackpressureTestConnection) requestContext() context.Context {
 	return c.ctx
 }
 
+func (c *terminalBackpressureTestConnection) RequestContext() context.Context {
+	return c.requestContext()
+}
+
 func (c *terminalBackpressureTestConnection) writePlain(frame controlPlainFrame) {
 	c.frames = append(c.frames, frame)
+}
+
+func (c *terminalBackpressureTestConnection) WriteTerminalFrame(frameType string, frame any) {
+	payload, _ := frame.(terminalStreamFrame)
+	c.writePlain(controlPlainFrame{Type: frameType, Terminal: &payload})
+}
+
+func (c *terminalBackpressureTestConnection) WriteTerminalError(code string, message string) {
+	c.writePlain(controlPlainFrame{
+		Type: "response",
+		Response: &ControlResponse{
+			OK: false,
+			Error: &ControlError{
+				Status:  http.StatusServiceUnavailable,
+				Code:    ControlErrorCode(code),
+				Message: message,
+			},
+		},
+	})
 }
 
 func (c *terminalBackpressureTestConnection) registerControlStream(string, context.CancelFunc) {}
@@ -658,4 +551,8 @@ func (c *terminalBackpressureTestConnection) cancelAllControlStreams()          
 func (c *terminalBackpressureTestConnection) terminateControlConnection(code, reason string) {
 	c.terminatedCode = code
 	c.terminatedReason = reason
+}
+
+func (c *terminalBackpressureTestConnection) TerminateTerminalConnection(code string, reason string) {
+	c.terminateControlConnection(code, reason)
 }

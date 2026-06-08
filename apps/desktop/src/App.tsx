@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ControllerRuntime, type ControllerRuntimeSnapshot } from "@astralops/controller-client";
 import { useTranslation } from "react-i18next";
+import { normalizedRecord } from "./types";
 import type { TFunction } from "i18next";
 import { AlertTriangle, KeyRound, LoaderCircle, PanelLeft, PanelRight, RefreshCw, X } from "lucide-react";
-import { createLocalCoreClient, createRemoteCoreClient, isCoreRequestError, readMeshState, requestRemoteHostPairing, subscribeMeshState, subscribeRemoteHostSessionState, type CoreClient, type EventSubscription } from "./api";
+import { createDesktopHostControllerClient, createLocalCoreClient, createRemoteCoreClient, readMeshState, requestRemoteHostPairing, subscribeMeshState, subscribeRemoteHostSessionState, type CoreClient, type EventSubscription } from "./api";
 import { Composer, type QueuedComposerInput } from "./components/Composer";
 import { RightPanel } from "./components/RightPanel";
 import { SettingsView } from "./components/SettingsView";
@@ -25,6 +27,7 @@ import { useSessionCommands } from "./hooks/useSessionCommands";
 import { useSessionEventWindow } from "./hooks/useSessionEventWindow";
 import i18n, { resolveAppLanguage } from "./i18n";
 import type {
+  AgentInfo,
   AgentKind,
   AppSettings,
   AppSettingsPatch,
@@ -58,6 +61,11 @@ const LOCAL_HOST_ID = "local";
 const DEFAULT_CLOUD_BASE_URL = "https://cloud-astralops.oines.dev";
 type RemoteAuthorizationOverride = "revoked" | "pending";
 
+type HostStateLoadResult = {
+  events: AstralEvent[];
+  liveAfterSeq: number;
+};
+
 const DEFAULT_APP_SETTINGS: AppSettings = {
   version: 1,
   general: { restore_on_launch: true },
@@ -66,7 +74,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   workspace: { default_opener: "vscode", ssh_auto_reconnect: true },
   notifications: { task_complete: true, requires_action: true, quiet_when_focused: false },
   diagnostics: { logging_enabled: false },
-  remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true },
+  remote_control: { enabled: false, listen_addr: "0.0.0.0:43900", lan_discovery: true, force_relay_only: false },
   cloud: { enabled: false, base_url: DEFAULT_CLOUD_BASE_URL },
   updates: { auto_check: true },
 };
@@ -108,6 +116,7 @@ export function App(): React.JSX.Element {
   const [pendingPairingCount, setPendingPairingCount] = useState(0);
   const [requestingPairingHostId, setRequestingPairingHostId] = useState("");
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [hostAgents, setHostAgents] = useState<Partial<Record<AgentKind, AgentInfo>>>({});
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [settingsSavingKeys, setSettingsSavingKeys] = useState<Set<string>>(() => new Set());
   const [settingsError, setSettingsError] = useState("");
@@ -136,6 +145,10 @@ export function App(): React.JSX.Element {
   const [composerHeight, setComposerHeight] = useState(96);
   const [forkingSeq, setForkingSeq] = useState<number | null>(null);
   const [scrollTarget, setScrollTarget] = useState<{ sessionId: string; eventSeq: number } | null>(null);
+  const [nativeImportWorkspaceId, setNativeImportWorkspaceId] = useState("");
+  const [nativeImportSessions, setNativeImportSessions] = useState<Session[]>([]);
+  const [nativeImportLoading, setNativeImportLoading] = useState(false);
+  const [nativeImportError, setNativeImportError] = useState("");
 
   const isMacDesktop = window.astral.platform === "darwin";
   const sidebarToggleLeftClass = isMacDesktop ? "left-[95px]" : "left-[16px]";
@@ -155,6 +168,7 @@ export function App(): React.JSX.Element {
   const hostStateGenerationRef = useRef(0);
   const sessionsRef = useRef<Session[]>([]);
   const remoteHostCacheRef = useRef<Record<string, RemoteHostRecord>>({});
+  const controllerRuntimeRef = useRef<ControllerRuntime | null>(null);
 
   const commitRemoteHosts = useCallback((hosts: RemoteHostRecord[]) => {
     if (hosts.length > 0) {
@@ -197,7 +211,7 @@ export function App(): React.JSX.Element {
 
   const maybeNotifyLiveEvent = useCallback((event: AstralEvent) => {
     if (event.kind !== "control.notification") return;
-    const payload = event.normalized as Record<string, unknown>;
+    const payload = normalizedRecord(event);
     const settings = appSettingsRef.current.notifications;
     const reason = typeof payload.reason === "string" ? payload.reason : "";
     if ((reason === "turn_completed" || reason === "turn_failed") && !settings.task_complete) return;
@@ -240,6 +254,8 @@ export function App(): React.JSX.Element {
     else delete node.dataset.rightPanelResizing;
   }, []);
 
+  const localHostDeviceId = localHostInfo?.identity.device_id || LOCAL_HOST_ID;
+  const selectedHostIsLocal = selectedHostId === LOCAL_HOST_ID || selectedHostId === localHostDeviceId;
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null,
     [activeWorkspaceId, workspaces],
@@ -272,6 +288,25 @@ export function App(): React.JSX.Element {
     mergeEvents,
     setError,
   });
+  const commitControllerRuntimeSnapshot = useCallback((snapshot: ControllerRuntimeSnapshot) => {
+    setConnection(snapshot.connection === "idle" ? "booting" : snapshot.connection);
+    setHostAgents(snapshot.workbench.agents ?? {});
+    setWorkspaces(snapshot.workspaces);
+    setWorkspaceConnections(snapshot.workbench.workspace_connections ?? {});
+    setTerminalTabs(snapshot.workbench.terminal_tabs ?? {});
+    setSessions(sortSessionsByUpdated(snapshot.sessions.map((session) => {
+      const view = snapshot.workbench.session_views[session.id];
+      return view ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session;
+    })));
+    setSessionViews(snapshot.workbench.session_views ?? {});
+    setActiveWorkspaceId(snapshot.selectedWorkspaceId);
+    setActiveSession(snapshot.selectedSession);
+    setEventIndex(mergeEventIndex(EMPTY_EVENT_INDEX, snapshot.events));
+    if (snapshot.selectedSessionId) {
+      setSessionWindows((current) => updateWindowAfterLatest(current, snapshot.selectedSessionId, snapshot.selectedSessionEvents, EVENT_WINDOW_SIZE));
+    }
+    if (snapshot.error) setError(snapshot.error);
+  }, [setSessionWindows]);
   const sessionRunning = activeSessionView?.status === "running";
   const queuedInputs = useMemo<QueuedComposerInput[]>(
     () => (activeSessionView?.queued_inputs ?? []).map((item) => ({ id: item.id, sessionId: item.session_id, text: item.text })),
@@ -292,7 +327,7 @@ export function App(): React.JSX.Element {
               ? t("desktop:composer.continueInterject")
               : t("desktop:composer.continueAfterCurrent")
           : t("desktop:composer.defaultPlaceholder");
-  const activeAgentInfo = activeAgent ? health?.agents[activeAgent] : undefined;
+  const activeAgentInfo = activeAgent ? hostAgents[activeAgent] ?? (selectedHostIsLocal ? health?.agents[activeAgent] : undefined) : undefined;
   const modelOptions = useMemo(() => activeAgentInfo?.models ?? [], [activeAgentInfo]);
   const currentModel = activeAgentInfo?.current_model;
   const currentEffort = activeAgentInfo?.current_effort;
@@ -376,9 +411,28 @@ export function App(): React.JSX.Element {
     }, delayMs);
   }, [storeSessionView]);
 
+  useEffect(() => {
+    if (!api || !activeSessionId || activeSessionView) return;
+    scheduleSessionViewRefresh(api, activeSessionId, sessionViewRefreshGenerationRef.current, 0);
+  }, [activeSessionId, activeSessionView, api, scheduleSessionViewRefresh]);
+
   const applyWorkbenchPatch = useCallback((patch: WorkbenchPatch) => {
     for (const op of patch.ops) {
       switch (op.collection) {
+        case "agents": {
+          const agent = op.id as AgentKind;
+          if (op.op === "remove") {
+            setHostAgents((current) => {
+              const next = { ...current };
+              delete next[agent];
+              return next;
+            });
+            continue;
+          }
+          const info = op.value as AgentInfo;
+          if (info) setHostAgents((current) => ({ ...current, [agent]: info }));
+          break;
+        }
         case "workspaces": {
           if (op.op === "remove") {
             const workspaceID = op.id;
@@ -517,33 +571,49 @@ export function App(): React.JSX.Element {
       restoreOnLaunch?: boolean;
       updateLocalHostInfo?: boolean;
     } = {},
-  ) => {
+  ): Promise<HostStateLoadResult> => {
+    let workbench: WorkbenchState | undefined;
+    let hostResponse: HostInfo | undefined;
+    let workspaceResponse: Workspace[] = [];
+    let sessionResponse: Session[] = [];
+    let recentEvents: AstralEvent[] = [];
+    let sessionEvents: AstralEvent[] = [];
+    let snapshotViews: SessionView[] = [];
+    let snapshotConnections: WorkspaceConnection[] = [];
+
     const snapshot = await client.hostSnapshot({
       event_limit: EVENT_WINDOW_SIZE,
-      restore_on_launch: Boolean(options.restoreOnLaunch),
+      restore_on_launch: false,
     });
-    if (options.isCurrent && !options.isCurrent()) return [];
-    const workbench: WorkbenchState | undefined = snapshot.workbench;
-    const hostResponse = snapshot.host;
-    const workspaceResponse = workbench ? sortWorkspacesByUpdated(workbenchValues(workbench.workspaces)) : snapshot.workspaces;
-    const sessionResponse = workbench ? sortSessionsByUpdated(workbenchValues(workbench.sessions)) : snapshot.sessions;
-    const recentEvents = snapshot.events;
+    if (options.isCurrent && !options.isCurrent()) return { events: [], liveAfterSeq: 0 };
+    workbench = snapshot.workbench;
+    hostResponse = snapshot.host;
+    setHostAgents(workbench?.agents ?? snapshot.agents ?? {});
+    workspaceResponse = workbench ? sortWorkspacesByUpdated(workbenchValues(workbench.workspaces)) : snapshot.workspaces;
+    sessionResponse = workbench ? sortSessionsByUpdated(workbenchValues(workbench.sessions)) : snapshot.sessions;
+    recentEvents = snapshot.events;
+    snapshotViews = snapshot.session_views;
+    snapshotConnections = snapshot.workspace_connections ?? [];
+    sessionEvents = snapshot.initial_session_events ?? [];
+
     const connectionMap: Record<string, WorkspaceConnection> = {};
     if (options.includeWorkspaceConnections || workbench) {
-      const connections = workbench ? workbenchValues(workbench.workspace_connections) : snapshot.workspace_connections ?? [];
+      const connections = workbench ? workbenchValues(workbench.workspace_connections) : snapshotConnections;
       for (const connection of connections) {
         connectionMap[connection.workspace_id] = connection;
       }
     }
     const initialSession = options.restoreOnLaunch ? sessionResponse[0] ?? null : null;
     const viewMap: Record<string, SessionView> = {};
-    const views = workbench ? workbenchValues(workbench.session_views) : snapshot.session_views;
+    const views = workbench ? workbenchValues(workbench.session_views) : snapshotViews;
     for (const view of views) {
       viewMap[view.session.id] = view;
     }
-    const sessionEvents = initialSession ? snapshot.initial_session_events ?? recentEvents.filter((event) => event.session_id === initialSession.id) : [];
+    if (initialSession && sessionEvents.length === 0) {
+      sessionEvents = recentEvents.filter((event) => event.session_id === initialSession.id);
+    }
     const eventResponse = [...recentEvents, ...sessionEvents];
-    if (options.updateLocalHostInfo) setLocalHostInfo(hostResponse);
+    if (options.updateLocalHostInfo && hostResponse) setLocalHostInfo(hostResponse);
     setLastSessionAgent(sessionResponse[0]?.agent ?? "claude");
     setWorkspaces(workspaceResponse);
     setWorkspaceConnections(connectionMap);
@@ -568,11 +638,12 @@ export function App(): React.JSX.Element {
       setActiveWorkspaceId(initialSession?.workspace_id || sessionResponse[0]?.workspace_id || workspaceResponse[0]?.id || "");
       setActiveSession(initialSession);
     }
-    return eventResponse;
+    return { events: eventResponse, liveAfterSeq: workbench?.version ?? 0 };
   }, []);
 
   const clearDisplayedWorkbenchState = useCallback(() => {
     setWorkspaces([]);
+    setHostAgents({});
     setWorkspaceConnections({});
     setTerminalTabs({});
     setSessions([]);
@@ -722,189 +793,181 @@ export function App(): React.JSX.Element {
 
   const handleCreateWorkspace = useCallback(
     async (request: CreateWorkspaceRequest) => {
-      if (!api) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime) return;
       setError("");
-      const workspace = await api.createWorkspace(request);
-      setWorkspaces((current) => [workspace, ...current.filter((item) => item.id !== workspace.id)]);
-      setActiveWorkspaceId(workspace.id);
-      setActiveSession(null);
+      await runtime.createWorkspace(request);
       setWorkspaceOpen(false);
-      if (workspace.target === "ssh") {
-        const state = await api.connectWorkspace(workspace.id);
-        setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
-      }
     },
-    [api],
+    [],
   );
 
   const handleConnectWorkspace = useCallback(
     async (workspaceId: string) => {
-      if (!api) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime) return;
       setError("");
       try {
-        const state = await api.connectWorkspace(workspaceId);
-        setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
+        await runtime.connectWorkspace(workspaceId);
       } catch (connectError) {
         setError(connectError instanceof Error ? connectError.message : String(connectError));
       }
     },
-    [api],
+    [],
   );
 
   const handleDisconnectWorkspace = useCallback(
     async (workspaceId: string) => {
-      if (!api) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime) return;
       setError("");
       try {
-        const state = await api.disconnectWorkspace(workspaceId);
-        setWorkspaceConnections((current) => ({ ...current, [state.workspace_id]: state }));
+        await runtime.disconnectWorkspace(workspaceId);
       } catch (disconnectError) {
         setError(disconnectError instanceof Error ? disconnectError.message : String(disconnectError));
       }
     },
-    [api],
+    [],
   );
 
   const handleSelectWorkspace = useCallback(
     (workspaceId: string) => {
-      setActiveWorkspaceId(workspaceId);
+      void controllerRuntimeRef.current?.selectWorkspace(workspaceId);
       setError("");
-      setActiveSession((current) => {
-        if (current?.workspace_id === workspaceId) return current;
-        return sessions.find((session) => session.workspace_id === workspaceId) ?? null;
-      });
     },
-    [sessions],
+    [],
   );
 
   const handleCreateSession = useCallback(
     async (workspaceId: string, agent: AgentKind) => {
-      if (!api) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime) return;
       setError("");
       try {
-        const workspace = workspaces.find((item) => item.id === workspaceId);
-        if (workspace?.target === "ssh" && workspaceConnections[workspaceId]?.status !== "connected") {
-          setError(t("desktop:errors.sshWorkspaceDisconnected"));
-          return;
-        }
-        const session = await api.createSession(workspaceId, agent);
-        const view = await api.sessionView(session.id).catch(() => null);
-        const displaySession = view ? { ...session, ...view.session, title: view.title || view.session.title, status: view.status } : session;
-        if (view) storeSessionView(view);
-        setSessions((current) => [displaySession, ...current.filter((item) => item.id !== session.id)]);
-        setActiveWorkspaceId(workspaceId);
-        setActiveSession(displaySession);
+        await runtime.createSession(workspaceId, agent);
         setLastSessionAgent(agent);
       } catch (sessionError) {
         setError(sessionError instanceof Error ? sessionError.message : String(sessionError));
       }
     },
-    [api, storeSessionView, t, workspaces, workspaceConnections],
+    [],
+  );
+
+  const openNativeImport = useCallback(
+    async (workspaceId: string) => {
+      if (!api) return;
+      setError("");
+      setNativeImportWorkspaceId(workspaceId);
+      setNativeImportSessions([]);
+      setNativeImportError("");
+      setNativeImportLoading(true);
+      try {
+        const candidates = await api.listNativeSessions(workspaceId);
+        setNativeImportSessions(candidates);
+      } catch (importError) {
+        setNativeImportError(importError instanceof Error ? importError.message : String(importError));
+      } finally {
+        setNativeImportLoading(false);
+      }
+    },
+    [api],
+  );
+
+  const closeNativeImport = useCallback(() => {
+    setNativeImportWorkspaceId("");
+    setNativeImportSessions([]);
+    setNativeImportError("");
+    setNativeImportLoading(false);
+  }, []);
+
+  const importNativeSession = useCallback(
+    async (candidate: Session) => {
+      if (!api || !nativeImportWorkspaceId) return;
+      setNativeImportError("");
+      try {
+        const imported = await api.importNativeSession(nativeImportWorkspaceId, candidate.id);
+        const view = await api.sessionView(imported.id).catch(() => null);
+        const displaySession = view ? { ...imported, ...view.session, title: view.title || view.session.title, status: view.status } : imported;
+        if (view) storeSessionView(view);
+        setSessions((current) => sortSessionsByUpdated([displaySession, ...current.filter((item) => item.id !== imported.id)]));
+        setActiveWorkspaceId(displaySession.workspace_id);
+        setActiveSession(displaySession);
+        setNativeImportSessions((current) => current.filter((session) => session.id !== candidate.id));
+        closeNativeImport();
+      } catch (importError) {
+        setNativeImportError(importError instanceof Error ? importError.message : String(importError));
+      }
+    },
+    [api, closeNativeImport, nativeImportWorkspaceId, storeSessionView],
   );
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
-      const session = sessions.find((item) => item.id === sessionId);
-      if (!session) return;
       setError("");
-      setActiveWorkspaceId(session.workspace_id);
-      setActiveSession(session);
+      void controllerRuntimeRef.current?.selectSession(sessionId);
     },
-    [sessions],
+    [],
   );
 
   const handleOpenSourceSession = useCallback(
     (sessionId: string, eventSeq?: number) => {
-      const session = sessions.find((item) => item.id === sessionId);
-      if (!session) return;
       setError("");
-      setActiveWorkspaceId(session.workspace_id);
-      setActiveSession(session);
+      void controllerRuntimeRef.current?.selectSession(sessionId, eventSeq);
       if (eventSeq) {
         setScrollTarget({ sessionId, eventSeq });
       }
     },
-    [sessions],
+    [],
   );
 
   const handleForkFromEvent = useCallback(
     async (event: AstralEvent) => {
-      if (!api || !activeSession) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime || !activeSession) return;
       setError("");
       setForkingSeq(event.seq);
       try {
-        const response = await api.forkSession(activeSession.id, event.seq);
-        const forked = response.session;
-        const [view, sessionEvents] = await Promise.all([
-          api.sessionView(forked.id).catch(() => null),
-          api.events({ session_id: forked.id, limit: EVENT_WINDOW_SIZE }),
-        ]);
-        const displaySession = view ? { ...forked, ...view.session, title: view.title || view.session.title, status: view.status } : forked;
-        if (view) storeSessionView(view);
-        setSessions((current) => sortSessionsByUpdated([displaySession, ...current.filter((item) => item.id !== forked.id)]));
-        setActiveWorkspaceId(displaySession.workspace_id);
-        setActiveSession(displaySession);
-        mergeEvents(sessionEvents);
-        setSessionWindows((current) => updateWindowAfterLatest(current, forked.id, sessionEvents, EVENT_WINDOW_SIZE));
+        await runtime.forkSession(event.seq, activeSession.id);
       } catch (forkError) {
         setError(forkError instanceof Error ? forkError.message : String(forkError));
       } finally {
         setForkingSeq(null);
       }
     },
-    [activeSession, api, mergeEvents, setSessionWindows, storeSessionView],
+    [activeSession],
   );
 
   const deleteWorkspace = useCallback(
     async (workspaceId: string) => {
-      if (!api) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime) return;
       setError("");
       try {
-        await api.deleteWorkspace(workspaceId);
-        setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
-        setWorkspaceConnections((current) => {
-          const next = { ...current };
-          delete next[workspaceId];
-          return next;
-        });
-        setSessions((current) => current.filter((session) => session.workspace_id !== workspaceId));
-        setSessionViews((current) => Object.fromEntries(Object.entries(current).filter(([, view]) => view.session.workspace_id !== workspaceId)));
-        setEventIndex((current) => removeWorkspaceEvents(current, workspaceId));
-        if (activeWorkspaceId === workspaceId) {
-          setActiveWorkspaceId("");
-          setActiveSession(null);
-        }
+        await runtime.deleteWorkspace(workspaceId);
       } catch (deleteError) {
         setError(deleteError instanceof Error ? deleteError.message : String(deleteError));
       }
     },
-    [activeWorkspaceId, api],
+    [],
   );
 
   const deleteSession = useCallback(async (sessionId?: string) => {
-    if (!api) return;
+    const runtime = controllerRuntimeRef.current;
+    if (!runtime) return;
     const targetSession = sessionId ? sessions.find((session) => session.id === sessionId) : activeSession;
     if (!targetSession) return;
     setError("");
     try {
-      await api.deleteSession(targetSession.id);
-      setSessions((current) => current.filter((session) => session.id !== targetSession.id));
-      setSessionViews((current) => {
-        const next = { ...current };
-        delete next[targetSession.id];
-        return next;
-      });
-      setEventIndex((current) => removeSessionEvents(current, targetSession.id));
+      await runtime.deleteSession(targetSession.id);
       setSessionWindows((current) => {
         const next = { ...current };
         delete next[targetSession.id];
         return next;
       });
-      setActiveSession((current) => (current?.id === targetSession.id ? sessions.find((session) => session.workspace_id === targetSession.workspace_id && session.id !== targetSession.id) ?? null : current));
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : String(deleteError));
     }
-  }, [activeSession, api, sessions]);
+  }, [activeSession, sessions, setSessionWindows]);
 
   const handleChooseFiles = useCallback(async () => {
     if (!activeSession) return [];
@@ -925,102 +988,94 @@ export function App(): React.JSX.Element {
 
   const handleSend = useCallback(
     async (input: string, attachments: SessionInputAttachment[] = []) => {
-      if (!api || !activeWorkspace || !activeSession || !workspaceInteractive) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime || !activeWorkspace || !activeSession || !workspaceInteractive) return;
       setError("");
       try {
-        await api.sendInput(activeSession.id, input, {
+        await runtime.sendMessage(input, {
           model: selectedModel,
           reasoning_effort: selectedReasoningEffort,
           permission_mode: runMode === "plan" ? "plan" : claudeSSHRemote ? "bypassPermissions" : permissionMode,
           attachments,
         });
-        scheduleSessionViewRefresh(api, activeSession.id);
       } catch (sendError) {
         setError(sendError instanceof Error ? sendError.message : String(sendError));
         throw sendError;
       }
     },
-    [activeSession, activeWorkspace, api, claudeSSHRemote, permissionMode, runMode, scheduleSessionViewRefresh, selectedModel, selectedReasoningEffort, workspaceInteractive],
+    [activeSession, activeWorkspace, claudeSSHRemote, permissionMode, runMode, selectedModel, selectedReasoningEffort, workspaceInteractive],
   );
 
   const handleEditUserMessage = useCallback(
     async (eventSeq: number, input: string) => {
-      if (!api || !activeWorkspace || !activeSession || !workspaceInteractive) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime || !activeWorkspace || !activeSession || !workspaceInteractive) return;
       setError("");
       try {
-        await api.editLastUserMessage(activeSession.id, input, {
-          event_seq: eventSeq,
+        await runtime.editLastUserMessage(eventSeq, input, {
           model: selectedModel,
           reasoning_effort: selectedReasoningEffort,
           permission_mode: runMode === "plan" ? "plan" : claudeSSHRemote ? "bypassPermissions" : permissionMode,
-        });
-        const view = await api.sessionView(activeSession.id).catch(() => null);
-        if (view) storeSessionView(view);
+        }, activeSession.id);
       } catch (editError) {
         setError(editError instanceof Error ? editError.message : String(editError));
         throw editError;
       }
     },
-    [activeSession, activeWorkspace, api, claudeSSHRemote, permissionMode, runMode, selectedModel, selectedReasoningEffort, storeSessionView, workspaceInteractive],
+    [activeSession, activeWorkspace, claudeSSHRemote, permissionMode, runMode, selectedModel, selectedReasoningEffort, workspaceInteractive],
   );
 
   const handleInterrupt = useCallback(async () => {
-    if (!api || !activeSession || !workspaceInteractive) return;
+    const runtime = controllerRuntimeRef.current;
+    if (!runtime || !activeSession || !workspaceInteractive) return;
     setError("");
     try {
-      await api.interrupt(activeSession.id);
-      const view = await api.sessionView(activeSession.id).catch(() => null);
-      if (view) storeSessionView(view);
+      await runtime.interrupt(activeSession.id);
     } catch (interruptError) {
       setError(interruptError instanceof Error ? interruptError.message : String(interruptError));
     }
-  }, [activeSession, api, storeSessionView, workspaceInteractive]);
+  }, [activeSession, workspaceInteractive]);
 
   const handleCancelQueue = useCallback(
     async (sessionId: string, queueId: string) => {
-      if (!api || !workspaceInteractive) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime || !workspaceInteractive) return;
       setError("");
       try {
-        await api.cancelQueuedInput(sessionId, queueId);
-        const view = await api.sessionView(sessionId).catch(() => null);
-        if (view) storeSessionView(view);
+        await runtime.cancelQueuedInput(sessionId, queueId);
       } catch (cancelError) {
         setError(cancelError instanceof Error ? cancelError.message : String(cancelError));
       }
     },
-    [api, storeSessionView, workspaceInteractive],
+    [workspaceInteractive],
   );
 
   const handleSteerQueue = useCallback(
     async (sessionId: string, queueId: string) => {
-      if (!api || !workspaceInteractive) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime || !workspaceInteractive) return;
       setError("");
       try {
-        await api.steerQueuedInput(sessionId, queueId);
-        const view = await api.sessionView(sessionId).catch(() => null);
-        if (view) storeSessionView(view);
+        await runtime.steerQueuedInput(sessionId, queueId);
       } catch (steerError) {
         setError(steerError instanceof Error ? steerError.message : String(steerError));
       }
     },
-    [api, storeSessionView, workspaceInteractive],
+    [workspaceInteractive],
   );
 
   const handleEventResponse = useCallback(
     async (requestId: string, response: Record<string, unknown>) => {
-      if (!api || !workspaceInteractive) return;
+      const runtime = controllerRuntimeRef.current;
+      if (!runtime || !workspaceInteractive) return;
       setError("");
       try {
-        await api.respondApproval(requestId, response);
-        if (activeSessionId) {
-          const view = await api.sessionView(activeSessionId).catch(() => null);
-          if (view) storeSessionView(view);
-        }
+        await runtime.respondApproval(requestId, response, activeSessionId);
       } catch (responseError) {
         setError(responseError instanceof Error ? responseError.message : String(responseError));
       }
     },
-    [activeSessionId, api, storeSessionView, workspaceInteractive],
+    [activeSessionId, workspaceInteractive],
   );
 
   useEffect(() => {
@@ -1031,11 +1086,9 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     if (!pendingOpenSessionId) return;
-    const session = sessions.find((item) => item.id === pendingOpenSessionId);
-    if (!session) return;
+    if (!sessions.some((item) => item.id === pendingOpenSessionId)) return;
     setError("");
-    setActiveWorkspaceId(session.workspace_id);
-    setActiveSession(session);
+    void controllerRuntimeRef.current?.selectSession(pendingOpenSessionId);
     setPendingOpenSessionId("");
   }, [pendingOpenSessionId, sessions]);
 
@@ -1044,8 +1097,6 @@ export function App(): React.JSX.Element {
   const composerVisible = Boolean(activeWorkspace && activeSession);
   const nativeVibrancy = isMacDesktop && appSettings.appearance.mac_sidebar_effect;
   const preferredSessionAgent: AgentKind = appSettings.session.default_agent === "remember" ? lastSessionAgent : appSettings.session.default_agent;
-  const localHostDeviceId = localHostInfo?.identity.device_id || LOCAL_HOST_ID;
-  const selectedHostIsLocal = selectedHostId === LOCAL_HOST_ID || selectedHostId === localHostDeviceId;
   const visibleRemoteHosts = useMemo(() => {
     if (selectedHostIsLocal || remoteHosts.some((host) => host.device_id === selectedHostId)) return remoteHosts;
     const cached = remoteHostCacheRef.current[selectedHostId];
@@ -1133,14 +1184,10 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     if (!daemonInfo || !localApi || !activeHostId) return;
-    let subscription: EventSubscription | null = null;
-    let workbenchSubscription: EventSubscription | null = null;
     let hostSessionSubscription: EventSubscription | null = null;
     let cancelled = false;
-    let resyncOnOpen = false;
     sessionViewRefreshGenerationRef.current += 1;
     hostStateGenerationRef.current += 1;
-    const refreshGeneration = sessionViewRefreshGenerationRef.current;
     const hostGeneration = hostStateGenerationRef.current;
     for (const timer of Object.values(sessionViewRefreshTimersRef.current)) window.clearTimeout(timer);
     sessionViewRefreshTimersRef.current = {};
@@ -1148,6 +1195,7 @@ export function App(): React.JSX.Element {
     sessionViewRefreshPendingRef.current.clear();
     const client = activeHostIsLocal ? localApi : createRemoteCoreClient(daemonInfo, activeHostId);
     const isCurrentHost = (): boolean => !cancelled && hostStateGenerationRef.current === hostGeneration;
+    controllerRuntimeRef.current?.stop();
     setApi(activeHostNeedsPairing ? null : client);
     setConnection(activeHostNeedsPairing ? "connected" : "booting");
     setError("");
@@ -1163,86 +1211,41 @@ export function App(): React.JSX.Element {
       });
     }
 
-    async function loadSelectedHost(): Promise<void> {
-      if (activeHostNeedsPairing) {
-        return;
-      }
-      try {
-        const initialEvents = await loadHostState(client, {
-          includeWorkspaceConnections: true,
-          isCurrent: isCurrentHost,
-          restoreOnLaunch: appSettingsRef.current.general.restore_on_launch,
-          updateLocalHostInfo: activeHostIsLocal,
-        });
-        if (!isCurrentHost()) return;
-        const afterSeq = Math.max(0, ...initialEvents.map((event) => event.seq));
-        workbenchSubscription = client.subscribeWorkbench({
-          onPatch: (patch) => {
-            if (!isCurrentHost()) return;
-            applyWorkbenchPatch(patch);
-            setConnection("connected");
-          },
-          onOpen: () => {
-            if (!isCurrentHost()) return;
-            setConnection("connected");
-          },
-          onError: () => {
-            if (!isCurrentHost()) return;
-            resyncOnOpen = true;
-            if (activeHostIsLocal) setConnection("reconnecting");
-          },
-        });
-        subscription = client.subscribeEvents(afterSeq, {
-          onEvent: (event) => {
-            if (!isCurrentHost()) return;
-            setConnection("connected");
-            applyHostEventState(event, client, refreshGeneration);
-            if (activeHostIsLocal && event.kind.startsWith("control.pairing.")) {
-              void refreshRemoteHosts();
-            }
-            if (activeHostIsLocal) maybeNotifyLiveEvent(event);
-            queueLiveEvent(event);
-          },
-          onOpen: () => {
-            if (!isCurrentHost()) return;
-            setConnection("connected");
-            if (!resyncOnOpen) return;
-            resyncOnOpen = false;
-            void loadHostState(client, {
-              includeWorkspaceConnections: true,
-              isCurrent: isCurrentHost,
-              restoreOnLaunch: false,
-              updateLocalHostInfo: activeHostIsLocal,
-              preserveSelection: true,
-            }).catch(() => undefined);
-          },
-          onError: (event) => {
-            if (!isCurrentHost()) return;
-            if (event instanceof SyntaxError) setError("bad SSE event payload");
-            resyncOnOpen = true;
-            if (activeHostIsLocal) setConnection("reconnecting");
-          },
-        });
-        setConnection("connected");
-      } catch (hostError) {
-        if (isCurrentHost()) {
-          if (!activeHostIsLocal && isCoreRequestError(hostError, "control_authorization_required")) {
-            setHostAuthorizationOverrides((current) => ({ ...current, [activeHostId]: "revoked" }));
-            setHostPairingStatus((current) => ({ ...current, [activeHostId]: t("desktop:pairing.revokedDescription") }));
-            setError("");
-          } else {
-            setError(hostError instanceof Error ? hostError.message : String(hostError));
-          }
-          setConnection("failed");
-        }
-      }
+    if (activeHostNeedsPairing) {
+      return () => {
+        cancelled = true;
+        hostSessionSubscription?.close();
+      };
     }
 
-    void loadSelectedHost();
+    const runtime = new ControllerRuntime(
+      {
+        host: createDesktopHostControllerClient(client, activeHostId),
+        hostId: activeHostId,
+        onLiveEvent: (event) => {
+          if (!isCurrentHost()) return;
+          if (activeHostIsLocal && event.kind.startsWith("control.pairing.")) {
+            void refreshRemoteHosts();
+          }
+          if (activeHostIsLocal) maybeNotifyLiveEvent(event);
+        },
+        logger: console,
+      },
+      {
+        eventWindowSize: EVENT_WINDOW_SIZE,
+        restoreOnLaunch: appSettingsRef.current.general.restore_on_launch,
+      },
+    );
+    controllerRuntimeRef.current = runtime;
+    const runtimeSubscription = runtime.subscribe((snapshot) => {
+      if (isCurrentHost()) commitControllerRuntimeSnapshot(snapshot);
+    });
+    void runtime.start();
     return () => {
       cancelled = true;
-      subscription?.close();
-      workbenchSubscription?.close();
+      runtimeSubscription.close();
+      runtime.stop();
+      if (controllerRuntimeRef.current === runtime) controllerRuntimeRef.current = null;
       hostSessionSubscription?.close();
       if (sseFrameRef.current !== null) {
         window.cancelAnimationFrame(sseFrameRef.current);
@@ -1254,7 +1257,7 @@ export function App(): React.JSX.Element {
       sessionViewRefreshPendingRef.current.clear();
       sseQueueRef.current = [];
     };
-  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, activeHostAuthorizationOverride, applyHostEventState, applyWorkbenchPatch, clearDisplayedWorkbenchState, daemonInfo, loadHostState, localApi, maybeNotifyLiveEvent, queueLiveEvent, refreshRemoteHosts, storeSessionView]);
+  }, [activeHostId, activeHostIsLocal, activeHostNeedsPairing, activeHostAuthorizationOverride, clearDisplayedWorkbenchState, commitControllerRuntimeSnapshot, daemonInfo, localApi, maybeNotifyLiveEvent, refreshRemoteHosts]);
 
   const sessionTitles = useMemo(
     () => Object.fromEntries(sessions.map((session) => [session.id, sessionViews[session.id]?.title || session.title || "Untitled session"])),
@@ -1306,6 +1309,7 @@ export function App(): React.JSX.Element {
         onDisconnectWorkspace={(workspaceId) => void handleDisconnectWorkspace(workspaceId)}
         onDeleteSession={(sessionId) => void deleteSession(sessionId)}
         onDeleteWorkspace={(workspaceId) => void deleteWorkspace(workspaceId)}
+        onImportNativeSessions={(workspaceId) => void openNativeImport(workspaceId)}
         onOpenSettings={() => setSettingsOpen(true)}
         onResize={setSidebarWidth}
         onSelectHost={handleSelectHost}
@@ -1415,6 +1419,15 @@ export function App(): React.JSX.Element {
         onCreate={handleCreateWorkspace}
       />
 
+      <NativeImportDialog
+        error={nativeImportError}
+        loading={nativeImportLoading}
+        open={Boolean(nativeImportWorkspaceId)}
+        sessions={nativeImportSessions}
+        onClose={closeNativeImport}
+        onImport={(session) => void importNativeSession(session)}
+      />
+
       <WorkspaceOpenerMenu
         defaultOpener={appSettings.workspace.default_opener}
         rightPanelOpen={rightPanelOpen}
@@ -1484,6 +1497,92 @@ function AppErrorBanner({ message, onDismiss }: { message: string; onDismiss: ()
       </div>
     </div>
   );
+}
+
+function NativeImportDialog({
+  error,
+  loading,
+  open,
+  sessions,
+  onClose,
+  onImport,
+}: {
+  error: string;
+  loading: boolean;
+  open: boolean;
+  sessions: Session[];
+  onClose: () => void;
+  onImport: (session: Session) => void;
+}): React.JSX.Element | null {
+  const { t } = useTranslation(["common", "desktop"]);
+  if (!open) return null;
+  return (
+    <div className="absolute inset-0 z-[var(--ao-z-modal)] flex items-center justify-center bg-black/20 px-6 py-10 backdrop-blur-sm">
+      <div className="w-full max-w-[520px] overflow-hidden rounded-lg border border-[var(--ao-border)] bg-[var(--ao-bg)] shadow-[0_28px_80px_rgba(0,0,0,0.20),0_4px_16px_rgba(0,0,0,0.08)]">
+        <div className="flex min-w-0 items-start gap-3 border-b border-[var(--ao-border)] px-4 py-4">
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[15px] font-bold leading-6 text-[var(--ao-text)]">{t("desktop:nativeImport.title")}</h2>
+            <p className="m-0 mt-1 text-[12px] font-medium leading-5 text-[var(--ao-muted)]">{t("desktop:nativeImport.description")}</p>
+          </div>
+          <button
+            className="grid size-7 shrink-0 place-items-center rounded-lg text-[var(--ao-muted-strong)] transition-colors hover:bg-black/[0.055] hover:text-[var(--ao-text)]"
+            type="button"
+            aria-label={t("common:actions.close")}
+            title={t("common:actions.close")}
+            onClick={onClose}
+          >
+            <X size={15} strokeWidth={2} />
+          </button>
+        </div>
+        <div className="max-h-[420px] overflow-auto px-3 py-3">
+          {error ? (
+            <div className="mb-3 rounded-lg border border-[#f0c8a7] bg-[#fff7ed] px-3 py-2 text-[12px] font-semibold leading-5 text-[#8a3b12]">
+              {error}
+            </div>
+          ) : null}
+          {loading ? (
+            <div className="flex min-h-[120px] items-center justify-center gap-2 text-[13px] font-semibold text-[var(--ao-muted)]">
+              <LoaderCircle className="animate-spin" size={16} strokeWidth={2} />
+              {t("desktop:nativeImport.loading")}
+            </div>
+          ) : sessions.length === 0 ? (
+            <div className="grid min-h-[120px] place-items-center rounded-lg border border-dashed border-[var(--ao-border)] text-[13px] font-semibold text-[var(--ao-muted)]">
+              {t("desktop:nativeImport.empty")}
+            </div>
+          ) : (
+            <div className="grid gap-1.5">
+              {sessions.map((session) => (
+                <div
+                  className="grid min-h-[54px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-3 py-2 transition-colors hover:bg-black/[0.035]"
+                  key={session.id}
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-[13px] font-bold leading-5 text-[var(--ao-text)]">{session.title || t("desktop:sidebar.emptySessionTitle")}</div>
+                    <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] font-semibold leading-4 text-[var(--ao-muted)]">
+                      <span>{agentDisplayName(session.agent)}</span>
+                      <span className="text-[var(--ao-subtle)]">·</span>
+                      <span className="truncate" title={session.updated_at || session.created_at}>{session.updated_at || session.created_at || session.id}</span>
+                    </div>
+                  </div>
+                  <button
+                    className="h-8 rounded-lg bg-[#202124] px-3 text-[13px] font-semibold text-white transition-colors hover:bg-[#343438]"
+                    type="button"
+                    onClick={() => onImport(session)}
+                  >
+                    {t("desktop:nativeImport.importAction")}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function agentDisplayName(agent: AgentKind | string): string {
+  return agent === "claude" ? "Claude" : agent === "codex" ? "Codex" : String(agent || "");
 }
 
 function latestWorkspaceConnection(events: AstralEvent[]): WorkspaceConnection | null {

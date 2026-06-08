@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Download, File, Loader2, Maximize2 } from "lucide-react";
-import type { AstralEvent } from "../../types";
+import { normalizedRecord, type AstralEvent } from "../../types";
 import { textValue } from "../../transcriptModel";
 import { MediaPreview } from "./MediaPreview";
 import type { MediaItem, MediaUrlResolver } from "./mediaTypes";
@@ -72,13 +72,13 @@ export function TranscriptMediaBlock({
 }
 
 export function attachmentsFromEvent(event: AstralEvent): MediaItem[] {
-  const value = event.normalized as Record<string, unknown>;
+  const value = normalizedRecord(event);
   const raw = Array.isArray(value.attachments) ? value.attachments : [];
   return raw.map((item) => mediaFromRecord(item as Record<string, unknown>)).filter((item): item is MediaItem => Boolean(item));
 }
 
 export function mediaFromEvent(event: AstralEvent): MediaItem | null {
-  return mediaFromRecord(event.normalized as Record<string, unknown>);
+  return mediaFromRecord(normalizedRecord(event));
 }
 
 function mediaFromRecord(value: Record<string, unknown>): MediaItem | null {

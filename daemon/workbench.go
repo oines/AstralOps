@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
+
+	internalterminal "github.com/oines/astralops/daemon/internal/core/terminal"
 )
 
 type workbenchState struct {
 	Version              int64                          `json:"version"`
 	UpdatedAt            string                         `json:"updated_at"`
+	Agents               map[AgentKind]agentInfo        `json:"agents,omitempty"`
 	Workspaces           map[string]Workspace           `json:"workspaces"`
 	Sessions             map[string]Session             `json:"sessions"`
 	SessionViews         map[string]sessionView         `json:"session_views"`
@@ -51,14 +55,11 @@ func (a *app) handleWorkbench(w http.ResponseWriter, r *http.Request) {
 func (a *app) buildWorkbenchState() workbenchState {
 	workspaces := sanitizeControlWorkspaces(a.store.listWorkspaces())
 	sessions := sanitizeControlSessions(a.store.listSessions(""))
-	workspaceByID := map[string]Workspace{}
-	for _, workspace := range workspaces {
-		workspaceByID[workspace.ID] = workspace
-	}
 
 	state := workbenchState{
 		Version:              a.workbenchVersion(),
 		UpdatedAt:            time.Now().UTC().Format(time.RFC3339Nano),
+		Agents:               sanitizeControlAgents(a.agents),
 		Workspaces:           map[string]Workspace{},
 		Sessions:             map[string]Session{},
 		SessionViews:         map[string]sessionView{},
@@ -69,32 +70,28 @@ func (a *app) buildWorkbenchState() workbenchState {
 	for _, workspace := range workspaces {
 		state.Workspaces[workspace.ID] = workspace
 		if workspace.Target == "ssh" {
-			state.WorkspaceConnections[workspace.ID] = sanitizeControlWorkspaceConnection(a.ssh.getConnection(workspace))
+			state.WorkspaceConnections[workspace.ID] = sanitizeControlWorkspaceConnection(a.sshService().Connection(context.Background(), workspace))
 		}
 	}
 	for _, session := range sessions {
 		state.Sessions[session.ID] = session
-		if view, ok := a.buildSessionView(session.ID); ok {
-			state.SessionViews[session.ID] = sanitizeControlSessionView(view, workspaceByID[view.Session.WorkspaceID])
-		}
 	}
-	a.terminalMu.Lock()
-	terminals := a.terminals
-	a.terminalMu.Unlock()
-	if terminals != nil {
-		for _, tab := range terminals.listTabs() {
-			state.TerminalTabs[tab.TerminalID] = tab
-		}
+	for _, tab := range mustListTerminalTabs(a.terminalService()) {
+		state.TerminalTabs[tab.TerminalID] = tab
 	}
 	return state
 }
 
-func (a *app) workbenchVersion() int64 {
-	events := a.store.allEvents()
-	if len(events) == 0 {
-		return 0
+func mustListTerminalTabs(service *internalterminal.Service) []terminalTab {
+	tabs, err := service.List(context.Background())
+	if err != nil {
+		return nil
 	}
-	return events[len(events)-1].Seq
+	return tabs
+}
+
+func (a *app) workbenchVersion() int64 {
+	return a.store.currentSeq()
 }
 
 func (a *app) handleWorkbenchSSE(w http.ResponseWriter, r *http.Request) {
@@ -118,28 +115,50 @@ func (a *app) handleWorkbenchSSE(w http.ResponseWriter, r *http.Request) {
 
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+	var patchTimer *time.Timer
+	var patchTimerC <-chan time.Time
+	defer func() {
+		if patchTimer != nil {
+			patchTimer.Stop()
+		}
+	}()
+	schedulePatch := func() {
+		if patchTimer != nil {
+			return
+		}
+		patchTimer = time.NewTimer(250 * time.Millisecond)
+		patchTimerC = patchTimer.C
+	}
+	flushPatch := func() {
+		patchTimer = nil
+		patchTimerC = nil
+		next := a.buildWorkbenchState()
+		patch := diffWorkbenchState(current, next)
+		if len(patch.Ops) > 0 {
+			writeSSE(w, flusher, "workbench.patch", patch)
+		}
+		current = next
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
 			writeSSE(w, flusher, "heartbeat", map[string]any{"ts": time.Now().UTC().Format(time.RFC3339Nano)})
+		case <-patchTimerC:
+			flushPatch()
 		case _, ok := <-client.ch:
 			if !ok {
 				return
 			}
-			next := a.buildWorkbenchState()
-			patch := diffWorkbenchState(current, next)
-			if len(patch.Ops) > 0 {
-				writeSSE(w, flusher, "workbench.patch", patch)
-			}
-			current = next
+			schedulePatch()
 		}
 	}
 }
 
 func diffWorkbenchState(prev, next workbenchState) workbenchPatch {
 	patch := workbenchPatch{Version: next.Version}
+	patch.Ops = append(patch.Ops, diffWorkbenchCollection("agents", agentAnyMap(prev.Agents), agentAnyMap(next.Agents))...)
 	patch.Ops = append(patch.Ops, diffWorkbenchCollection("workspaces", workspaceAnyMap(prev.Workspaces), workspaceAnyMap(next.Workspaces))...)
 	patch.Ops = append(patch.Ops, diffWorkbenchCollection("sessions", sessionAnyMap(prev.Sessions), sessionAnyMap(next.Sessions))...)
 	patch.Ops = append(patch.Ops, diffWorkbenchCollection("session_views", sessionViewAnyMap(prev.SessionViews), sessionViewAnyMap(next.SessionViews))...)
@@ -174,6 +193,14 @@ func workspaceAnyMap(values map[string]Workspace) map[string]any {
 	out := map[string]any{}
 	for key, value := range values {
 		out[key] = value
+	}
+	return out
+}
+
+func agentAnyMap(values map[AgentKind]agentInfo) map[string]any {
+	out := map[string]any{}
+	for key, value := range values {
+		out[string(key)] = value
 	}
 	return out
 }
